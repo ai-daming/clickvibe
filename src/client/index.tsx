@@ -139,6 +139,9 @@ const PANEL_CSS = `
 .cv-pr-open { color: #1a7f37; }
 .cv-pr-merged { color: #8250df; }
 .cv-pr-closed { color: #cf222e; }
+.cv-issue-open { color: #1a7f37; }
+.cv-issue-closed { color: #8250df; }
+.cv-link-state-issue-closed { background: #fbefff; color: #8250df; }
 .cv-stage-new { background: #fff8c5; color: #9a6700; }
 .cv-timeline { border-top: 1px solid #d0d7de; padding-top: 6px; display: flex; flex-direction: column; gap: 4px; }
 .cv-timeline-head { font-size: 12px; font-weight: 600; color: #57606a; }
@@ -397,6 +400,18 @@ function PrStateIcon({ state }: { state: 'open' | 'closed' | 'merged' }) {
   )
 }
 
+const OCTICON_ISSUE_OPEN = 'M8 9.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3ZM8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Z'
+const OCTICON_ISSUE_CLOSED = 'M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Zm3.97 1.78a.75.75 0 0 1 1.06 0l1.22 1.22 2.28-2.28a.75.75 0 1 1 1.06 1.06l-2.81 2.81a.75.75 0 0 1-1.06 0l-1.75-1.75a.75.75 0 0 1 0-1.06Z'
+
+/** GitHub-style issue state icon (open: ring, closed: ring + check). */
+function IssueStateIcon({ state }: { state: 'open' | 'closed' }) {
+  return (
+    <svg className={`cv-pr-icon cv-issue-${state}`} viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
+      <path d={state === 'closed' ? OCTICON_ISSUE_CLOSED : OCTICON_ISSUE_OPEN} />
+    </svg>
+  )
+}
+
 /** Label of a linked item's state (GitHub wording). */
 function linkedStateLabel(source: NonNullable<TimelineEvent['source']>): string {
   const state = linkedState(source)
@@ -539,12 +554,16 @@ function IssueView({ issue, kind, workflow, onWorkflow, timeline, dependencies }
                 <div key={i} className="cv-link-row">
                   {ev.source.is_pr
                     ? <PrStateIcon state={linkedStateValue} />
-                    : <span className="cv-link-kind">🔗</span>}
+                    : <IssueStateIcon state={linkedStateValue === 'closed' ? 'closed' : 'open'} />}
                   <span className="cv-link-kind">{ev.source.is_pr ? 'PR' : 'Issue'}</span>
                   <a className="cv-link" href={ev.source.html_url} target="_blank" rel="noreferrer">
                     #{ev.source.number} {ev.source.title ?? ''}
                   </a>
-                  <span className={`cv-link-state cv-link-state-${linkedStateValue}`}>
+                  <span className={
+                    ev.source.is_pr
+                      ? `cv-link-state cv-link-state-${linkedStateValue}`
+                      : `cv-link-state ${linkedStateValue === 'closed' ? 'cv-link-state-issue-closed' : 'cv-link-state-open'}`
+                  }>
                     {linkedStateLabel(ev.source)}
                   </span>
                 </div>
