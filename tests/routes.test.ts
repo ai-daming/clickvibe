@@ -116,3 +116,11 @@ test('authorization route freezes the displayed snapshot and consumes tampered c
   }, headers)
   assert.equal(replay.status, 403)
 })
+
+test('/sync rejects worktree mutation without the same-origin privileged headers', async () => {
+  const result = await post(createHandler(), '/clickvibe/api/sync', {
+    url: 'https://github.com/ai-daming/clickvibe/issues/1',
+  })
+  assert.equal(result.status, 403)
+  assert.match(result.body.error ?? '', /授权请求头/)
+})

@@ -1,0 +1,122 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { deriveNextAction, type WorkflowFacts } from '../src/state-view.ts'
+
+function facts(overrides: Partial<WorkflowFacts> = {}): WorkflowFacts {
+  return {
+    issueOpen: true,
+    prMerged: false,
+    prNumber: null,
+    stage: 'idle',
+    devInterrupted: false,
+    taskRunning: false,
+    head: 'a1b2c3d',
+    reviewedHash: null,
+    reviewPassed: null,
+    hasNewCommits: false,
+    needsSync: false,
+    ...overrides,
+  }
+}
+
+test('closed issue has no next action', () => {
+  const next = deriveNextAction(facts({ issueOpen: false }))
+  assert.equal(next.kind, 'none')
+})
+
+test('merged PR is terminal', () => {
+  const next = deriveNextAction(facts({ prMerged: true, stage: 'passed', prNumber: '9' }))
+  assert.equal(next.kind, 'none')
+})
+
+test('a running task has no next action until it settles', () => {
+  const next = deriveNextAction(facts({ stage: 'developing', taskRunning: true }))
+  assert.equal(next.kind, 'none')
+  const reviewing = deriveNextAction(facts({ stage: 'reviewing', taskRunning: true }))
+  assert.equal(reviewing.kind, 'none')
+})
+
+test('interrupted development resumes the agent session', () => {
+  const next = deriveNextAction(facts({ stage: 'developing', devInterrupted: true }))
+  assert.equal(next.kind, 'resume')
+})
+
+test('development without a live task after host restart resumes the session', () => {
+  // 持久化的 stage 仍是 developing,但 liveTasks 已随 Host 重启清空
+  const next = deriveNextAction(facts({ stage: 'developing', devInterrupted: false }))
+  assert.equal(next.kind, 'resume')
+  assert.match(next.hint, /失联/)
+})
+
+test('aborted review re-reviews instead of blocking', () => {
+  const next = deriveNextAction(facts({ stage: 'reviewing', devInterrupted: false }))
+  assert.equal(next.kind, 'review')
+})
+
+test('idle issue starts development', () => {
+  const next = deriveNextAction(facts({ stage: 'idle' }))
+  assert.equal(next.kind, 'develop')
+})
+
+test('review-ready without a verdict reviews', () => {
+  const next = deriveNextAction(facts({ stage: 'review-ready', reviewPassed: null }))
+  assert.equal(next.kind, 'review')
+})
+
+test('review-ready with a failed verdict reworks with the issues', () => {
+  const next = deriveNextAction(facts({
+    stage: 'review-ready', reviewPassed: false, reviewedHash: 'a1b2c3d', head: 'a1b2c3d',
+  }))
+  assert.equal(next.kind, 'rework')
+})
+
+test('a failed verdict still reworks when the head has moved (agent re-reads the code)', () => {
+  const next = deriveNextAction(facts({
+    stage: 'review-ready', reviewPassed: false, reviewedHash: 'a1b2c3d', head: 'e5f6g7',
+  }))
+  assert.equal(next.kind, 'rework')
+})
+
+test('a passed verdict on the current head merges the PR', () => {
+  const next = deriveNextAction(facts({
+    stage: 'review-ready', reviewPassed: true, reviewedHash: 'a1b2c3d', head: 'a1b2c3d', prNumber: '9',
+  }))
+  assert.equal(next.kind, 'merge')
+})
+
+test('a passed verdict without a linked PR has no merge action', () => {
+  const next = deriveNextAction(facts({
+    stage: 'review-ready', reviewPassed: true, reviewedHash: 'a1b2c3d', head: 'a1b2c3d', prNumber: null,
+  }))
+  assert.equal(next.kind, 'none')
+  assert.match(next.hint, /未关联 PR/)
+})
+
+test('a passed verdict bound to an old head must be re-reviewed', () => {
+  const next = deriveNextAction(facts({
+    stage: 'review-ready', reviewPassed: true, reviewedHash: 'a1b2c3d', head: 'e5f6g7', prNumber: '9',
+  }))
+  assert.equal(next.kind, 'review')
+})
+
+test('passed stage with a PR merges', () => {
+  const next = deriveNextAction(facts({ stage: 'passed', reviewPassed: true, prNumber: '9', head: 'a1b2c3d' }))
+  assert.equal(next.kind, 'merge')
+})
+
+test('a stale worktree syncs before review or rework', () => {
+  const reviewCase = deriveNextAction(facts({
+    stage: 'review-ready', reviewPassed: null, needsSync: true,
+  }))
+  assert.equal(reviewCase.kind, 'sync')
+  const reworkCase = deriveNextAction(facts({
+    stage: 'review-ready', reviewPassed: false, reviewedHash: 'a1b2c3d', head: 'a1b2c3d', needsSync: true,
+  }))
+  assert.equal(reworkCase.kind, 'sync')
+})
+
+test('a missing worktree on a started workflow has no safe action', () => {
+  const next = deriveNextAction(facts({ stage: 'review-ready', head: null }))
+  assert.equal(next.kind, 'none')
+  assert.match(next.hint, /worktree 缺失/)
+})

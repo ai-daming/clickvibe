@@ -147,6 +147,24 @@ const PANEL_CSS = `
 .cv-tl-pass { color: #1a7f37; }
 .cv-tl-fail { color: #cf222e; }
 .cv-tl-note { color: #57606a; }
+.cv-state { border: 1px solid #d0d7de; border-radius: 6px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; }
+.cv-state-head { font-size: 12px; font-weight: 600; color: #57606a; }
+.cv-state-table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.cv-state-table td { padding: 3px 0; vertical-align: top; }
+.cv-state-k { width: 78px; color: #8c959f; font-weight: 600; }
+.cv-state-v { color: #1f2328; word-break: break-all; }
+.cv-state-delta { display: block; color: #57606a; font-size: 11px; }
+.cv-state-warn { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 8px; background: #fff8c5; color: #9a6700; font-weight: 600; font-size: 10.5px; }
+.cv-review-stale { font-size: 12px; color: #9a6700; background: #fff8c5; border: 1px solid #d4a72c; border-radius: 4px; padding: 6px 8px; }
+.cv-dev-noop { font-size: 12px; color: #8c959f; padding: 4px 0; }
+.cv-agent-toggle { display: inline-flex; gap: 2px; border: 1px solid #d0d7de; border-radius: 6px; overflow: hidden; align-self: center; }
+.cv-agent-toggle button { border: none; background: #ffffff; color: #57606a; padding: 4px 10px; font-size: 12px; cursor: pointer; }
+.cv-agent-toggle button.on { background: #0969da; color: #ffffff; }
+.cv-agent-toggle button:disabled { opacity: 0.45; cursor: not-allowed; }
+.cv-dev-btn.cv-dev-sync { background: #0969da; }
+.cv-dev-btn.cv-dev-merge { background: #1a7f37; }
+.cv-dev-link { border: none; background: transparent; color: #0969da; font-size: 11.5px; cursor: pointer; padding: 4px 2px; text-decoration: underline; }
+.cv-dev-link:hover { opacity: 0.8; }
 `
 
 /** Inject the plugin stylesheet once; returns the disposer. */
@@ -469,10 +487,38 @@ interface Workflow {
   reviewSessionId: string | null
   reviewResult: { passed: boolean; issues: string[]; commentUrl?: string } | null
   prNumber: string | null
+  issueState?: 'OPEN' | 'CLOSED'
   baseRef: string | null
   updatedAt: number
   events?: WorkflowEvent[]
-  derived?: { head: string | null; hasNewCommits: boolean; lastDevHash: string | null; lastReviewHash: string | null }
+  derived?: {
+    head: string | null
+    branch: string | null
+    mainHead: string | null
+    originMainHead: string | null
+    upstreamHead: string | null
+    aheadOfMain: number
+    behindMain: number
+    aheadOfBase: number
+    behindBase: number
+    aheadOfUpstream: number | null
+    behindUpstream: number | null
+    needsSync: boolean
+    lastDevHash: string | null
+    lastReviewHash: string | null
+    reviewedHash: string | null
+    hasNewCommits: boolean
+    verdictCurrent: boolean
+    nextAction: NextAction
+  }
+}
+
+type NextActionKind = 'develop' | 'resume' | 'sync' | 'review' | 'rework' | 'merge' | 'none'
+
+interface NextAction {
+  kind: NextActionKind
+  label: string
+  hint: string
 }
 
 interface WorkflowEvent {
@@ -511,9 +557,12 @@ function DevSection({ url, issue, workflow, onWorkflow }: {
   const [error, setError] = React.useState<string | null>(null)
   const [statusLines, setStatusLines] = React.useState<string[]>([])
   const [activeTaskId, setActiveTaskId] = React.useState<string | null>(null)
+  const [agentChoice, setAgentChoice] = React.useState<'codex' | 'claude'>('codex')
   const esRef = React.useRef<EventSource | null>(null)
   const stage = workflow?.stage ?? 'idle'
-  const interrupted = workflow?.devInterrupted ?? false
+  const derived = workflow?.derived
+  const nextAction = derived?.nextAction
+
   const appendStatusLine = (line: string) => {
     setStatusLines((previous) => {
       const next = [...previous, line]
@@ -558,6 +607,12 @@ function DevSection({ url, issue, workflow, onWorkflow }: {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workflow?.devTaskId, workflow?.reviewTaskId, workflow?.stage])
+
+  // agent 选择跟随锁定 agent(review 锁 reviewAgent;resume/rework 用 devAgent)
+  React.useEffect(() => {
+    const preferred = workflow?.reviewAgent ?? workflow?.devAgent
+    setAgentChoice(preferred ?? 'codex')
+  }, [workflow?.reviewAgent, workflow?.devAgent])
 
   const refresh = async () => {
     const res = await apiCall<{ ok: true; workflows: Workflow[] }>('state', {})
@@ -653,23 +708,65 @@ function DevSection({ url, issue, workflow, onWorkflow }: {
     if (!res.ok) setError(res.error ?? '停止失败')
   }
 
-  const showDevButtons = stage === 'idle'
-  const canReview = stage === 'review-ready' && !interrupted && !workflow?.reviewResult
-  // review agent 锁定:上次用什么 review,这次就只显示那个按钮;
-  // 从未 review 过则两个都显示(首次自由选)。
-  const showCodexReview = canReview && (!workflow?.reviewAgent || workflow.reviewAgent === 'codex')
-  const showClaudeReview = canReview && (!workflow?.reviewAgent || workflow.reviewAgent === 'claude')
-  const showReworkButtons = stage === 'review-ready' && workflow?.reviewResult?.passed === false
+  const syncWorktree = async () => {
+    setBusy('syncing')
+    setError(null)
+    try {
+      const res = await apiCall<{ ok: true; worktree: string; branch: string; head: string | null } | { ok: false; error: string }>('sync', { url })
+      if (!res.ok) { setError(res.error); setBusy(null); return }
+      await refresh()
+      setBusy(null)
+    } catch (e) {
+      setError(String(e)); setBusy(null)
+    }
+  }
+
+  // 唯一动作:服务端由 git 事实推导;issue 已关闭时本地覆盖为无动作
+  const issueClosed = String(issue.state ?? '').toUpperCase() === 'CLOSED'
+  const effectiveAction: NextAction = issueClosed
+    ? { kind: 'none', label: '无', hint: 'issue 已关闭,无待办动作' }
+    : (nextAction ?? { kind: 'none', label: '无', hint: '等待状态…' })
+
+  const runAction = () => {
+    switch (effectiveAction.kind) {
+      case 'develop': void startDev(agentChoice); break
+      case 'resume': void resume(); break
+      case 'rework': void resume(workflow?.reviewResult?.issues.join('\n')); break
+      case 'review': void startReview(agentChoice); break
+      case 'sync': void syncWorktree(); break
+      case 'merge':
+        if (workflow?.prNumber) {
+          window.open(`https://github.com/${workflow.repoKey}/pull/${workflow.prNumber}`, '_blank', 'noopener')
+        }
+        break
+      case 'none': break
+    }
+  }
+
+  // review 锁定:从未 review 过则两个 agent 都可选;锁过只留那个
+  const lockedAgent = effectiveAction.kind === 'review' ? workflow?.reviewAgent ?? null : null
+  const showAgentToggle = effectiveAction.kind === 'develop' || effectiveAction.kind === 'review'
+
+  const actionButtonClass = effectiveAction.kind === 'merge'
+    ? 'cv-dev-btn cv-dev-merge'
+    : effectiveAction.kind === 'sync'
+      ? 'cv-dev-btn cv-dev-sync'
+      : effectiveAction.kind === 'review'
+        ? 'cv-dev-btn cv-dev-review'
+        : (effectiveAction.kind === 'resume' || effectiveAction.kind === 'rework')
+          ? 'cv-dev-btn cv-dev-warn'
+          : 'cv-dev-btn cv-dev-codex'
+
+  const busyLabel = busy === 'syncing' ? '同步中…' : busy === 'resuming' ? '恢复中…' : busy === 'reviewing' ? 'Review 中…' : busy === 'developing' ? '启动中…' : null
 
   return (
     <div className="cv-dev">
       {/* 状态卡:当前状态 + 关键事实 */}
       <div className="cv-dev-head">
         🚀 开发流程 <span className={`cv-stage cv-stage-${stage}`}>{stageLabel(stage, workflow)}</span>
-        {workflow?.derived?.hasNewCommits ? <span className="cv-stage cv-stage-new">有未 review 的新提交</span> : null}
+        {derived?.hasNewCommits ? <span className="cv-stage cv-stage-new">有未 review 的新提交</span> : null}
       </div>
       {workflow?.worktree ? <div className="cv-dev-path">{workflow.worktree}</div> : null}
-      {workflow?.derived?.head ? <div className="cv-dev-path">HEAD {workflow.derived.head}</div> : null}
       {workflow?.prNumber ? (
         <div className="cv-dev-path">
           🔗 PR{' '}
@@ -679,33 +776,91 @@ function DevSection({ url, issue, workflow, onWorkflow }: {
         </div>
       ) : null}
 
-      {/* 操作区(悬浮感):与信息分离 */}
+      {/* 权威状态视图:worktree / main / 远端 三方对比(issue #5) */}
+      {derived ? (
+        <div className="cv-state">
+          <div className="cv-state-head">📊 状态视图</div>
+          <table className="cv-state-table">
+            <tbody>
+              <tr>
+                <td className="cv-state-k">worktree</td>
+                <td className="cv-state-v">
+                  {derived.branch ?? workflow?.branch ?? '—'} <code className="cv-tl-hash">{derived.head ?? '—'}</code>
+                </td>
+              </tr>
+              {derived.mainHead ? (
+                <tr>
+                  <td className="cv-state-k">main</td>
+                  <td className="cv-state-v">
+                    <code className="cv-tl-hash">{derived.mainHead}</code>
+                    <span className="cv-state-delta">worktree 落后 {derived.behindMain} · 领先 {derived.aheadOfMain}</span>
+                  </td>
+                </tr>
+              ) : null}
+              {derived.originMainHead ? (
+                <tr>
+                  <td className="cv-state-k">远端</td>
+                  <td className="cv-state-v">
+                    origin/main <code className="cv-tl-hash">{derived.originMainHead}</code>
+                    <span className="cv-state-delta">worktree 落后 {derived.behindBase} · 领先 {derived.aheadOfBase}</span>
+                    {derived.needsSync ? <span className="cv-state-warn">⚠ 需要同步</span> : null}
+                  </td>
+                </tr>
+              ) : null}
+              {derived.upstreamHead ? (
+                <tr>
+                  <td className="cv-state-k">远端分支</td>
+                  <td className="cv-state-v">
+                    origin/{derived.branch ?? workflow?.branch} <code className="cv-tl-hash">{derived.upstreamHead}</code>
+                    <span className="cv-state-delta">worktree 落后 {derived.behindUpstream ?? 0} · 领先 {derived.aheadOfUpstream ?? 0}</span>
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+
+      {/* review 结论:标注它审查的 HEAD;HEAD 变化后不冒充当前结论 */}
+      {workflow?.reviewResult ? (
+        <div className={derived?.verdictCurrent ? (workflow.reviewResult.passed ? 'cv-dev-done' : 'cv-review-fail') : 'cv-review-stale'}>
+          {derived?.verdictCurrent
+            ? (workflow.reviewResult.passed
+              ? `✅ Review 通过(针对提交 ${derived.reviewedHash ?? '?'})`
+              : `❌ Review 发现 ${workflow.reviewResult.issues.length} 个问题(针对提交 ${derived.reviewedHash ?? '?'})`)
+            : `⏳ Review 结论针对旧提交 ${derived?.reviewedHash ?? '?'},当前 HEAD ${derived?.head ?? '?'} 已变化,结论已过期`}
+        </div>
+      ) : null}
+      {workflow?.reviewResult && !workflow.reviewResult.passed && derived?.verdictCurrent ? (
+        <ul className="cv-review-issues">
+          {workflow.reviewResult.issues.map((issue, i) => <li key={i}>{issue}</li>)}
+        </ul>
+      ) : null}
+
+      {/* 唯一动作 */}
       <div className="cv-dev-actions">
-        {interrupted && stage === 'developing' ? (
-          <button className="cv-dev-btn cv-dev-warn" onClick={() => resume()} disabled={busy !== null}>
-            {busy === 'resuming' ? '恢复中…' : '↩ 恢复开发'}
-          </button>
-        ) : null}
-        {showDevButtons ? (
+        {effectiveAction.kind === 'none' ? (
+          <div className="cv-dev-noop">· {effectiveAction.hint}</div>
+        ) : (
           <>
-            <button className="cv-dev-btn cv-dev-codex" onClick={() => startDev('codex')} disabled={busy !== null}>Codex 开发</button>
-            <button className="cv-dev-btn cv-dev-claude" onClick={() => startDev('claude')} disabled={busy !== null}>Claude 开发</button>
-            <button className="cv-dev-btn cv-dev-warn" onClick={() => startDev('dryrun')} disabled={busy !== null}>安全演练</button>
+            {showAgentToggle ? (
+              <div className="cv-agent-toggle" title={lockedAgent ? `Review 锁定 ${lockedAgent}` : '选择 agent'}>
+                <button className={agentChoice === 'codex' ? 'on' : ''} onClick={() => setAgentChoice('codex')} disabled={lockedAgent !== null && lockedAgent !== 'codex'}>Codex</button>
+                <button className={agentChoice === 'claude' ? 'on' : ''} onClick={() => setAgentChoice('claude')} disabled={lockedAgent !== null && lockedAgent !== 'claude'}>Claude</button>
+              </div>
+            ) : null}
+            <button
+              className={actionButtonClass}
+              onClick={runAction}
+              disabled={busy !== null}
+              title={effectiveAction.hint}
+            >
+              {busyLabel ?? effectiveAction.label}
+            </button>
           </>
-        ) : null}
-        {showCodexReview ? (
-          <button className="cv-dev-btn cv-dev-review" onClick={() => startReview('codex')} disabled={busy !== null}>Codex Review</button>
-        ) : null}
-        {showClaudeReview ? (
-          <button className="cv-dev-btn cv-dev-review" onClick={() => startReview('claude')} disabled={busy !== null}>Claude Review</button>
-        ) : null}
-        {workflow?.reviewResult && !workflow.reviewResult.passed ? (
-          <button
-            className="cv-dev-btn cv-dev-codex"
-            onClick={() => resume(workflow?.reviewResult?.issues.join('\n'))}
-            disabled={busy !== null}
-            title="续上次开发会话,并把 review 意见带进去"
-          >↩ 按 review 意见继续开发</button>
+        )}
+        {stage === 'idle' && effectiveAction.kind === 'develop' ? (
+          <button className="cv-dev-link" onClick={() => startDev('dryrun')} disabled={busy !== null}>安全演练(dry-run)</button>
         ) : null}
         {activeTaskId ? (
           <button className="cv-dev-btn cv-dev-warn" onClick={() => void stop()}>停止任务</button>
@@ -717,17 +872,6 @@ function DevSection({ url, issue, workflow, onWorkflow }: {
       {statusLines.length > 0 ? (
         <pre className="cv-dev-log">{statusLines.join('\n')}</pre>
       ) : null}
-
-      {/* 最新 review 结论(当前状态的一部分) */}
-      {workflow?.reviewResult && !workflow.reviewResult.passed ? (
-        <div className="cv-review-fail">
-          <div className="cv-dev-error">❌ 最近一次 Review 发现 {workflow.reviewResult.issues.length} 个问题</div>
-          <ul className="cv-review-issues">
-            {workflow.reviewResult.issues.map((issue, i) => <li key={i}>{issue}</li>)}
-          </ul>
-        </div>
-      ) : null}
-      {workflow?.reviewResult?.passed ? <div className="cv-dev-done">✅ Review 通过</div> : null}
 
       {/* 历史时间线:全部事件,按时间顺序 */}
       {(workflow?.events ?? []).length > 0 ? (

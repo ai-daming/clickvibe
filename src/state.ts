@@ -34,6 +34,8 @@ export interface IssueWorkflow {
   reviewResult: { passed: boolean; issues: string[]; commentUrl?: string } | null
   /** 关联的 PR 号(开发分支的代码产物);issue 为 key,PR 记录在这里。 */
   prNumber: string | null
+  /** 最近一次从 GitHub 看到的 issue 状态(推导『已关闭→无动作』,issue #5)。 */
+  issueState: 'OPEN' | 'CLOSED'
   /** 开发基线:开 worktree 时基于的分支与提交(如 origin/main @ a8a7b5f)。 */
   baseRef: string | null
   updatedAt: number
