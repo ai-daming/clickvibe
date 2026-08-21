@@ -399,6 +399,10 @@ function IssueView({ issue, kind, workflow, onWorkflow, timeline }: {
         <div className="cv-links">
           {timeline.map((ev, i) => {
             if (ev.event === 'cross-referenced' && ev.source) {
+              // 若 workflow 记录了该 PR 的 worktree,一并显示
+              const linkedWorktree = workflow && workflow.prNumber === String(ev.source.number)
+                ? workflow.worktree
+                : undefined
               return (
                 <div key={i} className="cv-link-row">
                   🔗 关联
@@ -408,6 +412,7 @@ function IssueView({ issue, kind, workflow, onWorkflow, timeline }: {
                   <span className={`cv-link-state cv-link-state-${ev.source.state ?? 'open'}`}>
                     {ev.source.state === 'closed' ? '已关闭' : ev.source.state === 'merged' ? '已合并' : '打开'}
                   </span>
+                  {linkedWorktree ? <code className="cv-tl-hash">{linkedWorktree}</code> : null}
                 </div>
               )
             }
