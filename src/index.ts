@@ -530,14 +530,16 @@ async function ensureWorktree(ctx: Context, parsed: { owner: string; repo: strin
       reviewSessionId: null,
       reviewResult: null,
       prNumber: null,
+      baseRef: null,
       updatedAt: Date.now(),
       events: [],
     }
   }
-  // 旧状态文件兜底:补 events / reviewSessionId / prNumber 字段
+  // 旧状态文件兜底:补 events / reviewSessionId / prNumber / baseRef 字段
   if (!Array.isArray(workflow.events)) workflow.events = []
   if (workflow.reviewSessionId === undefined) workflow.reviewSessionId = null
   if (workflow.prNumber === undefined) workflow.prNumber = null
+  if (workflow.baseRef === undefined) workflow.baseRef = null
   // 校正路径字段(配置可能变化)
   workflow.worktree = worktree
   workflow.branch = branch
@@ -608,6 +610,18 @@ async function ensureWorktree(ctx: Context, parsed: { owner: string; repo: strin
     await appendLog(workflow.key, 'dev', recovery.kind === 'add-new-branch'
       ? `[clickvibe] worktree 与分支创建完成`
       : `[clickvibe] 已从现有分支恢复 worktree`)
+  }
+
+  // 记录开发基线:首次开发时记下主仓库的分支 + HEAD(开 worktree 的来源)
+  if (!workflow.baseRef) {
+    const baseBranch = await runCommand(
+      ctx,
+      'git rev-parse --abbrev-ref HEAD; git rev-parse --short HEAD',
+      { workdir: expandedRepo, timeoutMs: 10000, sandboxPolicy: policy },
+    ).catch(() => '')
+    const [branchName = '', headHash = ''] = baseBranch.split('\n')
+    workflow.baseRef = `${branchName} @ ${headHash}`.trim()
+    await appendLog(workflow.key, 'dev', `[clickvibe] 开发基线: ${workflow.baseRef}`)
   }
 
   await saveWorkflow(workflow)

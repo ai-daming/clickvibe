@@ -395,14 +395,25 @@ function IssueView({ issue, kind, workflow, onWorkflow, timeline }: {
           ))}
         </tbody>
       </table>
+      {/* 开发上下文:worktree + 基线 —— 只要进入开发流程就显示,不依赖 PR */}
+      {workflow ? (
+        <div className="cv-links">
+          <div className="cv-link-row">
+            📁 worktree
+            <code className="cv-tl-hash">{workflow.worktree}</code>
+          </div>
+          {workflow.baseRef ? (
+            <div className="cv-link-row">
+              📍 基线
+              <code className="cv-tl-hash">{workflow.baseRef}</code>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       {timeline && timeline.length > 0 ? (
         <div className="cv-links">
           {timeline.map((ev, i) => {
             if (ev.event === 'cross-referenced' && ev.source) {
-              // 若 workflow 记录了该 PR 的 worktree,一并显示
-              const linkedWorktree = workflow && workflow.prNumber === String(ev.source.number)
-                ? workflow.worktree
-                : undefined
               return (
                 <div key={i} className="cv-link-row">
                   🔗 关联
@@ -412,7 +423,6 @@ function IssueView({ issue, kind, workflow, onWorkflow, timeline }: {
                   <span className={`cv-link-state cv-link-state-${ev.source.state ?? 'open'}`}>
                     {ev.source.state === 'closed' ? '已关闭' : ev.source.state === 'merged' ? '已合并' : '打开'}
                   </span>
-                  {linkedWorktree ? <code className="cv-tl-hash">{linkedWorktree}</code> : null}
                 </div>
               )
             }
@@ -459,6 +469,7 @@ interface Workflow {
   reviewSessionId: string | null
   reviewResult: { passed: boolean; issues: string[]; commentUrl?: string } | null
   prNumber: string | null
+  baseRef: string | null
   updatedAt: number
   events?: WorkflowEvent[]
   derived?: { head: string | null; hasNewCommits: boolean; lastDevHash: string | null; lastReviewHash: string | null }
