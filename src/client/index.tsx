@@ -439,11 +439,15 @@ interface Workflow {
   updatedAt: number
 }
 
-function stageLabel(stage: Workflow['stage']): string {
+function stageLabel(stage: Workflow['stage'], workflow: Workflow | null): string {
   switch (stage) {
     case 'idle': return '未开发'
     case 'developing': return '开发中'
-    case 'review-ready': return '待 review'
+    case 'review-ready':
+      // 已有 review 结果:未通过 → "Review 未通过";否则 → "待 review"
+      return workflow?.reviewResult
+        ? (workflow.reviewResult.passed ? 'Review 通过' : 'Review 未通过')
+        : '待 review'
     case 'reviewing': return 'review 中'
     case 'passed': return '✅ 已通过'
   }
@@ -553,7 +557,7 @@ function DevSection({ url, workflow, onWorkflow }: {
   return (
     <div className="cv-dev">
       <div className="cv-dev-head">
-        🚀 开发流程 <span className={`cv-stage cv-stage-${stage}`}>{stageLabel(stage)}</span>
+        🚀 开发流程 <span className={`cv-stage cv-stage-${stage}`}>{stageLabel(stage, workflow)}</span>
       </div>
 
       {interrupted && stage === 'developing' ? (
