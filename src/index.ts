@@ -469,13 +469,15 @@ async function ensureWorktree(ctx: Context, parsed: { owner: string; repo: strin
       devInterrupted: false,
       reviewAgent: null,
       reviewTaskId: null,
+      reviewSessionId: null,
       reviewResult: null,
       updatedAt: Date.now(),
       events: [],
     }
   }
-  // 旧状态文件兜底:补 events 字段
+  // 旧状态文件兜底:补 events / reviewSessionId 字段
   if (!Array.isArray(workflow.events)) workflow.events = []
+  if (workflow.reviewSessionId === undefined) workflow.reviewSessionId = null
   // 校正路径字段(配置可能变化)
   workflow.worktree = worktree
   workflow.branch = branch
@@ -744,7 +746,7 @@ async function startReview(
     agent,
     lines: [],
     closed: false,
-    sessionId: null,
+    sessionId: workflow.reviewSessionId,
   }
   liveTasks.set(taskId, live)
   workflow.reviewAgent = agent
@@ -752,13 +754,26 @@ async function startReview(
   workflow.stage = 'reviewing'
   await saveWorkflow(workflow)
 
-  const prompt = buildReviewPrompt(workflow)
-  const agentCommand = agent === 'claude'
-    ? 'claude -p --verbose --output-format stream-json'
-    : 'codex exec --json -'
+  // review 与 dev 同规则:有上次会话 id 就续会话(精确 id,不用 --last),
+  // 续会话时提示"代码已更新,检查之前的问题是否已解决并审查新改动";
+  // 没有会话 id 则新开会话。
+  const sessionId = workflow.reviewSessionId
+  let agentCommand: string
+  if (agent === 'claude') {
+    agentCommand = sessionId
+      ? `claude -p --resume ${shellQuoteId(sessionId)} --verbose --output-format stream-json`
+      : 'claude -p --verbose --output-format stream-json'
+  } else {
+    agentCommand = sessionId
+      ? `codex exec resume ${shellQuoteId(sessionId)} --json -`
+      : 'codex exec --json -'
+  }
+  const prompt = sessionId
+    ? '请继续 review。代码已更新,请先确认之前发现的问题是否已解决,再审查新改动,最后输出同样的 JSON 结论。'
+    : buildReviewPrompt(workflow)
 
-  await appendLog(workflow.key, 'review', `[clickvibe] 启动 ${agent} review…`)
-  attachAgentProcess(ctx, live, agentCommand, workflow.worktree, prompt, async (exitCode) => {
+  await appendLog(workflow.key, 'review', `[clickvibe] 启动 ${agent} review${sessionId ? `(续会话 ${sessionId})` : ''}…`)
+  attachAgentProcess(ctx, live, agentCommand, workflow.worktree, prompt, async (exitCode, newSessionId) => {
     await appendLog(workflow.key, 'review', `[clickvibe] review 结束,退出码 ${exitCode}`)
     // 优先用 agent 输出的 JSON 结论(完整、不受截断/分块影响);
     // JSON 缺失时回退到 ❌/✅ 文本判定。
@@ -770,6 +785,8 @@ async function startReview(
     if (reloaded) {
       reloaded.reviewResult = { passed, issues }
       reloaded.stage = passed ? 'passed' : 'review-ready' // 有问题 → 可回开发(rework)
+      // 记录 review 会话 id(供下次 review 续会话)
+      if (newSessionId) reloaded.reviewSessionId = newSessionId
       // 记录 review 历史事件:锚定被 review 的 HEAD
       const reviewedHead = await readWorktreeHead(ctx, workflow.worktree)
       await appendEvent(reloaded, {

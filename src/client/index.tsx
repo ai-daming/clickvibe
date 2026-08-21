@@ -451,6 +451,7 @@ interface Workflow {
   devInterrupted: boolean
   reviewAgent: 'codex' | 'claude' | null
   reviewTaskId: string | null
+  reviewSessionId: string | null
   reviewResult: { passed: boolean; issues: string[]; commentUrl?: string } | null
   updatedAt: number
   events?: WorkflowEvent[]

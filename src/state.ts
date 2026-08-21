@@ -30,6 +30,7 @@ export interface IssueWorkflow {
   devInterrupted: boolean
   reviewAgent: 'codex' | 'claude' | null
   reviewTaskId: string | null
+  reviewSessionId: string | null
   reviewResult: { passed: boolean; issues: string[]; commentUrl?: string } | null
   updatedAt: number
   /** 完整历史事件链:每次开发提交/review/恢复各一条,按时间追加。 */
