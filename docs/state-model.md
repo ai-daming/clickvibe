@@ -83,3 +83,25 @@
 - **#9(自动选取)** 的 ready 判定 = P3 #1/#2 状态 + blockedBy 依赖全完成
 - **#4(PR 评论流水)** 提供 meta,让 GitHub 成为可重建账本
 - **#11(跨机器)** 后,"本地 git"事实源路由到执行机,事实类型与判断不变
+
+## 六、P2 恢复动作明细(点「开始开发」后自动执行)
+
+`ensureWorktree` 对 worktree/分支 4 种组合自动处理,无需人工:
+
+| 组合 | 决策 | 动作 |
+|---|---|---|
+| 分支无 + worktree 无 | add-new-branch | `git worktree add <路径> -b <分支> origin/HEAD`(从远端默认分支建) |
+| 分支有 + worktree 有 | reuse | 直接复用 |
+| 分支有 + worktree 无 | add-existing-branch | `git worktree add <路径> <分支>` |
+| 分支无 + worktree 有(detached) | attach-detached | `git switch -c <分支>` |
+
+半状态兜底:
+
+| 场景 | 决策 | 动作 |
+|---|---|---|
+| detached 但分支已存在 | attach-existing | `git switch <分支>` |
+| git 注册存在但路径缺失/为空(stale) | repair | 清理注册后重建 |
+| 分支被其他 worktree 占用 | conflict | 拒绝(不覆盖) |
+| 路径是非空未注册目录 | conflict | 拒绝(不覆盖) |
+
+安全边界:冲突一律拒绝,绝不覆盖现有内容;新分支只从 fetch 后的 origin/HEAD 创建,不继承主仓库碰巧停留的 HEAD。
