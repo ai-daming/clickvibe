@@ -393,8 +393,8 @@ async function fetchTimeline(ctx: Context, owner: string, repo: string, number: 
   }
 }
 
-/** Build the development prompt from issue/PR data. */
-function buildPrompt(item: Record<string, unknown>): string {
+/** Build the development prompt from issue/PR data + the worktree path. */
+function buildPrompt(item: Record<string, unknown>, worktreePath: string): string {
   const comments = Array.isArray(item.comments)
     ? (item.comments as { author?: { login?: string } | null; body?: string }[])
         .map((c) => `@${c.author?.login ?? 'unknown'}: ${c.body ?? ''}`)
@@ -404,10 +404,14 @@ function buildPrompt(item: Record<string, unknown>): string {
     `请开发这个 GitHub ${item.url?.toString().includes('/pull/') ? 'PR' : 'issue'}: ${item.title ?? ''}`,
     String(item.url ?? ''),
     '',
+    `工作区(worktree): ${worktreePath}`,
+    '',
     '--- issue 正文 ---',
     String(item.body ?? ''),
     comments ? '--- 评论 ---\n' + comments : '',
     '--- 要求 ---',
+    '0. 先执行 git fetch origin 同步远端,并检查 base(默认 origin/main)是否有更新;',
+    '   并行开发时 base 会变化,若已有更新先合并/变基到最新再开始开发',
     '1. 先理解需求,如有歧义可自行判断或提问',
     '2. 实现代码改动',
     '3. 运行相关测试',
@@ -429,8 +433,11 @@ async function buildReviewPrompt(ctx: Context, workflow: IssueWorkflow): Promise
     `请 review 分支 ${workflow.branch} 的代码改动(相对 base ${base}),对照 issue:`,
     workflow.url,
     '',
+    `工作区(worktree): ${workflow.worktree}`,
+    '',
     '要求:',
-    `1. 先执行 git diff ${base}...HEAD 查看完整改动(在 worktree 内)`,
+    `0. 先执行 git fetch origin 同步远端最新状态(并行开发时 base 可能已变化)`,
+    `1. 再执行 git diff ${base}...HEAD 查看完整改动(在 worktree 内)`,
     '2. 检查:需求是否完整实现、是否有 bug/安全隐患、测试是否覆盖',
     '3. 不要修改任何文件,只做只读 review',
     '4. 最后一行必须输出一个 JSON 对象(单独一行,不要包裹在代码块里),格式:',
@@ -746,7 +753,19 @@ async function startDevelop(
       await appendLog(workflow.key, 'dev', `[clickvibe] 抓取 issue 数据…`)
       const fetchResult = await fetchIssue(ctx, { url })
       if (!fetchResult.ok) throw new Error(fetchResult.error)
-      let prompt = buildPrompt(fetchResult.data.item as Record<string, unknown>)
+      // Host 侧先同步远端(并行开发时 base 会变化,确保 agent 从最新基线开发)
+      try {
+        await runCommand(ctx, 'git fetch origin', {
+          workdir: workflow.worktree,
+          timeoutMs: 30000,
+          sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: workflow.worktree },
+        })
+        await appendLog(workflow.key, 'dev', `[clickvibe] 已同步远端(origin)`)
+      } catch (e) {
+        await appendLog(workflow.key, 'dev', `[clickvibe] git fetch 失败(继续): ${String(e instanceof Error ? e.message : e)}`)
+      }
+
+      let prompt = buildPrompt(fetchResult.data.item as Record<string, unknown>, workflow.worktree)
       if (extraContext !== '') {
         prompt += '\n\n--- 附加上下文(来自 review 或其他) ---\n' + extraContext
       }
@@ -1100,6 +1119,18 @@ async function resumeDevelop(
       ? `codex exec resume ${shellQuoteId(sessionId)} --json -`
       : 'codex exec --json --last -'
   }
+  // 续会话前也同步远端(并行开发时 base 会变化)
+  try {
+    await runCommand(ctx, 'git fetch origin', {
+      workdir: workflow.worktree,
+      timeoutMs: 30000,
+      sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: workflow.worktree },
+    })
+    await appendLog(workflow.key, 'dev', `[clickvibe] 已同步远端(origin)`)
+  } catch (e) {
+    await appendLog(workflow.key, 'dev', `[clickvibe] git fetch 失败(继续): ${String(e instanceof Error ? e.message : e)}`)
+  }
+
   const prompt = extraContext !== ''
     ? `请继续完成开发任务,并处理以下 review 意见:\n${extraContext}`
     : '请继续完成刚才的开发任务。'
