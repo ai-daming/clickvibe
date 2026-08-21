@@ -1244,7 +1244,17 @@ function PanelContent() {
               {[...grouped.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([group, rows]) => (
                 <React.Fragment key={group}>
                   <div className="cv-group-title">{group} · {rows.length}</div>
-                  {rows.map((issue) => {
+                  {[...rows].sort((a, b) => {
+                    // 就绪优先:就绪(未开发+依赖OK) → 开发中 → 阻塞 → 已交付;同档按编号。
+                    const levelOf = (issue: RepositoryIssue): number => {
+                      if (issue.blockedBy.some((dependency) => dependency.state.toUpperCase() === 'OPEN')) return 2
+                      const status = issue.workflow.derived?.status ?? issue.workflow.stage
+                      if (status === 'passed') return 3
+                      if (status === 'idle') return 0
+                      return 1 // developing / reviewing / review-ready
+                    }
+                    return levelOf(a) - levelOf(b) || a.number - b.number
+                  }).map((issue) => {
                     const derived = issue.workflow.derived
                     const status = derived?.status ?? issue.workflow.stage
                     const baseAction = derived?.nextAction ?? { kind: 'develop' as const, label: '开始开发', hint: '' }
