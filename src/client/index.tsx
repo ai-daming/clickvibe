@@ -121,6 +121,16 @@ const PANEL_CSS = `
 .cv-review-fail { display: flex; flex-direction: column; gap: 6px; }
 .cv-review-issues { margin: 0; padding-left: 18px; font-size: 12px; color: #1f2328; }
 .cv-review-issues li { margin: 2px 0; }
+.cv-refresh { padding: 6px 10px; border: 1px solid #d0d7de; border-radius: 6px; background: #ffffff; color: #57606a; cursor: pointer; font-size: 14px; line-height: 1; }
+.cv-refresh:hover { background: #f6f8fa; color: #1f2328; }
+.cv-links { display: flex; flex-direction: column; gap: 4px; }
+.cv-link-row { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #57606a; flex-wrap: wrap; }
+.cv-link { color: #0969da; font-weight: 600; text-decoration: none; }
+.cv-link:hover { text-decoration: underline; }
+.cv-link-state { display: inline-block; padding: 0 6px; border-radius: 8px; font-size: 10.5px; font-weight: 600; }
+.cv-link-state-open { background: #dafbe1; color: #1a7f37; }
+.cv-link-state-closed { background: #ffebe9; color: #cf222e; }
+.cv-link-state-merged { background: #d8f5ff; color: #8250df; }
 `
 
 /** Inject the plugin stylesheet once; returns the disposer. */
@@ -309,11 +319,20 @@ interface GhIssue {
   headRefName?: string
 }
 
-function IssueView({ issue, kind, workflow, onWorkflow }: {
+interface TimelineEvent {
+  event: string
+  created_at?: string
+  actor?: string
+  commit_id?: string | null
+  source?: { number?: number; title?: string; html_url?: string; state?: string } | null
+}
+
+function IssueView({ issue, kind, workflow, onWorkflow, timeline }: {
   issue: GhIssue
   kind: 'issue' | 'pr'
   workflow: Workflow | null
   onWorkflow: (w: Workflow | null) => void
+  timeline?: TimelineEvent[]
 }) {
   const isPR = kind === 'pr'
   const state = String(issue.state || '').toUpperCase()
@@ -360,6 +379,29 @@ function IssueView({ issue, kind, workflow, onWorkflow }: {
           ))}
         </tbody>
       </table>
+      {timeline && timeline.length > 0 ? (
+        <div className="cv-links">
+          {timeline.map((ev, i) => {
+            if (ev.event === 'cross-referenced' && ev.source) {
+              return (
+                <div key={i} className="cv-link-row">
+                  🔗 关联
+                  <a className="cv-link" href={ev.source.html_url} target="_blank" rel="noreferrer">
+                    {ev.source.title ? `#${ev.source.number} ${ev.source.title}` : `#${ev.source.number}`}
+                  </a>
+                  <span className={`cv-link-state cv-link-state-${ev.source.state ?? 'open'}`}>
+                    {ev.source.state === 'closed' ? '已关闭' : ev.source.state === 'merged' ? '已合并' : '打开'}
+                  </span>
+                </div>
+              )
+            }
+            if (ev.event === 'referenced' && ev.commit_id) {
+              return <div key={i} className="cv-link-row">🔗 引用提交 <code className="cv-md-code">{ev.commit_id.slice(0, 7)}</code></div>
+            }
+            return null
+          })}
+        </div>
+      ) : null}
       <div className="cv-issue-body">
         <div className="cv-md">{renderMarkdown(issue.body ?? '')}</div>
       </div>
@@ -602,7 +644,7 @@ async function fetchIssue(url: string): Promise<{ ok: true; data: { kind: 'issue
 function PanelContent() {
   const [url, setUrl] = React.useState('')
   const [loading, setLoading] = React.useState(false)
-  const [result, setResult] = React.useState<{ kind: 'issue' | 'pr'; item: GhIssue } | null>(null)
+  const [result, setResult] = React.useState<{ kind: 'issue' | 'pr'; item: GhIssue; timeline?: TimelineEvent[] } | null>(null)
   const [error, setError] = React.useState<string | null>(null)
   const [workflow, setWorkflow] = React.useState<Workflow | null>(null)
   const [restored, setRestored] = React.useState(false)
@@ -620,7 +662,7 @@ function PanelContent() {
           // 自动重新抓取该 issue
           const fetchRes = await fetchIssue(active.url)
           if (!cancelled) {
-            if (fetchRes.ok) setResult(fetchRes.data as { kind: 'issue' | 'pr'; item: GhIssue })
+            if (fetchRes.ok) setResult(fetchRes.data as { kind: 'issue' | 'pr'; item: GhIssue; timeline?: TimelineEvent[] })
             else setError(fetchRes.error)
           }
         }
@@ -645,7 +687,7 @@ function PanelContent() {
       const matched = stateRes.ok ? stateRes.workflows.find((w) => w.url === trimmed) ?? null : null
       setWorkflow(matched)
       const res = await fetchIssue(trimmed)
-      if (res.ok) setResult(res.data as { kind: 'issue' | 'pr'; item: GhIssue })
+      if (res.ok) setResult(res.data as { kind: 'issue' | 'pr'; item: GhIssue; timeline?: TimelineEvent[] })
       else setError(res.error)
     } catch (e) {
       setError(`调用失败: ${String(e)}`)
@@ -677,10 +719,15 @@ function PanelContent() {
         <button className="cv-fetch" onClick={() => run()} disabled={loading}>
           {loading ? '抓取中…' : '抓取'}
         </button>
+        {result ? (
+          <button className="cv-refresh" onClick={() => run()} disabled={loading} title="重新抓取当前 issue">
+            ⟳
+          </button>
+        ) : null}
       </div>
       {error ? <div className="cv-error">{error}</div> : null}
       {result
-        ? <IssueView issue={result.item} kind={result.kind} workflow={workflow} onWorkflow={updateWorkflow} />
+        ? <IssueView issue={result.item} kind={result.kind} workflow={workflow} onWorkflow={updateWorkflow} timeline={result.timeline} />
         : loading
           ? <div className="cv-loading">正在通过 gh 抓取…</div>
           : restored

@@ -286,7 +286,7 @@ export function apply(ctx: Context): void {
 async function fetchIssue(
   ctx: Context,
   payload: unknown,
-): Promise<{ ok: true; data: { kind: 'issue' | 'pr'; item: unknown } } | { ok: false; error: string }> {
+): Promise<{ ok: true; data: { kind: 'issue' | 'pr'; item: unknown; timeline?: unknown } } | { ok: false; error: string }> {
   const url = String((payload as { url?: unknown } | undefined)?.url ?? '').trim()
   const parsed = parseUrl(url)
   if (!parsed) {
@@ -302,9 +302,28 @@ async function fetchIssue(
       return { ok: false, error: stderr || `gh 执行失败(exit ${result.exitCode})` }
     }
     const parsedJson = JSON.parse(result.stdout.text) as unknown
-    return { ok: true, data: { kind: parsed.kind, item: parsedJson } }
+    const data: { kind: 'issue' | 'pr'; item: unknown; timeline?: unknown } = { kind: parsed.kind, item: parsedJson }
+    // issue 额外拉 timeline,提取关联事件(linked PR/commit)——GitHub UI 的
+    // "linked a pull request" 就来自 cross-referenced 事件
+    if (!isPR) {
+      data.timeline = await fetchTimeline(ctx, parsed.owner, parsed.repo, parsed.number)
+    }
+    return { ok: true, data }
   } catch (error) {
     return { ok: false, error: `抓取异常: ${String(error instanceof Error ? error.message : error)}` }
+  }
+}
+
+/** Fetch the issue timeline and keep only the events worth showing. */
+async function fetchTimeline(ctx: Context, owner: string, repo: string, number: string): Promise<unknown[]> {
+  const command = `gh api repos/${owner}/${repo}/issues/${number}/timeline -H "Accept: application/vnd.github+json" --jq '[.[] | select(.event == "cross-referenced" or .event == "referenced" or .event == "connected" or .event == "closed" or .event == "reopened") | {event, created_at, actor: .actor.login, commit_id, source: (if .source then {number: .source.issue.number, title: .source.issue.title, html_url: .source.issue.html_url, state: .source.issue.state} else null end)}]'`
+  try {
+    const spec = ctx.shell.resolve({ command, timeoutMs: 15000 })
+    const result = await ctx.shell.run(spec)
+    if (result.exitCode !== 0) return []
+    return JSON.parse(result.stdout.text) as unknown[]
+  } catch {
+    return []
   }
 }
 
