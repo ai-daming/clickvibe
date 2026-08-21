@@ -881,8 +881,8 @@ export async function fetchRepositoryIssues(
   const prCommand = `gh api --paginate --slurp ${shellQuote(`repos/${repoKey}/pulls?state=all&per_page=100`)}`
   try {
     const [issueOutput, prOutput, allWorkflows] = await Promise.all([
-      runCommand(ctx, issueCommand, { timeoutMs: 30000, stdoutMaxBytes: 4 * 1024 * 1024 }),
-      runCommand(ctx, prCommand, { timeoutMs: 30000, stdoutMaxBytes: 4 * 1024 * 1024 }),
+      runCommand(ctx, issueCommand, { timeoutMs: 30000 }),
+      runCommand(ctx, prCommand, { timeoutMs: 30000 }),
       overrides.workflows ? Promise.resolve(overrides.workflows) : loadAllWorkflows(),
     ])
     const allIssues = flattenGithubPages<RepositoryIssueRest>(JSON.parse(issueOutput))
