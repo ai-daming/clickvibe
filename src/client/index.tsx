@@ -600,7 +600,11 @@ function DevSection({ url, workflow, onWorkflow }: {
   }
 
   const showDevButtons = stage === 'idle'
-  const showReviewButtons = stage === 'review-ready' && !interrupted && !workflow?.reviewResult
+  const canReview = stage === 'review-ready' && !interrupted && !workflow?.reviewResult
+  // review agent 锁定:上次用什么 review,这次就只显示那个按钮;
+  // 从未 review 过则两个都显示(首次自由选)。
+  const showCodexReview = canReview && (!workflow?.reviewAgent || workflow.reviewAgent === 'codex')
+  const showClaudeReview = canReview && (!workflow?.reviewAgent || workflow.reviewAgent === 'claude')
   const showReworkButtons = stage === 'review-ready' && workflow?.reviewResult?.passed === false
 
   return (
@@ -634,11 +638,11 @@ function DevSection({ url, workflow, onWorkflow }: {
             <button className="cv-dev-btn cv-dev-claude" onClick={() => startDev('claude')} disabled={busy !== null}>Claude 开发</button>
           </>
         ) : null}
-        {showReviewButtons ? (
-          <>
-            <button className="cv-dev-btn cv-dev-review" onClick={() => startReview('codex')} disabled={busy !== null}>Codex Review</button>
-            <button className="cv-dev-btn cv-dev-review" onClick={() => startReview('claude')} disabled={busy !== null}>Claude Review</button>
-          </>
+        {showCodexReview ? (
+          <button className="cv-dev-btn cv-dev-review" onClick={() => startReview('codex')} disabled={busy !== null}>Codex Review</button>
+        ) : null}
+        {showClaudeReview ? (
+          <button className="cv-dev-btn cv-dev-review" onClick={() => startReview('claude')} disabled={busy !== null}>Claude Review</button>
         ) : null}
         {workflow?.reviewResult && !workflow.reviewResult.passed ? (
           <button

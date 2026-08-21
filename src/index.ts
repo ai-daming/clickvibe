@@ -948,12 +948,9 @@ async function startReview(
   workflow.stage = 'reviewing'
   await saveWorkflow(workflow)
 
-  // review 与 dev 同规则:同 agent 且上次有会话 id 才续会话(精确 id,不用 --last);
-  // 跨 agent 不续(换 codex/claude 就该重新审,且 session id 是 agent 私有的);
-  // 没有可续的会话则新开会话。
-  const sessionId = workflow.reviewSessionId && workflow.reviewAgent === agent
-    ? workflow.reviewSessionId
-    : null
+  // review 与 dev 同规则:有上次会话 id 就续会话(精确 id,不用 --last)。
+  // UI 已保证按钮只显示上次 review 的 agent,所以这里不需要再判断 agent 一致。
+  const sessionId = workflow.reviewSessionId
   let agentCommand: string
   if (agent === 'claude') {
     agentCommand = sessionId
