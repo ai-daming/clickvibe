@@ -16,8 +16,11 @@ DSH web 插件:右侧面板输入 GitHub issue / PR 链接,通过本地 `gh` CLI
 - Open issue 一键开发:
   - `Codex 开发` / `Claude 开发`:在 issue worktree 中启动非交互 agent
   - `安全演练`:走完整 worktree/任务/轮询链路,只执行 `pwd`、当前分支和 `git status`
-  - 日志按完整行、cursor 增量轮询；内存最多保留 2000 行,超出时明确提示截断
+  - 真实 Agent 启动只接受本机回环、同源且带专用请求头的请求；服务端冻结面板已展示的完整 Issue 快照,签发两分钟内一次性授权,启动时不再重新抓取 Issue
+  - 日志按完整行、cursor 增量轮询；服务端与面板最多保留 2000 行,持久日志也有大小上限,超出时明确提示截断
+  - Agent 最长运行 10 分钟,面板可主动停止；完成任务延迟回收,任务表本身有总量上限
   - 已有正确 worktree/分支会复用；缺分支、缺 worktree 或 detached 等半完成状态会安全恢复
+  - 创建或修复缺失分支前先 `git fetch origin --prune`,并显式从 `origin/HEAD`(兼容回退 `origin/main`)创建,不继承配置仓库当前 HEAD
   - 冲突分支或未注册的非空目录不会被覆盖
 
 ## 架构
@@ -84,4 +87,6 @@ curl -X POST http://127.0.0.1:3080/clickvibe/api/develop/poll \
   -d '{"taskId":"dev-...","cursor":0}'
 ```
 
-任务状态只保存在当前 Host 进程内,重启后旧 `taskId` 失效。真实 agent 会执行 Issue 内容并可能修改代码、commit、push 或创建 PR；只应对可信仓库和可信 Issue 主动点击运行。`dryrun` 不启动 agent,适合先验证配置与 worktree 恢复。
+任务状态只保存在当前 Host 进程内,重启后旧 `taskId` 失效。真实 Agent 必须从面板发起:面板先把当前显示的完整 Issue 快照交给服务端比对,再展示 Agent、更新时间、评论数和快照摘要供确认；确认后的授权只能使用一次且会过期。`dryrun` 不需要高权限授权、不启动 Agent,适合用 curl 验证配置、worktree 恢复和增量轮询。
+
+不要把 ClickVibe 暴露到局域网或公网。服务端会拒绝非回环来源的 Agent 操作,但同一操作系统账号下的恶意进程本来就可能读取代码、配置和开发凭据,本工具不把同账号进程隔离当作安全边界。

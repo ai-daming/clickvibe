@@ -68,8 +68,5 @@
     "test": "node --test tests/*.test.ts",
     "watch": "tsdown --watch",
     "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "yaml": "^2.9.0"
   }
 }
