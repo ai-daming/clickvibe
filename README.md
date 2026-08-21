@@ -8,6 +8,8 @@ DSH web 插件:右侧面板先选择已配置的 GitHub repo,再按依赖、状�
 - 项目选择器读取 `~/.clickvibe/config.yaml` 的全部 repo 映射,路径不在本机的跨机器配置也保留在列表
 - 选中项目后展示全部 open issue,支持按里程碑或依赖状态分组、按依赖就绪/阻塞过滤
 - 每行展示状态徽章、约定分支、落后提示、milestone、blockedBy 与唯一动作；点开后进入完整详情
+- **blockedBy 门槛**:有 OPEN 依赖时,「开始/恢复开发」替换为「被 #N 阻塞」(禁用);review/返工/合并等已开发流程不受影响
+- **就绪优先排序**:组内按 就绪(未开发+依赖OK)→ 开发中 → 阻塞 → 已交付 排列,同档按编号;一眼看到能下什么单
 - Host 半通过 `gh issue view` / `gh pr view` 抓取,返回结构化 JSON
 - Client 半渲染:
   - 状态徽章(Open / Closed / Merged)、编号、作者、创建/更新/关闭/合并时间
@@ -42,6 +44,32 @@ DSH web 插件:右侧面板先选择已配置的 GitHub repo,再按依赖、状�
 | 构建 | `tsdown.config.ts` | host → `lib/index.js`(ESM),client → `lib/client.js`(CJS 闭包,`window.__ModuleLoader__.load` 注册) |
 
 Client→Host 走 **HTTP API 路由**(正式插件没有动态插件的 `harness.handle`),这是与原型最大的结构差异。
+
+## 设计文档
+
+| 文档 | 内容 |
+|---|---|
+| [docs/state-model.md](docs/state-model.md) | **状态模型**:事实分级(git/GitHub 硬事实 vs 软事实)、按钮决策表(P0-P3)、软事实降级链、状态视图展示规范 |
+| [docs/issue-contract.md](docs/issue-contract.md) | Issue 契约:可被自动开发的 issue 写法(目标/验收标准/依赖 三行最小集) |
+| [docs/product-blueprint.md](docs/product-blueprint.md) | 产品蓝图:里程碑驱动的异步开发执行器定位、架构、UI 演进 |
+
+核心设计原则:**判断只依赖 git/GitHub 硬事实**(客观、保证存在),workflow 文件与 comment meta 只是增强器——允许缺失,缺失时走降级链,永不因缺 meta 卡死,也永不因缺判据瞎猜。
+
+## Agent 启动参数(显式,不依赖机器配置)
+
+ClickVibe 启动 agent 的命令行**按次显式传参**,不读取也不假设目标机器的全局配置(#11 跨机器可移植):
+
+- claude:`--dangerously-skip-permissions`
+- codex:`-c approval_policy=never -s danger-full-access`(新会话)/ `-c 'sandbox_mode="danger-full-access"'`(resume 子命令无 `-s`,用 `-c` 覆盖)
+
+## 进行中(open issues)
+
+- [#16](https://github.com/ai-daming/clickvibe/issues/16) 实时输出 TUI 化 + detach 放大 + 运行时长 + token 用量
+- [#17](https://github.com/ai-daming/clickvibe/issues/17) 超时/中断后会话恢复(会话 id 捕获 + resume 命令形式)
+- [#18](https://github.com/ai-daming/clickvibe/issues/18) 任务超时上限可配置,支持小时级长任务
+- [#20](https://github.com/ai-daming/clickvibe/issues/20) 提示词统一:各阶段自带需求快照
+- [#22](https://github.com/ai-daming/clickvibe/issues/22) review 结论解析器支持 JSON 格式
+- [#23](https://github.com/ai-daming/clickvibe/issues/23) 合并后清理(worktree/分支/issue/workflow)
 
 ## 开发
 
