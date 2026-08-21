@@ -1247,7 +1247,13 @@ function PanelContent() {
                   {rows.map((issue) => {
                     const derived = issue.workflow.derived
                     const status = derived?.status ?? issue.workflow.stage
-                    const action = derived?.nextAction ?? { kind: 'develop' as const, label: '开始开发', hint: '' }
+                    const baseAction = derived?.nextAction ?? { kind: 'develop' as const, label: '开始开发', hint: '' }
+                    // blockedBy 门槛:有 OPEN 依赖时,阻止"开始/恢复开发"(未开发先等依赖完成);
+                    // review/返工/合并等已开发流程不受影响(不能因依赖未完成卡死已做的工作)。
+                    const blockedByOpen = issue.blockedBy.filter((dependency) => dependency.state.toUpperCase() === 'OPEN')
+                    const action = (baseAction.kind === 'develop' || baseAction.kind === 'resume') && blockedByOpen.length > 0
+                      ? { kind: 'none' as const, label: `被 #${blockedByOpen.map((dependency) => dependency.number).join('#')} 阻塞`, hint: '依赖未完成,先完成被阻塞的依赖' }
+                      : baseAction
                     return <div className="cv-issue-row" key={issue.number}>
                       <span className={`cv-stage cv-stage-${status}`}>{stageLabel(status, issue.workflow)}</span>
                       <div className="cv-issue-row-main">
