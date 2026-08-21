@@ -134,7 +134,7 @@ const liveTasks = new Map<string, LiveTask>()
 const liveWaiters = new Map<string, Set<() => void>>()
 const authorizations = new AuthorizationStore()
 const TASK_LOG_LINES = 2000
-const TASK_TIMEOUT_MS = 10 * 60_000
+const TASK_TIMEOUT_MS = 24 * 60 * 60_000
 const TASK_RETENTION_MS = 5 * 60_000
 const MAX_TASKS = 64
 
@@ -1564,7 +1564,7 @@ function attachAgentProcess(
 
   task.timeout = setTimeout(() => {
     if (task.closed) return
-    pushTaskLine(task, `[clickvibe] Agent 超过 ${TASK_TIMEOUT_MS / 60_000} 分钟,已终止`)
+    pushTaskLine(task, `[clickvibe] Agent 超过 ${TASK_TIMEOUT_MS / 3_600_000} 小时,已终止`)
     task.status = 'timed_out'
     process.kill()
   }, TASK_TIMEOUT_MS)
