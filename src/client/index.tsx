@@ -1253,7 +1253,7 @@ function PanelContent() {
                       if (status === 'idle') return 0
                       return 1 // developing / reviewing / review-ready
                     }
-                    return levelOf(a) - levelOf(b) || a.number - b.number
+                    return levelOf(a) - levelOf(b) || (a.number ?? 0) - (b.number ?? 0)
                   }).map((issue) => {
                     const derived = issue.workflow.derived
                     const status = derived?.status ?? issue.workflow.stage
