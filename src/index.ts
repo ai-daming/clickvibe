@@ -340,11 +340,31 @@ function buildReviewPrompt(workflow: IssueWorkflow): string {
     '要求:',
     '1. 用 git diff 查看改动(相对主干)',
     '2. 检查:需求是否完整实现、是否有 bug/安全隐患、测试是否覆盖',
-    '3. 输出结论,第一行必须是 ✅ 或 ❌:',
-    '   - ✅ Review 通过',
-    '   - ❌ 发现 N 个问题,然后逐条列出(每条含文件/位置/原因/建议)',
-    '不要修改任何文件,只输出 review 结论。',
+    '3. 不要修改任何文件,只做只读 review',
+    '4. 最后一行必须输出一个 JSON 对象(单独一行,不要包裹在代码块里),格式:',
+    '{"passed": true|false, "issues": ["问题1(含文件/位置/原因)", "问题2", ...]}',
+    '   passed=true 表示无问题;有任意问题则 passed=false 并列出全部。',
   ].join('\n')
+}
+
+/** Extract the final JSON verdict object from review log lines. */
+function extractReviewJson(lines: string[]): { passed: boolean; issues: string[] } | null {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]
+    const match = line.match(/\{.*"passed".*\}/)
+    if (!match) continue
+    try {
+      const obj = JSON.parse(match[0]) as { passed?: unknown; issues?: unknown }
+      if (typeof obj.passed !== 'boolean') continue
+      const issues = Array.isArray(obj.issues)
+        ? obj.issues.filter((x): x is string => typeof x === 'string')
+        : []
+      return { passed: obj.passed, issues }
+    } catch {
+      // 不是合法 JSON,继续找前一行
+    }
+  }
+  return null
 }
 
 /** Create (or reuse) the workflow record and the worktree+branch. */
@@ -654,12 +674,12 @@ async function startReview(
   await appendLog(workflow.key, 'review', `[clickvibe] 启动 ${agent} review…`)
   attachAgentProcess(ctx, live, agentCommand, workflow.worktree, prompt, async (exitCode) => {
     await appendLog(workflow.key, 'review', `[clickvibe] review 结束,退出码 ${exitCode}`)
-    // 读取 review 全文,判断通过/有问题。只认 agent 的 ❌/✅ 结论行,
-    // 忽略 "✅ 本轮完成" 这类 turn 状态行(codex 事件流会混入)。
+    // 优先用 agent 输出的 JSON 结论(完整、不受截断/分块影响);
+    // JSON 缺失时回退到 ❌/✅ 文本判定。
     const lines = await readLogTail(workflow.key, 'review', 200)
-    const verdict = reviewVerdict(lines)
-    const passed = verdict.passed
-    const issues = passed ? [] : extractIssues(lines)
+    const json = extractReviewJson(lines)
+    const passed = json ? json.passed : reviewVerdict(lines).passed
+    const issues = passed ? [] : (json?.issues ?? extractIssues(lines))
     const reloaded = await loadWorkflow(workflow.key)
     if (reloaded) {
       reloaded.reviewResult = { passed, issues }
@@ -691,22 +711,27 @@ function reviewVerdict(lines: string[]): { passed: boolean } {
 /** Extract issue lines from review log lines (lines after a ❌ verdict). */
 function extractIssues(lines: string[]): string[] {
   const out: string[] = []
-  let capturing = false
-  for (const line of lines) {
-    const t = line.trim()
-    if (t.includes('❌')) {
-      capturing = true
-      // ❌ 结论可能与问题条目同行(agent 一次性输出),直接拆分
-      const rest = t.slice(t.indexOf('❌') + 1)
-      const numbered = rest.match(/\d+\.\s*[^0-9][^]*/g)
-      if (numbered) {
-        for (const n of numbered) out.push(n.replace(/^\d+\.\s*/, '').trim())
-      }
-      continue
+  // 只取最后一个包含 ❌ 的行(agent 的最终结论;前面可能有中间自查的 ❌)
+  let verdictIndex = -1
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].includes('❌')) verdictIndex = i
+  }
+  if (verdictIndex === -1) return []
+  const verdict = lines[verdictIndex]
+  const rest = verdict.slice(verdict.indexOf('❌') + 1)
+  // 按 "N. " 编号切分条目;若无编号条目则走下面的行收集
+  const parts = rest.split(/(?=\d+\.\s)/).filter((s) => /^\d+\./.test(s.trim()))
+  if (parts.length > 0) {
+    for (const p of parts) {
+      const item = p.replace(/^\d+\.\s*/, '').trim()
+      if (item !== '') out.push(item)
     }
-    if (capturing && t !== '' && !/^✅|^⚠️|^🚀|^💭|^🔧|^\[clickvibe\]|本轮完成|会话结束/.test(t)) {
+  } else {
+    // 无编号条目:收集结论行之后非状态、非 clickvibe 的行
+    for (let i = verdictIndex + 1; i < lines.length; i++) {
+      const t = lines[i].trim()
+      if (t === '' || /^✅|^⚠️|^🚀|^💭|^🔧|^\[clickvibe\]|本轮完成|会话结束/.test(t)) break
       out.push(t)
-      if (out.length >= 20) break
     }
   }
   return out.slice(0, 20)

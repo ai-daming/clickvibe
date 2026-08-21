@@ -89,7 +89,9 @@ export function parseCodexEvent(line: string): StatusLine[] {
       const item = event.item ?? {}
       switch (item.type) {
         case 'agent_message':
-          out.push({ kind: 'message', text: `💬 ${oneLine(item.text ?? '')}` })
+          // 结论类消息必须保留完整内容(截断会丢失 review 条目),
+          // 所以消息截断上限远大于工具行
+          out.push({ kind: 'message', text: `💬 ${oneLine(item.text ?? '', 4000)}` })
           break
         case 'function_call': {
           let args = ''
