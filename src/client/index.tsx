@@ -49,6 +49,20 @@ const PANEL_CSS = `
 .cv-close:hover { color: #1f2328; }
 .cv-input-row { display: flex; gap: 6px; padding: 4px 14px; flex-shrink: 0; }
 .cv-input-row:last-of-type { padding-bottom: 10px; }
+.cv-project-toolbar { padding: 10px 12px; border-bottom: 1px solid #d0d7de; display: grid; gap: 8px; }
+.cv-project-selects { display: flex; gap: 6px; }
+.cv-select { min-width: 0; flex: 1; border: 1px solid #d0d7de; border-radius: 6px; background: #fff; padding: 6px 8px; color: #1f2328; }
+.cv-project-meta { color: #57606a; font-size: 11px; }
+.cv-project-list { flex: 1; overflow-y: auto; padding: 8px 10px 16px; }
+.cv-group-title { margin: 10px 2px 5px; color: #57606a; font-size: 11px; font-weight: 700; }
+.cv-issue-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 9px 8px; border: 1px solid #d8dee4; border-radius: 7px; margin-bottom: 6px; background: #fff; }
+.cv-issue-row-main { min-width: 0; }
+.cv-issue-row-title { display: block; color: #0969da; font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.cv-issue-row-meta { color: #57606a; font-size: 10.5px; margin-top: 3px; display: flex; gap: 7px; flex-wrap: wrap; }
+.cv-row-lag { color: #9a6700; font-weight: 600; }
+.cv-row-action { border: none; border-radius: 6px; padding: 5px 8px; background: #1f883d; color: white; font-size: 11px; white-space: nowrap; cursor: pointer; }
+.cv-row-action.cv-row-none { background: #afb8c1; cursor: default; }
+.cv-back { border: none; background: transparent; color: #0969da; cursor: pointer; padding: 0; font-size: 12px; }
 .cv-input { flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid #d0d7de; border-radius: 6px; background: #ffffff; color: #1f2328; font-size: 12px; }
 .cv-input::placeholder { color: #8c959f; }
 .cv-fetch { padding: 6px 12px; border: none; border-radius: 6px; background: #0969da; color: #ffffff; cursor: pointer; font-size: 12px; }
@@ -440,13 +454,15 @@ function repoOf(url: string | undefined): string {
   return match ? match[1] : ''
 }
 
-function IssueView({ issue, kind, workflow, onWorkflow, timeline, dependencies }: {
+function IssueView({ issue, kind, workflow, onWorkflow, timeline, dependencies, autoAction, onAutoActionHandled }: {
   issue: GhIssue
   kind: 'issue' | 'pr'
   workflow: Workflow | null
   onWorkflow: (w: Workflow | null) => void
   timeline?: TimelineEvent[]
   dependencies?: Dependencies
+  autoAction?: boolean
+  onAutoActionHandled?: () => void
 }) {
   const isPR = kind === 'pr'
   const state = String(issue.state || '').toUpperCase()
@@ -580,7 +596,7 @@ function IssueView({ issue, kind, workflow, onWorkflow, timeline, dependencies }
         <div className="cv-md">{renderMarkdown(issue.body ?? '')}</div>
       </div>
       {issue.url && kind === 'issue' && state === 'OPEN'
-        ? <DevSection url={issue.url} issue={issue} workflow={workflow} onWorkflow={onWorkflow} />
+        ? <DevSection key={issue.url} url={issue.url} issue={issue} workflow={workflow} onWorkflow={onWorkflow} autoAction={autoAction} onAutoActionHandled={onAutoActionHandled} />
         : null}
       <CommentsSection comments={issue.comments ?? []} />
     </div>
@@ -635,10 +651,11 @@ interface Workflow {
     hasNewCommits: boolean
     verdictCurrent: boolean
     nextAction: NextAction
+    status: 'idle' | 'developing' | 'review-ready' | 'reviewing' | 'passed'
   }
 }
 
-type NextActionKind = 'develop' | 'resume' | 'sync' | 'review' | 'rework' | 'merge' | 'none'
+type NextActionKind = 'develop' | 'resume' | 'sync' | 'create-pr' | 'review' | 'rework' | 'merge' | 'none'
 
 interface NextAction {
   kind: NextActionKind
@@ -672,20 +689,23 @@ function stageLabel(stage: Workflow['stage'], workflow: Workflow | null): string
   }
 }
 
-function DevSection({ url, issue, workflow, onWorkflow }: {
+function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoActionHandled }: {
   url: string
   issue: GhIssue
   workflow: Workflow | null
   onWorkflow: (w: Workflow | null) => void
+  autoAction?: boolean
+  onAutoActionHandled?: () => void
 }) {
   const [busy, setBusy] = React.useState<string | null>(null)
   const [error, setError] = React.useState<string | null>(null)
   const [statusLines, setStatusLines] = React.useState<string[]>([])
   const [activeTaskId, setActiveTaskId] = React.useState<string | null>(null)
-  const [agentChoice, setAgentChoice] = React.useState<'codex' | 'claude'>('codex')
+  const [agentChoice, setAgentChoice] = React.useState<'codex' | 'claude'>(() => workflow?.reviewAgent ?? workflow?.devAgent ?? 'codex')
   const esRef = React.useRef<EventSource | null>(null)
-  const stage = workflow?.stage ?? 'idle'
+  const autoActionConsumedRef = React.useRef(false)
   const derived = workflow?.derived
+  const stage = derived?.status ?? workflow?.stage ?? 'idle'
   const nextAction = derived?.nextAction
 
   const appendStatusLine = (line: string) => {
@@ -866,6 +886,11 @@ function DevSection({ url, issue, workflow, onWorkflow }: {
       case 'rework': void resume(workflow?.reviewResult?.issues.join('\n')); break
       case 'review': void startReview(agentChoice); break
       case 'sync': void syncWorktree(); break
+      case 'create-pr':
+        if (workflow) {
+          window.open(`https://github.com/${workflow.repoKey}/compare/main...${encodeURIComponent(workflow.branch)}?expand=1`, '_blank', 'noopener')
+        }
+        break
       case 'merge':
         if (workflow?.prNumber) {
           window.open(`https://github.com/${workflow.repoKey}/pull/${workflow.prNumber}`, '_blank', 'noopener')
@@ -874,6 +899,19 @@ function DevSection({ url, issue, workflow, onWorkflow }: {
       case 'none': break
     }
   }
+
+  React.useEffect(() => {
+    if (!autoAction) {
+      autoActionConsumedRef.current = false
+      return
+    }
+    if (autoActionConsumedRef.current || effectiveAction.kind === 'none') return
+    autoActionConsumedRef.current = true
+    onAutoActionHandled?.()
+    runAction()
+    // The parent owns the one-shot trigger; use the currently rendered issue snapshot.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoAction])
 
   // review 锁定:从未 review 过则两个 agent 都可选;锁过只留那个
   const lockedAgent = effectiveAction.kind === 'review' ? workflow?.reviewAgent ?? null : null
@@ -1063,98 +1101,167 @@ async function fetchIssue(url: string): Promise<{ ok: true; data: { kind: 'issue
   return response.json() as Promise<{ ok: true; data: { kind: 'issue' | 'pr'; item: unknown } } | { ok: false; error: string }>
 }
 
+interface ProjectOption { repoKey: string; path: string; available: boolean }
+interface RepositoryIssue extends GhIssue {
+  blockedBy: Dependency[]
+  workflow: Workflow
+}
+
 function PanelContent() {
-  const [url, setUrl] = React.useState('')
+  const [projects, setProjects] = React.useState<ProjectOption[]>([])
+  const [repoKey, setRepoKey] = React.useState('')
+  const [issues, setIssues] = React.useState<RepositoryIssue[]>([])
+  const [dependencyFilter, setDependencyFilter] = React.useState<'all' | 'ready' | 'blocked'>('all')
+  const [groupBy, setGroupBy] = React.useState<'milestone' | 'dependency'>('milestone')
   const [loading, setLoading] = React.useState(false)
   const [result, setResult] = React.useState<{ kind: 'issue' | 'pr'; item: GhIssue; timeline?: TimelineEvent[]; dependencies?: Dependencies } | null>(null)
   const [error, setError] = React.useState<string | null>(null)
   const [workflow, setWorkflow] = React.useState<Workflow | null>(null)
-  const [restored, setRestored] = React.useState(false)
+  const [autoAction, setAutoAction] = React.useState(false)
 
-  // 恢复现场:打开面板时读回所有工作流,若存在进行中的任务自动重连展示
-  React.useEffect(() => {
-    let cancelled = false
-    void (async () => {
-      try {
-        const res = await apiCall<{ ok: true; workflows: Workflow[] }>('state', {})
-        if (!cancelled && res.ok && res.workflows.length > 0) {
-          const active = res.workflows[0]
-          setWorkflow(active)
-          setUrl(active.url)
-          // 自动重新抓取该 issue
-          const fetchRes = await fetchIssue(active.url)
-          if (!cancelled) {
-            if (fetchRes.ok) setResult(fetchRes.data as { kind: 'issue' | 'pr'; item: GhIssue; timeline?: TimelineEvent[] })
-            else setError(fetchRes.error)
-          }
-        }
-      } catch {
-        // 恢复失败不阻塞面板
-      } finally {
-        if (!cancelled) setRestored(true)
-      }
-    })()
-    return () => { cancelled = true }
-  }, [])
-
-  const run = async (targetUrl = url) => {
-    const trimmed = targetUrl.trim()
-    if (!trimmed) return
+  const loadRepo = async (selected: string) => {
+    if (!selected) return
     setLoading(true)
     setError(null)
     setResult(null)
+    setIssues([])
     try {
-      // 按目标 url 匹配已存 workflow(恢复现场的关键:抓取不清 workflow)
-      const stateRes = await apiCall<{ ok: true; workflows: Workflow[] }>('state', {})
-      const matched = stateRes.ok ? stateRes.workflows.find((w) => w.url === trimmed) ?? null : null
-      setWorkflow(matched)
-      const res = await fetchIssue(trimmed)
-      if (res.ok) setResult(res.data as { kind: 'issue' | 'pr'; item: GhIssue; timeline?: TimelineEvent[] })
-      else setError(res.error)
-    } catch (e) {
-      setError(`调用失败: ${String(e)}`)
+      const response = await apiCall<{ ok: true; issues: RepositoryIssue[] } | { ok: false; error: string }>('repo/issues', { repoKey: selected })
+      if (!response.ok) setError(response.error)
+      else setIssues(response.issues)
+    } catch (reason) {
+      setError(`项目加载失败: ${String(reason)}`)
     } finally {
       setLoading(false)
     }
   }
 
-  const updateWorkflow = (w: Workflow | null) => {
-    setWorkflow(w)
-    // workflow 变化时同步刷新状态(不打断当前展示)
+  React.useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const response = await apiCall<{ ok: true; projects: ProjectOption[] }>('projects', {})
+        if (cancelled) return
+        setProjects(response.projects)
+        const first = response.projects[0]?.repoKey ?? ''
+        setRepoKey(first)
+        if (first) await loadRepo(first)
+      } catch (reason) {
+        if (!cancelled) setError(`项目配置加载失败: ${String(reason)}`)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  const openIssue = async (issue: RepositoryIssue, triggerAction = false) => {
+    setLoading(true)
+    setError(null)
+    setAutoAction(false)
+    try {
+      const response = await fetchIssue(String(issue.url ?? ''))
+      if (!response.ok) setError(response.error)
+      else {
+        setWorkflow(issue.workflow)
+        setResult(response.data as { kind: 'issue' | 'pr'; item: GhIssue; timeline?: TimelineEvent[]; dependencies?: Dependencies })
+        setAutoAction(triggerAction)
+      }
+    } catch (reason) {
+      setError(`Issue 加载失败: ${String(reason)}`)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const filtered = issues.filter((issue) => {
+    const blocked = issue.blockedBy.some((dependency) => dependency.state.toUpperCase() === 'OPEN')
+    return dependencyFilter === 'all' || (dependencyFilter === 'blocked' ? blocked : !blocked)
+  })
+  const grouped = new Map<string, RepositoryIssue[]>()
+  for (const issue of filtered) {
+    const blocked = issue.blockedBy.some((dependency) => dependency.state.toUpperCase() === 'OPEN')
+    const key = groupBy === 'milestone' ? issue.milestone?.title ?? '无里程碑' : blocked ? '被依赖阻塞' : '依赖已就绪'
+    grouped.set(key, [...(grouped.get(key) ?? []), issue])
+  }
+
+  const rowAction = (issue: RepositoryIssue) => {
+    const action = issue.workflow.derived?.nextAction
+    if (!action || action.kind === 'none') return
+    if (action.kind === 'merge' && issue.workflow.prNumber) {
+      window.open(`https://github.com/${issue.workflow.repoKey}/pull/${issue.workflow.prNumber}`, '_blank', 'noopener')
+      return
+    }
+    if (action.kind === 'create-pr') {
+      window.open(`https://github.com/${issue.workflow.repoKey}/compare/main...${encodeURIComponent(issue.workflow.branch)}?expand=1`, '_blank', 'noopener')
+      return
+    }
+    void openIssue(issue, true)
   }
 
   return (
     <div className="cv-panel">
       <div className="cv-panel-header">
-        <span>ClickVibe</span>
+        <span>{result ? <button className="cv-back" onClick={() => { setResult(null); setAutoAction(false) }}>← 项目 Issues</button> : 'ClickVibe · 项目'}</span>
         <button className="cv-close" onClick={() => setPanelOpen(false)}>✕</button>
       </div>
-      <div className="cv-input-row" />
-      <div className="cv-input-row">
-        <input
-          className="cv-input"
-          placeholder="https://github.com/owner/repo/issues/123 或 /pull/123"
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') run() }}
+      {result ? (
+        <IssueView
+          issue={result.item}
+          kind={result.kind}
+          workflow={workflow}
+          onWorkflow={setWorkflow}
+          timeline={result.timeline}
+          dependencies={result.dependencies}
+          autoAction={autoAction}
+          onAutoActionHandled={() => setAutoAction(false)}
         />
-        <button className="cv-fetch" onClick={() => run()} disabled={loading}>
-          {loading ? '抓取中…' : '抓取'}
-        </button>
-        {result ? (
-          <button className="cv-refresh" onClick={() => run()} disabled={loading} title="重新抓取当前 issue">
-            ⟳
-          </button>
-        ) : null}
-      </div>
-      {error ? <div className="cv-error">{error}</div> : null}
-      {result
-        ? <IssueView issue={result.item} kind={result.kind} workflow={workflow} onWorkflow={updateWorkflow} timeline={result.timeline} dependencies={result.dependencies} />
-        : loading
-          ? <div className="cv-loading">正在通过 gh 抓取…</div>
-          : restored
-            ? <div className="cv-hint">粘贴一个 GitHub issue / PR 链接,回车抓取</div>
-            : <div className="cv-loading">正在恢复现场…</div>}
+      ) : (
+        <>
+          <div className="cv-project-toolbar">
+            <select className="cv-select" value={repoKey} onChange={(event) => { const value = event.target.value; setRepoKey(value); void loadRepo(value) }}>
+              {projects.map((project) => <option key={project.repoKey} value={project.repoKey}>{project.repoKey}{project.available ? '' : ' · 远程配置'}</option>)}
+            </select>
+            <div className="cv-project-selects">
+              <select className="cv-select" value={dependencyFilter} onChange={(event) => setDependencyFilter(event.target.value as typeof dependencyFilter)}>
+                <option value="all">全部依赖状态</option><option value="ready">依赖已就绪</option><option value="blocked">被依赖阻塞</option>
+              </select>
+              <select className="cv-select" value={groupBy} onChange={(event) => setGroupBy(event.target.value as typeof groupBy)}>
+                <option value="milestone">按里程碑分组</option><option value="dependency">按依赖分组</option>
+              </select>
+              <button className="cv-refresh" onClick={() => void loadRepo(repoKey)} disabled={loading} title="刷新 GitHub 与 git 状态">⟳</button>
+            </div>
+            {repoKey ? <div className="cv-project-meta">{issues.length} 个 open issue · {projects.find((project) => project.repoKey === repoKey)?.available ? '本机 git + GitHub' : '远程配置 · GitHub'} 实时事实</div> : null}
+          </div>
+          {error ? <div className="cv-error">{error}</div> : null}
+          {loading ? <div className="cv-loading">正在读取项目 issues 与实时状态…</div> : projects.length === 0 ? <div className="cv-hint">请先在 ~/.clickvibe/config.yaml 配置 repos</div> : (
+            <div className="cv-project-list">
+              {[...grouped.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([group, rows]) => (
+                <React.Fragment key={group}>
+                  <div className="cv-group-title">{group} · {rows.length}</div>
+                  {rows.map((issue) => {
+                    const derived = issue.workflow.derived
+                    const status = derived?.status ?? issue.workflow.stage
+                    const action = derived?.nextAction ?? { kind: 'develop' as const, label: '开始开发', hint: '' }
+                    return <div className="cv-issue-row" key={issue.number}>
+                      <span className={`cv-stage cv-stage-${status}`}>{stageLabel(status, issue.workflow)}</span>
+                      <div className="cv-issue-row-main">
+                        <span className="cv-issue-row-title" onClick={() => void openIssue(issue)}>#{issue.number} {issue.title}</span>
+                        <div className="cv-issue-row-meta">
+                          <span>分支: {issue.workflow.branch}</span>
+                          {(derived?.behindBase ?? 0) > 0 ? <span className="cv-row-lag">⚠ 落后 {derived?.behindBase}</span> : null}
+                          <span>里程碑: {issue.milestone?.title ?? '无'}</span>
+                          <span>blockedBy: {issue.blockedBy.length ? issue.blockedBy.map((dependency) => `#${dependency.number}${dependency.state.toUpperCase() === 'OPEN' ? '⏳' : '✓'}`).join(' ') : '无'}</span>
+                        </div>
+                      </div>
+                      <button className={`cv-row-action${action.kind === 'none' ? ' cv-row-none' : ''}`} disabled={action.kind === 'none'} title={action.hint} onClick={() => rowAction(issue)}>{action.kind === 'none' ? (status === 'passed' ? '已交付' : action.label) : action.label}</button>
+                    </div>
+                  })}
+                </React.Fragment>
+              ))}
+              {filtered.length === 0 ? <div className="cv-hint">当前筛选下没有 open issue</div> : null}
+            </div>
+          )}
+        </>
+      )}
     </div>
   )
 }

@@ -82,7 +82,7 @@ test('state view derives worktree/main/remote hashes, ahead-behind and sync need
     assert.equal(derived.behindBase, 0)
     assert.equal(derived.aheadOfBase, 1)
     assert.equal(derived.needsSync, false)
-    assert.equal(derived.nextAction.kind, 'review') // review-ready 无结论 → review
+    assert.equal(derived.nextAction.kind, 'create-pr') // 有提交但无 PR → 先创建 PR
 
     // 并行开发:main 前进到 B,worktree 落后 → 需要同步
     await git('switch', 'main')
@@ -103,7 +103,7 @@ test('state view derives worktree/main/remote hashes, ahead-behind and sync need
     const synced = (await deriveWorkflowState(ctx, workflow({ worktree }))).derived
     assert.equal(synced.behindBase, 0)
     assert.equal(synced.needsSync, false)
-    assert.equal(synced.nextAction.kind, 'review')
+    assert.equal(synced.nextAction.kind, 'create-pr')
   } finally {
     await rm(root, { recursive: true, force: true })
   }

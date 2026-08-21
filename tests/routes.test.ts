@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { createServer, request, type RequestListener } from 'node:http'
 import test from 'node:test'
-import { apply } from '../src/index.ts'
+import { apply, fetchRepositoryIssues } from '../src/index.ts'
 
 function createHandler(run?: (spec: { command: string }) => Promise<unknown>): RequestListener {
   let handler: RequestListener | null = null
@@ -180,4 +180,45 @@ test('/fetch on an issue without a 依赖 section yields no blockedBy (and no bl
   assert.ok(deps)
   assert.deepEqual(deps.blockedBy, [])
   assert.deepEqual(deps.blocking.map((d) => (d as { number: number }).number), [7])
+})
+
+test('repo issue aggregation includes open issues without workflows and honors live merged PR state', async () => {
+  const allIssues = [
+    { number: 5, title: 'dependency', state: 'CLOSED', body: '', url: 'https://github.com/o/r/issues/5', milestone: null },
+    { number: 7, title: 'delivered but still open', state: 'OPEN', body: '## 依赖\nBlocked by #5', url: 'https://github.com/o/r/issues/7', milestone: { title: 'M1' } },
+    { number: 8, title: 'never developed', state: 'OPEN', body: '## 依赖\n无', url: 'https://github.com/o/r/issues/8', milestone: null },
+  ]
+  const prs = [
+    { number: 19, state: 'MERGED', mergedAt: '2026-08-22T00:00:00Z', headRefName: 'r-issue-7', url: 'https://github.com/o/r/pull/19', reviewDecision: 'APPROVED' },
+  ]
+  const ctx = {
+    shell: {
+      resolve(spec: unknown) { return spec },
+      async run(spec: { command: string }) {
+        if (spec.command.startsWith('gh issue list')) return { exitCode: 0, stdout: { text: JSON.stringify(allIssues) }, stderr: { text: '' } }
+        if (spec.command.startsWith('gh pr list')) return { exitCode: 0, stdout: { text: JSON.stringify(prs) }, stderr: { text: '' } }
+        throw new Error(`unexpected command: ${spec.command}`)
+      },
+    },
+  }
+  const result = await fetchRepositoryIssues(ctx as never, { repoKey: 'o/r' }, {
+    config: { repos: { 'o/r': '/remote/r' }, worktreeRoot: '/remote/worktrees' },
+    workflows: [],
+  })
+  assert.equal(result.ok, true)
+  if (!result.ok) return
+  const issues = result.issues as Array<{
+    number: number
+    milestone: { title: string } | null
+    blockedBy: { number: number; state: string }[]
+    workflow: { prNumber: string | null; derived: { status: string; nextAction: { kind: string; label: string } } }
+  }>
+  assert.deepEqual(issues.map((issue) => issue.number), [7, 8])
+  assert.deepEqual(issues[0].blockedBy, [{ number: 5, title: 'dependency', state: 'CLOSED' }])
+  assert.equal(issues[0].milestone?.title, 'M1')
+  assert.equal(issues[0].workflow.prNumber, '19')
+  assert.equal(issues[0].workflow.derived.status, 'passed')
+  assert.equal(issues[0].workflow.derived.nextAction.kind, 'none')
+  assert.equal(issues[1].workflow.derived.status, 'idle')
+  assert.equal(issues[1].workflow.derived.nextAction.label, '开始开发')
 })
