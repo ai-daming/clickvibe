@@ -1,4 +1,7 @@
+import { createHash, randomBytes } from 'node:crypto'
+
 export type DevelopAgent = 'codex' | 'claude' | 'dryrun'
+export type AgentAction = 'develop' | 'review' | 'resume'
 
 export interface GithubTarget {
   kind: 'issue' | 'pr'
@@ -29,6 +32,18 @@ export function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`
 }
 
+/** Build a worktree command whose new branch is explicitly rooted at the fetched remote base. */
+export function buildWorktreeAddCommand(options: {
+  path: string
+  branch: string
+  branchExists: boolean
+  remoteBase: string
+}): string {
+  return options.branchExists
+    ? `git worktree add ${shellQuote(options.path)} ${shellQuote(options.branch)}`
+    : `git worktree add -b ${shellQuote(options.branch)} ${shellQuote(options.path)} ${shellQuote(options.remoteBase)}`
+}
+
 interface LogEntry {
   sequence: number
   line: string
@@ -42,9 +57,12 @@ export interface LogRead {
 
 /** Bounded, non-destructive line log with independent cursor readers. */
 export class LineLog {
+  static readonly MAX_LINE_CHARS = 64 * 1024
   readonly #limit: number
   #entries: LogEntry[] = []
   #partial = ''
+  #discardPartial = false
+  #pendingCr = false
   #sequence = 0
 
   constructor(limit: number) {
@@ -53,24 +71,52 @@ export class LineLog {
   }
 
   appendLine(line: string): void {
+    const bounded = line.length > LineLog.MAX_LINE_CHARS
+      ? `${line.slice(0, LineLog.MAX_LINE_CHARS)}… [clickvibe] 单行日志已截断`
+      : line
     this.#sequence += 1
-    this.#entries.push({ sequence: this.#sequence, line })
+    this.#entries.push({ sequence: this.#sequence, line: bounded })
     if (this.#entries.length > this.#limit) {
       this.#entries.splice(0, this.#entries.length - this.#limit)
     }
   }
 
   appendChunk(chunk: string): void {
-    const normalized = (this.#partial + chunk).replaceAll('\r\n', '\n').replaceAll('\r', '\n')
-    const parts = normalized.split('\n')
-    this.#partial = parts.pop() ?? ''
-    for (const line of parts) this.appendLine(line)
+    const endLine = () => {
+      if (!this.#discardPartial) this.appendLine(this.#partial)
+      this.#partial = ''
+      this.#discardPartial = false
+    }
+    for (const character of chunk) {
+      if (this.#pendingCr) {
+        this.#pendingCr = false
+        endLine()
+        if (character === '\n') continue
+      }
+      if (character === '\r') {
+        this.#pendingCr = true
+      } else if (character === '\n') {
+        endLine()
+      } else if (!this.#discardPartial) {
+        this.#partial += character
+        if (this.#partial.length > LineLog.MAX_LINE_CHARS) {
+          this.appendLine(this.#partial)
+          this.#partial = ''
+          this.#discardPartial = true
+        }
+      }
+    }
   }
 
   flush(): void {
-    if (this.#partial === '') return
-    this.appendLine(this.#partial)
+    if (this.#pendingCr) {
+      this.#pendingCr = false
+      if (!this.#discardPartial) this.appendLine(this.#partial)
+    } else if (this.#partial !== '' && !this.#discardPartial) {
+      this.appendLine(this.#partial)
+    }
     this.#partial = ''
+    this.#discardPartial = false
   }
 
   read(cursor: number): LogRead {
@@ -82,6 +128,147 @@ export class LineLog {
       .map((entry) => entry.line)
     if (truncated) lines.unshift('[clickvibe] 较早日志已截断')
     return { cursor: this.#sequence, lines, truncated }
+  }
+}
+
+export interface IssuePromptSnapshot {
+  url: string
+  title: string
+  body: string
+  state: string
+  updatedAt: string
+  comments: { author: string; body: string }[]
+}
+
+export interface AgentAuthorizationInput {
+  action: AgentAction
+  url: string
+  agent: 'codex' | 'claude'
+  context: string
+}
+
+export interface AgentAuthorization {
+  id: string
+  input: AgentAuthorizationInput
+  snapshot: IssuePromptSnapshot | null
+  digest: string
+  expiresAt: number
+}
+
+function stableAuthorizationValue(input: AgentAuthorizationInput, snapshot: IssuePromptSnapshot | null): string {
+  return JSON.stringify({ input, snapshot })
+}
+
+export function authorizationDigest(
+  input: AgentAuthorizationInput,
+  snapshot: IssuePromptSnapshot | null,
+): string {
+  return createHash('sha256').update(stableAuthorizationValue(input, snapshot)).digest('hex')
+}
+
+/** One-use, short-lived server authorization bound to an exact action and issue snapshot. */
+export class AuthorizationStore {
+  readonly #ttlMs: number
+  readonly #limit: number
+  readonly #now: () => number
+  #entries = new Map<string, AgentAuthorization>()
+
+  constructor(options: { ttlMs?: number; limit?: number; now?: () => number } = {}) {
+    this.#ttlMs = options.ttlMs ?? 2 * 60_000
+    this.#limit = options.limit ?? 64
+    this.#now = options.now ?? Date.now
+    if (this.#ttlMs < 1 || this.#limit < 1) throw new Error('authorization bounds must be positive')
+  }
+
+  issue(input: AgentAuthorizationInput, snapshot: IssuePromptSnapshot | null): AgentAuthorization {
+    this.prune()
+    while (this.#entries.size >= this.#limit) {
+      const oldest = this.#entries.keys().next().value as string | undefined
+      if (!oldest) break
+      this.#entries.delete(oldest)
+    }
+    const authorization: AgentAuthorization = {
+      id: randomBytes(24).toString('base64url'),
+      input,
+      snapshot,
+      digest: authorizationDigest(input, snapshot),
+      expiresAt: this.#now() + this.#ttlMs,
+    }
+    this.#entries.set(authorization.id, authorization)
+    return authorization
+  }
+
+  consume(id: string, input: AgentAuthorizationInput, digest: string): AgentAuthorization | null {
+    this.prune()
+    const authorization = this.#entries.get(id)
+    if (!authorization) return null
+    // Consume before comparison so a guessed/tampered request cannot retry a capability.
+    this.#entries.delete(id)
+    const expected = authorizationDigest(input, authorization.snapshot)
+    if (digest !== authorization.digest || expected !== authorization.digest) return null
+    return authorization
+  }
+
+  prune(): void {
+    const now = this.#now()
+    for (const [id, authorization] of this.#entries) {
+      if (authorization.expiresAt <= now) this.#entries.delete(id)
+    }
+  }
+
+  get size(): number { return this.#entries.size }
+}
+
+export interface RequestSecurityInput {
+  remoteAddress?: string | null
+  host?: string | string[]
+  origin?: string | string[]
+  requestMarker?: string | string[]
+}
+
+export function isLoopbackAddress(value: string | null | undefined): boolean {
+  if (!value) return false
+  const normalized = value.startsWith('::ffff:') ? value.slice('::ffff:'.length) : value
+  return normalized === '127.0.0.1' || normalized === '::1'
+}
+
+/** Protect privileged agent starts from remote/LAN and browser CSRF requests. */
+export function validatePrivilegedRequest(input: RequestSecurityInput): string | null {
+  if (!isLoopbackAddress(input.remoteAddress)) return '仅允许本机回环地址启动 Agent'
+  const host = Array.isArray(input.host) ? input.host[0] : input.host
+  const origin = Array.isArray(input.origin) ? input.origin[0] : input.origin
+  const marker = Array.isArray(input.requestMarker) ? input.requestMarker[0] : input.requestMarker
+  if (!host || !origin || marker !== '1') return '缺少同源 Agent 授权请求头'
+  try {
+    const parsed = new URL(origin)
+    if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || parsed.host !== host) {
+      return '拒绝跨站 Agent 请求'
+    }
+  } catch {
+    return 'Origin 无效'
+  }
+  return null
+}
+
+export function makeAuthorizationInput(value: {
+  action?: unknown
+  url?: unknown
+  agent?: unknown
+  context?: unknown
+}): AgentAuthorizationInput {
+  const action = String(value.action ?? '') as AgentAction
+  if (action !== 'develop' && action !== 'review' && action !== 'resume') {
+    throw new Error('不支持的 Agent 操作')
+  }
+  const agent = parseAgent(value.agent)
+  if (agent === 'dryrun') throw new Error('dryrun 不需要高权限授权')
+  const url = String(value.url ?? '').trim()
+  if (!parseGithubUrl(url)) throw new Error('GitHub URL 无效')
+  return {
+    action,
+    url,
+    agent,
+    context: typeof value.context === 'string' ? value.context.trim() : '',
   }
 }
 

@@ -5,7 +5,7 @@
  * files. Survives web restarts and page refreshes so the panel can restore
  * its context (the issue being viewed + its dev/review workflow stage).
  */
-import { mkdir, readFile, writeFile, appendFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile, appendFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 
@@ -119,9 +119,18 @@ export async function saveWorkflow(workflow: IssueWorkflow): Promise<void> {
 /** Append one line to an issue's log file (creating the directory). */
 export async function appendLog(key: string, kind: 'dev' | 'review', line: string): Promise<void> {
   try {
-    const dir = dirname(logPath(key, kind))
+    const path = logPath(key, kind)
+    const dir = dirname(path)
     await mkdir(dir, { recursive: true })
-    await appendFile(logPath(key, kind), `${line}\n`, 'utf8')
+    await appendFile(path, `${line}\n`, 'utf8')
+    const info = await stat(path)
+    if (info.size > 2 * 1024 * 1024) {
+      const raw = await readFile(path)
+      const tail = raw.subarray(Math.max(0, raw.length - 1024 * 1024)).toString('utf8')
+      const firstNewline = tail.indexOf('\n')
+      const completeTail = firstNewline >= 0 ? tail.slice(firstNewline + 1) : tail
+      await writeFile(path, `[clickvibe] 较早持久日志已截断\n${completeTail}`, 'utf8')
+    }
   } catch {
     // log persistence is best-effort
   }

@@ -437,7 +437,7 @@ function IssueView({ issue, kind, workflow, onWorkflow, timeline }: {
         <div className="cv-md">{renderMarkdown(issue.body ?? '')}</div>
       </div>
       {issue.url && kind === 'issue' && state === 'OPEN'
-        ? <DevSection url={issue.url} workflow={workflow} onWorkflow={onWorkflow} />
+        ? <DevSection url={issue.url} issue={issue} workflow={workflow} onWorkflow={onWorkflow} />
         : null}
       <CommentsSection comments={issue.comments ?? []} />
     </div>
@@ -447,7 +447,7 @@ function IssueView({ issue, kind, workflow, onWorkflow, timeline }: {
 async function apiCall<T>(method: string, body: Record<string, unknown>): Promise<T> {
   const response = await fetch(`/clickvibe/api/${method}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', 'x-clickvibe-request': '1' },
     body: JSON.stringify(body),
   })
   return response.json() as Promise<T>
@@ -501,20 +501,30 @@ function stageLabel(stage: Workflow['stage'], workflow: Workflow | null): string
   }
 }
 
-function DevSection({ url, workflow, onWorkflow }: {
+function DevSection({ url, issue, workflow, onWorkflow }: {
   url: string
+  issue: GhIssue
   workflow: Workflow | null
   onWorkflow: (w: Workflow | null) => void
 }) {
   const [busy, setBusy] = React.useState<string | null>(null)
   const [error, setError] = React.useState<string | null>(null)
   const [statusLines, setStatusLines] = React.useState<string[]>([])
+  const [activeTaskId, setActiveTaskId] = React.useState<string | null>(null)
   const esRef = React.useRef<EventSource | null>(null)
   const stage = workflow?.stage ?? 'idle'
   const interrupted = workflow?.devInterrupted ?? false
+  const appendStatusLine = (line: string) => {
+    setStatusLines((previous) => {
+      const next = [...previous, line]
+      if (next.length <= 2000) return next
+      return ['[clickvibe] 面板较早日志已截断', ...next.slice(next.length - 1999)]
+    })
+  }
 
   // 打开 SSE 实时流
   const openStream = (taskId: string) => {
+    setActiveTaskId(taskId)
     esRef.current?.close()
     const es = new EventSource(`/clickvibe/api/stream?taskId=${encodeURIComponent(taskId)}`)
     esRef.current = es
@@ -523,11 +533,13 @@ function DevSection({ url, workflow, onWorkflow }: {
         const data = JSON.parse(e.data) as string | { __done?: boolean }
         if (typeof data === 'object' && data.__done) {
           es.close()
+          setActiveTaskId(null)
+          void refresh()
           return
         }
-        setStatusLines((prev) => [...prev, String(data)])
+        appendStatusLine(String(data))
       } catch {
-        setStatusLines((prev) => [...prev, e.data])
+        appendStatusLine(e.data)
       }
     }
     es.onerror = () => { es.close() }
@@ -554,12 +566,43 @@ function DevSection({ url, workflow, onWorkflow }: {
     }
   }
 
-  const startDev = async (agent: 'codex' | 'claude', context?: string) => {
+  const authorize = async (
+    action: 'develop' | 'review' | 'resume',
+    agent: 'codex' | 'claude',
+    context = '',
+  ): Promise<{ authorizationId: string; authorizationDigest: string } | null> => {
+    const expectedSnapshot = {
+      url,
+      title: String(issue.title ?? ''),
+      body: String(issue.body ?? ''),
+      state: String(issue.state ?? '').toUpperCase(),
+      updatedAt: String(issue.updatedAt ?? ''),
+      comments: (issue.comments ?? []).map((comment) => ({
+        author: String(comment.author?.login ?? 'unknown'),
+        body: String(comment.body ?? ''),
+      })),
+    }
+    const res = await apiCall<
+      | { ok: true; authorizationId: string; authorizationDigest: string; preview: { title?: string; updatedAt?: string; commentCount?: number; digest: string } }
+      | { ok: false; error: string }
+    >('authorize', { action, url, agent, context, ...(action === 'develop' ? { expectedSnapshot } : {}) })
+    if (!res.ok) { setError(res.error); return null }
+    const preview = res.preview
+    const summary = action === 'develop'
+      ? `${agent} 将以高权限开发以下已冻结快照:\n\n${preview.title ?? url}\n更新时间: ${preview.updatedAt || '未知'}\n评论: ${preview.commentCount ?? 0} 条\n快照: ${preview.digest.slice(0, 12)}\n\n确认启动?`
+      : `${agent} 将以高权限执行 ${action}。\n目标: ${url}\n授权: ${preview.digest.slice(0, 12)}\n\n确认启动?`
+    if (!window.confirm(summary)) return null
+    return { authorizationId: res.authorizationId, authorizationDigest: res.authorizationDigest }
+  }
+
+  const startDev = async (agent: 'codex' | 'claude' | 'dryrun', context?: string) => {
     setBusy('developing')
     setError(null)
     setStatusLines([])
     try {
-      const res = await apiCall<{ ok: true; taskId: string; worktree: string; branch: string } | { ok: false; error: string }>('develop', context ? { url, agent, context } : { url, agent })
+      const authorization = agent === 'dryrun' ? {} : await authorize('develop', agent, context ?? '')
+      if (agent !== 'dryrun' && !authorization) { setBusy(null); return }
+      const res = await apiCall<{ ok: true; taskId: string; worktree: string; branch: string } | { ok: false; error: string }>('develop', { url, agent, ...(context ? { context } : {}), ...authorization })
       if (!res.ok) { setError(res.error); setBusy(null); return }
       await refresh()
       openStream(res.taskId)
@@ -574,7 +617,10 @@ function DevSection({ url, workflow, onWorkflow }: {
     setError(null)
     setStatusLines([])
     try {
-      const res = await apiCall<{ ok: true; taskId: string } | { ok: false; error: string }>('resume', context ? { url, context } : { url })
+      const agent = workflow?.devAgent ?? 'codex'
+      const authorization = await authorize('resume', agent, context ?? '')
+      if (!authorization) { setBusy(null); return }
+      const res = await apiCall<{ ok: true; taskId: string } | { ok: false; error: string }>('resume', { url, agent, ...(context ? { context } : {}), ...authorization })
       if (!res.ok) { setError(res.error); setBusy(null); return }
       await refresh()
       openStream(res.taskId)
@@ -589,7 +635,9 @@ function DevSection({ url, workflow, onWorkflow }: {
     setError(null)
     setStatusLines([])
     try {
-      const res = await apiCall<{ ok: true; taskId: string } | { ok: false; error: string }>('review', { url, agent })
+      const authorization = await authorize('review', agent)
+      if (!authorization) { setBusy(null); return }
+      const res = await apiCall<{ ok: true; taskId: string } | { ok: false; error: string }>('review', { url, agent, ...authorization })
       if (!res.ok) { setError(res.error); setBusy(null); return }
       await refresh()
       openStream(res.taskId)
@@ -597,6 +645,12 @@ function DevSection({ url, workflow, onWorkflow }: {
     } catch (e) {
       setError(String(e)); setBusy(null)
     }
+  }
+
+  const stop = async () => {
+    if (!activeTaskId) return
+    const res = await apiCall<{ ok: boolean; error?: string }>('stop', { taskId: activeTaskId })
+    if (!res.ok) setError(res.error ?? '停止失败')
   }
 
   const showDevButtons = stage === 'idle'
@@ -636,6 +690,7 @@ function DevSection({ url, workflow, onWorkflow }: {
           <>
             <button className="cv-dev-btn cv-dev-codex" onClick={() => startDev('codex')} disabled={busy !== null}>Codex 开发</button>
             <button className="cv-dev-btn cv-dev-claude" onClick={() => startDev('claude')} disabled={busy !== null}>Claude 开发</button>
+            <button className="cv-dev-btn cv-dev-warn" onClick={() => startDev('dryrun')} disabled={busy !== null}>安全演练</button>
           </>
         ) : null}
         {showCodexReview ? (
@@ -651,6 +706,9 @@ function DevSection({ url, workflow, onWorkflow }: {
             disabled={busy !== null}
             title="续上次开发会话,并把 review 意见带进去"
           >↩ 按 review 意见继续开发</button>
+        ) : null}
+        {activeTaskId ? (
+          <button className="cv-dev-btn cv-dev-warn" onClick={() => void stop()}>停止任务</button>
         ) : null}
       </div>
 
@@ -723,7 +781,7 @@ function CommentsSection({ comments }: { comments: GhComment[] }) {
 async function fetchIssue(url: string): Promise<{ ok: true; data: { kind: 'issue' | 'pr'; item: unknown } } | { ok: false; error: string }> {
   const response = await fetch('/clickvibe/api/fetch', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', 'x-clickvibe-request': '1' },
     body: JSON.stringify({ url }),
   })
   return response.json() as Promise<{ ok: true; data: { kind: 'issue' | 'pr'; item: unknown } } | { ok: false; error: string }>
