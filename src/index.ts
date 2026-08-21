@@ -1365,8 +1365,8 @@ async function startDevelop(
 
       await appendLog(workflow.key, 'dev', `[clickvibe] 启动 ${agent} 开发…`)
       const agentCommand = agent === 'claude'
-        ? 'claude -p --verbose --output-format stream-json'
-        : 'codex exec --json -'
+        ? 'claude -p --dangerously-skip-permissions --verbose --output-format stream-json'
+        : 'codex exec -c approval_policy=never -s danger-full-access --json -'
 
       attachAgentProcess(ctx, live, agentCommand, workflow.worktree, prompt, async (exitCode, sessionId) => {
         await appendLog(workflow.key, 'dev', `[clickvibe] ${agent} 结束,退出码 ${exitCode}`)
@@ -1626,12 +1626,12 @@ async function startReview(
   let agentCommand: string
   if (agent === 'claude') {
     agentCommand = sessionId
-      ? `claude -p --resume ${shellQuoteId(sessionId)} --verbose --output-format stream-json`
-      : 'claude -p --verbose --output-format stream-json'
+      ? `claude -p --resume ${shellQuoteId(sessionId)} --dangerously-skip-permissions --verbose --output-format stream-json`
+      : 'claude -p --dangerously-skip-permissions --verbose --output-format stream-json'
   } else {
     agentCommand = sessionId
-      ? `codex exec resume ${shellQuoteId(sessionId)} --json -`
-      : 'codex exec --json -'
+      ? `codex exec resume ${shellQuoteId(sessionId)} -c approval_policy=never -s danger-full-access --json -`
+      : 'codex exec -c approval_policy=never -s danger-full-access --json -'
   }
   const prompt = sessionId
     ? '请继续 review。代码已更新,请先确认之前发现的问题是否已解决,再审查新改动,最后输出同样的 JSON 结论。'
@@ -1785,12 +1785,12 @@ async function resumeDevelop(
   let command: string
   if (agent === 'claude') {
     command = sessionId
-      ? `claude -p --resume ${shellQuoteId(sessionId)} --verbose --output-format stream-json`
-      : 'claude -p --continue --verbose --output-format stream-json'
+      ? `claude -p --resume ${shellQuoteId(sessionId)} --dangerously-skip-permissions --verbose --output-format stream-json`
+      : 'claude -p --continue --dangerously-skip-permissions --verbose --output-format stream-json'
   } else {
     command = sessionId
-      ? `codex exec resume ${shellQuoteId(sessionId)} --json -`
-      : 'codex exec --json --last -'
+      ? `codex exec resume ${shellQuoteId(sessionId)} -c approval_policy=never -s danger-full-access --json -`
+      : 'codex exec -c approval_policy=never -s danger-full-access --json --last -'
   }
   // 续会话前也同步远端(并行开发时 base 会变化)
   try {
