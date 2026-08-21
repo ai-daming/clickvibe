@@ -252,7 +252,6 @@ async function runCommand(
     workdir?: string
     stdin?: string
     timeoutMs?: number
-    stdoutMaxBytes?: number
     sandboxPolicy?: { mode: 'read-only' | 'workspace-write' | 'danger-full-access'; workspaceRoot: string }
   } = {},
 ): Promise<string> {
@@ -261,7 +260,6 @@ async function runCommand(
     workdir: options.workdir,
     stdin: options.stdin,
     timeoutMs: options.timeoutMs ?? 30000,
-    stdoutMaxBytes: options.stdoutMaxBytes,
     sandboxPolicy: options.sandboxPolicy,
   })
   const result = await ctx.shell.run(spec)
