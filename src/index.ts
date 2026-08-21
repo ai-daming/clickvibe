@@ -1145,6 +1145,19 @@ async function resumeDevelop(
       reloaded.stage = exitCode === 0 ? 'review-ready' : 'developing'
       reloaded.devInterrupted = exitCode !== 0
       if (newSessionId) reloaded.devSessionId = newSessionId
+      if (exitCode === 0) {
+        // rework 完成:旧的 review 结论已归档到 events,回到"待 review",
+        // 不能继续显示"Review 未通过"让用户无限重复点
+        reloaded.reviewResult = null
+        // 记录 rework 事件(带新 HEAD)
+        const head = await readWorktreeHead(ctx, workflow.worktree)
+        await appendEvent(reloaded, {
+          kind: 'rework',
+          at: new Date().toISOString(),
+          hash: head ?? undefined,
+          note: `${agent} 完成 rework(按 review 意见)`,
+        })
+      }
       await saveWorkflow(reloaded)
     }
   })
