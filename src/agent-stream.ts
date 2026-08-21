@@ -158,13 +158,28 @@ export function parseClaudeEvent(line: string): StatusLine[] {
   return out
 }
 
-/** Parse a chunk of agent stdout into status lines (both agents). */
-export function parseAgentChunk(agent: AgentKind, chunk: string): StatusLine[] {
-  const lines = chunk.split('\n').filter((l) => l.trim() !== '')
-  const out: StatusLine[] = []
-  for (const line of lines) {
-    if (agent === 'codex') out.push(...parseCodexEvent(line))
-    else out.push(...parseClaudeEvent(line))
+/** Parse a chunk of agent stdout into status lines + the session id (if seen). */
+export function parseAgentChunk(agent: AgentKind, chunk: string): { lines: StatusLine[]; sessionId: string | null } {
+  const rawLines = chunk.split('\n').filter((l) => l.trim() !== '')
+  const lines: StatusLine[] = []
+  let sessionId: string | null = null
+  for (const line of rawLines) {
+    try {
+      const parsed = JSON.parse(line) as {
+        type?: string
+        thread_id?: string
+        session_id?: string
+        item?: { type?: string; text?: string; name?: string; arguments?: unknown }
+        message?: { content?: { type?: string; text?: string; name?: string; input?: unknown }[] }
+      }
+      // codex: thread_id; claude: session_id
+      const sid = parsed.thread_id ?? parsed.session_id
+      if (sid) sessionId = sid
+    } catch {
+      // 非 JSON 行,跳过
+    }
+    if (agent === 'codex') lines.push(...parseCodexEvent(line))
+    else lines.push(...parseClaudeEvent(line))
   }
-  return out
+  return { lines, sessionId }
 }

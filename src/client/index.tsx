@@ -551,11 +551,12 @@ function DevSection({ url, workflow, onWorkflow }: {
     }
   }
 
-  const resume = async () => {
+  const resume = async (context?: string) => {
     setBusy('resuming')
     setError(null)
+    setStatusLines([])
     try {
-      const res = await apiCall<{ ok: true; taskId: string } | { ok: false; error: string }>('resume', { url })
+      const res = await apiCall<{ ok: true; taskId: string } | { ok: false; error: string }>('resume', context ? { url, context } : { url })
       if (!res.ok) { setError(res.error); setBusy(null); return }
       await refresh()
       openStream(res.taskId)
@@ -597,7 +598,7 @@ function DevSection({ url, workflow, onWorkflow }: {
       {/* 操作区(悬浮感):与信息分离 */}
       <div className="cv-dev-actions">
         {interrupted && stage === 'developing' ? (
-          <button className="cv-dev-btn cv-dev-warn" onClick={resume} disabled={busy !== null}>
+          <button className="cv-dev-btn cv-dev-warn" onClick={() => resume()} disabled={busy !== null}>
             {busy === 'resuming' ? '恢复中…' : '↩ 恢复开发'}
           </button>
         ) : null}
@@ -616,8 +617,9 @@ function DevSection({ url, workflow, onWorkflow }: {
         {workflow?.reviewResult && !workflow.reviewResult.passed ? (
           <button
             className="cv-dev-btn cv-dev-codex"
-            onClick={() => startDev('codex', workflow?.reviewResult?.issues.join('\n'))}
+            onClick={() => resume(workflow?.reviewResult?.issues.join('\n'))}
             disabled={busy !== null}
+            title="续上次开发会话,并把 review 意见带进去"
           >↩ 按 review 意见继续开发</button>
         ) : null}
       </div>

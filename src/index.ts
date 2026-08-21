@@ -103,6 +103,7 @@ interface LiveTask {
   process?: ReturnType<Context['shell']['start']>
   lines: string[]          // 已解析的状态行(供 SSE 增量读取)
   closed: boolean
+  sessionId: string | null // 从事件流捕获的 agent 会话 id(续会话用)
 }
 
 const liveTasks = new Map<string, LiveTask>()
@@ -505,7 +506,7 @@ function attachAgentProcess(
   command: string,
   workdir: string,
   prompt: string,
-  onExit: (exitCode: number | null) => void,
+  onExit: (exitCode: number | null, sessionId: string | null) => void,
 ): void {
   const spec = ctx.shell.resolve({
     command,
@@ -521,11 +522,12 @@ function attachAgentProcess(
   const pump = setInterval(() => {
     const read = process.readOutput()
     if (read.delta !== '') {
-      const lines = parseAgentChunk(task.agent, read.delta)
-      for (const line of lines) {
+      const parsed = parseAgentChunk(task.agent, read.delta)
+      for (const line of parsed.lines) {
         task.lines.push(line.text)
         void appendLog(task.workflowKey, task.kind, line.text)
       }
+      if (parsed.sessionId) task.sessionId = parsed.sessionId
       if (read.lossy) {
         task.lines.push('[clickvibe] 输出被截断(日志过长)')
       }
@@ -537,7 +539,7 @@ function attachAgentProcess(
     clearInterval(pump)
     task.closed = true
     notifyTask(task.taskId)
-    onExit(process.exitCode)
+    onExit(process.exitCode, task.sessionId)
   })
 }
 
@@ -579,6 +581,7 @@ async function startDevelop(
     agent,
     lines: [],
     closed: false,
+    sessionId: null,
   }
   liveTasks.set(taskId, live)
   workflow.devAgent = agent
@@ -602,13 +605,15 @@ async function startDevelop(
         ? 'claude -p --verbose --output-format stream-json'
         : 'codex exec --json -'
 
-      attachAgentProcess(ctx, live, agentCommand, workflow.worktree, prompt, async (exitCode) => {
+      attachAgentProcess(ctx, live, agentCommand, workflow.worktree, prompt, async (exitCode, sessionId) => {
         await appendLog(workflow.key, 'dev', `[clickvibe] ${agent} 结束,退出码 ${exitCode}`)
         const reloaded = await loadWorkflow(workflow.key)
         if (reloaded) {
           if (exitCode === 0) {
             reloaded.stage = 'review-ready'
             reloaded.devInterrupted = false
+            // 记录 agent 会话 id(供续会话精确恢复,不用 --last)
+            if (sessionId) reloaded.devSessionId = sessionId
             // 记录开发提交事件:读 worktree HEAD 作为锚定哈希
             const head = await readWorktreeHead(ctx, workflow.worktree)
             await appendEvent(reloaded, {
@@ -739,6 +744,7 @@ async function startReview(
     agent,
     lines: [],
     closed: false,
+    sessionId: null,
   }
   liveTasks.set(taskId, live)
   workflow.reviewAgent = agent
@@ -841,21 +847,28 @@ async function postReviewComment(ctx: Context, issueUrl: string, passed: boolean
   }
 }
 
-/** Resume an interrupted dev session (codex exec resume / claude --continue). */
+/** Resume (or continue) a dev session with an exact session id; `context`
+ *  carries extra instructions (e.g. review issues for a rework). */
 async function resumeDevelop(
   ctx: Context,
   payload: unknown,
 ): Promise<{ ok: true; taskId: string } | { ok: false; error: string }> {
-  const body = (payload ?? {}) as { url?: unknown }
+  const body = (payload ?? {}) as { url?: unknown; context?: unknown }
   const url = String(body.url ?? '').trim()
+  const extraContext = typeof body.context === 'string' ? body.context.trim() : ''
   const parsed = parseUrl(url)
   if (!parsed || parsed.kind !== 'issue') {
     return { ok: false, error: '请输入形如 https://github.com/owner/repo/issues/123 的链接' }
   }
   const key = issueKey(`${parsed.owner}/${parsed.repo}`, parsed.number)
   const workflow = await loadWorkflow(key)
-  if (!workflow || !workflow.devInterrupted || !workflow.devTaskId) {
-    return { ok: false, error: '没有可恢复的中断任务' }
+  if (!workflow || !workflow.devTaskId) {
+    return { ok: false, error: '该 issue 尚无开发记录,无法续会话' }
+  }
+
+  // 没有记录会话 id(旧版本开发或会话已丢):回退到新开会话,但保留 context
+  if (!workflow.devSessionId) {
+    return await startDevelop(ctx, { url, agent: workflow.devAgent ?? 'codex', context: extraContext })
   }
 
   const oldLive = liveTasks.get(workflow.devTaskId)
@@ -871,6 +884,7 @@ async function resumeDevelop(
     agent: workflow.devAgent ?? 'codex',
     lines: [],
     closed: false,
+    sessionId: workflow.devSessionId,
   }
   liveTasks.set(taskId, live)
   workflow.devTaskId = taskId
@@ -878,22 +892,41 @@ async function resumeDevelop(
   workflow.stage = 'developing'
   await saveWorkflow(workflow)
 
-  // resume 需要会话 id(codex)或 --continue(claude);这里先尝试从日志找 session
-  const command = workflow.devAgent === 'claude'
-    ? 'claude -p --continue --verbose --output-format stream-json'
-    : 'codex exec --json --last -'
-  const prompt = '请继续完成刚才的开发任务。'
+  // 用精确会话 id 续会话(不能用 --last/--continue:worktree 里可能有多个
+  // agent 会话,--last 续的是"最近那个",不一定是我们这个)。
+  // sessionId 缺失时回退 --last/--continue(尽力而为)。
+  const agent = workflow.devAgent ?? 'codex'
+  const sessionId = workflow.devSessionId
+  let command: string
+  if (agent === 'claude') {
+    command = sessionId
+      ? `claude -p --resume ${shellQuoteId(sessionId)} --verbose --output-format stream-json`
+      : 'claude -p --continue --verbose --output-format stream-json'
+  } else {
+    command = sessionId
+      ? `codex exec resume ${shellQuoteId(sessionId)} --json -`
+      : 'codex exec --json --last -'
+  }
+  const prompt = extraContext !== ''
+    ? `请继续完成开发任务,并处理以下 review 意见:\n${extraContext}`
+    : '请继续完成刚才的开发任务。'
 
-  await appendLog(workflow.key, 'dev', `[clickvibe] 恢复 ${workflow.devAgent} 会话…`)
-  attachAgentProcess(ctx, live, command, workflow.worktree, prompt, async (exitCode) => {
-    await appendLog(workflow.key, 'dev', `[clickvibe] ${workflow.devAgent} 恢复结束,退出码 ${exitCode}`)
+  await appendLog(workflow.key, 'dev', `[clickvibe] 恢复 ${agent} 会话${sessionId ? `(${sessionId})` : ''}…`)
+  attachAgentProcess(ctx, live, command, workflow.worktree, prompt, async (exitCode, newSessionId) => {
+    await appendLog(workflow.key, 'dev', `[clickvibe] ${agent} 恢复结束,退出码 ${exitCode}`)
     const reloaded = await loadWorkflow(workflow.key)
     if (reloaded) {
       reloaded.stage = exitCode === 0 ? 'review-ready' : 'developing'
       reloaded.devInterrupted = exitCode !== 0
+      if (newSessionId) reloaded.devSessionId = newSessionId
       await saveWorkflow(reloaded)
     }
   })
 
   return { ok: true, taskId }
+}
+
+/** Quote an opaque id for a shell command (single-quote safe). */
+function shellQuoteId(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`
 }
