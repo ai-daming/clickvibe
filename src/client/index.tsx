@@ -98,6 +98,55 @@ const PANEL_CSS = `
 .cv-md-ol { padding-left: 20px; list-style: decimal; margin: 0 0 8px; }
 .cv-md-blockquote { border-left: 4px solid #d0d7de; padding-left: 10px; margin: 0 0 8px; color: #57606a; }
 .cv-md-hr { border: none; border-top: 1px solid #d0d7de; margin: 10px 0; }
+.cv-dev { border: 1px solid #d0d7de; border-radius: 6px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+.cv-dev-head { font-weight: 600; font-size: 12.5px; color: #1f2328; }
+.cv-dev-actions { display: flex; gap: 6px; }
+.cv-dev-btn { padding: 5px 12px; border: none; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; color: #ffffff; }
+.cv-dev-codex { background: #1f2328; }
+.cv-dev-claude { background: #d97706; }
+.cv-dev-btn:hover { opacity: 0.85; }
+.cv-dev-status { font-size: 12px; color: #57606a; }
+.cv-dev-path { font-size: 11px; color: #8c959f; word-break: break-all; margin-top: 2px; }
+.cv-dev-error { font-size: 12px; color: #cf222e; background: #ffebe9; border: 1px solid #ff8182; border-radius: 4px; padding: 6px 8px; }
+.cv-dev-log { background: #0d1117; color: #e6edf3; border-radius: 6px; padding: 8px 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow-y: auto; margin: 0; }
+.cv-dev-done { font-size: 12px; color: #1a7f37; font-weight: 600; }
+.cv-stage { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; margin-left: 6px; }
+.cv-stage-idle { background: #f6f8fa; color: #57606a; }
+.cv-stage-developing { background: #ddf4ff; color: #0969da; }
+.cv-stage-review-ready { background: #fff8c5; color: #9a6700; }
+.cv-stage-reviewing { background: #fbefff; color: #8250df; }
+.cv-stage-passed { background: #dafbe1; color: #1a7f37; }
+.cv-dev-btn.cv-dev-warn { background: #d4a72c; color: #ffffff; }
+.cv-dev-btn.cv-dev-review { background: #8250df; color: #ffffff; }
+.cv-review-fail { display: flex; flex-direction: column; gap: 6px; }
+.cv-review-issues { margin: 0; padding-left: 18px; font-size: 12px; color: #1f2328; }
+.cv-review-issues li { margin: 2px 0; }
+.cv-refresh { padding: 6px 10px; border: 1px solid #d0d7de; border-radius: 6px; background: #ffffff; color: #57606a; cursor: pointer; font-size: 14px; line-height: 1; }
+.cv-refresh:hover { background: #f6f8fa; color: #1f2328; }
+.cv-links { display: flex; flex-direction: column; gap: 4px; }
+.cv-link-row { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #57606a; flex-wrap: wrap; }
+.cv-link { color: #0969da; font-weight: 600; text-decoration: none; }
+.cv-link:hover { text-decoration: underline; }
+.cv-link-state { display: inline-block; padding: 0 6px; border-radius: 8px; font-size: 10.5px; font-weight: 600; }
+.cv-link-state-open { background: #dafbe1; color: #1a7f37; }
+.cv-link-state-closed { background: #ffebe9; color: #cf222e; }
+.cv-link-state-merged { background: #d8f5ff; color: #8250df; }
+.cv-stage-new { background: #fff8c5; color: #9a6700; }
+.cv-timeline { border-top: 1px solid #d0d7de; padding-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+.cv-timeline-head { font-size: 12px; font-weight: 600; color: #57606a; }
+.cv-tl-row { display: flex; align-items: center; gap: 6px; font-size: 11.5px; flex-wrap: wrap; }
+.cv-tl-kind { display: inline-block; padding: 0 6px; border-radius: 8px; font-size: 10.5px; font-weight: 600; }
+.cv-tl-kind-dev { background: #ddf4ff; color: #0969da; }
+.cv-tl-kind-rework { background: #fff8c5; color: #9a6700; }
+.cv-tl-kind-review { background: #fbefff; color: #8250df; }
+.cv-tl-kind-resume { background: #f6f8fa; color: #57606a; }
+.cv-tl-kind-note { background: #f6f8fa; color: #57606a; }
+.cv-tl-time { color: #8c959f; }
+.cv-tl-hash { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; background: #eff1f3; padding: 0 4px; border-radius: 4px; }
+.cv-tl-verdict { font-weight: 600; }
+.cv-tl-pass { color: #1a7f37; }
+.cv-tl-fail { color: #cf222e; }
+.cv-tl-note { color: #57606a; }
 `
 
 /** Inject the plugin stylesheet once; returns the disposer. */
@@ -286,7 +335,21 @@ interface GhIssue {
   headRefName?: string
 }
 
-function IssueView({ issue, kind }: { issue: GhIssue; kind: 'issue' | 'pr' }) {
+interface TimelineEvent {
+  event: string
+  created_at?: string
+  actor?: string
+  commit_id?: string | null
+  source?: { number?: number; title?: string; html_url?: string; state?: string } | null
+}
+
+function IssueView({ issue, kind, workflow, onWorkflow, timeline }: {
+  issue: GhIssue
+  kind: 'issue' | 'pr'
+  workflow: Workflow | null
+  onWorkflow: (w: Workflow | null) => void
+  timeline?: TimelineEvent[]
+}) {
   const isPR = kind === 'pr'
   const state = String(issue.state || '').toUpperCase()
   const stateBadge = isPR && state === 'MERGED'
@@ -332,10 +395,303 @@ function IssueView({ issue, kind }: { issue: GhIssue; kind: 'issue' | 'pr' }) {
           ))}
         </tbody>
       </table>
+      {/* 开发上下文:worktree + 基线 —— 只要进入开发流程就显示,不依赖 PR */}
+      {workflow ? (
+        <div className="cv-links">
+          <div className="cv-link-row">
+            📁 worktree
+            <code className="cv-tl-hash">{workflow.worktree}</code>
+          </div>
+          {workflow.baseRef ? (
+            <div className="cv-link-row">
+              📍 基线
+              <code className="cv-tl-hash">{workflow.baseRef}</code>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {timeline && timeline.length > 0 ? (
+        <div className="cv-links">
+          {timeline.map((ev, i) => {
+            if (ev.event === 'cross-referenced' && ev.source) {
+              return (
+                <div key={i} className="cv-link-row">
+                  🔗 关联
+                  <a className="cv-link" href={ev.source.html_url} target="_blank" rel="noreferrer">
+                    {ev.source.title ? `#${ev.source.number} ${ev.source.title}` : `#${ev.source.number}`}
+                  </a>
+                  <span className={`cv-link-state cv-link-state-${ev.source.state ?? 'open'}`}>
+                    {ev.source.state === 'closed' ? '已关闭' : ev.source.state === 'merged' ? '已合并' : '打开'}
+                  </span>
+                </div>
+              )
+            }
+            if (ev.event === 'referenced' && ev.commit_id) {
+              return <div key={i} className="cv-link-row">🔗 引用提交 <code className="cv-md-code">{ev.commit_id.slice(0, 7)}</code></div>
+            }
+            return null
+          })}
+        </div>
+      ) : null}
       <div className="cv-issue-body">
         <div className="cv-md">{renderMarkdown(issue.body ?? '')}</div>
       </div>
+      {issue.url && kind === 'issue' && state === 'OPEN'
+        ? <DevSection url={issue.url} workflow={workflow} onWorkflow={onWorkflow} />
+        : null}
       <CommentsSection comments={issue.comments ?? []} />
+    </div>
+  )
+}
+
+async function apiCall<T>(method: string, body: Record<string, unknown>): Promise<T> {
+  const response = await fetch(`/clickvibe/api/${method}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return response.json() as Promise<T>
+}
+
+interface Workflow {
+  key: string
+  url: string
+  repoKey: string
+  worktree: string
+  branch: string
+  stage: 'idle' | 'developing' | 'review-ready' | 'reviewing' | 'passed'
+  devAgent: 'codex' | 'claude' | null
+  devTaskId: string | null
+  devSessionId: string | null
+  devInterrupted: boolean
+  reviewAgent: 'codex' | 'claude' | null
+  reviewTaskId: string | null
+  reviewSessionId: string | null
+  reviewResult: { passed: boolean; issues: string[]; commentUrl?: string } | null
+  prNumber: string | null
+  baseRef: string | null
+  updatedAt: number
+  events?: WorkflowEvent[]
+  derived?: { head: string | null; hasNewCommits: boolean; lastDevHash: string | null; lastReviewHash: string | null }
+}
+
+interface WorkflowEvent {
+  kind: 'dev' | 'review' | 'rework' | 'resume' | 'note'
+  at: string
+  hash?: string
+  verdict?: { passed: boolean; issues: string[] }
+  note?: string
+}
+
+function fmtTime(iso: string): string {
+  try { return new Date(iso).toLocaleString() } catch { return iso }
+}
+
+function stageLabel(stage: Workflow['stage'], workflow: Workflow | null): string {
+  switch (stage) {
+    case 'idle': return '未开发'
+    case 'developing': return '开发中'
+    case 'review-ready':
+      // 已有 review 结果:未通过 → "Review 未通过";否则 → "待 review"
+      return workflow?.reviewResult
+        ? (workflow.reviewResult.passed ? 'Review 通过' : 'Review 未通过')
+        : '待 review'
+    case 'reviewing': return 'review 中'
+    case 'passed': return '✅ 已通过'
+  }
+}
+
+function DevSection({ url, workflow, onWorkflow }: {
+  url: string
+  workflow: Workflow | null
+  onWorkflow: (w: Workflow | null) => void
+}) {
+  const [busy, setBusy] = React.useState<string | null>(null)
+  const [error, setError] = React.useState<string | null>(null)
+  const [statusLines, setStatusLines] = React.useState<string[]>([])
+  const esRef = React.useRef<EventSource | null>(null)
+  const stage = workflow?.stage ?? 'idle'
+  const interrupted = workflow?.devInterrupted ?? false
+
+  // 打开 SSE 实时流
+  const openStream = (taskId: string) => {
+    esRef.current?.close()
+    const es = new EventSource(`/clickvibe/api/stream?taskId=${encodeURIComponent(taskId)}`)
+    esRef.current = es
+    es.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data) as string | { __done?: boolean }
+        if (typeof data === 'object' && data.__done) {
+          es.close()
+          return
+        }
+        setStatusLines((prev) => [...prev, String(data)])
+      } catch {
+        setStatusLines((prev) => [...prev, e.data])
+      }
+    }
+    es.onerror = () => { es.close() }
+  }
+
+  React.useEffect(() => () => {
+    esRef.current?.close()
+  }, [])
+
+  // 恢复现场:若已有进行中的任务,重连其 SSE
+  React.useEffect(() => {
+    if (!workflow) return
+    const taskId = workflow.stage === 'reviewing' ? workflow.reviewTaskId : workflow.devTaskId
+    if (taskId && (workflow.stage === 'developing' || workflow.stage === 'reviewing')) {
+      openStream(taskId)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workflow?.devTaskId, workflow?.reviewTaskId, workflow?.stage])
+
+  const refresh = async () => {
+    const res = await apiCall<{ ok: true; workflows: Workflow[] }>('state', {})
+    if (res.ok) {
+      onWorkflow(res.workflows.find((w) => w.url === url) ?? null)
+    }
+  }
+
+  const startDev = async (agent: 'codex' | 'claude', context?: string) => {
+    setBusy('developing')
+    setError(null)
+    setStatusLines([])
+    try {
+      const res = await apiCall<{ ok: true; taskId: string; worktree: string; branch: string } | { ok: false; error: string }>('develop', context ? { url, agent, context } : { url, agent })
+      if (!res.ok) { setError(res.error); setBusy(null); return }
+      await refresh()
+      openStream(res.taskId)
+      setBusy(null)
+    } catch (e) {
+      setError(String(e)); setBusy(null)
+    }
+  }
+
+  const resume = async (context?: string) => {
+    setBusy('resuming')
+    setError(null)
+    setStatusLines([])
+    try {
+      const res = await apiCall<{ ok: true; taskId: string } | { ok: false; error: string }>('resume', context ? { url, context } : { url })
+      if (!res.ok) { setError(res.error); setBusy(null); return }
+      await refresh()
+      openStream(res.taskId)
+      setBusy(null)
+    } catch (e) {
+      setError(String(e)); setBusy(null)
+    }
+  }
+
+  const startReview = async (agent: 'codex' | 'claude') => {
+    setBusy('reviewing')
+    setError(null)
+    setStatusLines([])
+    try {
+      const res = await apiCall<{ ok: true; taskId: string } | { ok: false; error: string }>('review', { url, agent })
+      if (!res.ok) { setError(res.error); setBusy(null); return }
+      await refresh()
+      openStream(res.taskId)
+      setBusy(null)
+    } catch (e) {
+      setError(String(e)); setBusy(null)
+    }
+  }
+
+  const showDevButtons = stage === 'idle'
+  const canReview = stage === 'review-ready' && !interrupted && !workflow?.reviewResult
+  // review agent 锁定:上次用什么 review,这次就只显示那个按钮;
+  // 从未 review 过则两个都显示(首次自由选)。
+  const showCodexReview = canReview && (!workflow?.reviewAgent || workflow.reviewAgent === 'codex')
+  const showClaudeReview = canReview && (!workflow?.reviewAgent || workflow.reviewAgent === 'claude')
+  const showReworkButtons = stage === 'review-ready' && workflow?.reviewResult?.passed === false
+
+  return (
+    <div className="cv-dev">
+      {/* 状态卡:当前状态 + 关键事实 */}
+      <div className="cv-dev-head">
+        🚀 开发流程 <span className={`cv-stage cv-stage-${stage}`}>{stageLabel(stage, workflow)}</span>
+        {workflow?.derived?.hasNewCommits ? <span className="cv-stage cv-stage-new">有未 review 的新提交</span> : null}
+      </div>
+      {workflow?.worktree ? <div className="cv-dev-path">{workflow.worktree}</div> : null}
+      {workflow?.derived?.head ? <div className="cv-dev-path">HEAD {workflow.derived.head}</div> : null}
+      {workflow?.prNumber ? (
+        <div className="cv-dev-path">
+          🔗 PR{' '}
+          <a className="cv-link" href={`https://github.com/${workflow.repoKey}/pull/${workflow.prNumber}`} target="_blank" rel="noreferrer">
+            #{workflow.prNumber}
+          </a>
+        </div>
+      ) : null}
+
+      {/* 操作区(悬浮感):与信息分离 */}
+      <div className="cv-dev-actions">
+        {interrupted && stage === 'developing' ? (
+          <button className="cv-dev-btn cv-dev-warn" onClick={() => resume()} disabled={busy !== null}>
+            {busy === 'resuming' ? '恢复中…' : '↩ 恢复开发'}
+          </button>
+        ) : null}
+        {showDevButtons ? (
+          <>
+            <button className="cv-dev-btn cv-dev-codex" onClick={() => startDev('codex')} disabled={busy !== null}>Codex 开发</button>
+            <button className="cv-dev-btn cv-dev-claude" onClick={() => startDev('claude')} disabled={busy !== null}>Claude 开发</button>
+          </>
+        ) : null}
+        {showCodexReview ? (
+          <button className="cv-dev-btn cv-dev-review" onClick={() => startReview('codex')} disabled={busy !== null}>Codex Review</button>
+        ) : null}
+        {showClaudeReview ? (
+          <button className="cv-dev-btn cv-dev-review" onClick={() => startReview('claude')} disabled={busy !== null}>Claude Review</button>
+        ) : null}
+        {workflow?.reviewResult && !workflow.reviewResult.passed ? (
+          <button
+            className="cv-dev-btn cv-dev-codex"
+            onClick={() => resume(workflow?.reviewResult?.issues.join('\n'))}
+            disabled={busy !== null}
+            title="续上次开发会话,并把 review 意见带进去"
+          >↩ 按 review 意见继续开发</button>
+        ) : null}
+      </div>
+
+      {error ? <div className="cv-dev-error">{error}</div> : null}
+
+      {statusLines.length > 0 ? (
+        <pre className="cv-dev-log">{statusLines.join('\n')}</pre>
+      ) : null}
+
+      {/* 最新 review 结论(当前状态的一部分) */}
+      {workflow?.reviewResult && !workflow.reviewResult.passed ? (
+        <div className="cv-review-fail">
+          <div className="cv-dev-error">❌ 最近一次 Review 发现 {workflow.reviewResult.issues.length} 个问题</div>
+          <ul className="cv-review-issues">
+            {workflow.reviewResult.issues.map((issue, i) => <li key={i}>{issue}</li>)}
+          </ul>
+        </div>
+      ) : null}
+      {workflow?.reviewResult?.passed ? <div className="cv-dev-done">✅ Review 通过</div> : null}
+
+      {/* 历史时间线:全部事件,按时间顺序 */}
+      {(workflow?.events ?? []).length > 0 ? (
+        <div className="cv-timeline">
+          <div className="cv-timeline-head">📜 历史</div>
+          {[...(workflow?.events ?? [])].reverse().map((ev, i) => (
+            <div key={i} className="cv-tl-row">
+              <span className={`cv-tl-kind cv-tl-kind-${ev.kind}`}>
+                {ev.kind === 'dev' ? '开发' : ev.kind === 'rework' ? '返工' : ev.kind === 'review' ? 'Review' : ev.kind === 'resume' ? '恢复' : '备注'}
+              </span>
+              <span className="cv-tl-time">{fmtTime(ev.at)}</span>
+              {ev.hash ? <code className="cv-tl-hash">{ev.hash}</code> : null}
+              {ev.kind === 'review' && ev.verdict
+                ? <span className={ev.verdict.passed ? 'cv-tl-verdict cv-tl-pass' : 'cv-tl-verdict cv-tl-fail'}>
+                    {ev.verdict.passed ? '✅ 通过' : `❌ ${ev.verdict.issues.length} 个问题`}
+                  </span>
+                : null}
+              {ev.note ? <span className="cv-tl-note">{ev.note}</span> : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -376,23 +732,61 @@ async function fetchIssue(url: string): Promise<{ ok: true; data: { kind: 'issue
 function PanelContent() {
   const [url, setUrl] = React.useState('')
   const [loading, setLoading] = React.useState(false)
-  const [result, setResult] = React.useState<{ kind: 'issue' | 'pr'; item: GhIssue } | null>(null)
+  const [result, setResult] = React.useState<{ kind: 'issue' | 'pr'; item: GhIssue; timeline?: TimelineEvent[] } | null>(null)
   const [error, setError] = React.useState<string | null>(null)
+  const [workflow, setWorkflow] = React.useState<Workflow | null>(null)
+  const [restored, setRestored] = React.useState(false)
 
-  const run = async () => {
-    if (!url.trim()) return
+  // 恢复现场:打开面板时读回所有工作流,若存在进行中的任务自动重连展示
+  React.useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await apiCall<{ ok: true; workflows: Workflow[] }>('state', {})
+        if (!cancelled && res.ok && res.workflows.length > 0) {
+          const active = res.workflows[0]
+          setWorkflow(active)
+          setUrl(active.url)
+          // 自动重新抓取该 issue
+          const fetchRes = await fetchIssue(active.url)
+          if (!cancelled) {
+            if (fetchRes.ok) setResult(fetchRes.data as { kind: 'issue' | 'pr'; item: GhIssue; timeline?: TimelineEvent[] })
+            else setError(fetchRes.error)
+          }
+        }
+      } catch {
+        // 恢复失败不阻塞面板
+      } finally {
+        if (!cancelled) setRestored(true)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  const run = async (targetUrl = url) => {
+    const trimmed = targetUrl.trim()
+    if (!trimmed) return
     setLoading(true)
     setError(null)
     setResult(null)
     try {
-      const res = await fetchIssue(url.trim())
-      if (res.ok) setResult(res.data as { kind: 'issue' | 'pr'; item: GhIssue })
+      // 按目标 url 匹配已存 workflow(恢复现场的关键:抓取不清 workflow)
+      const stateRes = await apiCall<{ ok: true; workflows: Workflow[] }>('state', {})
+      const matched = stateRes.ok ? stateRes.workflows.find((w) => w.url === trimmed) ?? null : null
+      setWorkflow(matched)
+      const res = await fetchIssue(trimmed)
+      if (res.ok) setResult(res.data as { kind: 'issue' | 'pr'; item: GhIssue; timeline?: TimelineEvent[] })
       else setError(res.error)
     } catch (e) {
       setError(`调用失败: ${String(e)}`)
     } finally {
       setLoading(false)
     }
+  }
+
+  const updateWorkflow = (w: Workflow | null) => {
+    setWorkflow(w)
+    // workflow 变化时同步刷新状态(不打断当前展示)
   }
 
   return (
@@ -410,16 +804,23 @@ function PanelContent() {
           onChange={(e) => setUrl(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter') run() }}
         />
-        <button className="cv-fetch" onClick={run} disabled={loading}>
+        <button className="cv-fetch" onClick={() => run()} disabled={loading}>
           {loading ? '抓取中…' : '抓取'}
         </button>
+        {result ? (
+          <button className="cv-refresh" onClick={() => run()} disabled={loading} title="重新抓取当前 issue">
+            ⟳
+          </button>
+        ) : null}
       </div>
       {error ? <div className="cv-error">{error}</div> : null}
       {result
-        ? <IssueView issue={result.item} kind={result.kind} />
+        ? <IssueView issue={result.item} kind={result.kind} workflow={workflow} onWorkflow={updateWorkflow} timeline={result.timeline} />
         : loading
           ? <div className="cv-loading">正在通过 gh 抓取…</div>
-          : <div className="cv-hint">粘贴一个 GitHub issue / PR 链接,回车抓取</div>}
+          : restored
+            ? <div className="cv-hint">粘贴一个 GitHub issue / PR 链接,回车抓取</div>
+            : <div className="cv-loading">正在恢复现场…</div>}
     </div>
   )
 }
