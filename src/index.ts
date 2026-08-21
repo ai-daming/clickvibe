@@ -1999,7 +1999,7 @@ async function resumeDevelop(
   } else {
     command = sessionId
       ? `codex exec resume ${shellQuoteId(sessionId)} -c approval_policy=never -s danger-full-access --json -`
-      : 'codex exec -c approval_policy=never -s danger-full-access --json --last -'
+      : 'codex exec resume --last -c approval_policy=never -s danger-full-access --json -'
   }
   // 续会话前也同步远端(并行开发时 base 会变化)
   try {
