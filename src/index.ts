@@ -270,13 +270,15 @@ async function runCommand(
     throw new Error(`命令退出码 ${result.exitCode}${stderr ? `: ${stderr}` : ''}`)
   }
   // stdout 超限时内存只保留尾部;有 spill 文件则读全文,否则明确报错而不是返回垃圾。
-  if (result.stdout.truncated) {
-    if (result.stdout.spillPath) {
-      return (await readFile(result.stdout.spillPath, 'utf8')).trim()
+  // 注:插件可见的 shell 类型只声明 {text},运行时才有 truncated/spillPath,做宽断言。
+  const out = result.stdout as { text: string; truncated?: boolean; spillPath?: string }
+  if (out.truncated) {
+    if (out.spillPath) {
+      return (await readFile(out.spillPath, 'utf8')).trim()
     }
-    throw new Error(`命令输出超过 ${result.stdout.text.length} 字节上限且无 spill 文件,无法获取完整输出`)
+    throw new Error(`命令输出超过上限且无 spill 文件,无法获取完整输出`)
   }
-  return result.stdout.text.trim()
+  return out.text.trim()
 }
 
 /** Read the current HEAD short-hash of a worktree (empty string on failure). */
