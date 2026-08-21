@@ -124,6 +124,8 @@ const PANEL_CSS = `
 .cv-refresh { padding: 6px 10px; border: 1px solid #d0d7de; border-radius: 6px; background: #ffffff; color: #57606a; cursor: pointer; font-size: 14px; line-height: 1; }
 .cv-refresh:hover { background: #f6f8fa; color: #1f2328; }
 .cv-links { display: flex; flex-direction: column; gap: 4px; }
+.cv-dep-block { display: flex; flex-direction: column; gap: 4px; }
+.cv-dep-label { font-size: 12px; font-weight: 600; color: #57606a; }
 .cv-link-row { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #57606a; flex-wrap: wrap; }
 .cv-link { color: #0969da; font-weight: 600; text-decoration: none; }
 .cv-link:hover { text-decoration: underline; }
@@ -361,12 +363,32 @@ interface TimelineEvent {
   source?: { number?: number; title?: string; html_url?: string; state?: string } | null
 }
 
-function IssueView({ issue, kind, workflow, onWorkflow, timeline }: {
+/** One resolved dependency: number + title + GitHub state. */
+interface Dependency {
+  number: number
+  title: string
+  state: string
+}
+
+/** Dependency graph of the viewed issue: who it waits on, who waits on it. */
+interface Dependencies {
+  blockedBy: Dependency[]
+  blocking: Dependency[]
+}
+
+/** Derive the owner/repo part of a GitHub URL for building dependency links. */
+function repoOf(url: string | undefined): string {
+  const match = String(url ?? '').match(/github\.com\/([^/]+\/[^/]+)\//)
+  return match ? match[1] : ''
+}
+
+function IssueView({ issue, kind, workflow, onWorkflow, timeline, dependencies }: {
   issue: GhIssue
   kind: 'issue' | 'pr'
   workflow: Workflow | null
   onWorkflow: (w: Workflow | null) => void
   timeline?: TimelineEvent[]
+  dependencies?: Dependencies
 }) {
   const isPR = kind === 'pr'
   const state = String(issue.state || '').toUpperCase()
@@ -424,6 +446,43 @@ function IssueView({ issue, kind, workflow, onWorkflow, timeline }: {
             <div className="cv-link-row">
               📍 基线
               <code className="cv-tl-hash">{workflow.baseRef}</code>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {/* 依赖图:blockedBy(依赖谁)/ blocking(谁依赖我)——与 GitHub「关联」明确区分 */}
+      {dependencies && (dependencies.blockedBy.length > 0 || dependencies.blocking.length > 0) ? (
+        <div className="cv-links">
+          {dependencies.blockedBy.length > 0 ? (
+            <div className="cv-dep-block">
+              <div className="cv-dep-label">🔒 blockedBy(依赖,需先完成)</div>
+              {dependencies.blockedBy.map((dep, i) => (
+                <div key={i} className="cv-link-row">
+                  <a className="cv-link" href={`https://github.com/${repoOf(issue.url)}/issues/${dep.number}`} target="_blank" rel="noreferrer">
+                    #{dep.number}{dep.title ? ` ${dep.title}` : ''}
+                  </a>
+                  {dep.state === 'closed'
+                    ? <span className="cv-link-state cv-link-state-closed">已关闭(依赖完成)</span>
+                    : dep.state === 'open'
+                      ? <span className="cv-link-state cv-link-state-open">打开(未完成)</span>
+                      : null}
+                </div>
+              ))}
+            </div>
+          ) : null}
+          {dependencies.blocking.length > 0 ? (
+            <div className="cv-dep-block">
+              <div className="cv-dep-label">🔓 blocking(被依赖,等我完成)</div>
+              {dependencies.blocking.map((dep, i) => (
+                <div key={i} className="cv-link-row">
+                  <a className="cv-link" href={`https://github.com/${repoOf(issue.url)}/issues/${dep.number}`} target="_blank" rel="noreferrer">
+                    #{dep.number}{dep.title ? ` ${dep.title}` : ''}
+                  </a>
+                  <span className={`cv-link-state cv-link-state-${dep.state}`}>
+                    {dep.state === 'closed' ? '已关闭' : dep.state === 'open' ? '打开' : dep.state}
+                  </span>
+                </div>
+              ))}
             </div>
           ) : null}
         </div>
@@ -922,7 +981,7 @@ function CommentsSection({ comments }: { comments: GhComment[] }) {
   )
 }
 
-async function fetchIssue(url: string): Promise<{ ok: true; data: { kind: 'issue' | 'pr'; item: unknown } } | { ok: false; error: string }> {
+async function fetchIssue(url: string): Promise<{ ok: true; data: { kind: 'issue' | 'pr'; item: unknown; timeline?: TimelineEvent[]; dependencies?: Dependencies } } | { ok: false; error: string }> {
   const response = await fetch('/clickvibe/api/fetch', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-clickvibe-request': '1' },
@@ -934,7 +993,7 @@ async function fetchIssue(url: string): Promise<{ ok: true; data: { kind: 'issue
 function PanelContent() {
   const [url, setUrl] = React.useState('')
   const [loading, setLoading] = React.useState(false)
-  const [result, setResult] = React.useState<{ kind: 'issue' | 'pr'; item: GhIssue; timeline?: TimelineEvent[] } | null>(null)
+  const [result, setResult] = React.useState<{ kind: 'issue' | 'pr'; item: GhIssue; timeline?: TimelineEvent[]; dependencies?: Dependencies } | null>(null)
   const [error, setError] = React.useState<string | null>(null)
   const [workflow, setWorkflow] = React.useState<Workflow | null>(null)
   const [restored, setRestored] = React.useState(false)
@@ -1017,7 +1076,7 @@ function PanelContent() {
       </div>
       {error ? <div className="cv-error">{error}</div> : null}
       {result
-        ? <IssueView issue={result.item} kind={result.kind} workflow={workflow} onWorkflow={updateWorkflow} timeline={result.timeline} />
+        ? <IssueView issue={result.item} kind={result.kind} workflow={workflow} onWorkflow={updateWorkflow} timeline={result.timeline} dependencies={result.dependencies} />
         : loading
           ? <div className="cv-loading">正在通过 gh 抓取…</div>
           : restored

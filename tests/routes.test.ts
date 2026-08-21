@@ -124,3 +124,60 @@ test('/sync rejects worktree mutation without the same-origin privileged headers
   assert.equal(result.status, 403)
   assert.match(result.body.error ?? '', /授权请求头/)
 })
+
+
+
+test('/fetch resolves blockedBy from the body and blocking from a repo scan', async () => {
+  const item = {
+    url: 'https://github.com/ai-daming/clickvibe/issues/7',
+    number: 7, title: 'issue 7', state: 'OPEN',
+    body: '## 目标\n做 X\n\n## 依赖\n\nBlocked by #5', comments: [],
+  }
+  const issues = [
+    { number: 5, title: 'issue 5', state: 'OPEN', body: '## 目标\nx' },
+    { number: 7, title: 'issue 7', state: 'OPEN', body: '## 依赖\n\nBlocked by #5' },
+    { number: 8, title: 'issue 8', state: 'OPEN', body: '## 依赖\n\nBlocked by #7' },
+  ]
+  const handler = createHandler(async (spec) => {
+    if (spec.command.startsWith('gh issue view')) {
+      return { exitCode: 0, stdout: { text: JSON.stringify(item) }, stderr: { text: '' } }
+    }
+    if (spec.command.startsWith('gh issue list')) {
+      return { exitCode: 0, stdout: { text: JSON.stringify(issues) }, stderr: { text: '' } }
+    }
+    return { exitCode: 0, stdout: { text: '[]' }, stderr: { text: '' } }
+  })
+  const result = await post(handler, '/clickvibe/api/fetch', { url: item.url })
+  assert.equal(result.status, 200, JSON.stringify(result.body))
+  const deps = (result.body as { ok: true; data: { dependencies?: { blockedBy: { number: number }[]; blocking: { number: number }[] } } }).data.dependencies
+  assert.ok(deps)
+  assert.deepEqual(deps.blockedBy.map((d) => d.number), [5])
+  assert.deepEqual(deps.blocking.map((d) => d.number), [8])
+})
+
+test('/fetch on an issue without a 依赖 section yields no blockedBy (and no blocking)', async () => {
+  const item = {
+    url: 'https://github.com/ai-daming/clickvibe/issues/5',
+    number: 5, title: 'issue 5', state: 'OPEN',
+    body: '## 目标\n做 Y', comments: [],
+  }
+  const issues = [
+    { number: 5, title: 'issue 5', state: 'OPEN', body: '## 目标\n做 Y' },
+    { number: 7, title: 'issue 7', state: 'OPEN', body: '## 依赖\n\nBlocked by #5' },
+  ]
+  const handler = createHandler(async (spec) => {
+    if (spec.command.startsWith('gh issue view')) {
+      return { exitCode: 0, stdout: { text: JSON.stringify(item) }, stderr: { text: '' } }
+    }
+    if (spec.command.startsWith('gh issue list')) {
+      return { exitCode: 0, stdout: { text: JSON.stringify(issues) }, stderr: { text: '' } }
+    }
+    return { exitCode: 0, stdout: { text: '[]' }, stderr: { text: '' } }
+  })
+  const result = await post(handler, '/clickvibe/api/fetch', { url: item.url })
+  assert.equal(result.status, 200)
+  const deps = (result.body as { ok: true; data: { dependencies?: { blockedBy: unknown[]; blocking: unknown[] } } }).data.dependencies
+  assert.ok(deps)
+  assert.deepEqual(deps.blockedBy, [])
+  assert.deepEqual(deps.blocking.map((d) => (d as { number: number }).number), [7])
+})

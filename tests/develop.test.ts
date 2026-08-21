@@ -10,6 +10,7 @@ import {
   parseAgent,
   parseGithubUrl,
   shellQuote,
+  parseDependencies,
   validatePrivilegedRequest,
 } from '../src/develop.ts'
 
@@ -178,4 +179,15 @@ test('LineLog bounds a never-terminated line and handles CRLF split across chunk
   assert.equal(read.lines.length, 2)
   assert.match(read.lines[0], /单行日志已截断/)
   assert.equal(read.lines[1], 'next')
+})
+
+
+test('parseDependencies extracts Blocked by numbers from the 依赖 section', () => {
+  assert.deepEqual(parseDependencies(`## 目标\n做 X\n\n## 依赖\n\nBlocked by #7`), [7])
+  assert.deepEqual(parseDependencies(`## 依赖\n\nBlocked by #7, #8`), [7, 8])
+  assert.deepEqual(parseDependencies(`## 依赖\n\n无`), [])
+  assert.deepEqual(parseDependencies('## 目标\n无依赖,正常开发'), [])
+  assert.deepEqual(parseDependencies(''), [])
+  // 依赖章节后还有其它章节:不串台
+  assert.deepEqual(parseDependencies(`## 依赖\n\nBlocked by #7\n\n## 验收标准\n- [ ] 通过 #7 的行为`), [7])
 })

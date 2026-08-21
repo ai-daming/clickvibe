@@ -30,6 +30,7 @@ import {
   isLoopbackAddress,
   makeAuthorizationInput,
   parseAgent,
+  parseDependencies,
   parseGithubUrl,
   shellQuote,
   validatePrivilegedRequest,
@@ -684,11 +685,13 @@ async function fetchIssue(
       return { ok: false, error: stderr || `gh 执行失败(exit ${result.exitCode})` }
     }
     const parsedJson = JSON.parse(result.stdout.text) as unknown
-    const data: { kind: 'issue' | 'pr'; item: unknown; timeline?: unknown } = { kind: parsed.kind, item: parsedJson }
+    const data: { kind: 'issue' | 'pr'; item: unknown; timeline?: unknown; dependencies?: { blockedBy: IssueDependency[]; blocking: IssueDependency[] } } = { kind: parsed.kind, item: parsedJson }
     // issue 额外拉 timeline,提取关联事件(linked PR/commit)——GitHub UI 的
     // "linked a pull request" 就来自 cross-referenced 事件
     if (!isPR) {
       data.timeline = await fetchTimeline(ctx, parsed.owner, parsed.repo, parsed.number)
+      // 依赖图:blockedBy 来自本 issue 正文,blocking 扫描 repo 内其它 issue
+      data.dependencies = await fetchDependencies(ctx, parsed, parsedJson as { body?: unknown })
     }
     return { ok: true, data }
   } catch (error) {
@@ -757,6 +760,60 @@ async function authorizeAgent(
   } catch (error) {
     return { ok: false, error: String(error instanceof Error ? error.message : error) }
   }
+}
+
+/** One resolved dependency entry (number + title + state). */
+interface IssueDependency {
+  number: number
+  title: string
+  state: string
+}
+
+/**
+ * Resolve an issue's dependency graph (issue-contract convention):
+ * - blockedBy: issues this issue depends on, parsed from its `## 依赖` body section;
+ * - blocking: issues that declare a dependency on this issue.
+ * Scans the repo's issues once via gh (local, fast).
+ */
+async function fetchDependencies(
+  ctx: Context,
+  target: { owner: string; repo: string; number: string },
+  item: { body?: unknown },
+): Promise<{ blockedBy: IssueDependency[]; blocking: IssueDependency[] }> {
+  const empty: { blockedBy: IssueDependency[]; blocking: IssueDependency[] } = { blockedBy: [], blocking: [] }
+  const command = `gh issue list --repo ${target.owner}/${target.repo} --state all --limit 100 --json number,title,state,body`
+  let issues: { number: number; title: string; state: string; body: string }[] = []
+  try {
+    const spec = ctx.shell.resolve({ command, timeoutMs: 20000 })
+    const result = await ctx.shell.run(spec)
+    if (result.exitCode !== 0) return empty
+    const parsed = JSON.parse(result.stdout.text) as unknown
+    if (!Array.isArray(parsed)) return empty
+    issues = parsed as { number: number; title: string; state: string; body: string }[]
+  } catch {
+    return empty
+  }
+
+  const current = Number(target.number)
+  const byNumber = new Map(issues.filter((i) => Number.isInteger(i.number)).map((i) => [i.number, i]))
+
+  const blockedBy: IssueDependency[] = []
+  for (const number of parseDependencies(String(item.body ?? ''))) {
+    const found = byNumber.get(number)
+    blockedBy.push(found
+      ? { number: found.number, title: found.title, state: found.state }
+      : { number, title: '', state: 'unknown' })
+  }
+  const blocking: IssueDependency[] = []
+  for (const issue of issues) {
+    if (issue.number === current) continue
+    if (parseDependencies(issue.body).includes(current)) {
+      blocking.push({ number: issue.number, title: issue.title, state: issue.state })
+    }
+  }
+  blockedBy.sort((a, b) => a.number - b.number)
+  blocking.sort((a, b) => a.number - b.number)
+  return { blockedBy, blocking }
 }
 
 /** Fetch the issue timeline and keep only the events worth showing. */
