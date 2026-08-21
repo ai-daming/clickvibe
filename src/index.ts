@@ -654,11 +654,12 @@ async function startReview(
   await appendLog(workflow.key, 'review', `[clickvibe] 启动 ${agent} review…`)
   attachAgentProcess(ctx, live, agentCommand, workflow.worktree, prompt, async (exitCode) => {
     await appendLog(workflow.key, 'review', `[clickvibe] review 结束,退出码 ${exitCode}`)
-    // 读取 review 全文,判断通过/有问题
+    // 读取 review 全文,判断通过/有问题。只认 agent 的 ❌/✅ 结论行,
+    // 忽略 "✅ 本轮完成" 这类 turn 状态行(codex 事件流会混入)。
     const lines = await readLogTail(workflow.key, 'review', 200)
-    const full = lines.join('\n')
-    const passed = exitCode === 0 && /^✅|通过/.test(full)
-    const issues = passed ? [] : extractIssues(full)
+    const verdict = reviewVerdict(lines)
+    const passed = verdict.passed
+    const issues = passed ? [] : extractIssues(lines)
     const reloaded = await loadWorkflow(workflow.key)
     if (reloaded) {
       reloaded.reviewResult = { passed, issues }
@@ -672,20 +673,43 @@ async function startReview(
   return { ok: true, taskId }
 }
 
+/** Decide the review verdict from the log: ❌ wins over ✅; neither → fail closed. */
+function reviewVerdict(lines: string[]): { passed: boolean } {
+  let sawFail = false
+  let sawPass = false
+  for (const line of lines) {
+    const t = line.trim()
+    // 结论可能带 emoji/状态前缀(💬/🔧/⚠️…),用 includes 判断更稳
+    if (t.includes('❌') && /发现|存在|问题|Review/.test(t)) sawFail = true
+    if (t.includes('✅') && !/本轮完成|会话结束/.test(t)) sawPass = true
+    if (/Review\s*通过|未发现问题|无问题/.test(t)) sawPass = true
+  }
+  return { passed: !sawFail && sawPass }
+}
+
 /** Extract issue lines from a review result (lines after a ❌ header). */
-function extractIssues(text: string): string[] {
-  const lines = text.split('\n')
+/** Extract issue lines from review log lines (lines after a ❌ verdict). */
+function extractIssues(lines: string[]): string[] {
   const out: string[] = []
   let capturing = false
   for (const line of lines) {
-    const trimmed = line.trim()
-    if (/^❌/.test(trimmed)) { capturing = true; continue }
-    if (capturing && trimmed !== '' && !/^✅/.test(trimmed)) {
-      out.push(trimmed)
+    const t = line.trim()
+    if (t.includes('❌')) {
+      capturing = true
+      // ❌ 结论可能与问题条目同行(agent 一次性输出),直接拆分
+      const rest = t.slice(t.indexOf('❌') + 1)
+      const numbered = rest.match(/\d+\.\s*[^0-9][^]*/g)
+      if (numbered) {
+        for (const n of numbered) out.push(n.replace(/^\d+\.\s*/, '').trim())
+      }
+      continue
+    }
+    if (capturing && t !== '' && !/^✅|^⚠️|^🚀|^💭|^🔧|^\[clickvibe\]|本轮完成|会话结束/.test(t)) {
+      out.push(t)
       if (out.length >= 20) break
     }
   }
-  return out
+  return out.slice(0, 20)
 }
 
 /** Post the review result to the issue's GitHub comments. */
