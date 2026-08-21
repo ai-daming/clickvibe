@@ -133,6 +133,12 @@ const PANEL_CSS = `
 .cv-link-state-open { background: #dafbe1; color: #1a7f37; }
 .cv-link-state-closed { background: #ffebe9; color: #cf222e; }
 .cv-link-state-merged { background: #d8f5ff; color: #8250df; }
+.cv-link-state-open { background: #dafbe1; color: #1a7f37; }
+.cv-link-kind { font-size: 10.5px; font-weight: 700; color: #57606a; }
+.cv-pr-icon { flex-shrink: 0; display: inline-block; }
+.cv-pr-open { color: #1a7f37; }
+.cv-pr-merged { color: #8250df; }
+.cv-pr-closed { color: #cf222e; }
 .cv-stage-new { background: #fff8c5; color: #9a6700; }
 .cv-timeline { border-top: 1px solid #d0d7de; padding-top: 6px; display: flex; flex-direction: column; gap: 4px; }
 .cv-timeline-head { font-size: 12px; font-weight: 600; color: #57606a; }
@@ -360,7 +366,44 @@ interface TimelineEvent {
   created_at?: string
   actor?: string
   commit_id?: string | null
-  source?: { number?: number; title?: string; html_url?: string; state?: string } | null
+  source?: {
+    number?: number
+    title?: string
+    html_url?: string
+    state?: string
+    is_pr?: boolean
+    pr_merged?: boolean
+  } | null
+}
+
+/** Derived display state of a linked item: PRs get open/merged/closed, issues open/closed. */
+function linkedState(source: NonNullable<TimelineEvent['source']>): 'open' | 'closed' | 'merged' {
+  if (source.is_pr) {
+    if (source.pr_merged) return 'merged'
+    return source.state === 'closed' ? 'closed' : 'open'
+  }
+  return source.state === 'closed' ? 'closed' : 'open'
+}
+
+const OCTICON_PR = 'M1.5 3.25a2.25 2.25 0 1 1 3 2.122v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 1.5 3.25Zm5.677-.177L9.573.677A.25.25 0 0 1 10 .854V2.5h1A2.5 2.5 0 0 1 13.5 5v5.628a2.251 2.251 0 1 1-1.5 0V5a1 1 0 0 0-1-1h-1v1.646a.25.25 0 0 1-.427.177L7.177 3.427a.25.25 0 0 1 0-.354ZM3.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm0 9.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm8.25.75a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Z'
+const OCTICON_MERGE = 'M5.45 5.154A4.25 4.25 0 0 0 9.25 7.5h1.378a2.251 2.251 0 1 1 0 1.5H9.25A5.734 5.734 0 0 1 5 7.123v3.505a2.25 2.25 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.95-.218ZM4.25 13.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm8.5-8.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Z'
+
+/** GitHub-style PR state icon (open: pull-request, merged: git-merge, closed: pull-request). */
+function PrStateIcon({ state }: { state: 'open' | 'closed' | 'merged' }) {
+  return (
+    <svg className={`cv-pr-icon cv-pr-${state}`} viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
+      <path d={state === 'merged' ? OCTICON_MERGE : OCTICON_PR} />
+    </svg>
+  )
+}
+
+/** Label of a linked item's state (GitHub wording). */
+function linkedStateLabel(source: NonNullable<TimelineEvent['source']>): string {
+  const state = linkedState(source)
+  if (source.is_pr) {
+    return state === 'merged' ? '已合并' : state === 'closed' ? '已关闭' : '打开'
+  }
+  return state === 'closed' ? '已关闭' : '打开'
 }
 
 /** One resolved dependency: number + title + GitHub state. */
@@ -491,14 +534,18 @@ function IssueView({ issue, kind, workflow, onWorkflow, timeline, dependencies }
         <div className="cv-links">
           {timeline.map((ev, i) => {
             if (ev.event === 'cross-referenced' && ev.source) {
+              const linkedStateValue = linkedState(ev.source)
               return (
                 <div key={i} className="cv-link-row">
-                  🔗 关联
+                  {ev.source.is_pr
+                    ? <PrStateIcon state={linkedStateValue} />
+                    : <span className="cv-link-kind">🔗</span>}
+                  <span className="cv-link-kind">{ev.source.is_pr ? 'PR' : 'Issue'}</span>
                   <a className="cv-link" href={ev.source.html_url} target="_blank" rel="noreferrer">
-                    {ev.source.title ? `#${ev.source.number} ${ev.source.title}` : `#${ev.source.number}`}
+                    #{ev.source.number} {ev.source.title ?? ''}
                   </a>
-                  <span className={`cv-link-state cv-link-state-${ev.source.state ?? 'open'}`}>
-                    {ev.source.state === 'closed' ? '已关闭' : ev.source.state === 'merged' ? '已合并' : '打开'}
+                  <span className={`cv-link-state cv-link-state-${linkedStateValue}`}>
+                    {linkedStateLabel(ev.source)}
                   </span>
                 </div>
               )

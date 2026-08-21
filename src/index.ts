@@ -818,7 +818,7 @@ async function fetchDependencies(
 
 /** Fetch the issue timeline and keep only the events worth showing. */
 async function fetchTimeline(ctx: Context, owner: string, repo: string, number: string): Promise<unknown[]> {
-  const command = `gh api repos/${owner}/${repo}/issues/${number}/timeline -H "Accept: application/vnd.github+json" --jq '[.[] | select(.event == "cross-referenced" or .event == "referenced" or .event == "connected" or .event == "closed" or .event == "reopened") | {event, created_at, actor: .actor.login, commit_id, source: (if .source then {number: .source.issue.number, title: .source.issue.title, html_url: .source.issue.html_url, state: .source.issue.state} else null end)}]'`
+  const command = `gh api repos/${owner}/${repo}/issues/${number}/timeline -H "Accept: application/vnd.github+json" --jq '[.[] | select(.event == "cross-referenced" or .event == "referenced" or .event == "connected" or .event == "closed" or .event == "reopened") | {event, created_at, actor: .actor.login, commit_id, source: (if .source then {number: .source.issue.number, title: .source.issue.title, html_url: .source.issue.html_url, state: .source.issue.state, is_pr: (.source.issue.pull_request != null), pr_merged: (.source.issue.pull_request.merged_at != null)} else null end)}]'`
   try {
     const spec = ctx.shell.resolve({ command, timeoutMs: 15000 })
     const result = await ctx.shell.run(spec)
