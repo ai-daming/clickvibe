@@ -13,6 +13,11 @@ DSH web 插件:右侧面板输入 GitHub issue / PR 链接,通过本地 `gh` CLI
   - PR 额外:分支 `base ← head`、变更统计、提交数、合并状态
   - 正文与评论:轻量 Markdown 渲染器(标题/粗斜体/代码块/列表/引用/链接),评论默认展开
   - 整块内容区一个滚动条(GitHub 风格)
+- **权威状态视图**(#5):每次请求实时推导
+  - 三方对比:worktree / main / 远端(origin/main、远端同名分支)的哈希与 ahead/behind
+  - worktree 落后远端时提示「需要同步」并提供 /sync 动作(fetch + merge origin/main,冲突自动回滚)
+  - review 结论标注它审查的 HEAD;HEAD 变化后自动显示「结论已过期」,不冒充当前状态
+  - 任意时刻只有一个「下一步动作」按钮(开发/恢复/同步/Review/返工/合并),由 git 事实推导,不靠易错的 stage 字段
 - Open issue 一键开发:
   - `Codex 开发` / `Claude 开发`:在 issue worktree 中启动非交互 agent
   - `安全演练`:走完整 worktree/任务/轮询链路,只执行 `pwd`、当前分支和 `git status`
@@ -29,7 +34,8 @@ DSH web 插件:右侧面板输入 GitHub issue / PR 链接,通过本地 `gh` CLI
 |---|---|---|
 | Host | `src/index.ts` | 注册 `/clickvibe/api` 前缀路由,处理 GitHub 抓取、开发任务和 cursor 日志轮询 |
 | 开发内核 | `src/develop.ts` | agent/URL 校验、shell 参数转义、有界行日志和 worktree 恢复决策 |
-| Client | `src/client/index.tsx` | `shell.overlay` 右侧面板 + `sidebar.footer.action` 开关按钮,`fetch('/clickvibe/api/fetch')` 取数 |
+| 状态视图 | `src/state-view.ts` | 纯函数 `deriveNextAction`:由 git 事实 + 事件历史推导唯一下一步动作 |
+| Client | `src/client/index.tsx` | `shell.overlay` 右侧面板 + `sidebar.footer.action` 开关按钮,`fetch('/clickvibe/api/fetch')` 取数;状态视图 + 唯一动作按钮 |
 | 构建 | `tsdown.config.ts` | host → `lib/index.js`(ESM),client → `lib/client.js`(CJS 闭包,`window.__ModuleLoader__.load` 注册) |
 
 Client→Host 走 **HTTP API 路由**(正式插件没有动态插件的 `harness.handle`),这是与原型最大的结构差异。
@@ -80,6 +86,13 @@ curl http://127.0.0.1:3080/plugins/clickvibe/client.js
 curl -X POST http://127.0.0.1:3080/clickvibe/api/develop \
   -H 'content-type: application/json' \
   -d '{"url":"https://github.com/ai-daming/clickvibe/issues/1","agent":"dryrun"}'
+
+# 同步 worktree 到远端基线(fetch + merge origin/main,冲突自动回滚)
+curl -X POST http://127.0.0.1:3080/clickvibe/api/sync \
+  -H 'content-type: application/json' \
+  -H 'origin: http://127.0.0.1:3080' \
+  -H 'x-clickvibe-request: 1' \
+  -d '{"url":"https://github.com/ai-daming/clickvibe/issues/5"}'
 
 # 用启动响应中的 taskId 和 poll 响应中的 cursor 增量轮询
 curl -X POST http://127.0.0.1:3080/clickvibe/api/develop/poll \

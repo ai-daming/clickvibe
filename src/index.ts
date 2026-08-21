@@ -7,6 +7,7 @@
  * - `/clickvibe/api/stream`         — SSE live status stream for a task
  * - `/clickvibe/api/review`         — review the dev branch with codex/claude
  * - `/clickvibe/api/resume`         — resume an interrupted dev session
+ * - `/clickvibe/api/sync`           — sync the worktree with the remote base (issue #5)
  *
  * Workflow per issue (persisted under ~/.clickvibe/state/):
  *   developing → review-ready → reviewing → passed
@@ -29,6 +30,7 @@ import {
   isLoopbackAddress,
   makeAuthorizationInput,
   parseAgent,
+  parseDependencies,
   parseGithubUrl,
   shellQuote,
   validatePrivilegedRequest,
@@ -37,6 +39,7 @@ import {
   type DevelopAgent,
   type IssuePromptSnapshot,
 } from './develop.ts'
+import { deriveNextAction, type NextAction, type WorkflowFacts } from './state-view.ts'
 import {
   appendEvent,
   appendLog,
@@ -302,17 +305,104 @@ async function detectLinkedPr(ctx: Context, repoKey: string, branch: string): Pr
   }
 }
 
+/** Result of one ahead/behind comparison (commits of one ref relative to another). */
+interface GitCompare {
+  behind: number
+  ahead: number
+}
+
+/** Worktree facts the authoritative state view derives on every /state request. */
+interface WorkflowDerived {
+  head: string | null
+  branch: string | null
+  mainHead: string | null
+  originMainHead: string | null
+  upstreamHead: string | null
+  aheadOfMain: number
+  behindMain: number
+  aheadOfBase: number
+  behindBase: number
+  aheadOfUpstream: number | null
+  behindUpstream: number | null
+  needsSync: boolean
+  lastDevHash: string | null
+  lastReviewHash: string | null
+  reviewedHash: string | null
+  hasNewCommits: boolean
+  verdictCurrent: boolean
+  nextAction: NextAction
+}
+
+/** Short hash of one ref inside the worktree's repo (null when unresolvable). */
+async function readRefShort(ctx: Context, workdir: string, ref: string): Promise<string | null> {
+  try {
+    const spec = ctx.shell.resolve({
+      command: `git rev-parse --short ${shellQuote(ref)}`,
+      workdir,
+      timeoutMs: 10000,
+      sandboxPolicy: { mode: 'read-only', workspaceRoot: workdir },
+    })
+    const result = await ctx.shell.run(spec)
+    if (result.exitCode !== 0) return null
+    const out = result.stdout.text.trim()
+    return out === '' ? null : out
+  } catch {
+    return null
+  }
+}
+
+/** Current branch of the worktree (null when detached or missing). */
+async function readBranch(ctx: Context, workdir: string): Promise<string | null> {
+  try {
+    const spec = ctx.shell.resolve({
+      command: 'git branch --show-current',
+      workdir,
+      timeoutMs: 10000,
+      sandboxPolicy: { mode: 'read-only', workspaceRoot: workdir },
+    })
+    const result = await ctx.shell.run(spec)
+    if (result.exitCode !== 0) return null
+    const out = result.stdout.text.trim()
+    return out === '' ? null : out
+  } catch {
+    return null
+  }
+}
+
+/** Ahead/behind of `right` relative to `left` (commits in left but not in right = behind). */
+async function readRevCount(ctx: Context, workdir: string, left: string, right: string): Promise<GitCompare | null> {
+  try {
+    const spec = ctx.shell.resolve({
+      command: `git rev-list --left-right --count ${shellQuote(left)}...${shellQuote(right)}`,
+      workdir,
+      timeoutMs: 10000,
+      sandboxPolicy: { mode: 'read-only', workspaceRoot: workdir },
+    })
+    const result = await ctx.shell.run(spec)
+    if (result.exitCode !== 0) return null
+    const [behind, ahead] = result.stdout.text.trim().split(/\s+/).map(Number)
+    if (!Number.isFinite(behind) || !Number.isFinite(ahead)) return null
+    return { behind, ahead }
+  } catch {
+    return null
+  }
+}
+
 /**
- * Derive the live state of a workflow from git facts + its event history.
- * The stored `stage`/`reviewResult` stay as-is; this adds `derived` with
- * the current worktree HEAD and whether commits exist beyond the last
- * recorded dev event (i.e. un-reviewed work).
+ * Derive the authoritative state of a workflow from git facts + event history
+ * (issue #5). Runs on every /state request so the panel never needs a
+ * restart/refresh to see current status; the stored `stage`/`reviewResult`
+ * stay as-is, and `derived` carries the three-way comparison (worktree /
+ * main / remote), the review-verdict HEAD binding and the single next action.
  */
-async function deriveWorkflowState(
+/** Derive the authoritative state of a workflow from git facts + event history.
+ *  Exported for integration tests; /state calls it on every request. */
+export async function deriveWorkflowState(
   ctx: Context,
   workflow: IssueWorkflow,
-): Promise<IssueWorkflow & { derived: { head: string | null; hasNewCommits: boolean; lastDevHash: string | null; lastReviewHash: string | null } }> {
-  const head = existsSync(workflow.worktree) ? await readWorktreeHead(ctx, workflow.worktree) : null
+): Promise<IssueWorkflow & { derived: WorkflowDerived }> {
+  const worktree = workflow.worktree
+  const exists = existsSync(worktree)
   const events = workflow.events ?? []
   let lastDevHash: string | null = null
   let lastReviewHash: string | null = null
@@ -320,11 +410,90 @@ async function deriveWorkflowState(
     if (ev.kind === 'dev' || ev.kind === 'rework') lastDevHash = ev.hash ?? lastDevHash
     if (ev.kind === 'review') lastReviewHash = ev.hash ?? lastReviewHash
   }
+
+  const head = exists ? await readWorktreeHead(ctx, worktree) : null
+  const branch = exists ? await readBranch(ctx, worktree) : null
+
+  let mainHead: string | null = null
+  let aheadOfMain = 0
+  let behindMain = 0
+  let originMainHead: string | null = null
+  let aheadOfBase = 0
+  let behindBase = 0
+  let upstreamHead: string | null = null
+  let aheadOfUpstream: number | null = null
+  let behindUpstream: number | null = null
+
+  if (exists && head !== null) {
+    mainHead = await readRefShort(ctx, worktree, 'main')
+    if (mainHead) {
+      const compare = await readRevCount(ctx, worktree, 'main', 'HEAD')
+      if (compare) { behindMain = compare.behind; aheadOfMain = compare.ahead }
+    }
+    originMainHead = await readRefShort(ctx, worktree, 'origin/main')
+    if (originMainHead) {
+      const compare = await readRevCount(ctx, worktree, 'origin/main', 'HEAD')
+      if (compare) { behindBase = compare.behind; aheadOfBase = compare.ahead }
+    }
+    if (branch) {
+      upstreamHead = await readRefShort(ctx, worktree, `origin/${branch}`)
+      if (upstreamHead) {
+        const compare = await readRevCount(ctx, worktree, `origin/${branch}`, 'HEAD')
+        if (compare) { behindUpstream = compare.behind; aheadOfUpstream = compare.ahead }
+      }
+    }
+  }
+
   // 有新提交 = worktree HEAD 不在已记录的任何 dev/rework 事件哈希里
   const hasNewCommits = head !== null && lastDevHash !== null && head !== lastDevHash
+  // worktree 落后远端基线(origin/main 或远端同名分支)→ 需要同步
+  const needsSync = behindBase > 0 || (behindUpstream ?? 0) > 0
+  const reviewedHash = lastReviewHash
+  const reviewPassed = workflow.reviewResult?.passed ?? null
+  // 结论仍针对当前 HEAD 才算数;HEAD 变化后旧结论不冒充当前状态
+  const verdictCurrent = workflow.reviewResult !== null && head !== null && reviewedHash !== null && head === reviewedHash
+
+  const devLive = workflow.devTaskId ? liveTasks.get(workflow.devTaskId) : undefined
+  const reviewLive = workflow.reviewTaskId ? liveTasks.get(workflow.reviewTaskId) : undefined
+  const taskRunning = (devLive !== undefined && !devLive.closed) || (reviewLive !== undefined && !reviewLive.closed)
+
+  const facts: WorkflowFacts = {
+    issueOpen: (workflow.issueState ?? 'OPEN') !== 'CLOSED',
+    prMerged: false, // PR 合并状态需要网络查询,/state 不做网络 IO,保持实时推导
+    prNumber: workflow.prNumber,
+    stage: workflow.stage,
+    devInterrupted: workflow.devInterrupted,
+    taskRunning,
+    head,
+    reviewedHash,
+    reviewPassed,
+    hasNewCommits,
+    needsSync,
+  }
+  const nextAction = deriveNextAction(facts)
+
   return {
     ...workflow,
-    derived: { head, hasNewCommits, lastDevHash, lastReviewHash },
+    derived: {
+      head,
+      branch,
+      mainHead,
+      originMainHead,
+      upstreamHead,
+      aheadOfMain,
+      behindMain,
+      aheadOfBase,
+      behindBase,
+      aheadOfUpstream,
+      behindUpstream,
+      needsSync,
+      lastDevHash,
+      lastReviewHash,
+      reviewedHash,
+      hasNewCommits,
+      verdictCurrent,
+      nextAction,
+    },
   }
 }
 export const name = 'clickvibe'
@@ -342,7 +511,7 @@ export function apply(ctx: Context): void {
       }
       const pathname = new URL(req.url ?? '/', 'http://clickvibe.internal').pathname
       const method = pathname.startsWith(`${ROUTE}/`) ? pathname.slice(`${ROUTE}/`.length) : undefined
-      const knownMethods = new Set(['fetch', 'state', 'authorize', 'develop', 'develop/poll', 'stream', 'review', 'resume', 'stop'])
+      const knownMethods = new Set(['fetch', 'state', 'authorize', 'develop', 'develop/poll', 'stream', 'review', 'resume', 'stop', 'sync'])
       if (method === undefined || !knownMethods.has(method)) {
         writeJson(res, 404, { ok: false, error: 'unknown method' })
         return
@@ -480,6 +649,16 @@ export function apply(ctx: Context): void {
         writeJson(res, result.ok ? 200 : 400, result)
         return
       }
+      if (method === 'sync') {
+        const securityError = privilegedRequestError(req)
+        if (securityError) {
+          writeJson(res, 403, { ok: false, error: securityError })
+          return
+        }
+        const result = await syncWorktree(ctx, payload)
+        writeJson(res, result.ok ? 200 : 400, result)
+        return
+      }
 
       writeJson(res, 404, { ok: false, error: `unknown method "${method}"` })
     },
@@ -506,11 +685,13 @@ async function fetchIssue(
       return { ok: false, error: stderr || `gh 执行失败(exit ${result.exitCode})` }
     }
     const parsedJson = JSON.parse(result.stdout.text) as unknown
-    const data: { kind: 'issue' | 'pr'; item: unknown; timeline?: unknown } = { kind: parsed.kind, item: parsedJson }
+    const data: { kind: 'issue' | 'pr'; item: unknown; timeline?: unknown; dependencies?: { blockedBy: IssueDependency[]; blocking: IssueDependency[] } } = { kind: parsed.kind, item: parsedJson }
     // issue 额外拉 timeline,提取关联事件(linked PR/commit)——GitHub UI 的
     // "linked a pull request" 就来自 cross-referenced 事件
     if (!isPR) {
       data.timeline = await fetchTimeline(ctx, parsed.owner, parsed.repo, parsed.number)
+      // 依赖图:blockedBy 来自本 issue 正文,blocking 扫描 repo 内其它 issue
+      data.dependencies = await fetchDependencies(ctx, parsed, parsedJson as { body?: unknown })
     }
     return { ok: true, data }
   } catch (error) {
@@ -581,9 +762,63 @@ async function authorizeAgent(
   }
 }
 
+/** One resolved dependency entry (number + title + state). */
+interface IssueDependency {
+  number: number
+  title: string
+  state: string
+}
+
+/**
+ * Resolve an issue's dependency graph (issue-contract convention):
+ * - blockedBy: issues this issue depends on, parsed from its `## 依赖` body section;
+ * - blocking: issues that declare a dependency on this issue.
+ * Scans the repo's issues once via gh (local, fast).
+ */
+async function fetchDependencies(
+  ctx: Context,
+  target: { owner: string; repo: string; number: string },
+  item: { body?: unknown },
+): Promise<{ blockedBy: IssueDependency[]; blocking: IssueDependency[] }> {
+  const empty: { blockedBy: IssueDependency[]; blocking: IssueDependency[] } = { blockedBy: [], blocking: [] }
+  const command = `gh issue list --repo ${target.owner}/${target.repo} --state all --limit 100 --json number,title,state,body`
+  let issues: { number: number; title: string; state: string; body: string }[] = []
+  try {
+    const spec = ctx.shell.resolve({ command, timeoutMs: 20000 })
+    const result = await ctx.shell.run(spec)
+    if (result.exitCode !== 0) return empty
+    const parsed = JSON.parse(result.stdout.text) as unknown
+    if (!Array.isArray(parsed)) return empty
+    issues = parsed as { number: number; title: string; state: string; body: string }[]
+  } catch {
+    return empty
+  }
+
+  const current = Number(target.number)
+  const byNumber = new Map(issues.filter((i) => Number.isInteger(i.number)).map((i) => [i.number, i]))
+
+  const blockedBy: IssueDependency[] = []
+  for (const number of parseDependencies(String(item.body ?? ''))) {
+    const found = byNumber.get(number)
+    blockedBy.push(found
+      ? { number: found.number, title: found.title, state: found.state }
+      : { number, title: '', state: 'unknown' })
+  }
+  const blocking: IssueDependency[] = []
+  for (const issue of issues) {
+    if (issue.number === current) continue
+    if (parseDependencies(issue.body).includes(current)) {
+      blocking.push({ number: issue.number, title: issue.title, state: issue.state })
+    }
+  }
+  blockedBy.sort((a, b) => a.number - b.number)
+  blocking.sort((a, b) => a.number - b.number)
+  return { blockedBy, blocking }
+}
+
 /** Fetch the issue timeline and keep only the events worth showing. */
 async function fetchTimeline(ctx: Context, owner: string, repo: string, number: string): Promise<unknown[]> {
-  const command = `gh api repos/${owner}/${repo}/issues/${number}/timeline -H "Accept: application/vnd.github+json" --jq '[.[] | select(.event == "cross-referenced" or .event == "referenced" or .event == "connected" or .event == "closed" or .event == "reopened") | {event, created_at, actor: .actor.login, commit_id, source: (if .source then {number: .source.issue.number, title: .source.issue.title, html_url: .source.issue.html_url, state: .source.issue.state} else null end)}]'`
+  const command = `gh api repos/${owner}/${repo}/issues/${number}/timeline -H "Accept: application/vnd.github+json" --jq '[.[] | select(.event == "cross-referenced" or .event == "referenced" or .event == "connected" or .event == "closed" or .event == "reopened") | {event, created_at, actor: .actor.login, commit_id, source: (if .source then {number: .source.issue.number, title: .source.issue.title, html_url: .source.issue.html_url, state: .source.issue.state, is_pr: (.source.issue.pull_request != null), pr_merged: (.source.issue.pull_request.merged_at != null)} else null end)}]'`
   try {
     const spec = ctx.shell.resolve({ command, timeoutMs: 15000 })
     const result = await ctx.shell.run(spec)
@@ -738,6 +973,7 @@ async function ensureWorktree(ctx: Context, parsed: { owner: string; repo: strin
       reviewSessionId: null,
       reviewResult: null,
       prNumber: null,
+      issueState: 'OPEN',
       baseRef: null,
       updatedAt: Date.now(),
       events: [],
@@ -747,6 +983,7 @@ async function ensureWorktree(ctx: Context, parsed: { owner: string; repo: strin
   if (!Array.isArray(workflow.events)) workflow.events = []
   if (workflow.reviewSessionId === undefined) workflow.reviewSessionId = null
   if (workflow.prNumber === undefined) workflow.prNumber = null
+  if (workflow.issueState === undefined) workflow.issueState = 'OPEN'
   if (workflow.baseRef === undefined) workflow.baseRef = null
   // 校正路径字段(配置可能变化)
   workflow.worktree = worktree
@@ -1069,6 +1306,8 @@ async function startDevelop(
   const ensured = await ensureWorktree(ctx, parsed)
   if (!ensured.ok) return ensured
   const { workflow } = ensured
+  // issue 已校验为 OPEN(真实 agent 走授权快照,dryrun 走抓取校验)
+  workflow.issueState = 'OPEN'
 
   if (agent === 'dryrun') {
     const taskIdValue = taskId('dryrun')
@@ -1270,6 +1509,55 @@ function stopTask(payload: unknown): { ok: true; taskId: string; stopped: boolea
     await saveWorkflow(workflow)
   })()
   return { ok: true, taskId, stopped }
+}
+
+/** Sync a workflow's worktree with the remote base (git fetch + merge origin/main).
+ *  Keeps the worktree on the latest base so dev/review never target stale code
+ *  (issue #5). The merge result is recorded as a timeline event. */
+async function syncWorktree(
+  ctx: Context,
+  payload: unknown,
+): Promise<{ ok: true; worktree: string; branch: string; head: string | null } | { ok: false; error: string }> {
+  const url = String((payload as { url?: unknown } | undefined)?.url ?? '').trim()
+  const parsed = parseUrl(url)
+  if (!parsed || parsed.kind !== 'issue') {
+    return { ok: false, error: '请输入形如 https://github.com/owner/repo/issues/123 的链接' }
+  }
+  const key = issueKey(`${parsed.owner}/${parsed.repo}`, parsed.number)
+  const workflow = await loadWorkflow(key)
+  if (!workflow || !existsSync(workflow.worktree)) {
+    return { ok: false, error: '该 issue 尚无 worktree,无法同步' }
+  }
+  const policy = { mode: 'danger-full-access' as const, workspaceRoot: workflow.worktree }
+  try {
+    await appendLog(workflow.key, 'dev', '[clickvibe] 同步:git fetch origin…')
+    await runCommand(ctx, 'git fetch origin --prune', { workdir: workflow.worktree, timeoutMs: 60_000, sandboxPolicy: policy })
+    await appendLog(workflow.key, 'dev', '[clickvibe] 同步:合并 origin/main…')
+    try {
+      await runCommand(ctx, 'git merge --no-edit origin/main', { workdir: workflow.worktree, timeoutMs: 60_000, sandboxPolicy: policy })
+    } catch (error) {
+      // 合并冲突/失败:回滚到合并前,保持 worktree 干净;错误透传给用户
+      await runCommand(ctx, 'git merge --abort', { workdir: workflow.worktree, timeoutMs: 30_000, sandboxPolicy: policy }).catch(() => {})
+      throw error
+    }
+    const head = await readWorktreeHead(ctx, workflow.worktree)
+    await appendLog(workflow.key, 'dev', `[clickvibe] 同步完成,HEAD ${head ?? '未知'}`)
+    // 记录同步事件到权威时间线(不改变开发/审查语义)
+    const reloaded = await loadWorkflow(workflow.key)
+    if (reloaded) {
+      await appendEvent(reloaded, {
+        kind: 'note',
+        at: new Date().toISOString(),
+        hash: head ?? undefined,
+        note: 'worktree 已同步到 origin/main',
+      })
+    }
+    return { ok: true, worktree: workflow.worktree, branch: workflow.branch, head }
+  } catch (error) {
+    const message = String(error instanceof Error ? error.message : error)
+    await appendLog(workflow.key, 'dev', `[clickvibe] 同步失败: ${message}`)
+    return { ok: false, error: `同步失败: ${message}` }
+  }
 }
 
 /** Start a review task on the dev branch with codex/claude. */

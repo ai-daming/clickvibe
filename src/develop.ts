@@ -32,6 +32,28 @@ export function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`
 }
 
+/**
+ * Parse the `## 依赖` section of an issue body (issue-contract machine-readable
+ * convention: `Blocked by #NN`, multiple deps comma-separated; `无` = none).
+ * Returns the referenced issue numbers, empty when the section is missing.
+ */
+export function parseDependencies(body: string | null | undefined): number[] {
+  const lines = String(body ?? '').split('\n')
+  const depIndex = lines.findIndex((line) => /^##\s*依赖/.test(line.trim()))
+  if (depIndex === -1) return []
+  const numbers: number[] = []
+  for (let i = depIndex + 1; i < lines.length; i++) {
+    const line = lines[i].trim()
+    if (line === '') continue
+    if (/^##\s/.test(line)) break // 下一个章节
+    for (const match of line.matchAll(/#(\d+)/g)) {
+      const number = Number(match[1])
+      if (!numbers.includes(number)) numbers.push(number)
+    }
+  }
+  return numbers
+}
+
 /** Build a worktree command whose new branch is explicitly rooted at the fetched remote base. */
 export function buildWorktreeAddCommand(options: {
   path: string
