@@ -848,9 +848,16 @@ function DevSection({ url, issue, workflow, onWorkflow }: {
 
   // 唯一动作:服务端由 git 事实推导;issue 已关闭时本地覆盖为无动作
   const issueClosed = String(issue.state ?? '').toUpperCase() === 'CLOSED'
+  // #5 回归修复:从未开发过(无 workflow 记录)的 OPEN issue,服务端 /api/state
+  // 只枚举已持久化 workflow,不会为其推导 nextAction(恒为 undefined),导致按钮
+  // 缺失。这里按 deriveNextAction 的 idle 分支本地兜底为『开始开发』;
+  // 有 workflow 记录时仍以服务端推导为准。
+  const idleDevelop: NextAction = { kind: 'develop', label: '开始开发', hint: '创建 worktree 并启动 agent 开发' }
   const effectiveAction: NextAction = issueClosed
     ? { kind: 'none', label: '无', hint: 'issue 已关闭,无待办动作' }
-    : (nextAction ?? { kind: 'none', label: '无', hint: '等待状态…' })
+    : (nextAction ?? (workflow === null
+      ? idleDevelop
+      : { kind: 'none', label: '无', hint: '等待状态…' }))
 
   const runAction = () => {
     switch (effectiveAction.kind) {
