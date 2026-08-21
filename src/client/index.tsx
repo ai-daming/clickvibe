@@ -98,6 +98,19 @@ const PANEL_CSS = `
 .cv-md-ol { padding-left: 20px; list-style: decimal; margin: 0 0 8px; }
 .cv-md-blockquote { border-left: 4px solid #d0d7de; padding-left: 10px; margin: 0 0 8px; color: #57606a; }
 .cv-md-hr { border: none; border-top: 1px solid #d0d7de; margin: 10px 0; }
+.cv-dev { border: 1px solid #d0d7de; border-radius: 6px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+.cv-dev-head { font-weight: 600; font-size: 12.5px; color: #1f2328; }
+.cv-dev-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.cv-dev-btn { padding: 5px 10px; border: none; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; color: #ffffff; }
+.cv-dev-btn:disabled { cursor: default; opacity: 0.6; }
+.cv-dev-codex { background: #1f2328; }
+.cv-dev-claude { background: #d97706; }
+.cv-dev-dryrun { background: #57606a; }
+.cv-dev-status { font-size: 12px; color: #57606a; }
+.cv-dev-path { font-size: 11px; color: #8c959f; word-break: break-all; margin-top: 2px; }
+.cv-dev-error { font-size: 12px; color: #cf222e; background: #ffebe9; border: 1px solid #ff8182; border-radius: 4px; padding: 6px 8px; }
+.cv-dev-log { background: #0d1117; color: #e6edf3; border-radius: 6px; padding: 8px 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow-y: auto; margin: 0; }
+.cv-dev-done { font-size: 12px; color: #1a7f37; font-weight: 600; }
 `
 
 /** Inject the plugin stylesheet once; returns the disposer. */
@@ -335,7 +348,133 @@ function IssueView({ issue, kind }: { issue: GhIssue; kind: 'issue' | 'pr' }) {
       <div className="cv-issue-body">
         <div className="cv-md">{renderMarkdown(issue.body ?? '')}</div>
       </div>
+      {issue.url && kind === 'issue' && state === 'OPEN'
+        ? <DevSection url={issue.url} />
+        : null}
       <CommentsSection comments={issue.comments ?? []} />
+    </div>
+  )
+}
+
+type DevelopAgent = 'codex' | 'claude' | 'dryrun'
+type DevelopStatus = 'idle' | 'starting' | 'creating' | 'running' | 'done' | 'failed'
+const MAX_UI_LOG_LINES = 2_000
+
+interface DevState {
+  status: DevelopStatus
+  worktree?: string
+  branch?: string
+  error?: string
+}
+
+interface PollSuccess {
+  ok: true
+  status: 'creating' | 'running' | 'done' | 'failed'
+  cursor: number
+  delta: string[]
+  truncated: boolean
+  done: boolean
+}
+
+async function apiCall<T>(method: string, body: Record<string, unknown>): Promise<T> {
+  const response = await fetch(`/clickvibe/api/${method}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return response.json() as Promise<T>
+}
+
+function DevSection({ url }: { url: string }) {
+  const [state, setState] = React.useState<DevState>({ status: 'idle' })
+  const [logs, setLogs] = React.useState<string[]>([])
+  const timerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+  const logRef = React.useRef<HTMLPreElement | null>(null)
+
+  const stopPolling = React.useCallback(() => {
+    if (timerRef.current !== null) clearTimeout(timerRef.current)
+    timerRef.current = null
+  }, [])
+
+  React.useEffect(() => stopPolling, [stopPolling])
+  React.useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
+  }, [logs])
+
+  const start = async (agent: DevelopAgent) => {
+    if (agent !== 'dryrun' && !window.confirm(
+      `将启动 ${agent} 执行该 Issue 及评论中的指令,并可能修改代码、提交、推送或创建 PR。确认继续?`,
+    )) return
+    stopPolling()
+    setState({ status: 'starting' })
+    setLogs([])
+    try {
+      const started = await apiCall<
+        | { ok: true; taskId: string; worktree: string; branch: string }
+        | { ok: false; error: string }
+      >('develop', { url, agent })
+      if (!started.ok) {
+        setState({ status: 'failed', error: started.error })
+        return
+      }
+      setState({ status: 'creating', worktree: started.worktree, branch: started.branch })
+      let cursor = 0
+      const poll = async (): Promise<void> => {
+        try {
+          const result = await apiCall<PollSuccess | { ok: false; error: string }>(
+            'develop/poll',
+            { taskId: started.taskId, cursor },
+          )
+          if (!result.ok) throw new Error(result.error)
+          cursor = result.cursor
+          if (result.delta.length > 0) setLogs((previous) => {
+            const combined = [...previous, ...result.delta]
+            if (combined.length <= MAX_UI_LOG_LINES) return combined
+            return ['[clickvibe] 面板较早日志已截断', ...combined.slice(-(MAX_UI_LOG_LINES - 1))]
+          })
+          setState((previous) => ({ ...previous, status: result.status }))
+          if (result.done) {
+            stopPolling()
+            return
+          }
+          timerRef.current = setTimeout(() => { void poll() }, 750)
+        } catch (error) {
+          stopPolling()
+          setState((previous) => ({
+            ...previous,
+            status: 'failed',
+            error: `日志轮询失败: ${String(error instanceof Error ? error.message : error)}`,
+          }))
+        }
+      }
+      await poll()
+    } catch (error) {
+      setState({ status: 'failed', error: `启动失败: ${String(error instanceof Error ? error.message : error)}` })
+    }
+  }
+
+  const active = state.status === 'starting' || state.status === 'creating' || state.status === 'running'
+  return (
+    <div className="cv-dev">
+      <div className="cv-dev-head">🚀 一键开发</div>
+      <div className="cv-dev-actions">
+        <button className="cv-dev-btn cv-dev-codex" disabled={active} onClick={() => { void start('codex') }}>Codex 开发</button>
+        <button className="cv-dev-btn cv-dev-claude" disabled={active} onClick={() => { void start('claude') }}>Claude 开发</button>
+        <button className="cv-dev-btn cv-dev-dryrun" disabled={active} onClick={() => { void start('dryrun') }}>安全演练</button>
+      </div>
+      {state.status !== 'idle' ? (
+        <div className="cv-dev-status">
+          {state.status === 'starting' ? '正在启动…'
+            : state.status === 'creating' ? '正在准备 worktree…'
+              : state.status === 'running' ? `开发中 (${state.branch ?? ''})`
+                : state.status === 'done' ? '任务已完成'
+                  : '任务失败'}
+          {state.worktree ? <div className="cv-dev-path">{state.worktree}</div> : null}
+        </div>
+      ) : null}
+      {state.error ? <div className="cv-dev-error">{state.error}</div> : null}
+      {logs.length > 0 ? <pre ref={logRef} className="cv-dev-log">{logs.join('\n')}</pre> : null}
+      {state.status === 'done' ? <div className="cv-dev-done">✅ 开发完成</div> : null}
     </div>
   )
 }

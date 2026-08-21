@@ -1,0 +1,105 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import {
+  LineLog,
+  decideWorktreeRecovery,
+  parseAgent,
+  parseGithubUrl,
+  shellQuote,
+} from '../src/develop.ts'
+
+test('parseAgent accepts only the three supported agents', () => {
+  assert.equal(parseAgent('codex'), 'codex')
+  assert.equal(parseAgent('CLAUDE'), 'claude')
+  assert.equal(parseAgent(' dryrun '), 'dryrun')
+  assert.equal(parseAgent(undefined), 'codex')
+  assert.throws(() => parseAgent('other'), /不支持的 agent/)
+})
+
+test('parseGithubUrl accepts exact issue and PR URLs only', () => {
+  assert.deepEqual(parseGithubUrl('https://github.com/ai-daming/clickvibe/issues/1'), {
+    kind: 'issue', owner: 'ai-daming', repo: 'clickvibe', number: '1',
+  })
+  assert.equal(parseGithubUrl('https://github.com/a/b/issues/1/extra'), null)
+  assert.equal(parseGithubUrl('https://evil.example/a/b/issues/1'), null)
+})
+
+test('shellQuote prevents POSIX shell expansion', () => {
+  assert.equal(shellQuote('/tmp/simple'), "'/tmp/simple'")
+  assert.equal(shellQuote("/tmp/a'b$(touch nope)"), "'/tmp/a'\\''b$(touch nope)'")
+})
+
+test('LineLog buffers complete lines and flushes a final fragment', () => {
+  const log = new LineLog(10)
+  log.appendChunk('one\ntw')
+  assert.deepEqual(log.read(0), { cursor: 1, lines: ['one'], truncated: false })
+  log.appendChunk('o\nthree\r\n')
+  log.appendChunk('last')
+  log.flush()
+  assert.deepEqual(log.read(1), {
+    cursor: 4,
+    lines: ['two', 'three', 'last'],
+    truncated: false,
+  })
+})
+
+test('LineLog keeps readers independent and reports truncation', () => {
+  const log = new LineLog(3)
+  log.appendLine('one')
+  log.appendLine('two')
+  assert.deepEqual(log.read(0).lines, ['one', 'two'])
+  assert.deepEqual(log.read(0).lines, ['one', 'two'])
+  log.appendLine('three')
+  log.appendLine('four')
+  assert.deepEqual(log.read(0), {
+    cursor: 4,
+    lines: ['[clickvibe] 较早日志已截断', 'two', 'three', 'four'],
+    truncated: true,
+  })
+})
+
+test('worktree recovery creates or reuses the intended branch', () => {
+  assert.deepEqual(decideWorktreeRecovery({
+    targetBranch: 'clickvibe-issue-1',
+    pathExists: false, pathEmpty: false, registeredBranch: null,
+    branchExists: false, branchWorktree: null,
+  }), { kind: 'add-new-branch' })
+  assert.deepEqual(decideWorktreeRecovery({
+    targetBranch: 'clickvibe-issue-1',
+    pathExists: true, pathEmpty: true, registeredBranch: null,
+    branchExists: true, branchWorktree: null,
+  }), { kind: 'add-existing-branch' })
+  assert.deepEqual(decideWorktreeRecovery({
+    targetBranch: 'clickvibe-issue-1',
+    pathExists: true, pathEmpty: false, registeredBranch: 'clickvibe-issue-1',
+    branchExists: true, branchWorktree: '/target',
+  }), { kind: 'reuse' })
+  assert.deepEqual(decideWorktreeRecovery({
+    targetBranch: 'clickvibe-issue-1',
+    pathExists: true, pathEmpty: false, registeredBranch: 'HEAD',
+    branchExists: false, branchWorktree: null,
+  }), { kind: 'attach-detached' })
+  assert.deepEqual(decideWorktreeRecovery({
+    targetBranch: 'clickvibe-issue-1',
+    pathExists: true, pathEmpty: false, registeredBranch: 'HEAD',
+    branchExists: true, branchWorktree: null,
+  }), { kind: 'attach-existing' })
+})
+
+test('worktree recovery fails closed for conflicting partial states', () => {
+  assert.match(decideWorktreeRecovery({
+    targetBranch: 'clickvibe-issue-1',
+    pathExists: true, pathEmpty: false, registeredBranch: null,
+    branchExists: false, branchWorktree: null,
+  }).reason ?? '', /非空目录/)
+  assert.match(decideWorktreeRecovery({
+    targetBranch: 'clickvibe-issue-1',
+    pathExists: true, pathEmpty: false, registeredBranch: 'other',
+    branchExists: true, branchWorktree: null,
+  }).reason ?? '', /其他分支/)
+  assert.match(decideWorktreeRecovery({
+    targetBranch: 'clickvibe-issue-1',
+    pathExists: false, pathEmpty: false, registeredBranch: null,
+    branchExists: true, branchWorktree: '/elsewhere',
+  }).reason ?? '', /其他 worktree/)
+})

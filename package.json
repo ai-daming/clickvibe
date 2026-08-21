@@ -44,6 +44,9 @@
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   },
+  "dependencies": {
+    "yaml": "^2.9.0"
+  },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.0-rc.8",
     "@deepseek-ai/dsh-client-runtime": "0.1.0-rc.8",
@@ -62,6 +65,7 @@
   "scripts": {
     "build": "rm -rf lib && tsc -p tsconfig.build.json && tsdown",
     "bundle": "tsdown",
+    "test": "node --test tests/*.test.ts",
     "watch": "tsdown --watch",
     "typecheck": "tsc --noEmit"
   }
