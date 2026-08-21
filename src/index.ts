@@ -39,7 +39,7 @@ import {
   type DevelopAgent,
   type IssuePromptSnapshot,
 } from './develop.ts'
-import { deriveNextAction, type NextAction, type WorkflowFacts } from './state-view.ts'
+import { deriveNextAction, workflowBaseBranch, type NextAction, type WorkflowFacts } from './state-view.ts'
 import {
   appendEvent,
   appendLog,
@@ -331,6 +331,25 @@ interface WorkflowDerived {
   hasNewCommits: boolean
   verdictCurrent: boolean
   nextAction: NextAction
+  status: 'idle' | 'developing' | 'review-ready' | 'reviewing' | 'passed'
+  baseBranch: string
+}
+
+interface GithubPrFact {
+  number: string
+  state: 'OPEN' | 'MERGED' | 'CLOSED'
+  mergedAt: string | null
+  headRefName: string
+  url: string
+  reviewDecision: string | null
+}
+
+interface DeriveOptions {
+  pr?: GithubPrFact | null
+  prStatusKnown?: boolean
+  branchExists?: boolean
+  hasCommits?: boolean
+  defaultBranch?: string
 }
 
 /** Short hash of one ref inside the worktree's repo (null when unresolvable). */
@@ -400,7 +419,9 @@ async function readRevCount(ctx: Context, workdir: string, left: string, right: 
 export async function deriveWorkflowState(
   ctx: Context,
   workflow: IssueWorkflow,
+  options: DeriveOptions = {},
 ): Promise<IssueWorkflow & { derived: WorkflowDerived }> {
+  const workflowPrNumber = workflow.prNumber == null ? null : String(workflow.prNumber)
   const worktree = workflow.worktree
   const exists = existsSync(worktree)
   const events = workflow.events ?? []
@@ -413,6 +434,13 @@ export async function deriveWorkflowState(
 
   const head = exists ? await readWorktreeHead(ctx, worktree) : null
   const branch = exists ? await readBranch(ctx, worktree) : null
+  const hasUncommittedChanges = exists
+    ? await runCommand(ctx, 'git status --porcelain', {
+        workdir: worktree,
+        timeoutMs: 10000,
+        sandboxPolicy: { mode: 'read-only', workspaceRoot: worktree },
+      }).then((output) => output !== '').catch(() => false)
+    : false
 
   let mainHead: string | null = null
   let aheadOfMain = 0
@@ -448,10 +476,15 @@ export async function deriveWorkflowState(
   const hasNewCommits = head !== null && lastDevHash !== null && head !== lastDevHash
   // worktree 落后远端基线(origin/main 或远端同名分支)→ 需要同步
   const needsSync = behindBase > 0 || (behindUpstream ?? 0) > 0
-  const reviewedHash = lastReviewHash
-  const reviewPassed = workflow.reviewResult?.passed ?? null
+  const githubReviewPassed = options.pr?.reviewDecision === 'APPROVED'
+    ? true
+    : options.pr?.reviewDecision === 'CHANGES_REQUESTED'
+      ? false
+      : null
+  const reviewPassed = workflow.reviewResult?.passed ?? githubReviewPassed
+  const reviewedHash = lastReviewHash ?? (githubReviewPassed !== null ? head : null)
   // 结论仍针对当前 HEAD 才算数;HEAD 变化后旧结论不冒充当前状态
-  const verdictCurrent = workflow.reviewResult !== null && head !== null && reviewedHash !== null && head === reviewedHash
+  const verdictCurrent = reviewPassed !== null && head !== null && reviewedHash !== null && head === reviewedHash
 
   const devLive = workflow.devTaskId ? liveTasks.get(workflow.devTaskId) : undefined
   const reviewLive = workflow.reviewTaskId ? liveTasks.get(workflow.reviewTaskId) : undefined
@@ -459,8 +492,10 @@ export async function deriveWorkflowState(
 
   const facts: WorkflowFacts = {
     issueOpen: (workflow.issueState ?? 'OPEN') !== 'CLOSED',
-    prMerged: false, // PR 合并状态需要网络查询,/state 不做网络 IO,保持实时推导
-    prNumber: workflow.prNumber,
+    prMerged: options.pr?.state === 'MERGED' || options.pr?.mergedAt !== null && options.pr?.mergedAt !== undefined,
+    prState: options.pr?.state ?? null,
+    prStatusKnown: options.prStatusKnown,
+    prNumber: options.pr?.number ?? workflowPrNumber,
     stage: workflow.stage,
     devInterrupted: workflow.devInterrupted,
     taskRunning,
@@ -469,11 +504,28 @@ export async function deriveWorkflowState(
     reviewPassed,
     hasNewCommits,
     needsSync,
+    branchExists: options.branchExists ?? branch !== null,
+    worktreeExists: exists,
+    worktreeValid: !exists || branch === workflow.branch,
+    hasUncommittedChanges,
+    hasCommits: options.hasCommits ?? aheadOfBase > 0,
+    hasResumeSession: workflow.devSessionId !== null,
   }
   const nextAction = deriveNextAction(facts)
+  const baseBranch = workflowBaseBranch(workflow.baseRef, options.defaultBranch ?? 'main')
+  const status: WorkflowDerived['status'] = facts.prMerged || reviewPassed === true
+    ? 'passed'
+    : taskRunning && workflow.stage === 'reviewing'
+      ? 'reviewing'
+      : facts.prNumber
+        ? 'review-ready'
+        : taskRunning || hasUncommittedChanges || facts.hasCommits
+          ? 'developing'
+          : 'idle'
 
   return {
     ...workflow,
+    prNumber: options.pr?.number ?? workflowPrNumber,
     derived: {
       head,
       branch,
@@ -493,6 +545,8 @@ export async function deriveWorkflowState(
       hasNewCommits,
       verdictCurrent,
       nextAction,
+      status,
+      baseBranch,
     },
   }
 }
@@ -511,7 +565,7 @@ export function apply(ctx: Context): void {
       }
       const pathname = new URL(req.url ?? '/', 'http://clickvibe.internal').pathname
       const method = pathname.startsWith(`${ROUTE}/`) ? pathname.slice(`${ROUTE}/`.length) : undefined
-      const knownMethods = new Set(['fetch', 'state', 'authorize', 'develop', 'develop/poll', 'stream', 'review', 'resume', 'stop', 'sync'])
+      const knownMethods = new Set(['fetch', 'projects', 'repo/issues', 'state', 'authorize', 'develop', 'develop/poll', 'stream', 'review', 'resume', 'stop', 'sync'])
       if (method === undefined || !knownMethods.has(method)) {
         writeJson(res, 404, { ok: false, error: 'unknown method' })
         return
@@ -546,14 +600,19 @@ export function apply(ctx: Context): void {
         writeJson(res, result.ok ? 200 : 400, result)
         return
       }
+      if (method === 'projects') {
+        const result = await listProjects()
+        writeJson(res, 200, result)
+        return
+      }
+      if (method === 'repo/issues') {
+        const result = await fetchRepositoryIssues(ctx, payload)
+        writeJson(res, result.ok ? 200 : 400, result)
+        return
+      }
       if (method === 'state') {
         const workflows = await loadAllWorkflows()
-        // 附加推导状态:worktree HEAD + 相对最新事件的进展(不覆盖存储)
-        const enriched = []
-        for (const w of workflows) {
-          const derived = await deriveWorkflowState(ctx, w)
-          enriched.push(derived)
-        }
+        const enriched = await enrichWorkflowStates(ctx, workflows)
         writeJson(res, 200, { ok: true, workflows: enriched })
         return
       }
@@ -663,6 +722,270 @@ export function apply(ctx: Context): void {
       writeJson(res, 404, { ok: false, error: `unknown method "${method}"` })
     },
   })
+}
+
+async function listProjects(): Promise<{ ok: true; projects: { repoKey: string; path: string; available: boolean }[] }> {
+  const config = await loadConfig()
+  return {
+    ok: true,
+    projects: Object.entries(config.repos)
+      .map(([repoKey, path]) => ({ repoKey, path: expandHome(path), available: existsSync(expandHome(path)) }))
+      .sort((a, b) => a.repoKey.localeCompare(b.repoKey)),
+  }
+}
+
+interface GithubPrLookup {
+  known: boolean
+  pr: GithubPrFact | null
+}
+
+async function fetchGithubPrFact(
+  ctx: Context,
+  repoKey: string,
+  branch: string,
+  prNumber: string | number | null,
+): Promise<GithubPrLookup> {
+  const hasPrNumber = prNumber !== null && prNumber !== undefined
+  const selector = hasPrNumber ? shellQuote(String(prNumber)) : `--head ${shellQuote(branch)} --state all --limit 1`
+  const command = hasPrNumber
+    ? `gh pr view ${selector} --repo ${shellQuote(repoKey)} --json number,state,mergedAt,headRefName,url,reviewDecision`
+    : `gh pr list --repo ${shellQuote(repoKey)} ${selector} --json number,state,mergedAt,headRefName,url,reviewDecision --jq '.[0] // {}'`
+  try {
+    const output = await runCommand(ctx, command, { timeoutMs: 5000 })
+    const raw = JSON.parse(output || '{}') as Partial<GithubPrFact> & { number?: number | string }
+    if (raw.number === undefined) return { known: true, pr: null }
+    return {
+      known: true,
+      pr: {
+        number: String(raw.number),
+        state: raw.state === 'MERGED' ? 'MERGED' : raw.state === 'CLOSED' ? 'CLOSED' : 'OPEN',
+        mergedAt: raw.mergedAt ?? null,
+        headRefName: String(raw.headRefName ?? branch),
+        url: String(raw.url ?? `https://github.com/${repoKey}/pull/${raw.number}`),
+        reviewDecision: raw.reviewDecision ?? null,
+      },
+    }
+  } catch {
+    return { known: false, pr: null }
+  }
+}
+
+async function readConfiguredBranchFacts(
+  ctx: Context,
+  config: ClickVibeConfig,
+  workflow: IssueWorkflow,
+): Promise<{ branchExists?: boolean; hasCommits?: boolean; defaultBranch?: string }> {
+  const configuredPath = config.repos[workflow.repoKey]
+  if (!configuredPath) return {}
+  const repoPath = expandHome(configuredPath)
+  if (!existsSync(repoPath)) return {}
+  const policy = { mode: 'read-only' as const, workspaceRoot: repoPath }
+  const localRef = `refs/heads/${workflow.branch}`
+  const remoteRef = `refs/remotes/origin/${workflow.branch}`
+  const branchRef = await runCommand(ctx,
+    `if git show-ref --verify --quiet ${shellQuote(localRef)}; then printf %s ${shellQuote(workflow.branch)}; elif git show-ref --verify --quiet ${shellQuote(remoteRef)}; then printf %s ${shellQuote(`origin/${workflow.branch}`)}; else exit 1; fi`,
+    { workdir: repoPath, timeoutMs: 3000, sandboxPolicy: policy },
+  ).catch(() => '')
+  const defaultRef = await runCommand(ctx, 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD', {
+    workdir: repoPath, timeoutMs: 3000, sandboxPolicy: policy,
+  }).catch(() => '')
+  if (!branchRef) return { branchExists: false, defaultBranch: defaultRef.replace(/^origin\//, '') || undefined }
+  const baseRef = defaultRef || 'origin/main'
+  const hasCommits = await runCommand(ctx, `git rev-list --count ${shellQuote(baseRef)}..${shellQuote(branchRef)}`, {
+    workdir: repoPath, timeoutMs: 3000, sandboxPolicy: policy,
+  }).then((count) => Number(count) > 0).catch(() => false)
+  return { branchExists: true, hasCommits, defaultBranch: defaultRef.replace(/^origin\//, '') || undefined }
+}
+
+/** Enrich every stored workflow concurrently; one unreachable GitHub call costs at most one 5s window. */
+export async function enrichWorkflowStates(
+  ctx: Context,
+  workflows: IssueWorkflow[],
+  configOverride?: ClickVibeConfig,
+): Promise<Array<IssueWorkflow & { derived: WorkflowDerived }>> {
+  const config = configOverride ?? await loadConfig()
+  return Promise.all(workflows.map(async (workflow) => {
+    const [prLookup, branchFacts] = await Promise.all([
+      fetchGithubPrFact(ctx, workflow.repoKey, workflow.branch, workflow.prNumber),
+      readConfiguredBranchFacts(ctx, config, workflow),
+    ])
+    return deriveWorkflowState(ctx, workflow, {
+      pr: prLookup.pr,
+      prStatusKnown: workflow.prNumber ? prLookup.known && prLookup.pr !== null : prLookup.known,
+      ...branchFacts,
+    })
+  }))
+}
+
+interface RepositoryIssueItem {
+  number: number
+  title: string
+  state: string
+  body: string
+  url: string
+  updatedAt?: string
+  labels?: { name: string; color?: string }[]
+  milestone?: { title: string; number?: number } | null
+}
+
+interface RepositoryIssueRest {
+  number: number
+  title: string
+  state: string
+  body: string | null
+  html_url: string
+  updated_at?: string
+  labels?: { name: string; color?: string }[]
+  milestone?: { title: string; number?: number } | null
+  pull_request?: unknown
+}
+
+interface RepositoryPrRest {
+  number: number
+  state: string
+  merged_at: string | null
+  html_url: string
+  head?: { ref?: string }
+}
+
+function flattenGithubPages<T>(value: unknown): T[] {
+  if (!Array.isArray(value)) throw new Error('GitHub 分页返回格式无效')
+  return value.flatMap((page) => Array.isArray(page) ? page as T[] : [page as T])
+}
+
+export async function fetchRepositoryIssues(
+  ctx: Context,
+  payload: unknown,
+  overrides: { config?: ClickVibeConfig; workflows?: IssueWorkflow[] } = {},
+): Promise<
+  | { ok: true; repoKey: string; issues: unknown[] }
+  | { ok: false; error: string }
+> {
+  const repoKey = String((payload as { repoKey?: unknown } | undefined)?.repoKey ?? '').trim()
+  const config = overrides.config ?? await loadConfig()
+  const configuredPath = config.repos[repoKey]
+  if (!configuredPath) return { ok: false, error: `未配置项目 ${repoKey}` }
+
+  const issueCommand = `gh api --paginate --slurp ${shellQuote(`repos/${repoKey}/issues?state=all&per_page=100`)}`
+  const prCommand = `gh api --paginate --slurp ${shellQuote(`repos/${repoKey}/pulls?state=all&per_page=100`)}`
+  try {
+    const [issueOutput, prOutput, allWorkflows] = await Promise.all([
+      runCommand(ctx, issueCommand, { timeoutMs: 30000 }),
+      runCommand(ctx, prCommand, { timeoutMs: 30000 }),
+      overrides.workflows ? Promise.resolve(overrides.workflows) : loadAllWorkflows(),
+    ])
+    const allIssues = flattenGithubPages<RepositoryIssueRest>(JSON.parse(issueOutput))
+      .filter((issue) => issue.pull_request === undefined)
+      .map<RepositoryIssueItem>((issue) => ({
+        number: issue.number,
+        title: issue.title,
+        state: issue.state.toUpperCase(),
+        body: issue.body ?? '',
+        url: issue.html_url,
+        updatedAt: issue.updated_at,
+        labels: issue.labels,
+        milestone: issue.milestone,
+      }))
+    const prs = flattenGithubPages<RepositoryPrRest>(JSON.parse(prOutput)).map<GithubPrFact>((pr) => ({
+      number: String(pr.number),
+      state: pr.merged_at ? 'MERGED' : pr.state.toUpperCase() === 'CLOSED' ? 'CLOSED' : 'OPEN',
+      mergedAt: pr.merged_at,
+      headRefName: String(pr.head?.ref ?? ''),
+      url: pr.html_url,
+      reviewDecision: null,
+    }))
+
+    const issueByNumber = new Map(allIssues.map((issue) => [issue.number, issue]))
+    const workflowByNumber = new Map(
+      allWorkflows
+        .filter((workflow) => workflow.repoKey === repoKey)
+        .map((workflow) => [Number(parseUrl(workflow.url)?.number), workflow]),
+    )
+    const prByBranch = new Map<string, GithubPrFact>()
+    for (const raw of prs) {
+      if (!raw.headRefName || prByBranch.has(raw.headRefName)) continue
+      prByBranch.set(raw.headRefName, { ...raw, number: String(raw.number) })
+    }
+
+    const repoPath = expandHome(configuredPath)
+    const project = basename(repoPath)
+    let refs = new Set<string>()
+    let defaultBranch = 'main'
+    if (existsSync(repoPath)) {
+      const policy = { mode: 'read-only' as const, workspaceRoot: repoPath }
+      const [refOutput, defaultRef] = await Promise.all([
+        runCommand(ctx, "git for-each-ref --format='%(refname:short)' refs/heads refs/remotes/origin", {
+          workdir: repoPath, timeoutMs: 5000, sandboxPolicy: policy,
+        }).catch(() => ''),
+        runCommand(ctx, 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD', {
+          workdir: repoPath, timeoutMs: 3000, sandboxPolicy: policy,
+        }).catch(() => ''),
+      ])
+      refs = new Set(refOutput.split('\n').filter(Boolean))
+      defaultBranch = defaultRef.replace(/^origin\//, '') || defaultBranch
+    }
+
+    const openIssues = allIssues.filter((issue) => String(issue.state).toUpperCase() === 'OPEN')
+    const issues = await Promise.all(openIssues.map(async (issue) => {
+      const existing = workflowByNumber.get(issue.number)
+      const branch = existing?.branch ?? `${project}-issue-${issue.number}`
+      const worktree = existing?.worktree ?? join(config.worktreeRoot, project, branch)
+      const branchExists = refs.has(branch) || refs.has(`origin/${branch}`)
+      let pr: GithubPrFact | null
+      let prStatusKnown: boolean
+      if (existing?.prNumber) {
+        const lookup = await fetchGithubPrFact(ctx, repoKey, branch, existing.prNumber)
+        pr = lookup.pr
+        prStatusKnown = lookup.known && lookup.pr !== null
+      } else {
+        pr = prByBranch.get(branch) ?? null
+        prStatusKnown = true
+      }
+      let hasCommits = false
+      if (branchExists && existsSync(repoPath)) {
+        hasCommits = await runCommand(ctx, `git rev-list --count ${shellQuote(`origin/${defaultBranch}`)}..${shellQuote(branch)}`, {
+          workdir: repoPath,
+          timeoutMs: 10000,
+          sandboxPolicy: { mode: 'read-only', workspaceRoot: repoPath },
+        }).then((count) => Number(count) > 0).catch(() => false)
+      }
+      const workflow: IssueWorkflow = existing ?? {
+        key: issueKey(repoKey, String(issue.number)),
+        url: issue.url,
+        repoKey,
+        worktree,
+        branch,
+        stage: pr ? 'review-ready' : 'idle',
+        devAgent: null,
+        devTaskId: null,
+        devSessionId: null,
+        devInterrupted: false,
+        reviewAgent: null,
+        reviewTaskId: null,
+        reviewSessionId: null,
+        reviewResult: null,
+        prNumber: pr?.number ?? null,
+        issueState: 'OPEN',
+        baseRef: null,
+        updatedAt: 0,
+        events: [],
+      }
+      workflow.worktree = worktree
+      workflow.branch = branch
+      workflow.issueState = 'OPEN'
+      const derived = await deriveWorkflowState(ctx, workflow, {
+        pr, prStatusKnown, branchExists, hasCommits, defaultBranch,
+      })
+      const blockedBy = parseDependencies(issue.body).map((number) => {
+        const dependency = issueByNumber.get(number)
+        return { number, title: dependency?.title ?? '', state: String(dependency?.state ?? 'UNKNOWN').toUpperCase() }
+      })
+      return { ...issue, blockedBy, workflow: derived }
+    }))
+    return { ok: true, repoKey, issues }
+  } catch (error) {
+    return { ok: false, error: `项目 issue 抓取失败: ${String(error instanceof Error ? error.message : error)}` }
+  }
 }
 
 /** Validate the URL and run gh, returning the { ok, ... } envelope. */

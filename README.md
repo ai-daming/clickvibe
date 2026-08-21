@@ -1,11 +1,13 @@
 # clickvibe
 
-DSH web 插件:右侧面板输入 GitHub issue / PR 链接,通过本地 `gh` CLI 抓取并以 Markdown 渲染展示；对 open issue 可创建独立 worktree 并启动 Codex/Claude 开发。
+DSH web 插件:右侧面板先选择已配置的 GitHub repo,再按依赖、状态和里程碑浏览全部 open issue；每个 issue 由 git/GitHub 硬事实推导唯一下一步动作,可创建独立 worktree 并启动 Codex/Claude 开发。
 
 ## 功能
 
-- 侧栏底部 **GitHub Issue** 按钮(窄栏显示 "GH")开关右侧面板
-- 支持 issue(`/issues/N`)与 PR(`/pull/N`)链接
+- 侧栏底部 **ClickVibe** 按钮(窄栏显示 "CV")开关右侧面板
+- 项目选择器读取 `~/.clickvibe/config.yaml` 的全部 repo 映射,路径不在本机的跨机器配置也保留在列表
+- 选中项目后展示全部 open issue,支持按里程碑或依赖状态分组、按依赖就绪/阻塞过滤
+- 每行展示状态徽章、约定分支、落后提示、milestone、blockedBy 与唯一动作；点开后进入完整详情
 - Host 半通过 `gh issue view` / `gh pr view` 抓取,返回结构化 JSON
 - Client 半渲染:
   - 状态徽章(Open / Closed / Merged)、编号、作者、创建/更新/关闭/合并时间
@@ -17,7 +19,8 @@ DSH web 插件:右侧面板输入 GitHub issue / PR 链接,通过本地 `gh` CLI
   - 三方对比:worktree / main / 远端(origin/main、远端同名分支)的哈希与 ahead/behind
   - worktree 落后远端时提示「需要同步」并提供 /sync 动作(fetch + merge origin/main,冲突自动回滚)
   - review 结论标注它审查的 HEAD;HEAD 变化后自动显示「结论已过期」,不冒充当前状态
-  - 任意时刻只有一个「下一步动作」按钮(开发/恢复/同步/Review/返工/合并),由 git 事实推导,不靠易错的 stage 字段
+  - 任意时刻只有一个「下一步动作」按钮(开发/恢复/同步/创建 PR/Review/返工/合并),由 git 事实推导,workflow 文件只做增强
+  - PR 状态每次从 GitHub 查询；merged 立即进入已交付终态,查询失败则 fail-closed,不沿用旧的合并按钮
 - Open issue 一键开发:
   - `Codex 开发` / `Claude 开发`:在 issue worktree 中启动非交互 agent
   - `安全演练`:走完整 worktree/任务/轮询链路,只执行 `pwd`、当前分支和 `git status`
@@ -35,7 +38,7 @@ DSH web 插件:右侧面板输入 GitHub issue / PR 链接,通过本地 `gh` CLI
 | Host | `src/index.ts` | 注册 `/clickvibe/api` 前缀路由,处理 GitHub 抓取、开发任务和 cursor 日志轮询 |
 | 开发内核 | `src/develop.ts` | agent/URL 校验、shell 参数转义、有界行日志和 worktree 恢复决策 |
 | 状态视图 | `src/state-view.ts` | 纯函数 `deriveNextAction`:由 git 事实 + 事件历史推导唯一下一步动作 |
-| Client | `src/client/index.tsx` | `shell.overlay` 右侧面板 + `sidebar.footer.action` 开关按钮,`fetch('/clickvibe/api/fetch')` 取数;状态视图 + 唯一动作按钮 |
+| Client | `src/client/index.tsx` | `shell.overlay` 项目优先面板 + `sidebar.footer.action` 开关按钮；项目 issue 列表、筛选/分组、详情和唯一动作 |
 | 构建 | `tsdown.config.ts` | host → `lib/index.js`(ESM),client → `lib/client.js`(CJS 闭包,`window.__ModuleLoader__.load` 注册) |
 
 Client→Host 走 **HTTP API 路由**(正式插件没有动态插件的 `harness.handle`),这是与原型最大的结构差异。
@@ -75,6 +78,13 @@ dsh plugin --profile web add link:/Users/yinwm/work/clickvibe
 
 ```sh
 # host 路由
+curl -X POST http://127.0.0.1:3080/clickvibe/api/projects \
+  -H 'content-type: application/json' -d '{}'
+
+curl -X POST http://127.0.0.1:3080/clickvibe/api/repo/issues \
+  -H 'content-type: application/json' \
+  -d '{"repoKey":"ai-daming/clickvibe"}'
+
 curl -X POST http://127.0.0.1:3080/clickvibe/api/fetch \
   -H 'content-type: application/json' \
   -d '{"url":"https://github.com/cli/cli/issues/100"}'

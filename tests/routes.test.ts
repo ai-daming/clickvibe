@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { createServer, request, type RequestListener } from 'node:http'
 import test from 'node:test'
-import { apply } from '../src/index.ts'
+import { apply, fetchRepositoryIssues } from '../src/index.ts'
 
 function createHandler(run?: (spec: { command: string }) => Promise<unknown>): RequestListener {
   let handler: RequestListener | null = null
@@ -125,6 +125,12 @@ test('/sync rejects worktree mutation without the same-origin privileged headers
   assert.match(result.body.error ?? '', /授权请求头/)
 })
 
+test('/projects route returns the configured-project envelope without invoking shell', async () => {
+  const result = await post(createHandler(), '/clickvibe/api/projects', {})
+  assert.equal(result.status, 200)
+  assert.equal(Array.isArray((result.body as { projects?: unknown[] }).projects), true)
+})
+
 
 
 test('/fetch resolves blockedBy from the body and blocking from a repo scan', async () => {
@@ -180,4 +186,140 @@ test('/fetch on an issue without a 依赖 section yields no blockedBy (and no bl
   assert.ok(deps)
   assert.deepEqual(deps.blockedBy, [])
   assert.deepEqual(deps.blocking.map((d) => (d as { number: number }).number), [7])
+})
+
+test('repo issue aggregation includes open issues without workflows and honors live merged PR state', async () => {
+  const allIssues = [
+    { number: 5, title: 'dependency', state: 'closed', body: '', html_url: 'https://github.com/o/r/issues/5', milestone: null },
+    { number: 7, title: 'delivered but still open', state: 'open', body: '## 依赖\nBlocked by #5', html_url: 'https://github.com/o/r/issues/7', milestone: { title: 'M1' } },
+    { number: 8, title: 'never developed', state: 'open', body: '## 依赖\n无', html_url: 'https://github.com/o/r/issues/8', milestone: null },
+  ]
+  const prs = [
+    { number: 19, state: 'closed', merged_at: '2026-08-22T00:00:00Z', head: { ref: 'r-issue-7' }, html_url: 'https://github.com/o/r/pull/19' },
+  ]
+  const ctx = {
+    shell: {
+      resolve(spec: unknown) { return spec },
+      async run(spec: { command: string }) {
+        if (spec.command.includes('/issues?')) return { exitCode: 0, stdout: { text: JSON.stringify([allIssues]) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: JSON.stringify([prs]) }, stderr: { text: '' } }
+        throw new Error(`unexpected command: ${spec.command}`)
+      },
+    },
+  }
+  const result = await fetchRepositoryIssues(ctx as never, { repoKey: 'o/r' }, {
+    config: { repos: { 'o/r': '/remote/r' }, worktreeRoot: '/remote/worktrees' },
+    workflows: [],
+  })
+  assert.equal(result.ok, true)
+  if (!result.ok) return
+  const issues = result.issues as Array<{
+    number: number
+    milestone: { title: string } | null
+    blockedBy: { number: number; state: string }[]
+    workflow: { prNumber: string | null; derived: { status: string; nextAction: { kind: string; label: string } } }
+  }>
+  assert.deepEqual(issues.map((issue) => issue.number), [7, 8])
+  assert.deepEqual(issues[0].blockedBy, [{ number: 5, title: 'dependency', state: 'CLOSED' }])
+  assert.equal(issues[0].milestone?.title, 'M1')
+  assert.equal(issues[0].workflow.prNumber, '19')
+  assert.equal(issues[0].workflow.derived.status, 'passed')
+  assert.equal(issues[0].workflow.derived.nextAction.kind, 'none')
+  assert.equal(issues[1].workflow.derived.status, 'idle')
+  assert.equal(issues[1].workflow.derived.nextAction.label, '开始开发')
+})
+
+test('repo issue aggregation fails closed when a stored PR cannot be refreshed by number', async () => {
+  const issue = { number: 7, title: 'issue 7', state: 'open', body: '', html_url: 'https://github.com/o/r/issues/7', milestone: null }
+  const workflow = {
+    key: 'o-r-7', url: issue.html_url, repoKey: 'o/r', worktree: '/remote/worktrees/r/r-issue-7', branch: 'renamed-branch',
+    stage: 'passed', devAgent: 'codex', devTaskId: null, devSessionId: null, devInterrupted: false,
+    reviewAgent: 'codex', reviewTaskId: null, reviewSessionId: null,
+    reviewResult: { passed: true, issues: [] }, prNumber: 99, issueState: 'OPEN',
+    baseRef: 'origin/main @ abc', updatedAt: 1, events: [],
+  }
+  const ctx = {
+    shell: {
+      resolve(spec: unknown) { return spec },
+      async run(spec: { command: string }) {
+        if (spec.command.includes('/issues?')) return { exitCode: 0, stdout: { text: JSON.stringify([[issue]]) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: '[[]]' }, stderr: { text: '' } }
+        if (spec.command.startsWith('gh pr view')) return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'offline' } }
+        throw new Error(`unexpected command: ${spec.command}`)
+      },
+    },
+  }
+  const result = await fetchRepositoryIssues(ctx as never, { repoKey: 'o/r' }, {
+    config: { repos: { 'o/r': '/remote/r' }, worktreeRoot: '/remote/worktrees' },
+    workflows: [workflow as never],
+  })
+  assert.equal(result.ok, true)
+  if (!result.ok) return
+  const item = result.issues[0] as { workflow: { prNumber: string; derived: { nextAction: { kind: string; label: string } } } }
+  assert.equal(item.workflow.prNumber, '99')
+  assert.deepEqual(item.workflow.derived.nextAction, {
+    kind: 'none', label: '刷新 PR 状态', hint: 'GitHub PR 实时状态查询失败,为避免误合并已暂停动作',
+  })
+})
+
+test('repo issue aggregation refreshes stored PR by number when its head no longer matches', async () => {
+  const issue = { number: 7, title: 'issue 7', state: 'open', body: '', html_url: 'https://github.com/o/r/issues/7', milestone: null }
+  const workflow = {
+    key: 'o-r-7', url: issue.html_url, repoKey: 'o/r', worktree: '/remote/worktrees/r/r-issue-7', branch: 'old-branch-name',
+    stage: 'passed', devAgent: 'codex', devTaskId: null, devSessionId: null, devInterrupted: false,
+    reviewAgent: 'codex', reviewTaskId: null, reviewSessionId: null,
+    reviewResult: { passed: true, issues: [] }, prNumber: 99, issueState: 'OPEN',
+    baseRef: 'origin/main @ abc', updatedAt: 1, events: [],
+  }
+  const ctx = {
+    shell: {
+      resolve(spec: unknown) { return spec },
+      async run(spec: { command: string }) {
+        if (spec.command.includes('/issues?')) return { exitCode: 0, stdout: { text: JSON.stringify([[issue]]) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: '[[]]' }, stderr: { text: '' } }
+        if (spec.command.startsWith("gh pr view '99'")) return {
+          exitCode: 0,
+          stdout: { text: JSON.stringify({ number: 99, state: 'MERGED', mergedAt: '2026-08-22T00:00:00Z', headRefName: 'new-branch-name', url: 'https://github.com/o/r/pull/99', reviewDecision: 'APPROVED' }) },
+          stderr: { text: '' },
+        }
+        throw new Error(`unexpected command: ${spec.command}`)
+      },
+    },
+  }
+  const result = await fetchRepositoryIssues(ctx as never, { repoKey: 'o/r' }, {
+    config: { repos: { 'o/r': '/remote/r' }, worktreeRoot: '/remote/worktrees' },
+    workflows: [workflow as never],
+  })
+  assert.equal(result.ok, true)
+  if (!result.ok) return
+  const item = result.issues[0] as { workflow: { prNumber: string; derived: { status: string; nextAction: { kind: string } } } }
+  assert.equal(item.workflow.prNumber, '99')
+  assert.equal(item.workflow.derived.status, 'passed')
+  assert.equal(item.workflow.derived.nextAction.kind, 'none')
+})
+
+test('repo issue aggregation uses unbounded pagination and keeps issues beyond 1000', async () => {
+  const allIssues = Array.from({ length: 1001 }, (_, index) => ({
+    number: index + 1, title: `issue ${index + 1}`, state: 'open', body: '',
+    html_url: `https://github.com/o/r/issues/${index + 1}`, milestone: null,
+  }))
+  const commands: string[] = []
+  const ctx = {
+    shell: {
+      resolve(spec: unknown) { return spec },
+      async run(spec: { command: string }) {
+        commands.push(spec.command)
+        if (spec.command.includes('/issues?')) return { exitCode: 0, stdout: { text: JSON.stringify([allIssues.slice(0, 1000), allIssues.slice(1000)]) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: '[[]]' }, stderr: { text: '' } }
+        throw new Error(`unexpected command: ${spec.command}`)
+      },
+    },
+  }
+  const result = await fetchRepositoryIssues(ctx as never, { repoKey: 'o/r' }, {
+    config: { repos: { 'o/r': '/remote/r' }, worktreeRoot: '/remote/worktrees' }, workflows: [],
+  })
+  assert.equal(result.ok, true)
+  if (!result.ok) return
+  assert.equal(result.issues.length, 1001)
+  assert.equal(commands.filter((command) => command.includes('--paginate --slurp')).length, 2)
 })

@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
-import { deriveWorkflowState, type IssueWorkflow } from '../src/index.ts'
+import { deriveWorkflowState, enrichWorkflowStates, type IssueWorkflow } from '../src/index.ts'
 
 const execFileAsync = promisify(execFile)
 
@@ -82,7 +82,7 @@ test('state view derives worktree/main/remote hashes, ahead-behind and sync need
     assert.equal(derived.behindBase, 0)
     assert.equal(derived.aheadOfBase, 1)
     assert.equal(derived.needsSync, false)
-    assert.equal(derived.nextAction.kind, 'review') // review-ready 无结论 → review
+    assert.equal(derived.nextAction.kind, 'create-pr') // 有提交但无 PR → 先创建 PR
 
     // 并行开发:main 前进到 B,worktree 落后 → 需要同步
     await git('switch', 'main')
@@ -103,7 +103,7 @@ test('state view derives worktree/main/remote hashes, ahead-behind and sync need
     const synced = (await deriveWorkflowState(ctx, workflow({ worktree }))).derived
     assert.equal(synced.behindBase, 0)
     assert.equal(synced.needsSync, false)
-    assert.equal(synced.nextAction.kind, 'review')
+    assert.equal(synced.nextAction.kind, 'create-pr')
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -134,6 +134,53 @@ test('review verdict binds to the reviewed HEAD and goes stale when the head mov
     assert.equal(stale.head === headC, false)
     assert.equal(stale.verdictCurrent, false)
     assert.equal(stale.nextAction.kind, 'review')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('/state enrichment checks configured branches and runs GitHub lookups concurrently', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'clickvibe-state-enrich-'))
+  const repo = join(root, 'repo')
+  await mkdir(repo)
+  let activeGithub = 0
+  let maxGithub = 0
+  const githubTimeouts: number[] = []
+  const fakeCtx = {
+    shell: {
+      resolve(spec: unknown) { return spec },
+      async run(spec: { command: string; timeoutMs?: number }) {
+        if (spec.command.startsWith('gh pr list')) {
+          githubTimeouts.push(spec.timeoutMs ?? 0)
+          activeGithub += 1
+          maxGithub = Math.max(maxGithub, activeGithub)
+          await new Promise((resolve) => setTimeout(resolve, 40))
+          activeGithub -= 1
+          return { exitCode: 0, stdout: { text: '{}' }, stderr: { text: '' } }
+        }
+        if (spec.command.startsWith('if git show-ref')) {
+          const branch = spec.command.includes('issue-6') ? 'clickvibe-issue-6' : 'clickvibe-issue-5'
+          return { exitCode: 0, stdout: { text: branch }, stderr: { text: '' } }
+        }
+        if (spec.command.startsWith('git symbolic-ref')) return { exitCode: 0, stdout: { text: 'origin/main' }, stderr: { text: '' } }
+        if (spec.command.startsWith('git rev-list')) return { exitCode: 0, stdout: { text: '1' }, stderr: { text: '' } }
+        throw new Error(`unexpected command: ${spec.command}`)
+      },
+    },
+  }
+  try {
+    const workflows = [
+      workflow({ worktree: join(root, 'missing-5'), branch: 'clickvibe-issue-5' }),
+      workflow({ key: 'repo-6', url: 'https://github.com/o/r/issues/6', worktree: join(root, 'missing-6'), branch: 'clickvibe-issue-6' }),
+    ]
+    const enriched = await enrichWorkflowStates(fakeCtx as never, workflows, {
+      repos: { 'o/r': repo }, worktreeRoot: root,
+    })
+    assert.equal(maxGithub, 2)
+    assert.deepEqual(githubTimeouts, [5000, 5000])
+    assert.deepEqual(enriched.map((item) => item.derived.nextAction.label), [
+      '恢复 worktree 继续开发', '恢复 worktree 继续开发',
+    ])
   } finally {
     await rm(root, { recursive: true, force: true })
   }

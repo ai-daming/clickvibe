@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { deriveNextAction, type WorkflowFacts } from '../src/state-view.ts'
+import { deriveNextAction, githubCompareUrl, workflowBaseBranch, type WorkflowFacts } from '../src/state-view.ts'
 
 function facts(overrides: Partial<WorkflowFacts> = {}): WorkflowFacts {
   return {
@@ -27,6 +27,28 @@ test('closed issue has no next action', () => {
 test('merged PR is terminal', () => {
   const next = deriveNextAction(facts({ prMerged: true, stage: 'passed', prNumber: '9' }))
   assert.equal(next.kind, 'none')
+})
+
+test('closed unmerged PR offers the explicit recovery action', () => {
+  const next = deriveNextAction(facts({ prNumber: '9', prState: 'CLOSED', prStatusKnown: true }))
+  assert.equal(next.kind, 'develop')
+  assert.equal(next.label, '查看原因 / 重新开发')
+})
+
+test('compare URL uses the frozen non-main workflow base', () => {
+  assert.equal(workflowBaseBranch('origin/trunk @ abc123', 'main'), 'trunk')
+  assert.equal(
+    githubCompareUrl('o/r', 'feature/7', 'origin/trunk @ abc123', 'main'),
+    'https://github.com/o/r/compare/trunk...feature%2F7?expand=1',
+  )
+})
+
+test('a linked PR with an unavailable live state fails closed', () => {
+  const next = deriveNextAction(facts({
+    prNumber: '9', prStatusKnown: false, stage: 'passed', reviewPassed: true, reviewedHash: 'a1b2c3d',
+  }))
+  assert.equal(next.kind, 'none')
+  assert.equal(next.label, '刷新 PR 状态')
 })
 
 test('a running task has no next action until it settles', () => {
@@ -56,6 +78,34 @@ test('aborted review re-reviews instead of blocking', () => {
 test('idle issue starts development', () => {
   const next = deriveNextAction(facts({ stage: 'idle' }))
   assert.equal(next.kind, 'develop')
+})
+
+test('a branch with content but without its worktree is recoverable without workflow cache', () => {
+  const next = deriveNextAction(facts({ branchExists: true, worktreeExists: false, hasCommits: true, head: null }))
+  assert.equal(next.kind, 'develop')
+  assert.equal(next.label, '恢复 worktree 继续开发')
+})
+
+test('an empty branch without a worktree still starts development', () => {
+  const next = deriveNextAction(facts({ branchExists: true, worktreeExists: false, hasCommits: false, head: null }))
+  assert.equal(next.kind, 'develop')
+  assert.equal(next.label, '开始开发')
+})
+
+test('uncommitted work without a resumable session starts a fresh development session', () => {
+  const next = deriveNextAction(facts({
+    stage: 'idle', branchExists: true, worktreeExists: true,
+    hasUncommittedChanges: true, hasResumeSession: false,
+  }))
+  assert.equal(next.kind, 'develop')
+  assert.equal(next.label, '重新开发')
+})
+
+test('commits without a PR offer PR creation', () => {
+  const next = deriveNextAction(facts({
+    stage: 'idle', branchExists: true, worktreeExists: true, hasCommits: true,
+  }))
+  assert.equal(next.kind, 'create-pr')
 })
 
 test('review-ready without a verdict reviews', () => {

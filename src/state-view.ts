@@ -10,6 +10,7 @@ export type NextActionKind =
   | 'develop'
   | 'resume'
   | 'sync'
+  | 'create-pr'
   | 'review'
   | 'rework'
   | 'merge'
@@ -23,6 +24,23 @@ export interface NextAction {
   hint: string
 }
 
+/** Resolve the PR base from the frozen workflow baseline, then the live repo default. */
+export function workflowBaseBranch(baseRef: string | null | undefined, defaultBranch = 'main'): string {
+  const ref = String(baseRef ?? '').split(/\s+@\s+/, 1)[0].trim()
+  const branch = ref.replace(/^refs\/remotes\/origin\//, '').replace(/^origin\//, '')
+  return branch !== '' && branch !== 'HEAD' ? branch : defaultBranch
+}
+
+export function githubCompareUrl(
+  repoKey: string,
+  branch: string,
+  baseRef: string | null | undefined,
+  defaultBranch = 'main',
+): string {
+  const base = workflowBaseBranch(baseRef, defaultBranch)
+  return `https://github.com/${repoKey}/compare/${encodeURIComponent(base)}...${encodeURIComponent(branch)}?expand=1`
+}
+
 export type WorkflowStageInput = 'idle' | 'developing' | 'review-ready' | 'reviewing' | 'passed'
 
 export interface WorkflowFacts {
@@ -30,6 +48,10 @@ export interface WorkflowFacts {
   issueOpen: boolean
   /** A linked PR has been merged: terminal state. */
   prMerged: boolean
+  /** Current GitHub PR state, queried live. */
+  prState?: 'OPEN' | 'MERGED' | 'CLOSED' | null
+  /** False means a linked PR exists in cache but its live GitHub state could not be read. */
+  prStatusKnown?: boolean
   prNumber: string | null
   /** Persisted workflow stage. */
   stage: WorkflowStageInput
@@ -47,6 +69,13 @@ export interface WorkflowFacts {
   hasNewCommits: boolean
   /** Worktree is behind its base / remote branch and should be synced. */
   needsSync: boolean
+  /** Hard git facts used when the workflow cache is absent. */
+  branchExists?: boolean
+  worktreeExists?: boolean
+  worktreeValid?: boolean
+  hasUncommittedChanges?: boolean
+  hasCommits?: boolean
+  hasResumeSession?: boolean
 }
 
 function action(kind: NextActionKind, label: string, hint: string): NextAction {
@@ -69,6 +98,37 @@ export function deriveNextAction(facts: WorkflowFacts): NextAction {
   if (!facts.issueOpen) return action('none', '无', 'issue 已关闭,无待办动作')
   if (facts.prMerged) return action('none', '无', 'PR 已合并,交付完成')
   if (facts.taskRunning) return action('none', '任务进行中', '开发/review 正在运行,等待完成')
+  if (facts.prNumber && facts.prStatusKnown === false) {
+    return action('none', '刷新 PR 状态', 'GitHub PR 实时状态查询失败,为避免误合并已暂停动作')
+  }
+
+  // P2 结构恢复。统一走 develop,由 ensureWorktree 按硬事实幂等恢复。
+  if (facts.worktreeExists && facts.worktreeValid === false) {
+    return action('develop', '修复 worktree', 'worktree 未附着到约定分支,修复后继续开发')
+  }
+  if (facts.branchExists && facts.worktreeExists === false && (facts.hasCommits || facts.stage !== 'idle')) {
+    return action('develop', '恢复 worktree 继续开发', '分支仍存在,重建 worktree 后继续开发')
+  }
+
+  // worktree 落后远端基线 → 先同步(唯一动作)。
+  if (facts.needsSync) {
+    return action('sync', '同步 worktree', 'worktree 落后远端基线,先同步再继续')
+  }
+
+  // GitHub 上 closed-but-unmerged 是异常终态,必须显式交还给人处理。
+  if (facts.prState === 'CLOSED') {
+    return action('develop', '查看原因 / 重新开发', 'PR 已关闭但未合并,检查原因后重新开发')
+  }
+
+  // 没有 workflow 缓存时,从 git 内容与 PR 硬事实恢复生命周期。
+  if (!facts.prNumber && facts.hasUncommittedChanges) {
+    return facts.hasResumeSession
+      ? action('resume', '恢复开发', 'worktree 有未提交改动,续上次 agent 会话')
+      : action('develop', '重新开发', 'worktree 有未提交改动但无可恢复会话,启动新会话')
+  }
+  if (!facts.prNumber && facts.hasCommits) {
+    return action('create-pr', '创建 PR', '开发分支已有提交,推送并创建 PR 后 Review')
+  }
 
   // 中断恢复:开发中但没有存活任务(Host 重启 / 用户停止 / agent 失败)→ 恢复会话。
   // taskRunning 已在上方排除,这里 stage==='developing' 即意味着任务已失联。
@@ -84,14 +144,9 @@ export function deriveNextAction(facts: WorkflowFacts): NextAction {
     return action('review', '重新 Review', '上次 review 中断,重新审查当前代码')
   }
 
-  // worktree 缺失(非 idle):无法继续,需要人工修复。
+  // worktree 缺失(非 idle,且分支也无法确认):无法继续,需要人工检查。
   if (facts.stage !== 'idle' && facts.head === null) {
     return action('none', '无', 'worktree 缺失,请检查本地配置')
-  }
-
-  // worktree 落后远端基线 → 先同步(唯一动作)。
-  if (facts.needsSync) {
-    return action('sync', '同步 worktree', 'worktree 落后远端基线,先同步再继续')
   }
 
   // developing / reviewing 已被上面的早退处理(中断恢复/重新 review)
