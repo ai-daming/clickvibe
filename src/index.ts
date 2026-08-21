@@ -746,9 +746,11 @@ async function postReviewComment(ctx: Context, issueUrl: string, passed: boolean
   const body = passed
     ? '## ✅ ClickVibe Review 通过\n\n自动 review 未发现问题。'
     : `## ❌ ClickVibe Review 发现问题(${issues.length} 条)\n\n${issues.map((i) => `- ${i}`).join('\n')}`
-  const command = `gh issue comment ${JSON.stringify(issueUrl)} --body ${JSON.stringify(body)}`
+  // body 走 stdin(--body-file -),避免 shell 转义破坏反引号/换行;
+  // URL 用单引号安全引用(与 develop.ts 的 shellQuote 一致)。
+  const command = `gh issue comment '${issueUrl.replaceAll("'", "'\\''")}' --body-file -`
   try {
-    await runCommand(ctx, command, { timeoutMs: 30000 })
+    await runCommand(ctx, command, { stdin: body, timeoutMs: 30000 })
   } catch {
     // posting is best-effort
   }
