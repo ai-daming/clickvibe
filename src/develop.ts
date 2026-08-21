@@ -102,6 +102,7 @@ export type WorktreeRecovery =
   | { kind: 'reuse' }
   | { kind: 'attach-detached' }
   | { kind: 'attach-existing' }
+  | { kind: 'repair'; reason: string }
   | { kind: 'conflict'; reason: string }
 
 /** Decide a safe recovery action without deleting or overwriting directories. */
@@ -119,9 +120,16 @@ export function decideWorktreeRecovery(snapshot: WorktreeSnapshot): WorktreeReco
       return branchExists ? { kind: 'attach-existing' } : { kind: 'attach-detached' }
     }
     if (registeredBranch !== '') {
-      return registeredBranch === targetBranch
-        ? { kind: 'reuse' }
-        : { kind: 'conflict', reason: `目标路径已检出其他分支: ${registeredBranch}` }
+      if (registeredBranch !== targetBranch) {
+        return { kind: 'conflict', reason: `目标路径已检出其他分支: ${registeredBranch}` }
+      }
+      // 注册匹配目标分支:仅当路径真实存在且非空才能复用;
+      // 路径消失或为空(stale 注册)→ repair:先清理注册再重建。
+      if (pathExists && !pathEmpty) return { kind: 'reuse' }
+      return {
+        kind: 'repair',
+        reason: `注册记录指向 ${targetBranch} 但路径${pathExists ? '为空' : '不存在'},需要清理注册后重建`,
+      }
     }
   }
 

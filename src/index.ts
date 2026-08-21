@@ -18,8 +18,9 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, basename } from 'node:path'
+import { join, basename, dirname, resolve } from 'node:path'
 import { parse as parseYaml } from 'yaml'
+import { decideWorktreeRecovery, shellQuote } from './develop.ts'
 import {
   appendEvent,
   appendLog,
@@ -482,23 +483,98 @@ async function ensureWorktree(ctx: Context, parsed: { owner: string; repo: strin
   workflow.worktree = worktree
   workflow.branch = branch
 
-  // 幂等建 worktree(无沙箱:git 需要写主仓库 .git/refs)
-  if (!existsSync(worktree)) {
-    await appendLog(workflow.key, 'dev', `[clickvibe] 创建 worktree: ${worktree}`)
-    await runCommand(
-      ctx,
-      `git worktree add ${JSON.stringify(worktree)} -b ${JSON.stringify(branch)}`,
-      {
-        workdir: expandedRepo,
-        timeoutMs: 60000,
-        sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: expandedRepo },
-      },
-    )
-    await appendLog(workflow.key, 'dev', `[clickvibe] worktree 创建完成`)
+  // 幂等建 worktree:用完整恢复决策(处理 reuse/attach/conflict/重建),
+  // 而不是简单判断目录是否存在。git 操作需要无沙箱(写主仓库 .git/refs)。
+  const policy = { mode: 'danger-full-access' as const, workspaceRoot: expandedRepo }
+  const listOut = await runCommand(ctx, 'git worktree list --porcelain', { workdir: expandedRepo, sandboxPolicy: policy, timeoutMs: 15000 })
+  const records = parseWorktreeList(listOut)
+  const normalizedTarget = resolve(worktree)
+  const atPath = records.find((r) => r.path === normalizedTarget)
+  const atBranch = records.find((r) => r.branch === branch)
+  const pathExists = existsSync(normalizedTarget)
+  let pathEmpty = false
+  if (pathExists) {
+    const { readdir } = await import('node:fs/promises')
+    pathEmpty = (await readdir(normalizedTarget)).length === 0
+  }
+  const branchOut = await runCommand(
+    ctx,
+    `git show-ref --verify --quiet ${shellQuote(`refs/heads/${branch}`)}; echo $?`,
+    { workdir: expandedRepo, sandboxPolicy: policy, timeoutMs: 15000 },
+  )
+  const branchExists = branchOut.trim() === '0'
+  const recovery = decideWorktreeRecovery({
+    targetBranch: branch,
+    pathExists,
+    pathEmpty,
+    registeredBranch: atPath?.branch ?? null,
+    branchExists,
+    branchWorktree: atBranch?.path ?? null,
+  })
+
+  if (recovery.kind === 'conflict') {
+    await appendLog(workflow.key, 'dev', `[clickvibe] worktree 冲突: ${recovery.reason}`)
+    return { ok: false, error: `worktree 冲突: ${recovery.reason}` }
+  }
+
+  if (recovery.kind === 'reuse') {
+    await appendLog(workflow.key, 'dev', `[clickvibe] worktree 已存在,复用`)
+  } else if (recovery.kind === 'attach-detached') {
+    await runCommand(ctx, `git switch -c ${shellQuote(branch)}`, { workdir: normalizedTarget, timeoutMs: 60000, sandboxPolicy: policy })
+    await appendLog(workflow.key, 'dev', `[clickvibe] 已为 detached worktree 创建目标分支`)
+  } else if (recovery.kind === 'attach-existing') {
+    await runCommand(ctx, `git switch ${shellQuote(branch)}`, { workdir: normalizedTarget, timeoutMs: 60000, sandboxPolicy: policy })
+    await appendLog(workflow.key, 'dev', `[clickvibe] 已将 detached worktree 切换到现有目标分支`)
+  } else if (recovery.kind === 'repair') {
+    // stale 注册:先清理 git 注册记录(路径为空时可顺带删空目录),再重建
+    await appendLog(workflow.key, 'dev', `[clickvibe] 修复 stale 注册: ${recovery.reason}`)
+    if (pathExists && pathEmpty) {
+      const { rmdir } = await import('node:fs/promises')
+      await rmdir(normalizedTarget).catch(() => { /* 非空时忽略,交给 git */ })
+    }
+    await runCommand(ctx, `git worktree remove --force ${shellQuote(normalizedTarget)}`, { workdir: expandedRepo, timeoutMs: 60000, sandboxPolicy: policy }).catch(() => { /* 记录已不在也忽略 */ })
+    const { mkdir } = await import('node:fs/promises')
+    await mkdir(dirname(normalizedTarget), { recursive: true })
+    const branchArg = branchExists ? shellQuote(branch) : `-b ${shellQuote(branch)}`
+    await runCommand(ctx, `git worktree add ${shellQuote(normalizedTarget)} ${branchArg}`, { workdir: expandedRepo, timeoutMs: 60000, sandboxPolicy: policy })
+    await appendLog(workflow.key, 'dev', `[clickvibe] stale worktree 已重建`)
+  } else {
+    // add-new-branch / add-existing-branch:确保父目录存在后创建/复用
+    const { mkdir } = await import('node:fs/promises')
+    await mkdir(dirname(normalizedTarget), { recursive: true })
+    const branchArg = recovery.kind === 'add-new-branch'
+      ? `-b ${shellQuote(branch)}`
+      : shellQuote(branch)
+    await runCommand(ctx, `git worktree add ${shellQuote(normalizedTarget)} ${branchArg}`, { workdir: expandedRepo, timeoutMs: 60000, sandboxPolicy: policy })
+    await appendLog(workflow.key, 'dev', recovery.kind === 'add-new-branch'
+      ? `[clickvibe] worktree 与分支创建完成`
+      : `[clickvibe] 已从现有分支恢复 worktree`)
   }
 
   await saveWorkflow(workflow)
   return { ok: true, workflow, worktree, branch }
+}
+
+/** Parse `git worktree list --porcelain` output into { path, branch } records. */
+function parseWorktreeList(output: string): { path: string; branch: string | null }[] {
+  const records: { path: string; branch: string | null }[] = []
+  let current: { path: string; branch: string | null } | null = null
+  for (const line of output.split('\n')) {
+    const trimmed = line.trim()
+    if (trimmed === '') {
+      if (current) { records.push(current); current = null }
+      continue
+    }
+    if (trimmed.startsWith('worktree ')) {
+      current = { path: trimmed.slice('worktree '.length), branch: null }
+    } else if (trimmed.startsWith('branch ') && current) {
+      current.branch = trimmed.slice('branch refs/heads/'.length)
+    } else if (trimmed.startsWith('detached') && current) {
+      current.branch = 'HEAD'
+    }
+  }
+  if (current) records.push(current)
+  return records
 }
 
 /** Start (or restart) a dev task in the live map with status parsing. */
