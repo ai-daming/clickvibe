@@ -252,6 +252,7 @@ async function runCommand(
     workdir?: string
     stdin?: string
     timeoutMs?: number
+    stdoutMaxBytes?: number
     sandboxPolicy?: { mode: 'read-only' | 'workspace-write' | 'danger-full-access'; workspaceRoot: string }
   } = {},
 ): Promise<string> {
@@ -260,12 +261,20 @@ async function runCommand(
     workdir: options.workdir,
     stdin: options.stdin,
     timeoutMs: options.timeoutMs ?? 30000,
+    stdoutMaxBytes: options.stdoutMaxBytes,
     sandboxPolicy: options.sandboxPolicy,
   })
   const result = await ctx.shell.run(spec)
   if (result.exitCode !== 0) {
     const stderr = result.stderr?.text?.trim() ?? ''
     throw new Error(`命令退出码 ${result.exitCode}${stderr ? `: ${stderr}` : ''}`)
+  }
+  // stdout 超限时内存只保留尾部;有 spill 文件则读全文,否则明确报错而不是返回垃圾。
+  if (result.stdout.truncated) {
+    if (result.stdout.spillPath) {
+      return (await readFile(result.stdout.spillPath, 'utf8')).trim()
+    }
+    throw new Error(`命令输出超过 ${result.stdout.text.length} 字节上限且无 spill 文件,无法获取完整输出`)
   }
   return result.stdout.text.trim()
 }
@@ -870,8 +879,8 @@ export async function fetchRepositoryIssues(
   const prCommand = `gh api --paginate --slurp ${shellQuote(`repos/${repoKey}/pulls?state=all&per_page=100`)}`
   try {
     const [issueOutput, prOutput, allWorkflows] = await Promise.all([
-      runCommand(ctx, issueCommand, { timeoutMs: 30000 }),
-      runCommand(ctx, prCommand, { timeoutMs: 30000 }),
+      runCommand(ctx, issueCommand, { timeoutMs: 30000, stdoutMaxBytes: 4 * 1024 * 1024 }),
+      runCommand(ctx, prCommand, { timeoutMs: 30000, stdoutMaxBytes: 4 * 1024 * 1024 }),
       overrides.workflows ? Promise.resolve(overrides.workflows) : loadAllWorkflows(),
     ])
     const allIssues = flattenGithubPages<RepositoryIssueRest>(JSON.parse(issueOutput))
