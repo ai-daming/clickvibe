@@ -1,12 +1,17 @@
 /**
- * clickvibe host half:
- * - `/clickvibe/api/fetch` — fetch GitHub issue/PR data via gh,
- * - `/clickvibe/api/develop` — start a development task: create a git
- *   worktree + branch for the issue's repo, then run codex/claude
- *   non-interactively inside it,
- * - `/clickvibe/api/develop/poll` — consume incremental task log/status.
+ * clickvibe host half — routes:
+ * - `/clickvibe/api/fetch`          — fetch GitHub issue/PR data via gh
+ * - `/clickvibe/api/state`          — restore panel context (all workflows)
+ * - `/clickvibe/api/develop`        — start dev: worktree+branch+agent
+ * - `/clickvibe/api/develop/poll`   — incremental dev log/status (JSON)
+ * - `/clickvibe/api/stream`         — SSE live status stream for a task
+ * - `/clickvibe/api/review`         — review the dev branch with codex/claude
+ * - `/clickvibe/api/resume`         — resume an interrupted dev session
  *
- * Config lives at ~/.clickvibe/config.yaml (see project README).
+ * Workflow per issue (persisted under ~/.clickvibe/state/):
+ *   developing → review-ready → reviewing → passed
+ *                      ↑                  │
+ *                      └── rework ────────┘
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -15,6 +20,18 @@ import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, basename } from 'node:path'
 import { parse as parseYaml } from 'yaml'
+import {
+  appendLog,
+  issueKey,
+  loadAllWorkflows,
+  loadWorkflow,
+  logPath,
+  readLogTail,
+  saveWorkflow,
+  type IssueWorkflow,
+  type WorkflowStage,
+} from './state.ts'
+import { parseAgentChunk, type AgentKind } from './agent-stream.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -52,17 +69,17 @@ declare module '@deepseek-ai/cordis' {
 /** Prefix route owning every /clickvibe/api/<method> request. */
 const ROUTE = '/clickvibe/api'
 
-/** Body size bound of one JSON request (defense against unbounded reads). */
+/** Body size bound of one JSON request. */
 const MAX_BODY_BYTES = 64 * 1024
 
-/** Fields the issue fetch requests from gh (all verified against rc.8). */
+/** Fields the issue fetch requests from gh (verified against rc.8). */
 const ISSUE_FIELDS = [
   'number', 'title', 'state', 'stateReason', 'author', 'createdAt',
   'updatedAt', 'closedAt', 'body', 'url', 'labels', 'assignees',
   'milestone', 'comments', 'reactionGroups', 'isPinned',
 ].join(',')
 
-/** Fields the PR fetch requests from gh (all verified against rc.8). */
+/** Fields the PR fetch requests from gh (verified against rc.8). */
 const PR_FIELDS = [
   'number', 'title', 'state', 'author', 'createdAt', 'updatedAt',
   'closedAt', 'mergedAt', 'body', 'url', 'labels', 'assignees',
@@ -74,6 +91,26 @@ const PR_FIELDS = [
 interface ClickVibeConfig {
   repos: Record<string, string>
   worktreeRoot: string
+}
+
+/** In-memory live task handle: the running process + a status-line buffer. */
+interface LiveTask {
+  taskId: string
+  workflowKey: string
+  kind: 'dev' | 'review'
+  agent: AgentKind
+  process?: ReturnType<Context['shell']['start']>
+  lines: string[]          // 已解析的状态行(供 SSE 增量读取)
+  closed: boolean
+}
+
+const liveTasks = new Map<string, LiveTask>()
+const liveWaiters = new Map<string, Set<() => void>>()
+
+/** Notify SSE waiters that new lines are available for a task. */
+function notifyTask(taskId: string): void {
+  const waiters = liveWaiters.get(taskId)
+  if (waiters) for (const fn of waiters) fn()
 }
 
 /** Expand a leading `~` in a path to the user's home directory. */
@@ -100,22 +137,6 @@ async function loadConfig(): Promise<ClickVibeConfig> {
     }
   }
 }
-
-/** One in-flight development task. */
-interface DevTask {
-  id: string
-  repo: string
-  number: string
-  worktree: string
-  branch: string
-  agent: 'codex' | 'claude'
-  status: 'creating' | 'running' | 'done' | 'failed'
-  exitCode: number | null
-  log: string[]
-  process?: ReturnType<Context['shell']['start']>
-}
-
-const tasks = new Map<string, DevTask>()
 
 /** Extract owner/repo and issue number from a GitHub issue/PR URL. */
 function parseUrl(url: string): { kind: 'issue' | 'pr'; owner: string; repo: string; number: string } | null {
@@ -187,8 +208,7 @@ async function runCommand(
 }
 
 /**
- * The clickvibe plugin: exports the profile-patch plugin contract
- * (inject / apply) the cordis loader expects.
+ * The clickvibe plugin: exports the profile-patch plugin contract.
  */
 export const name = 'clickvibe'
 
@@ -199,18 +219,25 @@ export function apply(ctx: Context): void {
     kind: 'prefix',
     path: ROUTE,
     handler: async (req: IncomingMessage, res: ServerResponse) => {
-      if (req.method !== 'POST') {
+      if (req.method !== 'POST' && req.method !== 'GET') {
         writeJson(res, 405, { ok: false, error: 'method not allowed' })
         return
       }
       const pathname = new URL(req.url ?? '/', 'http://clickvibe.internal').pathname
       const method = pathname.startsWith(`${ROUTE}/`) ? pathname.slice(`${ROUTE}/`.length) : undefined
-      const knownMethods = new Set(['fetch', 'develop', 'develop/poll'])
+      const knownMethods = new Set(['fetch', 'state', 'develop', 'develop/poll', 'stream', 'review', 'resume'])
       if (method === undefined || !knownMethods.has(method)) {
         writeJson(res, 404, { ok: false, error: 'unknown method' })
         return
       }
 
+      // SSE stream endpoint (GET)
+      if (method === 'stream') {
+        handleStream(req, res)
+        return
+      }
+
+      // JSON POST endpoints
       let payload: unknown
       try {
         payload = await readJsonBody(req)
@@ -224,13 +251,28 @@ export function apply(ctx: Context): void {
         writeJson(res, result.ok ? 200 : 400, result)
         return
       }
+      if (method === 'state') {
+        const workflows = await loadAllWorkflows()
+        writeJson(res, 200, { ok: true, workflows })
+        return
+      }
       if (method === 'develop') {
         const result = await startDevelop(ctx, payload)
         writeJson(res, result.ok ? 200 : 400, result)
         return
       }
       if (method === 'develop/poll') {
-        const result = pollDevelop(payload)
+        const result = await pollDevelop(payload)
+        writeJson(res, result.ok ? 200 : 400, result)
+        return
+      }
+      if (method === 'review') {
+        const result = await startReview(ctx, payload)
+        writeJson(res, result.ok ? 200 : 400, result)
+        return
+      }
+      if (method === 'resume') {
+        const result = await resumeDevelop(ctx, payload)
         writeJson(res, result.ok ? 200 : 400, result)
         return
       }
@@ -289,6 +331,128 @@ function buildPrompt(item: Record<string, unknown>): string {
   ].join('\n')
 }
 
+/** Build the review prompt: review the dev branch diff against the issue. */
+function buildReviewPrompt(workflow: IssueWorkflow): string {
+  return [
+    `请 review 分支 ${workflow.branch} 相对其 base 的代码改动,对照 issue:`,
+    workflow.url,
+    '',
+    '要求:',
+    '1. 用 git diff 查看改动(相对主干)',
+    '2. 检查:需求是否完整实现、是否有 bug/安全隐患、测试是否覆盖',
+    '3. 输出结论,第一行必须是 ✅ 或 ❌:',
+    '   - ✅ Review 通过',
+    '   - ❌ 发现 N 个问题,然后逐条列出(每条含文件/位置/原因/建议)',
+    '不要修改任何文件,只输出 review 结论。',
+  ].join('\n')
+}
+
+/** Create (or reuse) the workflow record and the worktree+branch. */
+async function ensureWorktree(ctx: Context, parsed: { owner: string; repo: string; number: string }): Promise<
+  | { ok: true; workflow: IssueWorkflow; worktree: string; branch: string }
+  | { ok: false; error: string }
+> {
+  const config = await loadConfig()
+  const repoKey = `${parsed.owner}/${parsed.repo}`
+  const repoPath = config.repos[repoKey]
+  if (!repoPath) {
+    return { ok: false, error: `本地未配置仓库 ${repoKey},请在 ~/.clickvibe/config.yaml 的 repos 中添加映射` }
+  }
+  const expandedRepo = expandHome(repoPath)
+  if (!existsSync(expandedRepo)) {
+    return { ok: false, error: `仓库路径不存在: ${expandedRepo}` }
+  }
+
+  const key = issueKey(repoKey, parsed.number)
+  let workflow = await loadWorkflow(key)
+  const project = basename(expandedRepo)
+  const branch = `${project}-issue-${parsed.number}`
+  const worktree = join(config.worktreeRoot, project, branch)
+
+  if (!workflow) {
+    workflow = {
+      key,
+      url: `https://github.com/${repoKey}/issues/${parsed.number}`,
+      repoKey,
+      worktree,
+      branch,
+      stage: 'idle',
+      devAgent: null,
+      devTaskId: null,
+      devSessionId: null,
+      devInterrupted: false,
+      reviewAgent: null,
+      reviewTaskId: null,
+      reviewResult: null,
+      updatedAt: Date.now(),
+    }
+  }
+  // 校正路径字段(配置可能变化)
+  workflow.worktree = worktree
+  workflow.branch = branch
+
+  // 幂等建 worktree(无沙箱:git 需要写主仓库 .git/refs)
+  if (!existsSync(worktree)) {
+    await appendLog(workflow.key, 'dev', `[clickvibe] 创建 worktree: ${worktree}`)
+    await runCommand(
+      ctx,
+      `git worktree add ${JSON.stringify(worktree)} -b ${JSON.stringify(branch)}`,
+      {
+        workdir: expandedRepo,
+        timeoutMs: 60000,
+        sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: expandedRepo },
+      },
+    )
+    await appendLog(workflow.key, 'dev', `[clickvibe] worktree 创建完成`)
+  }
+
+  await saveWorkflow(workflow)
+  return { ok: true, workflow, worktree, branch }
+}
+
+/** Start (or restart) a dev task in the live map with status parsing. */
+function attachAgentProcess(
+  ctx: Context,
+  task: LiveTask,
+  command: string,
+  workdir: string,
+  prompt: string,
+  onExit: (exitCode: number | null) => void,
+): void {
+  const spec = ctx.shell.resolve({
+    command,
+    workdir,
+    stdin: prompt,
+    timeoutMs: 600000,
+    sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: workdir },
+  })
+  const process = ctx.shell.start(spec)
+  task.process = process
+
+  // 轮询读取 agent 输出,解析为状态行,写入内存缓冲 + 落盘日志
+  const pump = setInterval(() => {
+    const read = process.readOutput()
+    if (read.delta !== '') {
+      const lines = parseAgentChunk(task.agent, read.delta)
+      for (const line of lines) {
+        task.lines.push(line.text)
+        void appendLog(task.workflowKey, task.kind, line.text)
+      }
+      if (read.lossy) {
+        task.lines.push('[clickvibe] 输出被截断(日志过长)')
+      }
+      notifyTask(task.taskId)
+    }
+  }, 500)
+
+  void process.done.then(() => {
+    clearInterval(pump)
+    task.closed = true
+    notifyTask(task.taskId)
+    onExit(process.exitCode)
+  })
+}
+
 /** Start a development task: worktree + branch + background agent run. */
 async function startDevelop(
   ctx: Context,
@@ -300,7 +464,7 @@ async function startDevelop(
   const body = (payload ?? {}) as { url?: unknown; agent?: unknown }
   const url = String(body.url ?? '').trim()
   const agentRaw = String(body.agent ?? 'codex').trim().toLowerCase()
-  const agent = agentRaw === 'claude' ? 'claude' : 'codex'
+  const agent: AgentKind = agentRaw === 'claude' ? 'claude' : 'codex'
   const parsed = parseUrl(url)
   if (!parsed) {
     return { ok: false, error: '请输入形如 https://github.com/owner/repo/issues/123 的链接' }
@@ -309,130 +473,287 @@ async function startDevelop(
     return { ok: false, error: '一键开发仅支持 issue 链接' }
   }
 
-  const config = await loadConfig()
-  const repoKey = `${parsed.owner}/${parsed.repo}`
-  const repoPath = config.repos[repoKey]
-  if (!repoPath) {
-    return {
-      ok: false,
-      error: `本地未配置仓库 ${repoKey},请在 ~/.clickvibe/config.yaml 的 repos 中添加映射`,
-    }
-  }
-  const expandedRepo = expandHome(repoPath)
-  if (!existsSync(expandedRepo)) {
-    return { ok: false, error: `仓库路径不存在: ${expandedRepo}` }
-  }
+  const ensured = await ensureWorktree(ctx, parsed)
+  if (!ensured.ok) return ensured
+  const { workflow } = ensured
 
-  const project = basename(expandedRepo)
-  const branch = `${project}-issue-${parsed.number}`
-  const worktree = join(config.worktreeRoot, project, branch)
-
-  // 同一 issue 已有任务在跑:直接返回现有任务
-  for (const task of tasks.values()) {
-    if (task.repo === repoKey && task.number === parsed.number && task.status !== 'failed') {
-      return { ok: true, taskId: task.id, worktree: task.worktree, branch: task.branch }
-    }
+  // 已有开发任务在跑:复用
+  if (workflow.devTaskId && liveTasks.has(workflow.devTaskId) && !liveTasks.get(workflow.devTaskId)!.closed) {
+    return { ok: true, taskId: workflow.devTaskId, worktree: workflow.worktree, branch: workflow.branch }
   }
 
   const taskId = `dev-${Date.now()}`
-  const task: DevTask = {
-    id: taskId,
-    repo: repoKey,
-    number: parsed.number,
-    worktree,
-    branch,
+  const live: LiveTask = {
+    taskId,
+    workflowKey: workflow.key,
+    kind: 'dev',
     agent,
-    status: 'creating',
-    exitCode: null,
-    log: [],
+    lines: [],
+    closed: false,
   }
-  tasks.set(taskId, task)
+  liveTasks.set(taskId, live)
+  workflow.devAgent = agent
+  workflow.devTaskId = taskId
+  workflow.devInterrupted = false
+  workflow.stage = 'developing'
+  await saveWorkflow(workflow)
 
   void (async () => {
     try {
-      // 幂等建 worktree:已存在则跳过
-      task.log.push(`[clickvibe] worktree: ${worktree}`)
-      if (!existsSync(worktree)) {
-        const worktreeOut = await runCommand(
-          ctx,
-          `git worktree add ${JSON.stringify(worktree)} -b ${JSON.stringify(branch)}`,
-          {
-            workdir: expandedRepo,
-            timeoutMs: 60000,
-            // git 需要写主仓库的 .git/refs(sandbox 默认 read-only 会以
-            // EPERM 拒绝创建 ref 锁),worktree 创建必须在无沙箱下进行
-            sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: expandedRepo },
-          },
-        )
-        task.log.push(`[clickvibe] worktree 创建完成: ${worktreeOut}`)
-      } else {
-        task.log.push('[clickvibe] worktree 已存在,复用')
-      }
-
-      // 抓 issue 数据拼 prompt
-      task.log.push('[clickvibe] 抓取 issue 数据…')
+      await appendLog(workflow.key, 'dev', `[clickvibe] 抓取 issue 数据…`)
       const fetchResult = await fetchIssue(ctx, { url })
-      if (!fetchResult.ok) {
-        throw new Error(fetchResult.error)
-      }
+      if (!fetchResult.ok) throw new Error(fetchResult.error)
       const prompt = buildPrompt(fetchResult.data.item as Record<string, unknown>)
 
-      // 后台启动 agent
-      task.log.push(`[clickvibe] 启动 ${agent} 开发…`)
-      task.status = 'running'
+      await appendLog(workflow.key, 'dev', `[clickvibe] 启动 ${agent} 开发…`)
       const agentCommand = agent === 'claude'
-        ? 'claude -p - --output-format text'
+        ? 'claude -p --verbose --output-format stream-json'
         : 'codex exec --json -'
-      const spec = ctx.shell.resolve({
-        command: agentCommand,
-        workdir: worktree,
-        stdin: prompt,
-        timeoutMs: 600000,
-        // codex/claude 需要完整的 IPC/进程能力,sandbox 会以 EPERM 拒绝其
-        // app-server 初始化 —— 开发任务必须在无沙箱(danger-full-access)下运行
-        sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: worktree },
-      })
-      const process = ctx.shell.start(spec)
-      task.process = process
-      void process.done.then(() => {
-        task.exitCode = process.exitCode
-        task.status = process.exitCode === 0 ? 'done' : 'failed'
-        task.log.push(`[clickvibe] ${agent} 结束,退出码 ${process.exitCode}`)
+
+      attachAgentProcess(ctx, live, agentCommand, workflow.worktree, prompt, async (exitCode) => {
+        await appendLog(workflow.key, 'dev', `[clickvibe] ${agent} 结束,退出码 ${exitCode}`)
+        const reloaded = await loadWorkflow(workflow.key)
+        if (reloaded) {
+          if (exitCode === 0) {
+            reloaded.stage = 'review-ready'
+            reloaded.devInterrupted = false
+          } else {
+            reloaded.devInterrupted = true
+          }
+          await saveWorkflow(reloaded)
+        }
       })
     } catch (error) {
-      task.status = 'failed'
-      task.exitCode = null
-      task.log.push(`[clickvibe] 失败: ${String(error instanceof Error ? error.message : error)}`)
+      live.closed = true
+      await appendLog(workflow.key, 'dev', `[clickvibe] 失败: ${String(error instanceof Error ? error.message : error)}`)
     }
   })()
 
-  return { ok: true, taskId, worktree, branch }
+  return { ok: true, taskId, worktree: workflow.worktree, branch: workflow.branch }
 }
 
-/** Consume incremental log/status for one task. */
-function pollDevelop(
+/** Consume incremental dev log/status for one task. */
+async function pollDevelop(
   payload: unknown,
-): { ok: true; taskId: string; status: string; exitCode: number | null; delta: string[]; done: boolean } | { ok: false; error: string } {
+): Promise<
+  | { ok: true; taskId: string; status: string; exitCode: number | null; delta: string[]; done: boolean }
+  | { ok: false; error: string }
+> {
   const taskId = String((payload as { taskId?: unknown } | undefined)?.taskId ?? '')
-  const task = tasks.get(taskId)
-  if (!task) {
+  const live = liveTasks.get(taskId)
+  if (!live) {
     return { ok: false, error: `未知任务 ${taskId}` }
   }
-  const delta: string[] = []
-  if (task.process) {
-    const read = task.process.readOutput()
-    if (read.delta !== '') delta.push(read.delta)
-    if (read.lossy) delta.push('[clickvibe] 输出被截断(日志过长)')
-  }
-  // 内部日志(worktree 创建等)增量补发
-  const newLogs = task.log.splice(0, task.log.length)
-  delta.push(...newLogs)
+  const delta = live.lines.splice(0, live.lines.length)
   return {
     ok: true,
     taskId,
-    status: task.status,
-    exitCode: task.exitCode,
+    status: live.closed ? (live.process?.exitCode === 0 ? 'done' : 'failed') : 'running',
+    exitCode: live.process?.exitCode ?? null,
     delta,
-    done: task.status === 'done' || task.status === 'failed',
+    done: live.closed,
   }
+}
+
+/** SSE live stream: pushes parsed status lines for a task as they arrive. */
+function handleStream(req: IncomingMessage, res: ServerResponse): void {
+  const url = new URL(req.url ?? '/', 'http://clickvibe.internal')
+  const taskId = url.searchParams.get('taskId') ?? ''
+  const live = liveTasks.get(taskId)
+  if (!live) {
+    res.writeHead(404, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: false, error: `未知任务 ${taskId}` }))
+    return
+  }
+
+  res.writeHead(200, {
+    'content-type': 'text/event-stream',
+    'cache-control': 'no-cache',
+    connection: 'keep-alive',
+  })
+
+  let index = 0
+  let closed = false
+
+  const flush = () => {
+    if (closed) return
+    while (index < live.lines.length) {
+      const line = live.lines[index]
+      index += 1
+      res.write(`data: ${JSON.stringify(line)}\n\n`)
+    }
+    if (live.closed) {
+      res.write(`data: ${JSON.stringify({ __done: true })}\n\n`)
+      res.end()
+      closed = true
+    }
+  }
+
+  flush()
+  if (!closed) {
+    const wake = () => flush()
+    const waiters = liveWaiters.get(taskId) ?? new Set<() => void>()
+    waiters.add(wake)
+    liveWaiters.set(taskId, waiters)
+    req.on('close', () => {
+      waiters.delete(wake)
+      if (waiters.size === 0) liveWaiters.delete(taskId)
+    })
+  }
+}
+
+/** Start a review task on the dev branch with codex/claude. */
+async function startReview(
+  ctx: Context,
+  payload: unknown,
+): Promise<
+  | { ok: true; taskId: string }
+  | { ok: false; error: string }
+> {
+  const body = (payload ?? {}) as { url?: unknown; agent?: unknown }
+  const url = String(body.url ?? '').trim()
+  const agentRaw = String(body.agent ?? 'codex').trim().toLowerCase()
+  const agent: AgentKind = agentRaw === 'claude' ? 'claude' : 'codex'
+  const parsed = parseUrl(url)
+  if (!parsed) {
+    return { ok: false, error: '请输入形如 https://github.com/owner/repo/issues/123 的链接' }
+  }
+  if (parsed.kind !== 'issue') {
+    return { ok: false, error: 'review 仅支持 issue 链接' }
+  }
+
+  const key = issueKey(`${parsed.owner}/${parsed.repo}`, parsed.number)
+  const workflow = await loadWorkflow(key)
+  if (!workflow || workflow.stage === 'idle' || workflow.stage === 'developing') {
+    return { ok: false, error: '该 issue 尚未完成开发,无法 review' }
+  }
+  if (!existsSync(workflow.worktree)) {
+    return { ok: false, error: `worktree 不存在: ${workflow.worktree}` }
+  }
+
+  const taskId = `review-${Date.now()}`
+  const live: LiveTask = {
+    taskId,
+    workflowKey: workflow.key,
+    kind: 'review',
+    agent,
+    lines: [],
+    closed: false,
+  }
+  liveTasks.set(taskId, live)
+  workflow.reviewAgent = agent
+  workflow.reviewTaskId = taskId
+  workflow.stage = 'reviewing'
+  await saveWorkflow(workflow)
+
+  const prompt = buildReviewPrompt(workflow)
+  const agentCommand = agent === 'claude'
+    ? 'claude -p --verbose --output-format stream-json'
+    : 'codex exec --json -'
+
+  await appendLog(workflow.key, 'review', `[clickvibe] 启动 ${agent} review…`)
+  attachAgentProcess(ctx, live, agentCommand, workflow.worktree, prompt, async (exitCode) => {
+    await appendLog(workflow.key, 'review', `[clickvibe] review 结束,退出码 ${exitCode}`)
+    // 读取 review 全文,判断通过/有问题
+    const lines = await readLogTail(workflow.key, 'review', 200)
+    const full = lines.join('\n')
+    const passed = exitCode === 0 && /^✅|通过/.test(full)
+    const issues = passed ? [] : extractIssues(full)
+    const reloaded = await loadWorkflow(workflow.key)
+    if (reloaded) {
+      reloaded.reviewResult = { passed, issues }
+      reloaded.stage = passed ? 'passed' : 'review-ready' // 有问题 → 可回开发(rework)
+      await saveWorkflow(reloaded)
+      // 发到 GitHub issue 评论
+      void postReviewComment(ctx, workflow.url, passed, issues)
+    }
+  })
+
+  return { ok: true, taskId }
+}
+
+/** Extract issue lines from a review result (lines after a ❌ header). */
+function extractIssues(text: string): string[] {
+  const lines = text.split('\n')
+  const out: string[] = []
+  let capturing = false
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (/^❌/.test(trimmed)) { capturing = true; continue }
+    if (capturing && trimmed !== '' && !/^✅/.test(trimmed)) {
+      out.push(trimmed)
+      if (out.length >= 20) break
+    }
+  }
+  return out
+}
+
+/** Post the review result to the issue's GitHub comments. */
+async function postReviewComment(ctx: Context, issueUrl: string, passed: boolean, issues: string[]): Promise<void> {
+  const body = passed
+    ? '## ✅ ClickVibe Review 通过\n\n自动 review 未发现问题。'
+    : `## ❌ ClickVibe Review 发现问题(${issues.length} 条)\n\n${issues.map((i) => `- ${i}`).join('\n')}`
+  const command = `gh issue comment ${JSON.stringify(issueUrl)} --body ${JSON.stringify(body)}`
+  try {
+    await runCommand(ctx, command, { timeoutMs: 30000 })
+  } catch {
+    // posting is best-effort
+  }
+}
+
+/** Resume an interrupted dev session (codex exec resume / claude --continue). */
+async function resumeDevelop(
+  ctx: Context,
+  payload: unknown,
+): Promise<{ ok: true; taskId: string } | { ok: false; error: string }> {
+  const body = (payload ?? {}) as { url?: unknown }
+  const url = String(body.url ?? '').trim()
+  const parsed = parseUrl(url)
+  if (!parsed || parsed.kind !== 'issue') {
+    return { ok: false, error: '请输入形如 https://github.com/owner/repo/issues/123 的链接' }
+  }
+  const key = issueKey(`${parsed.owner}/${parsed.repo}`, parsed.number)
+  const workflow = await loadWorkflow(key)
+  if (!workflow || !workflow.devInterrupted || !workflow.devTaskId) {
+    return { ok: false, error: '没有可恢复的中断任务' }
+  }
+
+  const oldLive = liveTasks.get(workflow.devTaskId)
+  if (oldLive && !oldLive.closed) {
+    return { ok: true, taskId: oldLive.taskId }
+  }
+
+  const taskId = `dev-${Date.now()}`
+  const live: LiveTask = {
+    taskId,
+    workflowKey: workflow.key,
+    kind: 'dev',
+    agent: workflow.devAgent ?? 'codex',
+    lines: [],
+    closed: false,
+  }
+  liveTasks.set(taskId, live)
+  workflow.devTaskId = taskId
+  workflow.devInterrupted = false
+  workflow.stage = 'developing'
+  await saveWorkflow(workflow)
+
+  // resume 需要会话 id(codex)或 --continue(claude);这里先尝试从日志找 session
+  const command = workflow.devAgent === 'claude'
+    ? 'claude -p --continue --verbose --output-format stream-json'
+    : 'codex exec --json --last -'
+  const prompt = '请继续完成刚才的开发任务。'
+
+  await appendLog(workflow.key, 'dev', `[clickvibe] 恢复 ${workflow.devAgent} 会话…`)
+  attachAgentProcess(ctx, live, command, workflow.worktree, prompt, async (exitCode) => {
+    await appendLog(workflow.key, 'dev', `[clickvibe] ${workflow.devAgent} 恢复结束,退出码 ${exitCode}`)
+    const reloaded = await loadWorkflow(workflow.key)
+    if (reloaded) {
+      reloaded.stage = exitCode === 0 ? 'review-ready' : 'developing'
+      reloaded.devInterrupted = exitCode !== 0
+      await saveWorkflow(reloaded)
+    }
+  })
+
+  return { ok: true, taskId }
 }
