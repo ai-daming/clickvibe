@@ -782,6 +782,9 @@ async function startDevelop(
           if (exitCode === 0) {
             reloaded.stage = 'review-ready'
             reloaded.devInterrupted = false
+            // 开发完成(含 rework):旧的 review 结论已归档到 events 历史,
+            // 当前回到"待 review"——不能继续显示"Review 未通过"
+            reloaded.reviewResult = null
             // 记录 agent 会话 id(供续会话精确恢复,不用 --last)
             if (sessionId) reloaded.devSessionId = sessionId
             // 检测关联 PR:开发可能创建了 PR,记录到 workflow(issue 为 key,PR 是产物)
