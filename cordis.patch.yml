@@ -1,0 +1,13 @@
+# clickvibe bundle patch
+#
+# When installed via the official CLI —
+#
+#   dsh plugin --profile <name> add <path-or-name>
+#
+# — the command reconciles `dsh.profile.bundles` against installed packages
+# and, seeing this declaration, appends `clickvibe` to the bundle stack.
+# The profile boot then merges THIS patch (a single `insert` of the plugin
+# row) like any other bundle layer.
+- insert:
+    - id: clickvibe
+      name: 'clickvibe'
