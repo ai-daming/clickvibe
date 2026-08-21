@@ -1630,7 +1630,7 @@ async function startReview(
       : 'claude -p --dangerously-skip-permissions --verbose --output-format stream-json'
   } else {
     agentCommand = sessionId
-      ? `codex exec resume ${shellQuoteId(sessionId)} -c approval_policy=never -s danger-full-access --json -`
+      ? `codex exec resume ${shellQuoteId(sessionId)} -c approval_policy=never -c 'sandbox_mode="danger-full-access"' --json -`
       : 'codex exec -c approval_policy=never -s danger-full-access --json -'
   }
   const prompt = sessionId
@@ -1789,8 +1789,8 @@ async function resumeDevelop(
       : 'claude -p --continue --dangerously-skip-permissions --verbose --output-format stream-json'
   } else {
     command = sessionId
-      ? `codex exec resume ${shellQuoteId(sessionId)} -c approval_policy=never -s danger-full-access --json -`
-      : 'codex exec resume --last -c approval_policy=never -s danger-full-access --json -'
+      ? `codex exec resume ${shellQuoteId(sessionId)} -c approval_policy=never -c 'sandbox_mode="danger-full-access"' --json -`
+      : 'codex exec resume --last -c approval_policy=never -c \'sandbox_mode="danger-full-access"\' --json -'
   }
   // 续会话前也同步远端(并行开发时 base 会变化)
   try {
