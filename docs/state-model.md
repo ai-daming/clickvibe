@@ -141,6 +141,26 @@
 🔗 PR #N                          ← 建了 PR 才显示
 ```
 
+### 任务进行中形态(developing / reviewing)
+
+```
+🚀 开发流程 [开发中]
+📁 worktree    ~/.clickvibe/worktrees/clickvibe/clickvibe-issue-7
+🌿 分支        clickvibe-issue-7 @ 9f3a2c1
+📍 基线        origin/main @ 8715172
+
+■ 实时输出(agent 实时行,深色等宽,200px 滚动)
+   [clickvibe] 开发基线: origin/main @ 8715172
+   $ git status ...
+   ...
+
+[停止任务]
+```
+
+- **「实时输出」** = 当前任务的 agent 实时行 + `[clickvibe]` 系统提示行(启动失败/超时/截断等);类名 `cv-dev-log`
+- 数据恢复(断线重连、Host 重启、2000 行上限)由 #3 负责,本规范只管展示形态
+- 任务结束 → 实时输出区收起,内容沉淀进 📜 历史(事件时间线)
+
 ### 完整详情视图形态
 
 ```
