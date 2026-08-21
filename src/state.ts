@@ -32,6 +32,26 @@ export interface IssueWorkflow {
   reviewTaskId: string | null
   reviewResult: { passed: boolean; issues: string[]; commentUrl?: string } | null
   updatedAt: number
+  /** 完整历史事件链:每次开发提交/review/恢复各一条,按时间追加。 */
+  events: WorkflowEvent[]
+}
+
+/** One historical event in an issue's workflow timeline. */
+export interface WorkflowEvent {
+  kind: 'dev' | 'review' | 'rework' | 'resume' | 'note'
+  at: string
+  /** commit hash 短码(dev/review 锚定的提交)。 */
+  hash?: string
+  /** review 结论(仅 review 事件)。 */
+  verdict?: { passed: boolean; issues: string[] }
+  note?: string
+}
+
+/** Append one event to a workflow and persist. */
+export async function appendEvent(workflow: IssueWorkflow, event: WorkflowEvent): Promise<void> {
+  workflow.events = workflow.events ?? []
+  workflow.events.push(event)
+  await saveWorkflow(workflow)
 }
 
 /** Derive the per-issue state directory. */

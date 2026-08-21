@@ -21,6 +21,7 @@ import { homedir } from 'node:os'
 import { join, basename } from 'node:path'
 import { parse as parseYaml } from 'yaml'
 import {
+  appendEvent,
   appendLog,
   issueKey,
   loadAllWorkflows,
@@ -207,9 +208,48 @@ async function runCommand(
   return result.stdout.text.trim()
 }
 
+/** Read the current HEAD short-hash of a worktree (empty string on failure). */
+async function readWorktreeHead(ctx: Context, worktree: string): Promise<string | null> {
+  try {
+    const spec = ctx.shell.resolve({
+      command: 'git rev-parse --short HEAD',
+      workdir: worktree,
+      timeoutMs: 10000,
+      sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: worktree },
+    })
+    const result = await ctx.shell.run(spec)
+    if (result.exitCode !== 0) return null
+    return result.stdout.text.trim() || null
+  } catch {
+    return null
+  }
+}
+
 /**
- * The clickvibe plugin: exports the profile-patch plugin contract.
+ * Derive the live state of a workflow from git facts + its event history.
+ * The stored `stage`/`reviewResult` stay as-is; this adds `derived` with
+ * the current worktree HEAD and whether commits exist beyond the last
+ * recorded dev event (i.e. un-reviewed work).
  */
+async function deriveWorkflowState(
+  ctx: Context,
+  workflow: IssueWorkflow,
+): Promise<IssueWorkflow & { derived: { head: string | null; hasNewCommits: boolean; lastDevHash: string | null; lastReviewHash: string | null } }> {
+  const head = existsSync(workflow.worktree) ? await readWorktreeHead(ctx, workflow.worktree) : null
+  const events = workflow.events ?? []
+  let lastDevHash: string | null = null
+  let lastReviewHash: string | null = null
+  for (const ev of events) {
+    if (ev.kind === 'dev' || ev.kind === 'rework') lastDevHash = ev.hash ?? lastDevHash
+    if (ev.kind === 'review') lastReviewHash = ev.hash ?? lastReviewHash
+  }
+  // 有新提交 = worktree HEAD 不在已记录的任何 dev/rework 事件哈希里
+  const hasNewCommits = head !== null && lastDevHash !== null && head !== lastDevHash
+  return {
+    ...workflow,
+    derived: { head, hasNewCommits, lastDevHash, lastReviewHash },
+  }
+}
 export const name = 'clickvibe'
 
 export const inject = ['webServer', 'shell']
@@ -253,7 +293,13 @@ export function apply(ctx: Context): void {
       }
       if (method === 'state') {
         const workflows = await loadAllWorkflows()
-        writeJson(res, 200, { ok: true, workflows })
+        // 附加推导状态:worktree HEAD + 相对最新事件的进展(不覆盖存储)
+        const enriched = []
+        for (const w of workflows) {
+          const derived = await deriveWorkflowState(ctx, w)
+          enriched.push(derived)
+        }
+        writeJson(res, 200, { ok: true, workflows: enriched })
         return
       }
       if (method === 'develop') {
@@ -424,8 +470,11 @@ async function ensureWorktree(ctx: Context, parsed: { owner: string; repo: strin
       reviewTaskId: null,
       reviewResult: null,
       updatedAt: Date.now(),
+      events: [],
     }
   }
+  // 旧状态文件兜底:补 events 字段
+  if (!Array.isArray(workflow.events)) workflow.events = []
   // 校正路径字段(配置可能变化)
   workflow.worktree = worktree
   workflow.branch = branch
@@ -560,6 +609,14 @@ async function startDevelop(
           if (exitCode === 0) {
             reloaded.stage = 'review-ready'
             reloaded.devInterrupted = false
+            // 记录开发提交事件:读 worktree HEAD 作为锚定哈希
+            const head = await readWorktreeHead(ctx, workflow.worktree)
+            await appendEvent(reloaded, {
+              kind: extraContext !== '' ? 'rework' : 'dev',
+              at: new Date().toISOString(),
+              hash: head ?? undefined,
+              note: `${agent} 完成开发${extraContext !== '' ? '(按 review 意见返工)' : ''}`,
+            })
           } else {
             reloaded.devInterrupted = true
           }
@@ -707,6 +764,15 @@ async function startReview(
     if (reloaded) {
       reloaded.reviewResult = { passed, issues }
       reloaded.stage = passed ? 'passed' : 'review-ready' // 有问题 → 可回开发(rework)
+      // 记录 review 历史事件:锚定被 review 的 HEAD
+      const reviewedHead = await readWorktreeHead(ctx, workflow.worktree)
+      await appendEvent(reloaded, {
+        kind: 'review',
+        at: new Date().toISOString(),
+        hash: reviewedHead ?? undefined,
+        verdict: { passed, issues },
+        note: `${agent} review${passed ? ' 通过' : ` 发现 ${issues.length} 个问题`}`,
+      })
       await saveWorkflow(reloaded)
       // 发到 GitHub issue 评论
       void postReviewComment(ctx, workflow.url, passed, issues)

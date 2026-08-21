@@ -131,6 +131,22 @@ const PANEL_CSS = `
 .cv-link-state-open { background: #dafbe1; color: #1a7f37; }
 .cv-link-state-closed { background: #ffebe9; color: #cf222e; }
 .cv-link-state-merged { background: #d8f5ff; color: #8250df; }
+.cv-stage-new { background: #fff8c5; color: #9a6700; }
+.cv-timeline { border-top: 1px solid #d0d7de; padding-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+.cv-timeline-head { font-size: 12px; font-weight: 600; color: #57606a; }
+.cv-tl-row { display: flex; align-items: center; gap: 6px; font-size: 11.5px; flex-wrap: wrap; }
+.cv-tl-kind { display: inline-block; padding: 0 6px; border-radius: 8px; font-size: 10.5px; font-weight: 600; }
+.cv-tl-kind-dev { background: #ddf4ff; color: #0969da; }
+.cv-tl-kind-rework { background: #fff8c5; color: #9a6700; }
+.cv-tl-kind-review { background: #fbefff; color: #8250df; }
+.cv-tl-kind-resume { background: #f6f8fa; color: #57606a; }
+.cv-tl-kind-note { background: #f6f8fa; color: #57606a; }
+.cv-tl-time { color: #8c959f; }
+.cv-tl-hash { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; background: #eff1f3; padding: 0 4px; border-radius: 4px; }
+.cv-tl-verdict { font-weight: 600; }
+.cv-tl-pass { color: #1a7f37; }
+.cv-tl-fail { color: #cf222e; }
+.cv-tl-note { color: #57606a; }
 `
 
 /** Inject the plugin stylesheet once; returns the disposer. */
@@ -437,6 +453,20 @@ interface Workflow {
   reviewTaskId: string | null
   reviewResult: { passed: boolean; issues: string[]; commentUrl?: string } | null
   updatedAt: number
+  events?: WorkflowEvent[]
+  derived?: { head: string | null; hasNewCommits: boolean; lastDevHash: string | null; lastReviewHash: string | null }
+}
+
+interface WorkflowEvent {
+  kind: 'dev' | 'review' | 'rework' | 'resume' | 'note'
+  at: string
+  hash?: string
+  verdict?: { passed: boolean; issues: string[] }
+  note?: string
+}
+
+function fmtTime(iso: string): string {
+  try { return new Date(iso).toLocaleString() } catch { return iso }
 }
 
 function stageLabel(stage: Workflow['stage'], workflow: Workflow | null): string {
@@ -556,57 +586,79 @@ function DevSection({ url, workflow, onWorkflow }: {
 
   return (
     <div className="cv-dev">
+      {/* 状态卡:当前状态 + 关键事实 */}
       <div className="cv-dev-head">
         🚀 开发流程 <span className={`cv-stage cv-stage-${stage}`}>{stageLabel(stage, workflow)}</span>
+        {workflow?.derived?.hasNewCommits ? <span className="cv-stage cv-stage-new">有未 review 的新提交</span> : null}
+      </div>
+      {workflow?.worktree ? <div className="cv-dev-path">{workflow.worktree}</div> : null}
+      {workflow?.derived?.head ? <div className="cv-dev-path">HEAD {workflow.derived.head}</div> : null}
+
+      {/* 操作区(悬浮感):与信息分离 */}
+      <div className="cv-dev-actions">
+        {interrupted && stage === 'developing' ? (
+          <button className="cv-dev-btn cv-dev-warn" onClick={resume} disabled={busy !== null}>
+            {busy === 'resuming' ? '恢复中…' : '↩ 恢复开发'}
+          </button>
+        ) : null}
+        {showDevButtons ? (
+          <>
+            <button className="cv-dev-btn cv-dev-codex" onClick={() => startDev('codex')} disabled={busy !== null}>Codex 开发</button>
+            <button className="cv-dev-btn cv-dev-claude" onClick={() => startDev('claude')} disabled={busy !== null}>Claude 开发</button>
+          </>
+        ) : null}
+        {showReviewButtons ? (
+          <>
+            <button className="cv-dev-btn cv-dev-review" onClick={() => startReview('codex')} disabled={busy !== null}>Codex Review</button>
+            <button className="cv-dev-btn cv-dev-review" onClick={() => startReview('claude')} disabled={busy !== null}>Claude Review</button>
+          </>
+        ) : null}
+        {workflow?.reviewResult && !workflow.reviewResult.passed ? (
+          <button
+            className="cv-dev-btn cv-dev-codex"
+            onClick={() => startDev('codex', workflow?.reviewResult?.issues.join('\n'))}
+            disabled={busy !== null}
+          >↩ 按 review 意见继续开发</button>
+        ) : null}
       </div>
 
-      {interrupted && stage === 'developing' ? (
-        <div className="cv-dev-actions">
-          <button className="cv-dev-btn cv-dev-warn" onClick={resume} disabled={busy !== null}>
-            {busy === 'resuming' ? '恢复中…' : '↩ 恢复开发(上次中断)'}
-          </button>
-        </div>
-      ) : null}
-
-      {showDevButtons ? (
-        <div className="cv-dev-actions">
-          <button className="cv-dev-btn cv-dev-codex" onClick={() => startDev('codex')} disabled={busy !== null}>Codex 开发</button>
-          <button className="cv-dev-btn cv-dev-claude" onClick={() => startDev('claude')} disabled={busy !== null}>Claude 开发</button>
-        </div>
-      ) : null}
-
-      {showReviewButtons ? (
-        <div className="cv-dev-actions">
-          <button className="cv-dev-btn cv-dev-review" onClick={() => startReview('codex')} disabled={busy !== null}>Codex Review</button>
-          <button className="cv-dev-btn cv-dev-review" onClick={() => startReview('claude')} disabled={busy !== null}>Claude Review</button>
-        </div>
-      ) : null}
-
-      {workflow?.worktree ? <div className="cv-dev-path">{workflow.worktree}</div> : null}
       {error ? <div className="cv-dev-error">{error}</div> : null}
 
       {statusLines.length > 0 ? (
         <pre className="cv-dev-log">{statusLines.join('\n')}</pre>
       ) : null}
 
-      {workflow?.reviewResult ? (
-        workflow.reviewResult.passed
-          ? <div className="cv-dev-done">✅ Review 通过,流程完成</div>
-          : (
-            <div className="cv-review-fail">
-              <div className="cv-dev-error">❌ Review 发现 {workflow.reviewResult.issues.length} 个问题</div>
-              <ul className="cv-review-issues">
-                {workflow.reviewResult.issues.map((issue, i) => <li key={i}>{issue}</li>)}
-              </ul>
-              <div className="cv-dev-actions">
-                <button
-                  className="cv-dev-btn cv-dev-codex"
-                  onClick={() => startDev('codex', workflow?.reviewResult?.issues.join('\n'))}
-                  disabled={busy !== null}
-                >↩ 按 review 意见继续开发</button>
-              </div>
+      {/* 最新 review 结论(当前状态的一部分) */}
+      {workflow?.reviewResult && !workflow.reviewResult.passed ? (
+        <div className="cv-review-fail">
+          <div className="cv-dev-error">❌ 最近一次 Review 发现 {workflow.reviewResult.issues.length} 个问题</div>
+          <ul className="cv-review-issues">
+            {workflow.reviewResult.issues.map((issue, i) => <li key={i}>{issue}</li>)}
+          </ul>
+        </div>
+      ) : null}
+      {workflow?.reviewResult?.passed ? <div className="cv-dev-done">✅ Review 通过</div> : null}
+
+      {/* 历史时间线:全部事件,按时间顺序 */}
+      {(workflow?.events ?? []).length > 0 ? (
+        <div className="cv-timeline">
+          <div className="cv-timeline-head">📜 历史</div>
+          {[...(workflow?.events ?? [])].reverse().map((ev, i) => (
+            <div key={i} className="cv-tl-row">
+              <span className={`cv-tl-kind cv-tl-kind-${ev.kind}`}>
+                {ev.kind === 'dev' ? '开发' : ev.kind === 'rework' ? '返工' : ev.kind === 'review' ? 'Review' : ev.kind === 'resume' ? '恢复' : '备注'}
+              </span>
+              <span className="cv-tl-time">{fmtTime(ev.at)}</span>
+              {ev.hash ? <code className="cv-tl-hash">{ev.hash}</code> : null}
+              {ev.kind === 'review' && ev.verdict
+                ? <span className={ev.verdict.passed ? 'cv-tl-verdict cv-tl-pass' : 'cv-tl-verdict cv-tl-fail'}>
+                    {ev.verdict.passed ? '✅ 通过' : `❌ ${ev.verdict.issues.length} 个问题`}
+                  </span>
+                : null}
+              {ev.note ? <span className="cv-tl-note">{ev.note}</span> : null}
             </div>
-          )
+          ))}
+        </div>
       ) : null}
     </div>
   )
