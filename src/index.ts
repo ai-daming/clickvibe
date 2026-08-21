@@ -481,10 +481,11 @@ async function startDevelop(
   | { ok: true; taskId: string; worktree: string; branch: string }
   | { ok: false; error: string }
 > {
-  const body = (payload ?? {}) as { url?: unknown; agent?: unknown }
+  const body = (payload ?? {}) as { url?: unknown; agent?: unknown; context?: unknown }
   const url = String(body.url ?? '').trim()
   const agentRaw = String(body.agent ?? 'codex').trim().toLowerCase()
   const agent: AgentKind = agentRaw === 'claude' ? 'claude' : 'codex'
+  const extraContext = typeof body.context === 'string' ? body.context.trim() : ''
   const parsed = parseUrl(url)
   if (!parsed) {
     return { ok: false, error: '请输入形如 https://github.com/owner/repo/issues/123 的链接' }
@@ -523,7 +524,10 @@ async function startDevelop(
       await appendLog(workflow.key, 'dev', `[clickvibe] 抓取 issue 数据…`)
       const fetchResult = await fetchIssue(ctx, { url })
       if (!fetchResult.ok) throw new Error(fetchResult.error)
-      const prompt = buildPrompt(fetchResult.data.item as Record<string, unknown>)
+      let prompt = buildPrompt(fetchResult.data.item as Record<string, unknown>)
+      if (extraContext !== '') {
+        prompt += '\n\n--- 附加上下文(来自 review 或其他) ---\n' + extraContext
+      }
 
       await appendLog(workflow.key, 'dev', `[clickvibe] 启动 ${agent} 开发…`)
       const agentCommand = agent === 'claude'

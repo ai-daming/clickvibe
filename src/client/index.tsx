@@ -460,11 +460,12 @@ function DevSection({ url, workflow, onWorkflow }: {
     }
   }
 
-  const startDev = async (agent: 'codex' | 'claude') => {
+  const startDev = async (agent: 'codex' | 'claude', context?: string) => {
     setBusy('developing')
     setError(null)
+    setStatusLines([])
     try {
-      const res = await apiCall<{ ok: true; taskId: string; worktree: string; branch: string } | { ok: false; error: string }>('develop', { url, agent })
+      const res = await apiCall<{ ok: true; taskId: string; worktree: string; branch: string } | { ok: false; error: string }>('develop', context ? { url, agent, context } : { url, agent })
       if (!res.ok) { setError(res.error); setBusy(null); return }
       await refresh()
       openStream(res.taskId)
@@ -503,7 +504,9 @@ function DevSection({ url, workflow, onWorkflow }: {
     }
   }
 
-  const showButtons = stage === 'idle' || (stage === 'review-ready' && !interrupted)
+  const showDevButtons = stage === 'idle'
+  const showReviewButtons = stage === 'review-ready' && !interrupted && !workflow?.reviewResult
+  const showReworkButtons = stage === 'review-ready' && workflow?.reviewResult?.passed === false
 
   return (
     <div className="cv-dev">
@@ -519,14 +522,14 @@ function DevSection({ url, workflow, onWorkflow }: {
         </div>
       ) : null}
 
-      {showButtons ? (
+      {showDevButtons ? (
         <div className="cv-dev-actions">
           <button className="cv-dev-btn cv-dev-codex" onClick={() => startDev('codex')} disabled={busy !== null}>Codex 开发</button>
           <button className="cv-dev-btn cv-dev-claude" onClick={() => startDev('claude')} disabled={busy !== null}>Claude 开发</button>
         </div>
       ) : null}
 
-      {stage === 'review-ready' && !interrupted ? (
+      {showReviewButtons ? (
         <div className="cv-dev-actions">
           <button className="cv-dev-btn cv-dev-review" onClick={() => startReview('codex')} disabled={busy !== null}>Codex Review</button>
           <button className="cv-dev-btn cv-dev-review" onClick={() => startReview('claude')} disabled={busy !== null}>Claude Review</button>
@@ -550,7 +553,11 @@ function DevSection({ url, workflow, onWorkflow }: {
                 {workflow.reviewResult.issues.map((issue, i) => <li key={i}>{issue}</li>)}
               </ul>
               <div className="cv-dev-actions">
-                <button className="cv-dev-btn cv-dev-codex" onClick={() => startDev('codex')} disabled={busy !== null}>↩ 按 review 意见继续开发</button>
+                <button
+                  className="cv-dev-btn cv-dev-codex"
+                  onClick={() => startDev('codex', workflow?.reviewResult?.issues.join('\n'))}
+                  disabled={busy !== null}
+                >↩ 按 review 意见继续开发</button>
               </div>
             </div>
           )
