@@ -626,14 +626,18 @@ function PanelContent() {
     return () => { cancelled = true }
   }, [])
 
-  const run = async () => {
-    if (!url.trim()) return
+  const run = async (targetUrl = url) => {
+    const trimmed = targetUrl.trim()
+    if (!trimmed) return
     setLoading(true)
     setError(null)
     setResult(null)
-    setWorkflow(null)
     try {
-      const res = await fetchIssue(url.trim())
+      // 按目标 url 匹配已存 workflow(恢复现场的关键:抓取不清 workflow)
+      const stateRes = await apiCall<{ ok: true; workflows: Workflow[] }>('state', {})
+      const matched = stateRes.ok ? stateRes.workflows.find((w) => w.url === trimmed) ?? null : null
+      setWorkflow(matched)
+      const res = await fetchIssue(trimmed)
       if (res.ok) setResult(res.data as { kind: 'issue' | 'pr'; item: GhIssue })
       else setError(res.error)
     } catch (e) {
@@ -663,7 +667,7 @@ function PanelContent() {
           onChange={(e) => setUrl(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter') run() }}
         />
-        <button className="cv-fetch" onClick={run} disabled={loading}>
+        <button className="cv-fetch" onClick={() => run()} disabled={loading}>
           {loading ? '抓取中…' : '抓取'}
         </button>
       </div>

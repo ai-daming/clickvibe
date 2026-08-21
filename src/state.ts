@@ -62,8 +62,6 @@ export async function loadWorkflow(key: string): Promise<IssueWorkflow | null> {
 /** Load every stored workflow (for panel restore). */
 export async function loadAllWorkflows(): Promise<IssueWorkflow[]> {
   try {
-    const dir = await readFile(stateDir(), 'utf8').then(() => true).catch(() => false)
-    if (!dir) return []
     const { readdir } = await import('node:fs/promises')
     const entries = await readdir(stateDir())
     const workflows: IssueWorkflow[] = []
