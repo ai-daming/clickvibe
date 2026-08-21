@@ -453,6 +453,7 @@ interface Workflow {
   reviewTaskId: string | null
   reviewSessionId: string | null
   reviewResult: { passed: boolean; issues: string[]; commentUrl?: string } | null
+  prNumber: string | null
   updatedAt: number
   events?: WorkflowEvent[]
   derived?: { head: string | null; hasNewCommits: boolean; lastDevHash: string | null; lastReviewHash: string | null }
@@ -595,6 +596,14 @@ function DevSection({ url, workflow, onWorkflow }: {
       </div>
       {workflow?.worktree ? <div className="cv-dev-path">{workflow.worktree}</div> : null}
       {workflow?.derived?.head ? <div className="cv-dev-path">HEAD {workflow.derived.head}</div> : null}
+      {workflow?.prNumber ? (
+        <div className="cv-dev-path">
+          🔗 PR{' '}
+          <a className="cv-link" href={`https://github.com/${workflow.repoKey}/pull/${workflow.prNumber}`} target="_blank" rel="noreferrer">
+            #{workflow.prNumber}
+          </a>
+        </div>
+      ) : null}
 
       {/* 操作区(悬浮感):与信息分离 */}
       <div className="cv-dev-actions">

@@ -32,6 +32,8 @@ export interface IssueWorkflow {
   reviewTaskId: string | null
   reviewSessionId: string | null
   reviewResult: { passed: boolean; issues: string[]; commentUrl?: string } | null
+  /** 关联的 PR 号(开发分支的代码产物);issue 为 key,PR 记录在这里。 */
+  prNumber: string | null
   updatedAt: number
   /** 完整历史事件链:每次开发提交/review/恢复各一条,按时间追加。 */
   events: WorkflowEvent[]

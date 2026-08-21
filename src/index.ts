@@ -228,6 +228,24 @@ async function readWorktreeHead(ctx: Context, worktree: string): Promise<string 
 }
 
 /**
+ * Detect the PR opened from a branch (via gh). Returns the PR number or null.
+ */
+async function detectLinkedPr(ctx: Context, repoKey: string, branch: string): Promise<string | null> {
+  try {
+    const spec = ctx.shell.resolve({
+      command: `gh pr list --repo ${repoKey} --head ${shellQuote(branch)} --state open --json number --jq '.[0].number // ""'`,
+      timeoutMs: 15000,
+    })
+    const result = await ctx.shell.run(spec)
+    if (result.exitCode !== 0) return null
+    const num = result.stdout.text.trim()
+    return num === '' ? null : num
+  } catch {
+    return null
+  }
+}
+
+/**
  * Derive the live state of a workflow from git facts + its event history.
  * The stored `stage`/`reviewResult` stay as-is; this adds `derived` with
  * the current worktree HEAD and whether commits exist beyond the last
@@ -398,20 +416,59 @@ function buildPrompt(item: Record<string, unknown>): string {
   ].join('\n')
 }
 
-/** Build the review prompt: review the dev branch diff against the issue. */
-function buildReviewPrompt(workflow: IssueWorkflow): string {
+/** Build the review prompt: review `git diff base...HEAD` against the issue.
+ *  base 取远端主干(origin/main 或 PR base),让 agent 用真实 diff 审查。 */
+async function buildReviewPrompt(ctx: Context, workflow: IssueWorkflow): Promise<string> {
+  // 解析 base:PR 有 baseRefName(若记录过),否则尝试 origin/HEAD 主干
+  let base = 'origin/main'
+  if (workflow.prNumber) {
+    const baseRef = await fetchPrBase(ctx, workflow.repoKey, workflow.prNumber)
+    if (baseRef) base = `origin/${baseRef}`
+  }
   return [
-    `请 review 分支 ${workflow.branch} 相对其 base 的代码改动,对照 issue:`,
+    `请 review 分支 ${workflow.branch} 的代码改动(相对 base ${base}),对照 issue:`,
     workflow.url,
     '',
     '要求:',
-    '1. 用 git diff 查看改动(相对主干)',
+    `1. 先执行 git diff ${base}...HEAD 查看完整改动(在 worktree 内)`,
     '2. 检查:需求是否完整实现、是否有 bug/安全隐患、测试是否覆盖',
     '3. 不要修改任何文件,只做只读 review',
     '4. 最后一行必须输出一个 JSON 对象(单独一行,不要包裹在代码块里),格式:',
     '{"passed": true|false, "issues": ["问题1(含文件/位置/原因)", "问题2", ...]}',
     '   passed=true 表示无问题;有任意问题则 passed=false 并列出全部。',
   ].join('\n')
+}
+
+/** Fetch a PR's base ref name via gh. */
+async function fetchPrBase(ctx: Context, repoKey: string, prNumber: string): Promise<string | null> {
+  try {
+    const spec = ctx.shell.resolve({
+      command: `gh pr view ${prNumber} --repo ${repoKey} --json baseRefName --jq '.baseRefName // ""'`,
+      timeoutMs: 15000,
+    })
+    const result = await ctx.shell.run(spec)
+    if (result.exitCode !== 0) return null
+    const name = result.stdout.text.trim()
+    return name === '' ? null : name
+  } catch {
+    return null
+  }
+}
+
+/** Fetch a PR's head branch name via gh (to locate its worktree). */
+async function fetchPrHeadBranch(ctx: Context, owner: string, repo: string, prNumber: string): Promise<string | null> {
+  try {
+    const spec = ctx.shell.resolve({
+      command: `gh pr view ${prNumber} --repo ${owner}/${repo} --json headRefName --jq '.headRefName // ""'`,
+      timeoutMs: 15000,
+    })
+    const result = await ctx.shell.run(spec)
+    if (result.exitCode !== 0) return null
+    const name = result.stdout.text.trim()
+    return name === '' ? null : name
+  } catch {
+    return null
+  }
 }
 
 /** Extract the final JSON verdict object from review log lines. */
@@ -472,13 +529,15 @@ async function ensureWorktree(ctx: Context, parsed: { owner: string; repo: strin
       reviewTaskId: null,
       reviewSessionId: null,
       reviewResult: null,
+      prNumber: null,
       updatedAt: Date.now(),
       events: [],
     }
   }
-  // 旧状态文件兜底:补 events / reviewSessionId 字段
+  // 旧状态文件兜底:补 events / reviewSessionId / prNumber 字段
   if (!Array.isArray(workflow.events)) workflow.events = []
   if (workflow.reviewSessionId === undefined) workflow.reviewSessionId = null
+  if (workflow.prNumber === undefined) workflow.prNumber = null
   // 校正路径字段(配置可能变化)
   workflow.worktree = worktree
   workflow.branch = branch
@@ -692,6 +751,11 @@ async function startDevelop(
             reloaded.devInterrupted = false
             // 记录 agent 会话 id(供续会话精确恢复,不用 --last)
             if (sessionId) reloaded.devSessionId = sessionId
+            // 检测关联 PR:开发可能创建了 PR,记录到 workflow(issue 为 key,PR 是产物)
+            if (!reloaded.prNumber) {
+              const pr = await detectLinkedPr(ctx, workflow.repoKey, workflow.branch)
+              if (pr) reloaded.prNumber = pr
+            }
             // 记录开发提交事件:读 worktree HEAD 作为锚定哈希
             const head = await readWorktreeHead(ctx, workflow.worktree)
             await appendEvent(reloaded, {
@@ -799,19 +863,37 @@ async function startReview(
   const agent: AgentKind = agentRaw === 'claude' ? 'claude' : 'codex'
   const parsed = parseUrl(url)
   if (!parsed) {
-    return { ok: false, error: '请输入形如 https://github.com/owner/repo/issues/123 的链接' }
-  }
-  if (parsed.kind !== 'issue') {
-    return { ok: false, error: 'review 仅支持 issue 链接' }
+    return { ok: false, error: '请输入形如 https://github.com/owner/repo/issues/123 或 /pull/123 的链接' }
   }
 
-  const key = issueKey(`${parsed.owner}/${parsed.repo}`, parsed.number)
-  const workflow = await loadWorkflow(key)
+  // 定位 workflow:issue URL → 直接按 key;PR URL → 按 prNumber 或 head 分支反查
+  let workflow: IssueWorkflow | null = null
+  if (parsed.kind === 'issue') {
+    const key = issueKey(`${parsed.owner}/${parsed.repo}`, parsed.number)
+    workflow = await loadWorkflow(key)
+  } else {
+    // PR:先按已记录的 prNumber 找,再按 head 分支找(可能尚未记录)
+    const all = await loadAllWorkflows()
+    const repoKey = `${parsed.owner}/${parsed.repo}`
+    workflow = all.find((w) => w.repoKey === repoKey && w.prNumber === parsed.number) ?? null
+    if (!workflow) {
+      const prInfo = await fetchPrHeadBranch(ctx, parsed.owner, parsed.repo, parsed.number)
+      if (prInfo) {
+        workflow = all.find((w) => w.repoKey === repoKey && w.branch === prInfo) ?? null
+      }
+    }
+  }
+
   if (!workflow || workflow.stage === 'idle' || workflow.stage === 'developing') {
     return { ok: false, error: '该 issue 尚未完成开发,无法 review' }
   }
   if (!existsSync(workflow.worktree)) {
     return { ok: false, error: `worktree 不存在: ${workflow.worktree}` }
+  }
+  // 记录关联 PR(若 review 的是 PR 且未记录)
+  if (parsed.kind === 'pr' && !workflow.prNumber) {
+    workflow.prNumber = parsed.number
+    await saveWorkflow(workflow)
   }
 
   const taskId = `review-${Date.now()}`
@@ -846,7 +928,7 @@ async function startReview(
   }
   const prompt = sessionId
     ? '请继续 review。代码已更新,请先确认之前发现的问题是否已解决,再审查新改动,最后输出同样的 JSON 结论。'
-    : buildReviewPrompt(workflow)
+    : await buildReviewPrompt(ctx, workflow)
 
   await appendLog(workflow.key, 'review', `[clickvibe] 启动 ${agent} review${sessionId ? `(续会话 ${sessionId})` : ''}…`)
   attachAgentProcess(ctx, live, agentCommand, workflow.worktree, prompt, async (exitCode, newSessionId) => {
@@ -873,8 +955,12 @@ async function startReview(
         note: `${agent} review${passed ? ' 通过' : ` 发现 ${issues.length} 个问题`}`,
       })
       await saveWorkflow(reloaded)
-      // 发到 GitHub issue 评论
-      void postReviewComment(ctx, workflow.url, passed, issues)
+      // 发评论:有 PR 则发到 PR 评论(review 对象是代码/PR),否则发 issue
+      if (reloaded.prNumber) {
+        void postReviewComment(ctx, `https://github.com/${workflow.repoKey}/pull/${reloaded.prNumber}`, passed, issues)
+      } else {
+        void postReviewComment(ctx, workflow.url, passed, issues)
+      }
     }
   })
 
