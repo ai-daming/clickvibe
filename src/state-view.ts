@@ -24,6 +24,23 @@ export interface NextAction {
   hint: string
 }
 
+/** Resolve the PR base from the frozen workflow baseline, then the live repo default. */
+export function workflowBaseBranch(baseRef: string | null | undefined, defaultBranch = 'main'): string {
+  const ref = String(baseRef ?? '').split(/\s+@\s+/, 1)[0].trim()
+  const branch = ref.replace(/^refs\/remotes\/origin\//, '').replace(/^origin\//, '')
+  return branch !== '' && branch !== 'HEAD' ? branch : defaultBranch
+}
+
+export function githubCompareUrl(
+  repoKey: string,
+  branch: string,
+  baseRef: string | null | undefined,
+  defaultBranch = 'main',
+): string {
+  const base = workflowBaseBranch(baseRef, defaultBranch)
+  return `https://github.com/${repoKey}/compare/${encodeURIComponent(base)}...${encodeURIComponent(branch)}?expand=1`
+}
+
 export type WorkflowStageInput = 'idle' | 'developing' | 'review-ready' | 'reviewing' | 'passed'
 
 export interface WorkflowFacts {

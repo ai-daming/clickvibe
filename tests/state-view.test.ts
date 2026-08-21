@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { deriveNextAction, type WorkflowFacts } from '../src/state-view.ts'
+import { deriveNextAction, githubCompareUrl, workflowBaseBranch, type WorkflowFacts } from '../src/state-view.ts'
 
 function facts(overrides: Partial<WorkflowFacts> = {}): WorkflowFacts {
   return {
@@ -27,6 +27,20 @@ test('closed issue has no next action', () => {
 test('merged PR is terminal', () => {
   const next = deriveNextAction(facts({ prMerged: true, stage: 'passed', prNumber: '9' }))
   assert.equal(next.kind, 'none')
+})
+
+test('closed unmerged PR offers the explicit recovery action', () => {
+  const next = deriveNextAction(facts({ prNumber: '9', prState: 'CLOSED', prStatusKnown: true }))
+  assert.equal(next.kind, 'develop')
+  assert.equal(next.label, '查看原因 / 重新开发')
+})
+
+test('compare URL uses the frozen non-main workflow base', () => {
+  assert.equal(workflowBaseBranch('origin/trunk @ abc123', 'main'), 'trunk')
+  assert.equal(
+    githubCompareUrl('o/r', 'feature/7', 'origin/trunk @ abc123', 'main'),
+    'https://github.com/o/r/compare/trunk...feature%2F7?expand=1',
+  )
 })
 
 test('a linked PR with an unavailable live state fails closed', () => {

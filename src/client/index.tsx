@@ -17,6 +17,7 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 // merges the slot names.
 import type { LayoutController } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { SidebarFooterActionOwnerProps } from '@deepseek-ai/dsh-client-ui-sidebar/client'
+import { githubCompareUrl } from '../state-view.ts'
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 type _SlotLoaders = [typeof LayoutController, SidebarFooterActionOwnerProps]
 
@@ -652,6 +653,7 @@ interface Workflow {
     verdictCurrent: boolean
     nextAction: NextAction
     status: 'idle' | 'developing' | 'review-ready' | 'reviewing' | 'passed'
+    baseBranch: string
   }
 }
 
@@ -888,7 +890,7 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
       case 'sync': void syncWorktree(); break
       case 'create-pr':
         if (workflow) {
-          window.open(`https://github.com/${workflow.repoKey}/compare/main...${encodeURIComponent(workflow.branch)}?expand=1`, '_blank', 'noopener')
+          window.open(githubCompareUrl(workflow.repoKey, workflow.branch, workflow.baseRef, workflow.derived?.baseBranch), '_blank', 'noopener')
         }
         break
       case 'merge':
@@ -1191,7 +1193,12 @@ function PanelContent() {
       return
     }
     if (action.kind === 'create-pr') {
-      window.open(`https://github.com/${issue.workflow.repoKey}/compare/main...${encodeURIComponent(issue.workflow.branch)}?expand=1`, '_blank', 'noopener')
+      window.open(githubCompareUrl(
+        issue.workflow.repoKey,
+        issue.workflow.branch,
+        issue.workflow.baseRef,
+        issue.workflow.derived?.baseBranch,
+      ), '_blank', 'noopener')
       return
     }
     void openIssue(issue, true)
