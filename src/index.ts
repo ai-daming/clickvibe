@@ -59,6 +59,7 @@ import {
   type WorkflowEvent,
 } from './state.ts'
 import { buildDevComment, buildReviewComment } from './delivery-comment.ts'
+import { extractGithubCommentUrl } from './delivery-publication.ts'
 import { parseAgentChunk, type AgentKind } from './agent-stream.ts'
 import {
   clearReviewResultFile,
@@ -2141,10 +2142,11 @@ async function publishDeliveryComment(
   const command = `gh issue comment ${shellQuote(targetUrl)} --body-file -`
   try {
     const output = await runCommand(ctx, command, { stdin: body, timeoutMs: 30000 })
+    const commentUrl = extractGithubCommentUrl(output)
     event.publication = {
       target,
       status: 'posted',
-      ...(output.startsWith('https://github.com/') ? { url: output.split('\n').at(-1) } : {}),
+      ...(commentUrl ? { url: commentUrl } : {}),
     }
     await appendLog(workflow.key, event.kind === 'review' ? 'review' : 'dev', `[clickvibe] 已发布 GitHub ${target === 'pr' ? 'PR' : 'Issue'} 评论${event.publication.url ? `: ${event.publication.url}` : ''}`)
   } catch (error) {

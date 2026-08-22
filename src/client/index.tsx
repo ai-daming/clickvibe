@@ -18,6 +18,7 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type { LayoutController } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { SidebarFooterActionOwnerProps } from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import { githubCompareUrl } from '../state-view.ts'
+import { deliveryPublicationLabel, type DeliveryPublication } from '../delivery-publication.ts'
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 type _SlotLoaders = [typeof LayoutController, SidebarFooterActionOwnerProps]
 
@@ -679,12 +680,7 @@ interface WorkflowEvent {
   hash?: string
   verdict?: { passed: boolean; issues: string[] }
   fixed?: number
-  publication?: {
-    target: 'pr' | 'issue'
-    status: 'posted' | 'failed'
-    url?: string
-    error?: string
-  }
+  publication?: DeliveryPublication
   note?: string
 }
 
@@ -1097,12 +1093,12 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
               {ev.publication?.status === 'posted'
                 ? ev.publication.url
                   ? <a className="cv-tl-public" href={ev.publication.url} target="_blank" rel="noreferrer">
-                      GitHub {ev.publication.target === 'pr' ? 'PR' : 'Issue'} 评论 ↗
+                      {deliveryPublicationLabel(ev.publication)}
                     </a>
-                  : <span className="cv-tl-public">GitHub {ev.publication.target === 'pr' ? 'PR' : 'Issue'} 评论已发布</span>
+                  : <span className="cv-tl-public">{deliveryPublicationLabel(ev.publication)}</span>
                 : ev.publication?.status === 'failed'
-                  ? <span className="cv-tl-publish-fail" title={ev.publication.error}>GitHub 评论发布失败</span>
-                  : <span className="cv-tl-local">本地事件</span>}
+                  ? <span className="cv-tl-publish-fail" title={ev.publication.error}>{deliveryPublicationLabel(ev.publication)}</span>
+                  : <span className="cv-tl-local">{deliveryPublicationLabel(ev.publication)}</span>}
             </div>
           ))}
         </div>

@@ -293,6 +293,66 @@ test('completed development without a PR appends its Dev Meta comment to the iss
   }
 })
 
+test('comment publication failure keeps the delivery event and stores a bounded visible error', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-dev-comment-failure-'))
+  process.env.HOME = tempHome
+  try {
+    const worktree = join(tempHome, 'worktree')
+    await mkdir(worktree, { recursive: true })
+    const workflow = interruptedWorkflow('o-r-921', 'https://github.com/o/r/issues/921', worktree)
+    workflow.reviewResult = { passed: false, issues: ['must remain traceable'] }
+    await saveWorkflow(workflow)
+    const handler = createHandler(async (spec) => {
+      if (spec.command === 'git rev-parse --short HEAD') {
+        return { exitCode: 0, stdout: { text: '987abcd' }, stderr: { text: '' } }
+      }
+      if (spec.command.startsWith('gh issue comment')) {
+        return { exitCode: 1, stdout: { text: '' }, stderr: { text: `offline-${'x'.repeat(700)}` } }
+      }
+      return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+    }, () => {
+      let read = false
+      return {
+        status: 'running', exitCode: 0,
+        done: new Promise<void>((resolve) => setTimeout(resolve, 5)),
+        readOutput() {
+          if (read) return { delta: '', lossy: false }
+          read = true
+          return { delta: '{"type":"thread.started","thread_id":"failure-session"}\n', lossy: false }
+        },
+        kill() { return true },
+      }
+    })
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+    const authorized = await post(handler, '/clickvibe/api/authorize', {
+      action: 'resume', url: workflow.url, agent: 'codex', context: '',
+    }, headers) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
+    const resumed = await post(handler, '/clickvibe/api/resume', {
+      url: workflow.url, agent: 'codex', context: '',
+      authorizationId: authorized.body.authorizationId,
+      authorizationDigest: authorized.body.authorizationDigest,
+    }, headers) as { status: number; body: { taskId?: string } }
+    assert.equal(resumed.status, 200, JSON.stringify(resumed.body))
+    assert.ok(resumed.body.taskId)
+    await waitForTask(handler, resumed.body.taskId)
+
+    const reloaded = await loadWorkflow(workflow.key)
+    assert.equal(reloaded?.stage, 'review-ready')
+    assert.equal(reloaded?.events.length, 1)
+    assert.equal(reloaded?.events[0].hash, '987abcd')
+    assert.equal(reloaded?.events[0].fixed, 1)
+    assert.equal(reloaded?.events[0].publication?.target, 'pr')
+    assert.equal(reloaded?.events[0].publication?.status, 'failed')
+    assert.equal(reloaded?.events[0].publication?.error?.length, 500)
+    assert.match(reloaded?.events[0].publication?.error ?? '', /offline-/)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
 test('invalid exact review session clears the stale id and falls back to a fresh review', async () => {
   const previousHome = process.env.HOME
   const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-review-fallback-'))
