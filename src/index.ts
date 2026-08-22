@@ -277,13 +277,16 @@ async function runCommand(
     sandboxPolicy: options.sandboxPolicy,
   })
   const result = await ctx.shell.run(spec)
-  if (result.exitCode !== 0) {
-    const stderr = result.stderr?.text?.trim() ?? ''
-    throw new Error(`命令退出码 ${result.exitCode}${stderr ? `: ${stderr}` : ''}`)
-  }
   // stdout 超限时内存只保留尾部;有 spill 文件则读全文,否则明确报错而不是返回垃圾。
   // 注:插件可见的 shell 类型只声明 {text},运行时才有 truncated/spillPath,做宽断言。
   const out = result.stdout as { text: string; truncated?: boolean; spillPath?: string }
+  if (result.exitCode !== 0) {
+    // git merge 等命令把 CONFLICT/文件提示打到 stdout,只拼 stderr 会丢冲突详情
+    const stderr = result.stderr?.text?.trim() ?? ''
+    const stdout = out.text.trim()
+    const detail = [stderr, stdout].filter(Boolean).join('\n')
+    throw new Error(`命令退出码 ${result.exitCode}${detail ? `: ${detail}` : ''}`)
+  }
   if (out.truncated) {
     if (out.spillPath) {
       return (await readFile(out.spillPath, 'utf8')).trim()
@@ -348,6 +351,8 @@ interface WorkflowDerived {
   aheadOfUpstream: number | null
   behindUpstream: number | null
   needsSync: boolean
+  /** Worktree sits in an unresolved conflicted merge (MERGE_HEAD exists). */
+  mergeConflict: boolean
   lastDevHash: string | null
   lastReviewHash: string | null
   reviewedHash: string | null
@@ -430,6 +435,46 @@ async function readRevCount(ctx: Context, workdir: string, left: string, right: 
   }
 }
 
+/** True when the worktree sits in an unresolved conflicted merge (MERGE_HEAD exists). */
+async function hasMergeConflict(ctx: Context, workdir: string): Promise<boolean> {
+  return (await readRefShort(ctx, workdir, 'MERGE_HEAD')) !== null
+}
+
+/** List unresolved conflict files (git diff --name-only --diff-filter=U).
+ *  Empty when none or unreadable — callers treat it as best-effort detail. */
+async function listConflictFiles(ctx: Context, workdir: string): Promise<string[]> {
+  try {
+    const output = await runCommand(ctx, 'git diff --name-only --diff-filter=U', {
+      workdir,
+      timeoutMs: 10000,
+      sandboxPolicy: { mode: 'read-only', workspaceRoot: workdir },
+    })
+    return output.split('\n').map((line) => line.trim()).filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+/** Format a conflict-file list as a readable suffix (";冲突文件:a、b"), '' when none. */
+function conflictFileSuffix(files: string[]): string {
+  return files.length > 0 ? `;冲突文件:${files.join('、')}` : ''
+}
+
+/** Preface instruction for resume/rework agents when the worktree is not on the
+ *  latest base: merge origin/<base> (and resolve any conflict) before continuing
+ *  (issue #26). Empty when the worktree is already up to date. */
+export async function buildMergePreface(ctx: Context, worktree: string, baseBranch: string): Promise<string> {
+  if (await hasMergeConflict(ctx, worktree)) {
+    const files = await listConflictFiles(ctx, worktree)
+    return `注意:worktree 里有一次未完成的合并(origin/${baseBranch})冲突${conflictFileSuffix(files)}。请先用 git status 查看冲突文件,解决全部冲突并完成 git commit,然后再继续后续任务。`
+  }
+  const compare = await readRevCount(ctx, worktree, `origin/${baseBranch}`, 'HEAD')
+  if (compare && compare.behind > 0) {
+    return `注意:本地分支落后 origin/${baseBranch}。请先执行 git merge --no-edit origin/${baseBranch}(如有冲突,解决后完成提交),然后再继续后续任务。`
+  }
+  return ''
+}
+
 /**
  * Derive the authoritative state of a workflow from git facts + event history
  * (issue #5). Runs on every /state request so the panel never needs a
@@ -499,6 +544,8 @@ export async function deriveWorkflowState(
   const hasNewCommits = head !== null && lastDevHash !== null && head !== lastDevHash
   // worktree 落后远端基线(origin/main 或远端同名分支)→ 需要同步
   const needsSync = behindBase > 0 || (behindUpstream ?? 0) > 0
+  // 未完成的冲突合并(MERGE_HEAD 存在):sync 只会再次失败,必须由 agent 收拾(issue #26)
+  const mergeConflict = exists && await hasMergeConflict(ctx, worktree)
   const githubReviewPassed = options.pr?.reviewDecision === 'APPROVED'
     ? true
     : options.pr?.reviewDecision === 'CHANGES_REQUESTED'
@@ -527,6 +574,7 @@ export async function deriveWorkflowState(
     reviewPassed,
     hasNewCommits,
     needsSync,
+    mergeConflict,
     branchExists: options.branchExists ?? branch !== null,
     worktreeExists: exists,
     worktreeValid: !exists || branch === workflow.branch,
@@ -554,6 +602,7 @@ export async function deriveWorkflowState(
       aheadOfUpstream,
       behindUpstream,
       needsSync,
+      mergeConflict,
       lastDevHash,
       lastReviewHash,
       reviewedHash,
@@ -1890,11 +1939,16 @@ function stopTask(payload: unknown): { ok: true; taskId: string; stopped: boolea
 
 /** Sync a workflow's worktree with the remote base (git fetch + merge origin/main).
  *  Keeps the worktree on the latest base so dev/review never target stale code
- *  (issue #5). The merge result is recorded as a timeline event. */
-async function syncWorktree(
+ *  (issue #5). The merge result is recorded as a timeline event.
+ *  合并冲突时不回滚:现场(MERGE_HEAD + 冲突标记)原样保留,转交返工 agent
+ *  解决(issue #26),避免「同步失败 → 门禁不放行 rework」的死锁。 */
+export async function syncWorktree(
   ctx: Context,
   payload: unknown,
-): Promise<{ ok: true; worktree: string; branch: string; head: string | null } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; worktree: string; branch: string; head: string | null }
+  | { ok: false; error: string; conflict?: boolean; files?: string[] }
+> {
   const url = String((payload as { url?: unknown } | undefined)?.url ?? '').trim()
   const parsed = parseUrl(url)
   if (!parsed || parsed.kind !== 'issue') {
@@ -1913,8 +1967,31 @@ async function syncWorktree(
     try {
       await runCommand(ctx, 'git merge --no-edit origin/main', { workdir: workflow.worktree, timeoutMs: 60_000, sandboxPolicy: policy })
     } catch (error) {
-      // 合并冲突/失败:回滚到合并前,保持 worktree 干净;错误透传给用户
-      await runCommand(ctx, 'git merge --abort', { workdir: workflow.worktree, timeoutMs: 30_000, sandboxPolicy: policy }).catch(() => {})
+      // issue #26:合并冲突不再 abort 回滚丢弃现场。冲突状态(MERGE_HEAD +
+      // 冲突标记)原样保留,转交返工 agent 解决;非冲突失败(如本地脏改动
+      // 导致 git 自行中止)没有可保留的现场,照旧透传错误。
+      if (await hasMergeConflict(ctx, workflow.worktree)) {
+        const message = String(error instanceof Error ? error.message : error)
+        // 冲突详情透传(issue #26):文件清单记日志、进时间线、随错误返回面板
+        const files = await listConflictFiles(ctx, workflow.worktree)
+        const suffix = conflictFileSuffix(files)
+        const note = `合并 origin/main 冲突,现场已保留(未回滚),转交返工 agent 处理${suffix}`
+        await appendLog(workflow.key, 'dev', `[clickvibe] ${note}`)
+        const reloaded = await loadWorkflow(workflow.key)
+        if (reloaded) {
+          await appendEvent(reloaded, {
+            kind: 'note',
+            at: new Date().toISOString(),
+            note,
+          })
+        }
+        return {
+          ok: false,
+          conflict: true,
+          files,
+          error: `合并 origin/main 冲突,现场已保留:${message}${suffix}。可直接「按意见返工」,agent 会先解决冲突再修意见`,
+        }
+      }
       throw error
     }
     const head = await readWorktreeHead(ctx, workflow.worktree)
@@ -2118,8 +2195,9 @@ async function postReviewComment(ctx: Context, issueUrl: string, passed: boolean
 }
 
 /** Resume (or continue) a dev session with an exact session id; `context`
- *  carries extra instructions (e.g. review issues for a rework). */
-async function resumeDevelop(
+ *  carries extra instructions (e.g. review issues for a rework).
+ *  Exported for integration tests; the /resume route calls it. */
+export async function resumeDevelop(
   ctx: Context,
   payload: unknown,
 ): Promise<{ ok: true; taskId: string } | { ok: false; error: string }> {
@@ -2177,11 +2255,34 @@ async function resumeDevelop(
     await appendLog(workflow.key, 'dev', `[clickvibe] git fetch 失败(继续): ${String(e instanceof Error ? e.message : e)}`)
   }
 
-  const prompt = ownedDevSession.invalid
-    ? await buildFreshResumePrompt(ctx, workflow, extraContext)
-    : extraContext !== ''
-      ? `请继续完成开发任务,并处理以下 review 意见:\n${extraContext}`
+// issue #26:worktree 落后基线或处于冲突合并中时,把「合并 main、解决冲突」
+  // 作为前置指令交给 agent(danger-full-access 有能力处理),review 意见不再
+  // 被同步门禁挡住送不进来。
+  const mergePreface = await buildMergePreface(ctx, workflow.worktree, workflowBaseBranch(workflow.baseRef))
+
+  // issue #26:未解决的 review 意见必须送达 agent。客户端 resume 动作不带
+  // context,精确会话失效/归属不匹配回退全新会话时 fresh prompt 也不能只带
+  // 合并指令——持久化 reviewResult 是权威来源,服务端负责补全(客户端已带
+  // 同样意见时不重复)。
+  const unresolvedIssues = workflow.reviewResult && workflow.reviewResult.passed === false
+    ? workflow.reviewResult.issues
+    : []
+  const reviewContext = unresolvedIssues.length > 0 && !unresolvedIssues.some((issue) => extraContext.includes(issue))
+    ? `请处理以下未解决的 review 意见:\n${unresolvedIssues.join('\n')}`
+    : ''
+  const context = reviewContext === ''
+    ? extraContext
+    : extraContext === '' ? reviewContext : `${extraContext}\n\n${reviewContext}`
+
+  const basePrompt = ownedDevSession.invalid
+    ? await buildFreshResumePrompt(ctx, workflow, context)
+    : context !== ''
+      ? `请继续完成开发任务,并处理以下 review 意见:\n${context}`
       : '请继续完成刚才的开发任务。'
+
+  const prompt = mergePreface !== ''
+    ? `${mergePreface}\n\n${basePrompt}`
+    : basePrompt
 
   await appendLog(workflow.key, 'dev', `[clickvibe] 恢复 ${agent} 会话${sessionId ? `(${sessionId})` : ''}…`)
   attachAgentProcess(ctx, live, command, workflow.worktree, prompt, async (exitCode, newSessionId) => {
@@ -2207,9 +2308,11 @@ async function resumeDevelop(
     prepare: async () => {
       const reloaded = await loadWorkflow(workflow.key)
       if (reloaded && clearStaleSessionId(reloaded, 'dev', sessionId)) await saveWorkflow(reloaded)
+      // 回退的全新会话同样前置合并指令:冲突现场还在,不能只带意见不带冲突指引
+      const fresh = await buildFreshResumePrompt(ctx, workflow, context)
       return {
         command: buildFreshAgentCommand(agent),
-        prompt: await buildFreshResumePrompt(ctx, workflow, extraContext),
+        prompt: mergePreface !== '' ? `${mergePreface}\n\n${fresh}` : fresh,
       }
     },
   } : undefined)

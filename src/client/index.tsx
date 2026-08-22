@@ -648,6 +648,7 @@ interface Workflow {
     aheadOfUpstream: number | null
     behindUpstream: number | null
     needsSync: boolean
+    mergeConflict?: boolean
     lastDevHash: string | null
     lastReviewHash: string | null
     reviewedHash: string | null
@@ -855,8 +856,13 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
     setBusy('syncing')
     setError(null)
     try {
-      const res = await apiCall<{ ok: true; worktree: string; branch: string; head: string | null } | { ok: false; error: string }>('sync', { url })
-      if (!res.ok) { setError(res.error); setBusy(null); return }
+      const res = await apiCall<{ ok: true; worktree: string; branch: string; head: string | null } | { ok: false; error: string; conflict?: boolean }>('sync', { url })
+      if (!res.ok) {
+        setError(res.error)
+        // 冲突现场保留后,唯一动作会切换为「按意见返工」,刷新让按钮立即接手
+        if (res.conflict) await refresh()
+        setBusy(null); return
+      }
       await refresh()
       setBusy(null)
     } catch (e) {
@@ -972,6 +978,7 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
                     origin/main <code className="cv-tl-hash">{derived.originMainHead}</code>
                     <span className="cv-state-delta">worktree 落后 {derived.behindBase} · 领先 {derived.aheadOfBase}</span>
                     {derived.needsSync ? <span className="cv-state-warn">⚠ 需要同步</span> : null}
+                    {derived.mergeConflict ? <span className="cv-state-warn">⚠ 合并冲突待解决(转交 agent)</span> : null}
                   </td>
                 </tr>
               ) : null}
