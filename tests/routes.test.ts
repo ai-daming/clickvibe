@@ -1663,6 +1663,51 @@ test('repo aggregation keeps a closed issue visible while merged cleanup is pend
   assert.equal(items[0].workflow.derived.nextAction.kind, 'cleanup')
 })
 
+test('repo aggregation consumes snapshot PR facts and skips per-PR detail network calls', async () => {
+  // 列表页冷启动优化:PR 已在 pulls?state=all 快照里(含已合并/已关闭)时,
+  // 直接消费快照,不再为 workflow 打 pulls/{n}(+reviews) 请求;reviewDecision
+  // 等详情留给 /state 后台轮询。fake shell 对 /pulls/29 抛错即证明无网络调用。
+  const issue = {
+    number: 7, title: 'issue 7', state: 'open', body: '',
+    html_url: 'https://github.com/o/r/issues/7', milestone: null,
+  }
+  const workflow = {
+    key: 'o-r-7', url: issue.html_url, repoKey: 'o/r', worktree: '/remote/worktrees/r/r-issue-7', branch: 'r-issue-7',
+    stage: 'review-ready', devAgent: 'codex', devTaskId: null, devSessionId: null, devSessionAgent: null, devInterrupted: false,
+    reviewAgent: 'codex', reviewTaskId: null, reviewSessionId: null, reviewSessionAgent: null,
+    reviewResult: null, prNumber: 29, issueState: 'OPEN',
+    baseRef: 'origin/main @ abc', updatedAt: 1, events: [],
+  }
+  const commands: string[] = []
+  const ctx = {
+    shell: {
+      resolve(spec: unknown) { return spec },
+      async run(spec: { command: string }) {
+        commands.push(spec.command)
+        if (spec.command.includes('/issues?')) return { exitCode: 0, stdout: { text: included([issue]) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: included([
+          { number: 29, state: 'closed', merged_at: '2026-08-22T00:00:00Z', head: { ref: 'r-issue-7' }, html_url: 'https://github.com/o/r/pull/29' },
+        ]) }, stderr: { text: '' } }
+        throw new Error('snapshot fast path must not run: ' + spec.command)
+      },
+    },
+  }
+  const result = await fetchRepositoryIssues(ctx as never, { repoKey: 'o/r' }, {
+    config: { repos: { 'o/r': '/remote/r' }, worktreeRoot: '/remote/worktrees' },
+    workflows: [workflow as never],
+  })
+  assert.equal(result.ok, true)
+  if (!result.ok) return
+  const item = result.issues[0] as { workflow: { prNumber: string; derived: { status: string; nextAction: { kind: string } } } }
+  assert.equal(item.workflow.prNumber, '29')
+  assert.equal(item.workflow.derived.status, 'passed')
+  assert.equal(item.workflow.derived.nextAction.kind, 'none')
+  assert.equal(commands.filter((command) => command.startsWith('gh api ')).length, 2, 'only the issues+pulls snapshot, no per-PR detail')
+  // #8:列表项携带契约合规字段;空正文 = 缺 目标/验收标准/依赖(选前校验标记,不硬选)
+  const contractItem = result.issues[0] as unknown as { contract: { ok: boolean; missing: string[] } }
+  assert.equal(contractItem.contract.ok, false)
+  assert.deepEqual(contractItem.contract.missing, ['目标', '验收标准', '依赖'])
+})
 test('repo issue aggregation fails closed when a stored PR cannot be refreshed by number', async () => {
   const issue = { number: 7, title: 'issue 7', state: 'open', body: '', html_url: 'https://github.com/o/r/issues/7', milestone: null }
   const workflow = {
