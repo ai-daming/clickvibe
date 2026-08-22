@@ -93,7 +93,12 @@ export function deriveWorkflowStatus(facts: WorkflowFacts): WorkflowStatus {
   if (facts.prMerged) return 'passed'
   // A live task outranks the linked PR and any verdict bound to an older HEAD.
   if (facts.taskRunning) return facts.stage === 'reviewing' ? 'reviewing' : 'developing'
-  if (facts.reviewPassed === true && verdictCurrent) return 'passed'
+  // When the worktree cannot be inspected, preserve a known passing verdict
+  // unless there is positive evidence of a newer commit. This matches the
+  // pre-derived-state behavior without treating a known changed HEAD as current.
+  const passedWithoutContradictingHead = facts.reviewPassed === true
+    && (verdictCurrent || (facts.head === null && !facts.hasNewCommits))
+  if (passedWithoutContradictingHead) return 'passed'
   if (facts.reviewPassed !== null || facts.prNumber || facts.stage === 'review-ready') return 'review-ready'
   if (facts.hasUncommittedChanges || facts.hasCommits) return 'developing'
   return 'idle'

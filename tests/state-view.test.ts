@@ -84,7 +84,7 @@ test('a running review task stays reviewing even when a PR exists', () => {
   })), 'reviewing')
 })
 
-test('only a current passed verdict produces passed status', () => {
+test('a current passed verdict passes while a known changed head requires review', () => {
   assert.equal(deriveWorkflowStatus(facts({
     stage: 'review-ready', prNumber: '9', reviewPassed: true,
     reviewedHash: 'a1b2c3d', head: 'a1b2c3d',
@@ -97,6 +97,13 @@ test('only a current passed verdict produces passed status', () => {
     stage: 'review-ready', prNumber: null, reviewPassed: false,
     reviewedHash: 'a1b2c3d', head: 'e5f6g7', hasCommits: true,
   })), 'review-ready')
+})
+
+test('an unavailable worktree preserves a passed verdict without evidence of new commits', () => {
+  assert.equal(deriveWorkflowStatus(facts({
+    stage: 'review-ready', prNumber: '9', reviewPassed: true,
+    reviewedHash: 'a1b2c3d', head: null, hasNewCommits: false,
+  })), 'passed')
 })
 
 test('a stale review verdict is labelled as awaiting re-review', () => {

@@ -1105,6 +1105,10 @@ interface RepositoryIssue extends GhIssue {
   workflow: Workflow
 }
 
+type WorkflowStateResponse =
+  | { ok: true; workflows: Workflow[] }
+  | { ok: false; error: string }
+
 function PanelContent() {
   const [projects, setProjects] = React.useState<ProjectOption[]>([])
   const [repoKey, setRepoKey] = React.useState('')
@@ -1133,8 +1137,13 @@ function PanelContent() {
 
   const refreshWorkflowStates = React.useCallback(async () => {
     if (!repoKey) return
-    const response = await apiCall<{ ok: true; workflows: Workflow[] }>('state', { repoKey })
-    if (response.ok) mergeWorkflowStates(response.workflows)
+    try {
+      const response = await apiCall<WorkflowStateResponse>('state', { repoKey })
+      if (response.ok) mergeWorkflowStates(response.workflows)
+    } catch {
+      // Polling is best-effort. Keep the last usable snapshot when the panel
+      // host disconnects; a later tick or explicit refresh will recover it.
+    }
   }, [mergeWorkflowStates, repoKey])
 
   const loadRepo = async (selected: string) => {
@@ -1186,14 +1195,17 @@ function PanelContent() {
       const url = String(issue.url ?? '')
       const [response, stateResponse] = await Promise.all([
         fetchIssue(url),
-        apiCall<{ ok: true; workflows: Workflow[] }>('state', { url }),
+        apiCall<WorkflowStateResponse>('state', { url }).catch(() => null),
       ])
-      mergeWorkflowStates(stateResponse.workflows)
+      if (stateResponse?.ok) mergeWorkflowStates(stateResponse.workflows)
       if (!response.ok) setError(response.error)
       else {
         // Workflows are persisted only after development starts; keep the
-        // authoritative repo snapshot solely for never-started synthetic rows.
-        setWorkflow(stateResponse.workflows.find((item) => item.url === url) ?? issue.workflow)
+        // repo snapshot for never-started rows and as a graceful fallback when
+        // /state is temporarily unavailable.
+        setWorkflow(stateResponse?.ok
+          ? stateResponse.workflows.find((item) => item.url === url) ?? issue.workflow
+          : issue.workflow)
         setResult(response.data as { kind: 'issue' | 'pr'; item: GhIssue; timeline?: TimelineEvent[]; dependencies?: Dependencies })
         setAutoAction(triggerAction)
       }
