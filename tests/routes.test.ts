@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { apply, fetchRepositoryIssues } from '../src/index.ts'
-import { loadWorkflow, saveWorkflow, type IssueWorkflow } from '../src/state.ts'
+import { appendLog, loadWorkflow, readLogHistory, saveWorkflow, type IssueWorkflow } from '../src/state.ts'
 
 function createHandler(
   run?: (spec: { command: string }) => Promise<unknown>,
@@ -174,7 +174,6 @@ test('/history restores the complete disk log by task id after Host restart', as
     )
     workflow.devTaskId = 'dev-before-restart'
     await saveWorkflow(workflow)
-    const { appendLog } = await import('../src/state.ts')
     await appendLog(workflow.key, 'dev', 'thinking one')
     await appendLog(workflow.key, 'dev', 'thinking two')
 
@@ -198,7 +197,6 @@ test('/history accepts a safe workflow key and rejects unknown or traversal targ
   try {
     const workflow = interruptedWorkflow('o-r-904', 'https://github.com/o/r/issues/904', join(tempHome, 'worktree'))
     await saveWorkflow(workflow)
-    const { appendLog } = await import('../src/state.ts')
     await appendLog(workflow.key, 'review', 'review history')
     const handler = createHandler()
 
@@ -252,6 +250,7 @@ test('invalid exact dev session falls back once to a fresh session on the same t
     await mkdir(worktree, { recursive: true })
     const workflow = interruptedWorkflow('o-r-917', 'https://github.com/o/r/issues/917', worktree)
     await saveWorkflow(workflow)
+    await appendLog(workflow.key, 'dev', 'prior run must be rotated')
     const starts: Array<{ command: string; workdir?: string }> = []
     const handler = createHandler(async (spec) => {
       if (spec.command.startsWith('gh issue view')) return { exitCode: 0, stdout: { text: JSON.stringify({
@@ -294,6 +293,8 @@ test('invalid exact dev session falls back once to a fresh session on the same t
     assert.equal(starts[1].command, 'codex exec -c approval_policy=never -s danger-full-access --json -')
     assert.deepEqual(starts.map((start) => start.workdir), [worktree, worktree])
     assert.ok(completed.delta.some((line) => line.includes('回退全新会话')))
+    assert.ok(completed.delta.some((line) => line.includes('恢复结束,退出码 0')))
+    assert.equal((await readLogHistory(workflow.key, 'dev')).includes('prior run must be rotated'), false)
     const reloaded = await loadWorkflow(workflow.key)
     assert.equal(reloaded?.devSessionId, 'new-session')
     assert.equal(reloaded?.devSessionAgent, 'codex')
@@ -353,7 +354,7 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     }, headers) as { status: number; body: { ok: boolean; taskId?: string } }
     assert.equal(reviewed.status, 200, JSON.stringify(reviewed.body))
     assert.ok(reviewed.body.taskId)
-    await waitForTask(handler, reviewed.body.taskId)
+    const completed = await waitForTask(handler, reviewed.body.taskId)
     assert.equal(starts.length, 2)
     assert.match(starts[0], /exec resume 'dead-review'/)
     assert.equal(starts[1], 'codex exec -c approval_policy=never -s danger-full-access --json -')
@@ -361,6 +362,8 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     assert.equal(reloaded?.reviewSessionId, 'new-review')
     assert.equal(reloaded?.reviewSessionAgent, 'codex')
     assert.equal(reloaded?.reviewResult?.passed, true)
+    assert.ok(completed.delta.some((line) => line.includes('review 结束,退出码 0')))
+    assert.ok(completed.delta.some((line) => line.includes('review 结论来源')))
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome

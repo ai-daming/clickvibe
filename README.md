@@ -101,7 +101,7 @@ pnpm test
 
 Review agent 会把结构化结论写到 worktree 的 `.clickvibe/review-result.json`。完成回调优先读取并严格校验这个文件；文件缺失、过大、不是普通文件、JSON 损坏或 schema 不符时，会在 `~/.clickvibe/state/<issue-key>/review.log` 记录原因，再依次回退 stdout JSON 和表情结论。该文件已被 git 忽略，且每次 review 启动前都会删除，避免上一次结论污染新一轮 review；因此不要手工预置它。
 
-开发与 Review 状态行完整保存在 `~/.clickvibe/state/<issue-key>/dev.log` 和 `review.log`。面板先读取磁盘历史，再从返回的 cursor 连接 SSE 增量；Host 重启后仍能恢复历史，移动网络切换时 EventSource 会按事件序号续传。排障时可直接查询：
+当前一轮开发与 Review 的状态行完整保存在 `~/.clickvibe/state/<issue-key>/dev.log` 和 `review.log`；新一轮同类型任务启动时重置对应日志，避免多轮任务无限累积，跨轮摘要保留在 workflow events。面板先读取磁盘历史，再从返回的 cursor 连接 SSE 增量；Host 重启后仍能恢复历史，移动网络切换时 EventSource 会按事件序号续传。排障时可直接查询：
 
 ```sh
 curl 'http://127.0.0.1:3080/clickvibe/api/history?taskId=<task-id>'

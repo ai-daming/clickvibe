@@ -9,6 +9,7 @@ import {
   clearStaleSessionId,
   readLogHistory,
   recordSessionId,
+  resetLog,
   resolveSessionForAgent,
   type IssueWorkflow,
 } from '../src/state.ts'
@@ -24,6 +25,23 @@ test('persistent log snapshots preserve append order without truncating history'
     assert.equal(lines.length, 2100)
     assert.equal(lines[0], 'line-0')
     assert.equal(lines[2099], 'line-2099')
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('a new task log generation bounds multi-run growth without truncating the current run', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-log-reset-'))
+  process.env.HOME = tempHome
+  try {
+    await appendLog('o-r-4', 'dev', 'prior run')
+    await resetLog('o-r-4', 'dev')
+    await appendLog('o-r-4', 'dev', 'current one')
+    await appendLog('o-r-4', 'dev', 'current two')
+    assert.deepEqual(await readLogHistory('o-r-4', 'dev'), ['current one', 'current two'])
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome

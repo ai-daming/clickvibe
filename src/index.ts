@@ -55,6 +55,7 @@ import {
   readLogHistory,
   readLogTail,
   recordSessionId,
+  resetLog,
   resolveSessionForAgent,
   saveWorkflow,
   type IssueWorkflow,
@@ -1702,6 +1703,11 @@ async function startDevelop(
     return { ok: false, error: '缺少与该 OPEN Issue 绑定的服务端确认快照' }
   }
 
+  const workflowKey = issueKey(`${parsed.owner}/${parsed.repo}`, parsed.number)
+  const existingLive = [...liveTasks.values()].find((task) =>
+    task.workflowKey === workflowKey && task.kind === 'dev' && !task.closed)
+  if (!existingLive) await resetLog(workflowKey, 'dev')
+
   const ensured = await ensureWorktree(ctx, parsed)
   if (!ensured.ok) return ensured
   const { workflow } = ensured
@@ -1756,19 +1762,19 @@ async function startDevelop(
 
   void (async () => {
     try {
-      await appendLog(workflow.key, 'dev', `[clickvibe] 使用已确认 Issue 快照(${authorizedSnapshot.updatedAt || '无更新时间'})`)
+      pushTaskLine(live, `[clickvibe] 使用已确认 Issue 快照(${authorizedSnapshot.updatedAt || '无更新时间'})`)
       let prompt = buildPrompt(authorizedSnapshot, workflow.worktree)
       if (extraContext !== '') {
         prompt += '\n\n--- 附加上下文(来自 review 或其他) ---\n' + extraContext
       }
 
-      await appendLog(workflow.key, 'dev', `[clickvibe] 启动 ${agent} 开发…`)
+      pushTaskLine(live, `[clickvibe] 启动 ${agent} 开发…`)
       const agentCommand = agent === 'claude'
         ? 'claude -p --dangerously-skip-permissions --verbose --output-format stream-json'
         : 'codex exec -c approval_policy=never -s danger-full-access --json -'
 
       attachAgentProcess(ctx, live, agentCommand, workflow.worktree, prompt, async (exitCode, sessionId) => {
-        await appendLog(workflow.key, 'dev', `[clickvibe] ${agent} 结束,退出码 ${exitCode}`)
+        pushTaskLine(live, `[clickvibe] ${agent} 结束,退出码 ${exitCode}`)
         const reloaded = await loadWorkflow(workflow.key)
         if (reloaded) {
           if (applyDevRunOutcome(reloaded, live.status, exitCode, sessionId, agent)) {
@@ -2089,10 +2095,11 @@ async function startReview(
   }
   if (!reservation.created) return { ok: true, taskId: reservation.task.taskId }
   const live = reservation.task
+  await resetLog(workflow.key, 'review')
 
   if (ownedReviewSession.invalid) {
     await saveWorkflow(workflow)
-    await appendLog(workflow.key, 'review', '[clickvibe] review sessionId 归属缺失或与当前 agent 不一致,已清除并启动全新会话')
+    pushTaskLine(live, '[clickvibe] review sessionId 归属缺失或与当前 agent 不一致,已清除并启动全新会话')
   }
 
   // 记录关联 PR(若 review 的是 PR 且未记录)
@@ -2106,7 +2113,7 @@ async function startReview(
     await clearReviewResultFile(workflow.worktree)
   } catch (error) {
     const message = String(error instanceof Error ? error.message : error)
-    await appendLog(workflow.key, 'review', `[clickvibe] 无法清除旧 review 结论文件: ${message}`)
+    pushTaskLine(live, `[clickvibe] 无法清除旧 review 结论文件: ${message}`)
     finishTask(live, 'failed', 1)
     return { ok: false, error: `无法清除旧 review 结论文件: ${message}` }
   }
@@ -2124,9 +2131,9 @@ async function startReview(
     ? `请继续 review。代码已更新,请先确认之前发现的问题是否已解决,再审查新改动。除 ${REVIEW_RESULT_RELATIVE_PATH} 外不要修改任何文件;必须使用写文件工具把最终结论写入该路径,格式为 {"passed":true|false,"issues":[...]};最后一行再输出同一个 JSON 作为兼容兜底。`
     : await buildReviewPrompt(ctx, workflow)
 
-  await appendLog(workflow.key, 'review', `[clickvibe] 启动 ${agent} review${sessionId ? `(续会话 ${sessionId})` : ''}…`)
+  pushTaskLine(live, `[clickvibe] 启动 ${agent} review${sessionId ? `(续会话 ${sessionId})` : ''}…`)
   attachAgentProcess(ctx, live, agentCommand, workflow.worktree, prompt, async (exitCode, newSessionId) => {
-    await appendLog(workflow.key, 'review', `[clickvibe] review 结束,退出码 ${exitCode}`)
+    pushTaskLine(live, `[clickvibe] review 结束,退出码 ${exitCode}`)
     if (live.status !== 'done' || exitCode !== 0) {
       const interrupted = await loadWorkflow(workflow.key)
       if (interrupted) {
@@ -2139,7 +2146,7 @@ async function startReview(
     const lines = await readLogTail(workflow.key, 'review', 200)
     const resolved = await loadReviewResult(workflow.worktree, lines)
     if (!resolved.result) {
-      await appendLog(workflow.key, 'review', `[clickvibe] review 结论解析异常:${resolved.parseError ?? '原因未知'},需要重新 Review`)
+      pushTaskLine(live, `[clickvibe] review 结论解析异常:${resolved.parseError ?? '原因未知'},需要重新 Review`)
       const invalid = await loadWorkflow(workflow.key)
       if (invalid) {
         recordSessionId(invalid, 'review', newSessionId, agent)
@@ -2150,11 +2157,10 @@ async function startReview(
       return
     }
     if (resolved.source === 'file') {
-      await appendLog(workflow.key, 'review', `[clickvibe] review 结论来源: ${REVIEW_RESULT_RELATIVE_PATH}`)
+      pushTaskLine(live, `[clickvibe] review 结论来源: ${REVIEW_RESULT_RELATIVE_PATH}`)
     } else {
-      await appendLog(
-        workflow.key,
-        'review',
+      pushTaskLine(
+        live,
         `[clickvibe] review 结论文件不可用(${resolved.fileError ?? '原因未知'}),回退 ${resolved.source === 'stdout-json' ? 'stdout JSON' : 'stdout 表情行'}判定`,
       )
     }
@@ -2246,12 +2252,13 @@ async function resumeDevelop(
   } catch (error) {
     return { ok: false, error: String(error instanceof Error ? error.message : error) }
   }
+  await resetLog(workflow.key, 'dev')
   workflow.devTaskId = taskIdValue
   workflow.devInterrupted = false
   workflow.stage = 'developing'
   await saveWorkflow(workflow)
   if (ownedDevSession.invalid) {
-    await appendLog(workflow.key, 'dev', '[clickvibe] dev sessionId 归属缺失或与当前 agent 不一致,已清除并启动全新会话')
+    pushTaskLine(live, '[clickvibe] dev sessionId 归属缺失或与当前 agent 不一致,已清除并启动全新会话')
   }
 
   // 用精确会话 id 续会话(不能用 --last/--continue:worktree 里可能有多个
@@ -2267,9 +2274,9 @@ async function resumeDevelop(
       timeoutMs: 30000,
       sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: workflow.worktree },
     })
-    await appendLog(workflow.key, 'dev', `[clickvibe] 已同步远端(origin)`)
+    pushTaskLine(live, `[clickvibe] 已同步远端(origin)`)
   } catch (e) {
-    await appendLog(workflow.key, 'dev', `[clickvibe] git fetch 失败(继续): ${String(e instanceof Error ? e.message : e)}`)
+    pushTaskLine(live, `[clickvibe] git fetch 失败(继续): ${String(e instanceof Error ? e.message : e)}`)
   }
 
   const prompt = ownedDevSession.invalid
@@ -2278,9 +2285,9 @@ async function resumeDevelop(
       ? `请继续完成开发任务,并处理以下 review 意见:\n${extraContext}`
       : '请继续完成刚才的开发任务。'
 
-  await appendLog(workflow.key, 'dev', `[clickvibe] 恢复 ${agent} 会话${sessionId ? `(${sessionId})` : ''}…`)
+  pushTaskLine(live, `[clickvibe] 恢复 ${agent} 会话${sessionId ? `(${sessionId})` : ''}…`)
   attachAgentProcess(ctx, live, command, workflow.worktree, prompt, async (exitCode, newSessionId) => {
-    await appendLog(workflow.key, 'dev', `[clickvibe] ${agent} 恢复结束,退出码 ${exitCode}`)
+    pushTaskLine(live, `[clickvibe] ${agent} 恢复结束,退出码 ${exitCode}`)
     const reloaded = await loadWorkflow(workflow.key)
     if (reloaded) {
       if (applyDevRunOutcome(reloaded, live.status, exitCode, newSessionId, agent)) {

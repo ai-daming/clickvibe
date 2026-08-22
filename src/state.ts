@@ -230,6 +230,19 @@ export async function appendLog(key: string, kind: 'dev' | 'review', line: strin
   }
 }
 
+/** Start a new task generation while preserving full history within that run. */
+export async function resetLog(key: string, kind: 'dev' | 'review'): Promise<void> {
+  const path = logPath(key, kind)
+  try {
+    await enqueueLogOperation(path, async () => {
+      await mkdir(dirname(path), { recursive: true })
+      await writeFile(path, '', 'utf8')
+    })
+  } catch {
+    // log persistence is best-effort
+  }
+}
+
 /** Read the complete durable log at an ordered snapshot boundary. */
 export async function readLogHistory(key: string, kind: 'dev' | 'review'): Promise<string[]> {
   const path = logPath(key, kind)

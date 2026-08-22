@@ -17,6 +17,7 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 // merges the slot names.
 import type { LayoutController } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { SidebarFooterActionOwnerProps } from '@deepseek-ai/dsh-client-ui-sidebar/client'
+import { selectHistoryTask } from '../task-history.ts'
 import { githubCompareUrl } from '../state-view.ts'
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 type _SlotLoaders = [typeof LayoutController, SidebarFooterActionOwnerProps]
@@ -827,17 +828,13 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
   // 恢复现场:完成态也加载最后一次磁盘历史;进行态再接 SSE。
   React.useEffect(() => {
     if (!workflow) return
-    const taskStartedAt = (taskId: string | null): number => {
-      const matched = taskId?.match(/^[a-z]+-(\d+)-/)
-      return matched ? Number(matched[1]) : 0
-    }
-    const showReview = workflow.stage === 'reviewing'
-      || workflow.stage === 'passed'
-      || Boolean(workflow.reviewResult)
-      || taskStartedAt(workflow.reviewTaskId) > taskStartedAt(workflow.devTaskId)
-    const taskId = showReview ? workflow.reviewTaskId : workflow.devTaskId
+    const { taskId, expectRunning } = selectHistoryTask({
+      stage: workflow.stage,
+      devTaskId: workflow.devTaskId,
+      reviewTaskId: workflow.reviewTaskId,
+      hasReviewResult: Boolean(workflow.reviewResult),
+    })
     if (taskId) {
-      const expectRunning = workflow.stage === 'developing' || workflow.stage === 'reviewing'
       void openStream(taskId, expectRunning)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -948,8 +945,14 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
     setError(null)
     try {
       const res = await apiCall<{ ok: true; worktree: string; branch: string; head: string | null } | { ok: false; error: string }>('sync', { url })
-      if (!res.ok) { setError(res.error); setBusy(null); return }
+      if (!res.ok) {
+        setError(res.error)
+        if (workflow?.devTaskId) void openStream(workflow.devTaskId, false)
+        setBusy(null)
+        return
+      }
       await refresh()
+      if (workflow?.devTaskId) void openStream(workflow.devTaskId, false)
       setBusy(null)
     } catch (e) {
       setError(String(e)); setBusy(null)
