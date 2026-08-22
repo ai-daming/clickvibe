@@ -52,6 +52,8 @@ import {
   loadAllWorkflows,
   loadWorkflow,
   readLogTail,
+  recordSessionId,
+  resolveSessionForAgent,
   saveWorkflow,
   type IssueWorkflow,
 } from './state.ts'
@@ -980,10 +982,12 @@ export async function fetchRepositoryIssues(
         devAgent: null,
         devTaskId: null,
         devSessionId: null,
+        devSessionAgent: null,
         devInterrupted: false,
         reviewAgent: null,
         reviewTaskId: null,
         reviewSessionId: null,
+        reviewSessionAgent: null,
         reviewResult: null,
         prNumber: pr?.number ?? null,
         issueState: 'OPEN',
@@ -1308,10 +1312,12 @@ async function ensureWorktree(ctx: Context, parsed: { owner: string; repo: strin
       devAgent: null,
       devTaskId: null,
       devSessionId: null,
+      devSessionAgent: null,
       devInterrupted: false,
       reviewAgent: null,
       reviewTaskId: null,
       reviewSessionId: null,
+      reviewSessionAgent: null,
       reviewResult: null,
       prNumber: null,
       issueState: 'OPEN',
@@ -1320,9 +1326,11 @@ async function ensureWorktree(ctx: Context, parsed: { owner: string; repo: strin
       events: [],
     }
   }
-  // 旧状态文件兜底:补 events / reviewSessionId / prNumber / baseRef 字段
+  // 旧状态文件兜底:裸 session id 不猜 agent 归属,后续 resume 会按无效处理。
   if (!Array.isArray(workflow.events)) workflow.events = []
   if (workflow.reviewSessionId === undefined) workflow.reviewSessionId = null
+  if (workflow.devSessionAgent === undefined) workflow.devSessionAgent = null
+  if (workflow.reviewSessionAgent === undefined) workflow.reviewSessionAgent = null
   if (workflow.prNumber === undefined) workflow.prNumber = null
   if (workflow.issueState === undefined) workflow.issueState = 'OPEN'
   if (workflow.baseRef === undefined) workflow.baseRef = null
@@ -1751,7 +1759,7 @@ async function startDevelop(
         await appendLog(workflow.key, 'dev', `[clickvibe] ${agent} 结束,退出码 ${exitCode}`)
         const reloaded = await loadWorkflow(workflow.key)
         if (reloaded) {
-          if (applyDevRunOutcome(reloaded, live.status, exitCode, sessionId)) {
+          if (applyDevRunOutcome(reloaded, live.status, exitCode, sessionId, agent)) {
             // 开发完成(含 rework):旧的 review 结论已归档到 events 历史,
             // 当前回到"待 review"——不能继续显示"Review 未通过"
             // 检测关联 PR:开发可能创建了 PR,记录到 workflow(issue 为 key,PR 是产物)
@@ -1974,19 +1982,26 @@ async function startReview(
   if (!existsSync(workflow.worktree)) {
     return { ok: false, error: `worktree 不存在: ${workflow.worktree}` }
   }
+  const ownedReviewSession = resolveSessionForAgent(workflow, 'review', agent)
+  const sessionId = ownedReviewSession.sessionId
   // 必须在第一个 await 之前同步占位。只检查持久化 reviewTaskId 会有 TOCTOU:
   // 两个请求可同时读到旧 workflow,再在清理结果文件时交错并双开 review。
   let reservation: { task: LiveTask; created: boolean }
   try {
     reservation = reviewTaskGate.reserve(workflow.key, () => {
       const id = taskId('review')
-      return createLiveTask(id, workflow.key, 'review', agent, workflow.reviewSessionId)
+      return createLiveTask(id, workflow.key, 'review', agent, sessionId)
     })
   } catch (error) {
     return { ok: false, error: String(error instanceof Error ? error.message : error) }
   }
   if (!reservation.created) return { ok: true, taskId: reservation.task.taskId }
   const live = reservation.task
+
+  if (ownedReviewSession.invalid) {
+    await saveWorkflow(workflow)
+    await appendLog(workflow.key, 'review', '[clickvibe] review sessionId 归属缺失或与当前 agent 不一致,已清除并启动全新会话')
+  }
 
   // 记录关联 PR(若 review 的是 PR 且未记录)
   if (parsed.kind === 'pr' && !workflow.prNumber) {
@@ -2009,9 +2024,7 @@ async function startReview(
   workflow.stage = 'reviewing'
   await saveWorkflow(workflow)
 
-  // review 与 dev 同规则:有上次会话 id 就续会话(精确 id,不用 --last)。
-  // UI 已保证按钮只显示上次 review 的 agent,所以这里不需要再判断 agent 一致。
-  const sessionId = workflow.reviewSessionId
+  // 仅续接归属匹配的精确会话;旧状态无 owner 或跨 agent 时直接全新 review。
   const agentCommand = sessionId
     ? buildResumeAgentCommand(agent, sessionId)
     : buildFreshAgentCommand(agent)
@@ -2025,6 +2038,7 @@ async function startReview(
     if (live.status !== 'done' || exitCode !== 0) {
       const interrupted = await loadWorkflow(workflow.key)
       if (interrupted) {
+        recordSessionId(interrupted, 'review', newSessionId, agent)
         interrupted.stage = 'review-ready'
         await saveWorkflow(interrupted)
       }
@@ -2032,6 +2046,17 @@ async function startReview(
     }
     const lines = await readLogTail(workflow.key, 'review', 200)
     const resolved = await loadReviewResult(workflow.worktree, lines)
+    if (!resolved.result) {
+      await appendLog(workflow.key, 'review', `[clickvibe] review 结论解析异常:${resolved.parseError ?? '原因未知'},需要重新 Review`)
+      const invalid = await loadWorkflow(workflow.key)
+      if (invalid) {
+        recordSessionId(invalid, 'review', newSessionId, agent)
+        invalid.reviewResult = null
+        invalid.stage = 'review-ready'
+        await saveWorkflow(invalid)
+      }
+      return
+    }
     if (resolved.source === 'file') {
       await appendLog(workflow.key, 'review', `[clickvibe] review 结论来源: ${REVIEW_RESULT_RELATIVE_PATH}`)
     } else {
@@ -2047,7 +2072,7 @@ async function startReview(
       reloaded.reviewResult = { passed, issues }
       reloaded.stage = passed ? 'passed' : 'review-ready' // 有问题 → 可回开发(rework)
       // 记录 review 会话 id(供下次 review 续会话)
-      if (newSessionId) reloaded.reviewSessionId = newSessionId
+      recordSessionId(reloaded, 'review', newSessionId, agent)
       // 记录 review 历史事件:锚定被 review 的 HEAD
       const reviewedHead = await readWorktreeHead(ctx, workflow.worktree)
       await appendEvent(reloaded, {
@@ -2119,10 +2144,13 @@ async function resumeDevelop(
     return { ok: true, taskId: oldLive.taskId }
   }
 
+  const agent = workflow.devAgent ?? 'codex'
+  const ownedDevSession = resolveSessionForAgent(workflow, 'dev', agent)
+  const sessionId = ownedDevSession.sessionId
   const taskIdValue = taskId('dev')
   let live: LiveTask
   try {
-    live = createLiveTask(taskIdValue, workflow.key, 'dev', workflow.devAgent ?? 'codex', workflow.devSessionId)
+    live = createLiveTask(taskIdValue, workflow.key, 'dev', agent, sessionId)
   } catch (error) {
     return { ok: false, error: String(error instanceof Error ? error.message : error) }
   }
@@ -2130,13 +2158,16 @@ async function resumeDevelop(
   workflow.devInterrupted = false
   workflow.stage = 'developing'
   await saveWorkflow(workflow)
+  if (ownedDevSession.invalid) {
+    await appendLog(workflow.key, 'dev', '[clickvibe] dev sessionId 归属缺失或与当前 agent 不一致,已清除并启动全新会话')
+  }
 
   // 用精确会话 id 续会话(不能用 --last/--continue:worktree 里可能有多个
   // agent 会话,--last 续的是"最近那个",不一定是我们这个)。
   // sessionId 缺失时回退 --last/--continue(尽力而为)。
-  const agent = workflow.devAgent ?? 'codex'
-  const sessionId = workflow.devSessionId
-  const command = buildResumeAgentCommand(agent, sessionId)
+  const command = ownedDevSession.invalid
+    ? buildFreshAgentCommand(agent)
+    : buildResumeAgentCommand(agent, sessionId)
   // 续会话前也同步远端(并行开发时 base 会变化)
   try {
     await runCommand(ctx, 'git fetch origin', {
@@ -2149,16 +2180,18 @@ async function resumeDevelop(
     await appendLog(workflow.key, 'dev', `[clickvibe] git fetch 失败(继续): ${String(e instanceof Error ? e.message : e)}`)
   }
 
-  const prompt = extraContext !== ''
-    ? `请继续完成开发任务,并处理以下 review 意见:\n${extraContext}`
-    : '请继续完成刚才的开发任务。'
+  const prompt = ownedDevSession.invalid
+    ? await buildFreshResumePrompt(ctx, workflow, extraContext)
+    : extraContext !== ''
+      ? `请继续完成开发任务,并处理以下 review 意见:\n${extraContext}`
+      : '请继续完成刚才的开发任务。'
 
   await appendLog(workflow.key, 'dev', `[clickvibe] 恢复 ${agent} 会话${sessionId ? `(${sessionId})` : ''}…`)
   attachAgentProcess(ctx, live, command, workflow.worktree, prompt, async (exitCode, newSessionId) => {
     await appendLog(workflow.key, 'dev', `[clickvibe] ${agent} 恢复结束,退出码 ${exitCode}`)
     const reloaded = await loadWorkflow(workflow.key)
     if (reloaded) {
-      if (applyDevRunOutcome(reloaded, live.status, exitCode, newSessionId)) {
+      if (applyDevRunOutcome(reloaded, live.status, exitCode, newSessionId, agent)) {
         // rework 完成:旧的 review 结论已归档到 events,回到"待 review",
         // 不能继续显示"Review 未通过"让用户无限重复点
         // 记录 rework 事件(带新 HEAD)

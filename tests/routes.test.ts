@@ -141,8 +141,8 @@ test('/projects route returns the configured-project envelope without invoking s
 function interruptedWorkflow(key: string, url: string, worktree: string): IssueWorkflow {
   return {
     key, url, repoKey: 'o/r', worktree, branch: 'r-issue-17', stage: 'developing',
-    devAgent: 'codex', devTaskId: 'old-dev', devSessionId: 'dead-session', devInterrupted: true,
-    reviewAgent: 'codex', reviewTaskId: null, reviewSessionId: null,
+    devAgent: 'codex', devTaskId: 'old-dev', devSessionId: 'dead-session', devSessionAgent: 'codex', devInterrupted: true,
+    reviewAgent: 'codex', reviewTaskId: null, reviewSessionId: null, reviewSessionAgent: null,
     reviewResult: null, prNumber: '29', issueState: 'OPEN', baseRef: 'origin/main @ abc',
     updatedAt: 1, events: [],
   }
@@ -209,7 +209,9 @@ test('invalid exact dev session falls back once to a fresh session on the same t
     assert.equal(starts[1].command, 'codex exec -c approval_policy=never -s danger-full-access --json -')
     assert.deepEqual(starts.map((start) => start.workdir), [worktree, worktree])
     assert.ok(completed.delta.some((line) => line.includes('回退全新会话')))
-    assert.equal((await loadWorkflow(workflow.key))?.devSessionId, 'new-session')
+    const reloaded = await loadWorkflow(workflow.key)
+    assert.equal(reloaded?.devSessionId, 'new-session')
+    assert.equal(reloaded?.devSessionAgent, 'codex')
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
@@ -227,6 +229,7 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     const workflow = interruptedWorkflow('o-r-918', 'https://github.com/o/r/issues/918', worktree)
     workflow.stage = 'review-ready'
     workflow.reviewSessionId = 'dead-review'
+    workflow.reviewSessionAgent = 'codex'
     await saveWorkflow(workflow)
     const starts: string[] = []
     const handler = createHandler(async (spec) => {
@@ -271,7 +274,72 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     assert.equal(starts[1], 'codex exec -c approval_policy=never -s danger-full-access --json -')
     const reloaded = await loadWorkflow(workflow.key)
     assert.equal(reloaded?.reviewSessionId, 'new-review')
+    assert.equal(reloaded?.reviewSessionAgent, 'codex')
     assert.equal(reloaded?.reviewResult?.passed, true)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('cross-agent review starts fresh and an empty failed verdict requires re-review', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-review-owner-'))
+  process.env.HOME = tempHome
+  try {
+    const worktree = join(tempHome, 'worktree')
+    await mkdir(worktree, { recursive: true })
+    const workflow = interruptedWorkflow('o-r-919', 'https://github.com/o/r/issues/919', worktree)
+    workflow.stage = 'review-ready'
+    workflow.reviewAgent = 'codex'
+    workflow.reviewSessionId = 'codex-review'
+    workflow.reviewSessionAgent = 'codex'
+    workflow.reviewResult = { passed: false, issues: ['old issue'] }
+    await saveWorkflow(workflow)
+    const starts: string[] = []
+    const handler = createHandler(async (spec) => {
+      if (spec.command.startsWith('gh pr view')) return { exitCode: 0, stdout: { text: 'main' }, stderr: { text: '' } }
+      return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+    }, (spec) => {
+      starts.push(spec.command)
+      let read = false
+      return {
+        status: 'running', exitCode: 0,
+        done: (async () => {
+          await mkdir(join(worktree, '.clickvibe'), { recursive: true })
+          await writeFile(join(worktree, '.clickvibe', 'review-result.json'), '{"passed":false,"issues":[]}')
+          await new Promise((resolve) => setTimeout(resolve, 5))
+        })(),
+        readOutput() {
+          if (read) return { delta: '', lossy: false }
+          read = true
+          return {
+            delta: '{"type":"system","session_id":"new-claude"}\n{"type":"result","session_id":"new-claude"}\n',
+            lossy: false,
+          }
+        },
+        kill() { return true },
+      }
+    })
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+    const authorized = await post(handler, '/clickvibe/api/authorize', {
+      action: 'review', url: workflow.url, agent: 'claude', context: '',
+    }, headers) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
+    const reviewed = await post(handler, '/clickvibe/api/review', {
+      url: workflow.url, agent: 'claude', context: '',
+      authorizationId: authorized.body.authorizationId,
+      authorizationDigest: authorized.body.authorizationDigest,
+    }, headers) as { status: number; body: { ok: boolean; taskId?: string } }
+    assert.equal(reviewed.status, 200, JSON.stringify(reviewed.body))
+    assert.ok(reviewed.body.taskId)
+    await waitForTask(handler, reviewed.body.taskId)
+    assert.deepEqual(starts, ['claude -p --dangerously-skip-permissions --verbose --output-format stream-json'])
+    const reloaded = await loadWorkflow(workflow.key)
+    assert.equal(reloaded?.reviewSessionId, 'new-claude')
+    assert.equal(reloaded?.reviewSessionAgent, 'claude')
+    assert.equal(reloaded?.reviewResult, null)
+    assert.equal(reloaded?.stage, 'review-ready')
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
@@ -381,8 +449,8 @@ test('repo issue aggregation fails closed when a stored PR cannot be refreshed b
   const issue = { number: 7, title: 'issue 7', state: 'open', body: '', html_url: 'https://github.com/o/r/issues/7', milestone: null }
   const workflow = {
     key: 'o-r-7', url: issue.html_url, repoKey: 'o/r', worktree: '/remote/worktrees/r/r-issue-7', branch: 'renamed-branch',
-    stage: 'passed', devAgent: 'codex', devTaskId: null, devSessionId: null, devInterrupted: false,
-    reviewAgent: 'codex', reviewTaskId: null, reviewSessionId: null,
+    stage: 'passed', devAgent: 'codex', devTaskId: null, devSessionId: null, devSessionAgent: null, devInterrupted: false,
+    reviewAgent: 'codex', reviewTaskId: null, reviewSessionId: null, reviewSessionAgent: null,
     reviewResult: { passed: true, issues: [] }, prNumber: 99, issueState: 'OPEN',
     baseRef: 'origin/main @ abc', updatedAt: 1, events: [],
   }
@@ -414,8 +482,8 @@ test('repo issue aggregation refreshes stored PR by number when its head no long
   const issue = { number: 7, title: 'issue 7', state: 'open', body: '', html_url: 'https://github.com/o/r/issues/7', milestone: null }
   const workflow = {
     key: 'o-r-7', url: issue.html_url, repoKey: 'o/r', worktree: '/remote/worktrees/r/r-issue-7', branch: 'old-branch-name',
-    stage: 'passed', devAgent: 'codex', devTaskId: null, devSessionId: null, devInterrupted: false,
-    reviewAgent: 'codex', reviewTaskId: null, reviewSessionId: null,
+    stage: 'passed', devAgent: 'codex', devTaskId: null, devSessionId: null, devSessionAgent: null, devInterrupted: false,
+    reviewAgent: 'codex', reviewTaskId: null, reviewSessionId: null, reviewSessionAgent: null,
     reviewResult: { passed: true, issues: [] }, prNumber: 99, issueState: 'OPEN',
     baseRef: 'origin/main @ abc', updatedAt: 1, events: [],
   }
