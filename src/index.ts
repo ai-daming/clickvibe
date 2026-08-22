@@ -2834,7 +2834,7 @@ function stopTask(payload: unknown): { ok: true; taskId: string; stopped: boolea
   return { ok: true, taskId, stopped }
 }
 
-/** Sync a workflow's worktree with the remote base (git fetch + merge origin/main).
+/** Sync a workflow's worktree with the remote base, then push the PR branch.
  *  Keeps the worktree on the latest base so dev/review never target stale code
  *  (issue #5). The merge result is recorded as a timeline event.
  *  合并冲突时不回滚:现场(MERGE_HEAD + 冲突标记)原样保留,转交返工 agent
@@ -2858,6 +2858,18 @@ export async function syncWorktree(
   }
   const policy = { mode: 'danger-full-access' as const, workspaceRoot: workflow.worktree }
   try {
+    // Do not rely on git merge to reject a dirty tree:Git permits unrelated
+    // local changes, which would otherwise let the merge commit be pushed.
+    // An existing conflicted merge keeps following the conflict-preservation
+    // path below so callers still receive conflict:true and the file list.
+    if (!await hasMergeConflict(ctx, workflow.worktree)) {
+      const changes = await runCommand(ctx, 'git status --porcelain', {
+        workdir: workflow.worktree,
+        timeoutMs: 10_000,
+        sandboxPolicy: { mode: 'read-only', workspaceRoot: workflow.worktree },
+      })
+      if (changes) throw new Error('worktree 有未提交改动,请先提交或清理后再同步')
+    }
     await appendLog(workflow.key, 'dev', '[clickvibe] 同步:git fetch origin…')
     await runCommand(ctx, 'git fetch origin --prune', { workdir: workflow.worktree, timeoutMs: 60_000, sandboxPolicy: policy })
     await appendLog(workflow.key, 'dev', '[clickvibe] 同步:合并 origin/main…')
@@ -2892,7 +2904,13 @@ export async function syncWorktree(
       throw error
     }
     const head = await readWorktreeHead(ctx, workflow.worktree)
-    await appendLog(workflow.key, 'dev', `[clickvibe] 同步完成,HEAD ${head ?? '未知'}`)
+    await appendLog(workflow.key, 'dev', `[clickvibe] 同步:推送 ${workflow.branch} 到 origin…`)
+    await runCommand(ctx, `git push origin ${shellQuote(workflow.branch)}`, {
+      workdir: workflow.worktree,
+      timeoutMs: 60_000,
+      sandboxPolicy: policy,
+    })
+    await appendLog(workflow.key, 'dev', `[clickvibe] 同步并推送完成,HEAD ${head ?? '未知'}`)
     // 记录同步事件到权威时间线(不改变开发/审查语义)
     const reloaded = await loadWorkflow(workflow.key)
     if (reloaded) {
