@@ -46,6 +46,8 @@ export interface ParsedCommand {
   agent: 'codex' | 'claude' | 'dryrun' | null
   /** Free-form extra instructions (`context=`…), trimmed. */
   context: string
+  /** Manual-override reason for merge (`override=…`, issue #49); empty = no override. */
+  overrideReason: string
 }
 
 export type ParseResult = { ok: true; command: ParsedCommand } | { ok: false; error: string }
@@ -76,22 +78,25 @@ export function parseCommand(input: string): ParseResult {
   const raw = input.trim()
   if (raw === '') return { ok: false, error: '命令为空。发送 help 查看全部可命令化操作。' }
 
-  // context=<rest of line>:作为整体剥离,避免其中的空格破坏分词
+  // context=/override=<rest of line>:作为整体剥离,避免其中的空格破坏分词
   let context = ''
+  let overrideReason = ''
   let remainder = raw
-  const contextAt = remainder.search(/(?:^|\s)context=/)
-  if (contextAt >= 0) {
-    const after = remainder.slice(contextAt)
-    context = after.replace(/^\s*context=/, '').trim().replace(/^["“](.*)["”]$/, '$1').trim()
-    if (context === '') return { ok: false, error: 'context= 后面是空的;如不需要附加上下文请删掉它。' }
-    remainder = remainder.slice(0, contextAt).trim()
+  for (const key of ['context', 'override'] as const) {
+    const at = remainder.search(new RegExp(`(?:^|\\s)${key}=`))
+    if (at < 0) continue
+    const value = remainder.slice(at).replace(new RegExp(`^\\s*${key}=`), '').trim().replace(/^["“](.*)["”]$/, '$1').trim()
+    if (value === '') return { ok: false, error: `${key}= 后面是空的;如不需要请删掉它。` }
+    if (key === 'context') context = value
+    else overrideReason = value
+    remainder = remainder.slice(0, at).trim()
   }
 
   // 中文习惯不在 # 前后留空格(「把#8下单开发」),先规范化出独立 token
   const tokens = remainder.replace(/#(\d+)/g, ' #$1 ').split(/\s+/)
     .filter((token) => token !== '' && !FILLER.test(token))
 
-  const command: ParsedCommand = { action: 'help', url: null, number: null, repoKey: null, agent: null, context }
+  const command: ParsedCommand = { action: 'help', url: null, number: null, repoKey: null, agent: null, context, overrideReason }
   let sawVerb = false
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i]
@@ -143,6 +148,9 @@ export function parseCommand(input: string): ParseResult {
   if (ACTIONS_REQUIRING_TARGET.includes(command.action) && command.number === null) {
     return { ok: false, error: `${command.action} 需要一个 issue 目标(如 ${command.action} #8 或 ${command.action} 8 owner/repo)。` }
   }
+  if (overrideReason !== '' && command.action !== 'merge') {
+    return { ok: false, error: 'override= 只用于 merge 命令的门禁人工放行。' }
+  }
   return { ok: true, command }
 }
 
@@ -159,6 +167,7 @@ export const COMMAND_HELP_TEXT = [
   '  sync <目标>                         同步 worktree 到远端基线',
   '  stop <目标>                         停止运行中的任务',
   '  merge <目标>                        合并 PR 并清理(需二次确认)',
+  '  merge <目标> override=<放行原因>    门禁拒绝后的人工放行(跳过项与原因写入审计)',
   '',
   '写操作是两阶段的:先返回预览与一次性授权(2 分钟有效),用户在对话里确认后,',
   '携带 authorizationId / authorizationDigest 原样重发同一命令才会执行。',
@@ -266,6 +275,11 @@ export interface CommandAuthorizationPreview {
   head?: string
   mergeFlag?: string
   cleanup?: string[]
+  override?: {
+    skipped?: string[]
+    reason?: string
+    gates?: { key?: string; message?: string }[]
+  }
 }
 
 export function formatConfirmationPreview(
@@ -288,11 +302,19 @@ export function formatConfirmationPreview(
     ].join('\n')
   }
   if (action === 'merge') {
+    const gates = preview.override?.gates ?? []
     return [
       '即将执行不可逆的合并与清理:',
       `- PR:#${preview.prNumber ?? '?'}(分支 ${preview.branch ?? '?'},HEAD ${preview.head ?? '?'})`,
       `- 策略:${preview.mergeFlag ?? '--merge'}(merge commit,禁止 squash/rebase)`,
       `- 清理:${(preview.cleanup ?? []).join('、')}`,
+      ...(gates.length > 0
+        ? [
+            '- 人工放行:将跳过以下 ClickVibe 门禁(写入审计,不绕过 GitHub 保护):',
+            ...gates.map((gate) => `  · ${gate.message ?? gate.key ?? ''}`),
+            `  放行原因:${preview.override?.reason ?? ''}`,
+          ]
+        : []),
       '',
       '合并是人的决策,必须由用户明确确认后携带授权重发命令。',
       expireNote,
@@ -304,5 +326,20 @@ export function formatConfirmationPreview(
     '',
     '请用户确认后携带授权原样重发命令。',
     expireNote,
+  ].join('\n')
+}
+
+/** Merge rejected by the ClickVibe gates (issue #49): list every failure and the override path. */
+export function formatMergeGateRejection(
+  url: string,
+  failures: { key?: string; message?: string }[],
+  labels: (key: string) => string,
+): string {
+  return [
+    `合并被 ClickVibe 门禁拒绝(${url}):`,
+    ...failures.map((failure) => `- [${labels(failure.key ?? '')}] ${failure.message ?? ''}`),
+    '',
+    '逐项确认后,可用人工放行跳过以上门禁(仅跳过 ClickVibe 自身门禁,不绕过 GitHub 分支保护;',
+    `放行原因必填并写入审计):merge <目标> override=<放行原因>。重新 Review 通过则无需放行。`,
   ].join('\n')
 }

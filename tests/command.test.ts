@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { apply } from '../src/index.ts'
 import { parseCommand } from '../src/command.ts'
-import { saveWorkflow, type IssueWorkflow } from '../src/state.ts'
+import { issueBodyHash, saveWorkflow, type IssueWorkflow } from '../src/state.ts'
 
 function included(body: unknown, status = 200): string {
   return [
@@ -339,6 +339,68 @@ test('review command previews through the shared authorize path', async () => {
     assert.equal(preview.status, 200, JSON.stringify(preview.body))
     assert.equal(preview.body.needsConfirmation, true)
     assert.match(String(preview.body.text), /review/)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('merge command surfaces every gate failure and supports the manual override (issue #49)', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-cmd-override-'))
+  process.env.HOME = tempHome
+  try {
+    const repo = join(tempHome, 'repo')
+    await mkdir(repo, { recursive: true })
+    await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
+    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), `repos:\n  o/r: ${repo}\nworktreeRoot: ${join(tempHome, 'worktrees')}\n`)
+    const workflow = workflowFixture('o-r-23', 'https://github.com/o/r/issues/23', join(tempHome, 'worktrees', 'r-issue-23'))
+    workflow.branch = 'r-issue-23'
+    workflow.stage = 'passed'
+    workflow.events = [{
+      kind: 'review', at: 'now', hash: '1111111', verdict: { passed: true, issues: [] },
+      // 契约也变更:两个门禁同时失败,命令应把清单全量列出
+      issueContract: { bodyHash: issueBodyHash('## 验收标准\n- old'), updatedAt: '2026-08-22T00:00:00Z' },
+    }]
+    await saveWorkflow(workflow)
+    const handler = createHandler(async ({ command }) => {
+      const api = githubApi(command, {
+        item: {
+          url: workflow.url, number: 23, title: 'override issue',
+          body: '## 验收标准\n- changed', state: 'OPEN', updatedAt: '2026-08-23T00:00:00Z',
+        },
+        pr: {
+          number: 29, state: 'open', merged_at: null,
+          head: { ref: workflow.branch, sha: '2222222222222222' }, base: { ref: 'main' },
+        },
+      })
+      if (api) return api
+      throw new Error(`unexpected command: ${command}`)
+    }, () => { throw new Error('merge preview must not start an agent') })
+
+    // 不带放行:门禁拒绝,可读文本列出全部失败项 + 放行路径
+    const rejected = await post(handler, { command: 'merge #23' }, PRIVILEGED)
+    assert.equal(rejected.status, 400, JSON.stringify(rejected.body))
+    const failures = rejected.body.gateFailures as { key: string }[]
+    assert.deepEqual(failures.map((failure) => failure.key), ['review-hash', 'contract-changed'])
+    assert.match(String(rejected.body.text), /哈希不一致/)
+    assert.match(String(rejected.body.text), /验收契约已变更/)
+    assert.match(String(rejected.body.text), /merge <目标> override=<放行原因>/)
+
+    // 带放行原因:预览签发跳过项绑定当前实际失败项,文本明示将跳过哪些门禁
+    const override = await post(handler, { command: 'merge #23 override=已人工核对,同意放行' }, PRIVILEGED)
+    assert.equal(override.status, 200, JSON.stringify(override.body))
+    assert.equal(override.body.needsConfirmation, true)
+    assert.match(String(override.body.text), /人工放行/)
+    assert.match(String(override.body.text), /已人工核对,同意放行/)
+    const authorization = override.body.authorization as Record<string, unknown>
+    assert.ok(authorization.authorizationId)
+    assert.ok((authorization.override as { skipped: string[] }).skipped.includes('review-hash'))
+
+    // override= 只属于 merge
+    const misplaced = parseCommand('develop #8 override=理由')
+    assert.equal(misplaced.ok, false)
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome

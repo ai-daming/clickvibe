@@ -52,6 +52,10 @@ sync <target> | stop <target> | merge <target>
 
 `sync` / `stop` / dryrun need no one-time authorization but still require the privileged headers.
 
+### Merge gate override (issue #49)
+
+A `merge` rejected by ClickVibe's own gates returns `gateFailures` (review-hash / contract checks) plus a readable list. Relay every failure item to the user. Only if the user explicitly accepts each item may you re-preview with `merge <target> override=<reason>` — the reason is mandatory, is written into the audit timeline, and only skips ClickVibe-side gates (GitHub branch protection still applies). Never suggest an override yourself; re-running Review is the default path.
+
 ## Hard boundaries
 
 - Never execute a write command without explicit user confirmation of the exact preview.
