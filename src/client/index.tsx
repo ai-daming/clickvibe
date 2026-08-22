@@ -859,8 +859,13 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
     setBusy('syncing')
     setError(null)
     try {
-      const res = await apiCall<{ ok: true; worktree: string; branch: string; head: string | null } | { ok: false; error: string }>('sync', { url })
-      if (!res.ok) { setError(res.error); setBusy(null); return }
+      const res = await apiCall<{ ok: true; worktree: string; branch: string; head: string | null } | { ok: false; error: string; conflict?: boolean }>('sync', { url })
+      if (!res.ok) {
+        setError(res.error)
+        // 冲突现场保留后,唯一动作会切换为「按意见返工」,刷新让按钮立即接手
+        if (res.conflict) await refresh()
+        setBusy(null); return
+      }
       await refresh()
       setBusy(null)
     } catch (e) {

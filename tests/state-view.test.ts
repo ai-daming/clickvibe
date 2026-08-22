@@ -154,15 +154,24 @@ test('passed stage with a PR merges', () => {
   assert.equal(next.kind, 'merge')
 })
 
-test('a stale worktree syncs before review or rework', () => {
+test('a stale worktree syncs before review or merge', () => {
   const reviewCase = deriveNextAction(facts({
     stage: 'review-ready', reviewPassed: null, needsSync: true,
   }))
   assert.equal(reviewCase.kind, 'sync')
+  const passedCase = deriveNextAction(facts({
+    stage: 'review-ready', reviewPassed: true, reviewedHash: 'a1b2c3d', head: 'a1b2c3d', needsSync: true, prNumber: '9',
+  }))
+  assert.equal(passedCase.kind, 'sync')
+})
+
+test('a failed review verdict reworks even when the worktree is stale (issue #26)', () => {
+  // 门禁降级:同步冲突不再挡住返工——agent 先合并 origin/main 解决冲突,再修意见
   const reworkCase = deriveNextAction(facts({
     stage: 'review-ready', reviewPassed: false, reviewedHash: 'a1b2c3d', head: 'a1b2c3d', needsSync: true,
   }))
-  assert.equal(reworkCase.kind, 'sync')
+  assert.equal(reworkCase.kind, 'rework')
+  assert.match(reworkCase.hint, /合并 origin\/main/)
 })
 
 test('a missing worktree on a started workflow has no safe action', () => {

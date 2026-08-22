@@ -416,6 +416,25 @@ async function readRevCount(ctx: Context, workdir: string, left: string, right: 
   }
 }
 
+/** True when the worktree sits in an unresolved conflicted merge (MERGE_HEAD exists). */
+async function hasMergeConflict(ctx: Context, workdir: string): Promise<boolean> {
+  return (await readRefShort(ctx, workdir, 'MERGE_HEAD')) !== null
+}
+
+/** Preface instruction for resume/rework agents when the worktree is not on the
+ *  latest base: merge origin/<base> (and resolve any conflict) before continuing
+ *  (issue #26). Empty when the worktree is already up to date. */
+export async function buildMergePreface(ctx: Context, worktree: string, baseBranch: string): Promise<string> {
+  if (await hasMergeConflict(ctx, worktree)) {
+    return `注意:worktree 里有一次未完成的合并(origin/${baseBranch})冲突。请先用 git status 查看冲突文件,解决全部冲突并完成 git commit,然后再继续后续任务。`
+  }
+  const compare = await readRevCount(ctx, worktree, `origin/${baseBranch}`, 'HEAD')
+  if (compare && compare.behind > 0) {
+    return `注意:本地分支落后 origin/${baseBranch}。请先执行 git merge --no-edit origin/${baseBranch}(如有冲突,解决后完成提交),然后再继续后续任务。`
+  }
+  return ''
+}
+
 /**
  * Derive the authoritative state of a workflow from git facts + event history
  * (issue #5). Runs on every /state request so the panel never needs a
@@ -1845,11 +1864,16 @@ function stopTask(payload: unknown): { ok: true; taskId: string; stopped: boolea
 
 /** Sync a workflow's worktree with the remote base (git fetch + merge origin/main).
  *  Keeps the worktree on the latest base so dev/review never target stale code
- *  (issue #5). The merge result is recorded as a timeline event. */
-async function syncWorktree(
+ *  (issue #5). The merge result is recorded as a timeline event.
+ *  合并冲突时不回滚:现场(MERGE_HEAD + 冲突标记)原样保留,转交返工 agent
+ *  解决(issue #26),避免「同步失败 → 门禁不放行 rework」的死锁。 */
+export async function syncWorktree(
   ctx: Context,
   payload: unknown,
-): Promise<{ ok: true; worktree: string; branch: string; head: string | null } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; worktree: string; branch: string; head: string | null }
+  | { ok: false; error: string; conflict?: boolean }
+> {
   const url = String((payload as { url?: unknown } | undefined)?.url ?? '').trim()
   const parsed = parseUrl(url)
   if (!parsed || parsed.kind !== 'issue') {
@@ -1868,8 +1892,26 @@ async function syncWorktree(
     try {
       await runCommand(ctx, 'git merge --no-edit origin/main', { workdir: workflow.worktree, timeoutMs: 60_000, sandboxPolicy: policy })
     } catch (error) {
-      // 合并冲突/失败:回滚到合并前,保持 worktree 干净;错误透传给用户
-      await runCommand(ctx, 'git merge --abort', { workdir: workflow.worktree, timeoutMs: 30_000, sandboxPolicy: policy }).catch(() => {})
+      // issue #26:合并冲突不再 abort 回滚丢弃现场。冲突状态(MERGE_HEAD +
+      // 冲突标记)原样保留,转交返工 agent 解决;非冲突失败(如本地脏改动
+      // 导致 git 自行中止)没有可保留的现场,照旧透传错误。
+      if (await hasMergeConflict(ctx, workflow.worktree)) {
+        const message = String(error instanceof Error ? error.message : error)
+        await appendLog(workflow.key, 'dev', '[clickvibe] 合并 origin/main 冲突,现场已保留(未回滚),转交返工 agent 处理')
+        const reloaded = await loadWorkflow(workflow.key)
+        if (reloaded) {
+          await appendEvent(reloaded, {
+            kind: 'note',
+            at: new Date().toISOString(),
+            note: '合并 origin/main 冲突,现场已保留(未回滚),转交返工 agent 处理',
+          })
+        }
+        return {
+          ok: false,
+          conflict: true,
+          error: `合并 origin/main 冲突,现场已保留:${message}。可直接「按意见返工」,agent 会先解决冲突再修意见`,
+        }
+      }
       throw error
     }
     const head = await readWorktreeHead(ctx, workflow.worktree)
@@ -2136,9 +2178,17 @@ async function resumeDevelop(
     await appendLog(workflow.key, 'dev', `[clickvibe] git fetch 失败(继续): ${String(e instanceof Error ? e.message : e)}`)
   }
 
-  const prompt = extraContext !== ''
-    ? `请继续完成开发任务,并处理以下 review 意见:\n${extraContext}`
-    : '请继续完成刚才的开发任务。'
+  // issue #26:worktree 落后基线或处于冲突合并中时,把「合并 main、解决冲突」
+  // 作为前置指令交给 agent(danger-full-access 有能力处理),review 意见不再
+  // 被同步门禁挡住送不进来。
+  const mergePreface = await buildMergePreface(ctx, workflow.worktree, workflowBaseBranch(workflow.baseRef))
+
+  const prompt = [
+    mergePreface,
+    extraContext !== ''
+      ? `请继续完成开发任务,并处理以下 review 意见:\n${extraContext}`
+      : '请继续完成刚才的开发任务。',
+  ].filter((part) => part !== '').join('\n\n')
 
   await appendLog(workflow.key, 'dev', `[clickvibe] 恢复 ${agent} 会话${sessionId ? `(${sessionId})` : ''}…`)
   attachAgentProcess(ctx, live, command, workflow.worktree, prompt, async (exitCode, newSessionId) => {

@@ -111,7 +111,13 @@ export function deriveNextAction(facts: WorkflowFacts): NextAction {
   }
 
   // worktree 落后远端基线 → 先同步(唯一动作)。
+  // 例外(issue #26):review 未通过等返工时放行 rework——返工 agent 有完整
+  // git 权限,由它先合并 origin/main 解决冲突、再修意见。否则同步一旦冲突,
+  // 意见永远送不到 agent,流水线死锁。
   if (facts.needsSync) {
+    if (facts.stage === 'review-ready' && facts.reviewPassed === false) {
+      return action('rework', '按意见返工', 'worktree 落后基线,返工会先合并 origin/main 解决冲突,再按意见修改')
+    }
     return action('sync', '同步 worktree', 'worktree 落后远端基线,先同步再继续')
   }
 
