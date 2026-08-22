@@ -64,8 +64,10 @@ const PANEL_CSS = `
 .cv-issue-row-title { display: block; color: #0969da; font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .cv-issue-row-meta { color: #57606a; font-size: 10.5px; margin-top: 3px; display: flex; gap: 7px; flex-wrap: wrap; }
 .cv-row-lag { color: #9a6700; font-weight: 600; }
+.cv-row-contract { color: #cf222e; font-weight: 600; }
 .cv-row-action { border: none; border-radius: 6px; padding: 5px 8px; background: #1f883d; color: white; font-size: 11px; white-space: nowrap; cursor: pointer; }
 .cv-row-action.cv-row-none { background: #afb8c1; cursor: default; }
+.cv-row-action.cv-row-running { background: #0969da; cursor: default; }
 .cv-back { border: none; background: transparent; color: #0969da; cursor: pointer; padding: 0; font-size: 12px; }
 .cv-input { flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid #d0d7de; border-radius: 6px; background: #ffffff; color: #1f2328; font-size: 12px; }
 .cv-input::placeholder { color: #8c959f; }
@@ -1309,6 +1311,7 @@ interface ProjectOption { repoKey: string; path: string; available: boolean }
 interface RepositoryIssue extends GhIssue {
   blockedBy: Dependency[]
   workflow: Workflow
+  contract?: { ok: boolean; missing: string[] }
 }
 
 interface RepositoryFreshness {
@@ -1423,7 +1426,7 @@ function PanelContent() {
       const response = await apiCall<
         { ok: true; issues: RepositoryIssue[]; freshness: RepositoryFreshness | null }
         | { ok: false; error: string }
-      >('repo/issues', { repoKey: selected, forceRefresh })
+      >('repo/issues', { repoKey: selected, forceRefresh }, 30_000)
       if (!response.ok) setError(response.error)
       else {
         setIssues(response.issues)
@@ -1634,6 +1637,12 @@ function PanelContent() {
                     const action = (baseAction.kind === 'develop' || baseAction.kind === 'resume') && blockedByOpen.length > 0
                       ? { kind: 'none' as const, label: `被 #${blockedByOpen.map((dependency) => dependency.number).join('#')} 阻塞`, hint: '依赖未完成,先完成被阻塞的依赖' }
                       : baseAction
+                    // 契约门槛:缺 目标/验收标准/依赖 的 issue 标记『不满足契约』并提示补齐,
+                    // 不硬选(不拦人工开发,按钮保留、hint 提示补全);自动选取(#9)按 contract.ok 排除。
+                    const contract = issue.contract
+                    const shownAction = contract && !contract.ok && (action.kind === 'develop' || action.kind === 'resume')
+                      ? { ...action, hint: `该 issue 缺:${contract.missing.join('、')},建议先在 GitHub 补齐契约(目标/验收标准/依赖);人工仍可开发` }
+                      : action
                     return <div className="cv-issue-row" key={issue.number}>
                       <span className={`cv-stage cv-stage-${status}`}>{stageLabel(status, issue.workflow)}</span>
                       <div className="cv-issue-row-main">
@@ -1643,9 +1652,10 @@ function PanelContent() {
                           {(derived?.behindBase ?? 0) > 0 ? <span className="cv-row-lag">⚠ 落后 {derived?.behindBase}</span> : null}
                           <span>里程碑: {issue.milestone?.title ?? '无'}</span>
                           <span>blockedBy: {issue.blockedBy.length ? issue.blockedBy.map((dependency) => `#${dependency.number}${dependency.state.toUpperCase() === 'OPEN' ? '⏳' : '✓'}`).join(' ') : '无'}</span>
+                          {contract && !contract.ok ? <span className="cv-row-contract">⚠ 不满足契约(缺:{contract.missing.join('、')})</span> : null}
                         </div>
                       </div>
-                      <button className={`cv-row-action${action.kind === 'none' ? ' cv-row-none' : ''}`} disabled={action.kind === 'none'} title={action.hint} onClick={() => rowAction(issue)}>{action.kind === 'none' ? (status === 'passed' ? '已交付' : action.label) : action.label}</button>
+                      <button className={`cv-row-action${shownAction.kind === 'none' ? (shownAction.label === '任务进行中' ? ' cv-row-running' : ' cv-row-none') : ''}`} disabled={shownAction.kind === 'none'} title={shownAction.hint} onClick={() => rowAction(issue)}>{shownAction.kind === 'none' ? (status === 'passed' ? '已交付' : shownAction.label) : shownAction.label}</button>
                     </div>
                   })}
                 </React.Fragment>
