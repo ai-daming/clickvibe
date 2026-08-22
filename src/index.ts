@@ -56,6 +56,7 @@ import {
   loadReviewResult,
   REVIEW_RESULT_RELATIVE_PATH,
 } from './review-result.ts'
+import { ExclusiveTaskGate } from './task-gate.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -136,6 +137,7 @@ interface LiveTask {
 }
 
 const liveTasks = new Map<string, LiveTask>()
+const reviewTaskGate = new ExclusiveTaskGate<LiveTask>()
 const liveWaiters = new Map<string, Set<() => void>>()
 const authorizations = new AuthorizationStore()
 const TASK_LOG_LINES = 2000
@@ -1493,6 +1495,7 @@ function finishTask(
   task.closed = true
   task.status = status
   task.exitCode = exitCode
+  if (task.kind === 'review') reviewTaskGate.release(task.workflowKey, task)
   if (task.timeout) clearTimeout(task.timeout)
   notifyTask(task.taskId)
   scheduleTaskCleanup(task)
@@ -1920,11 +1923,20 @@ async function startReview(
   if (!existsSync(workflow.worktree)) {
     return { ok: false, error: `worktree 不存在: ${workflow.worktree}` }
   }
-  // 已有 review 在跑:复用同一任务,而不是再开一个并发 review——
-  // 并发任务共用同一个 .clickvibe/review-result.json,会互删/互读结论导致 verdict 错绑。
-  if (workflow.reviewTaskId && liveTasks.has(workflow.reviewTaskId) && !liveTasks.get(workflow.reviewTaskId)!.closed) {
-    return { ok: true, taskId: workflow.reviewTaskId }
+  // 必须在第一个 await 之前同步占位。只检查持久化 reviewTaskId 会有 TOCTOU:
+  // 两个请求可同时读到旧 workflow,再在清理结果文件时交错并双开 review。
+  let reservation: { task: LiveTask; created: boolean }
+  try {
+    reservation = reviewTaskGate.reserve(workflow.key, () => {
+      const id = taskId('review')
+      return createLiveTask(id, workflow.key, 'review', agent, workflow.reviewSessionId)
+    })
+  } catch (error) {
+    return { ok: false, error: String(error instanceof Error ? error.message : error) }
   }
+  if (!reservation.created) return { ok: true, taskId: reservation.task.taskId }
+  const live = reservation.task
+
   // 记录关联 PR(若 review 的是 PR 且未记录)
   if (parsed.kind === 'pr' && !workflow.prNumber) {
     workflow.prNumber = parsed.number
@@ -1937,18 +1949,12 @@ async function startReview(
   } catch (error) {
     const message = String(error instanceof Error ? error.message : error)
     await appendLog(workflow.key, 'review', `[clickvibe] 无法清除旧 review 结论文件: ${message}`)
+    finishTask(live, 'failed', 1)
     return { ok: false, error: `无法清除旧 review 结论文件: ${message}` }
   }
 
-  const taskIdValue = taskId('review')
-  let live: LiveTask
-  try {
-    live = createLiveTask(taskIdValue, workflow.key, 'review', agent, workflow.reviewSessionId)
-  } catch (error) {
-    return { ok: false, error: String(error instanceof Error ? error.message : error) }
-  }
   workflow.reviewAgent = agent
-  workflow.reviewTaskId = taskIdValue
+  workflow.reviewTaskId = live.taskId
   workflow.stage = 'reviewing'
   await saveWorkflow(workflow)
 
@@ -2017,7 +2023,7 @@ async function startReview(
     }
   })
 
-  return { ok: true, taskId: taskIdValue }
+  return { ok: true, taskId: live.taskId }
 }
 
 /** Post the review result to the issue's GitHub comments. */
