@@ -76,6 +76,12 @@ import {
   type PromptSnapshot,
   type SnapshotFreshness,
 } from './prompt.ts'
+import {
+  RepositoryFreshnessGate,
+  RepositoryRefreshClock,
+  aggregateRepositoryFreshness,
+  type RepositoryFreshness,
+} from './repo-freshness.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -135,7 +141,14 @@ const PR_FIELDS = [
 interface ClickVibeConfig {
   repos: Record<string, string>
   worktreeRoot: string
+  /** Remote-ref refresh interval for read paths. Clamped to 30-60 seconds. */
+  fetchTtlSeconds?: number
 }
+
+const DEFAULT_FETCH_TTL_SECONDS = 45
+const READ_FETCH_WAIT_MS = 2_000
+const repositoryFreshness = new RepositoryFreshnessGate()
+const dependencyRefreshClock = new RepositoryRefreshClock()
 
 /** In-memory live task handle: the running process + a status-line buffer. */
 interface LiveTask {
@@ -191,11 +204,13 @@ async function loadConfig(): Promise<ClickVibeConfig> {
     return {
       repos: parsed?.repos ?? {},
       worktreeRoot: parsed?.worktreeRoot ? expandHome(parsed.worktreeRoot) : join(homedir(), '.clickvibe', 'worktrees'),
+      fetchTtlSeconds: parsed?.fetchTtlSeconds,
     }
   } catch {
     return {
       repos: {},
       worktreeRoot: join(homedir(), '.clickvibe', 'worktrees'),
+      fetchTtlSeconds: DEFAULT_FETCH_TTL_SECONDS,
     }
   }
 }
@@ -307,6 +322,30 @@ async function runCommand(
     throw new Error(`命令输出超过上限且无 spill 文件,无法获取完整输出`)
   }
   return out.text.trim()
+}
+
+function fetchTtlMs(config: ClickVibeConfig): number {
+  const seconds = Number(config.fetchTtlSeconds ?? DEFAULT_FETCH_TTL_SECONDS)
+  return Math.min(60, Math.max(30, Number.isFinite(seconds) ? seconds : DEFAULT_FETCH_TTL_SECONDS)) * 1000
+}
+
+async function ensureConfiguredRepoFresh(
+  ctx: Context,
+  config: ClickVibeConfig,
+  repoKey: string,
+  force = false,
+): Promise<RepositoryFreshness | null> {
+  const configuredPath = config.repos[repoKey]
+  if (!configuredPath) return null
+  const repoPath = resolve(expandHome(configuredPath))
+  if (!existsSync(repoPath)) return null
+  return repositoryFreshness.ensureWithin(repoPath, fetchTtlMs(config), async () => {
+    await runCommand(ctx, 'git fetch origin --prune', {
+      workdir: repoPath,
+      timeoutMs: 30_000,
+      sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: repoPath },
+    })
+  }, READ_FETCH_WAIT_MS, force)
 }
 
 /** Read the current HEAD short-hash of a worktree (empty string on failure). */
@@ -698,14 +737,28 @@ export function apply(ctx: Context): void {
         return
       }
       if (method === 'state') {
-        const filter = payload as { url?: unknown; repoKey?: unknown } | undefined
+        const filter = payload as { url?: unknown; repoKey?: unknown; forceRefresh?: unknown } | undefined
         const url = String(filter?.url ?? '')
         const repoKey = String(filter?.repoKey ?? '')
+        const config = await loadConfig()
         const workflows = (await loadAllWorkflows()).filter((workflow) =>
           (url === '' || workflow.url === url) && (repoKey === '' || workflow.repoKey === repoKey),
         )
-        const enriched = await enrichWorkflowStates(ctx, workflows)
-        writeJson(res, 200, { ok: true, workflows: enriched })
+        const parsedRepo = parseUrl(url)
+        const repoKeys = new Set(
+          repoKey ? [repoKey]
+            : parsedRepo ? [`${parsedRepo.owner}/${parsedRepo.repo}`]
+              : workflows.map((workflow) => workflow.repoKey),
+        )
+        const freshnesses = (await Promise.all([...repoKeys].map((key) =>
+          ensureConfiguredRepoFresh(ctx, config, key, filter?.forceRefresh === true),
+        ))).filter((value): value is RepositoryFreshness => value !== null)
+        const dependenciesRefreshDue = [...repoKeys]
+          .map((key) => dependencyRefreshClock.take(key, fetchTtlMs(config), filter?.forceRefresh === true))
+          .some(Boolean)
+        const enriched = await enrichWorkflowStates(ctx, workflows, config)
+        const freshness = aggregateRepositoryFreshness(freshnesses)
+        writeJson(res, 200, { ok: true, workflows: enriched, freshness, dependenciesRefreshDue })
         return
       }
       if (method === 'authorize') {
@@ -950,13 +1003,15 @@ export async function fetchRepositoryIssues(
   payload: unknown,
   overrides: { config?: ClickVibeConfig; workflows?: IssueWorkflow[] } = {},
 ): Promise<
-  | { ok: true; repoKey: string; issues: unknown[] }
+  | { ok: true; repoKey: string; issues: unknown[]; freshness: RepositoryFreshness | null }
   | { ok: false; error: string }
 > {
   const repoKey = String((payload as { repoKey?: unknown } | undefined)?.repoKey ?? '').trim()
   const config = overrides.config ?? await loadConfig()
   const configuredPath = config.repos[repoKey]
   if (!configuredPath) return { ok: false, error: `未配置项目 ${repoKey}` }
+  const forceRefresh = (payload as { forceRefresh?: unknown } | undefined)?.forceRefresh === true
+  const freshness = await ensureConfiguredRepoFresh(ctx, config, repoKey, forceRefresh)
 
   const issueCommand = `gh api --paginate --slurp ${shellQuote(`repos/${repoKey}/issues?state=all&per_page=100`)}`
   const prCommand = `gh api --paginate --slurp ${shellQuote(`repos/${repoKey}/pulls?state=all&per_page=100`)}`
@@ -1076,7 +1131,8 @@ export async function fetchRepositoryIssues(
       })
       return { ...issue, blockedBy, workflow: derived }
     }))
-    return { ok: true, repoKey, issues }
+    dependencyRefreshClock.mark(repoKey)
+    return { ok: true, repoKey, issues, freshness }
   } catch (error) {
     return { ok: false, error: `项目 issue 抓取失败: ${String(error instanceof Error ? error.message : error)}` }
   }
@@ -1086,7 +1142,10 @@ export async function fetchRepositoryIssues(
 async function fetchIssue(
   ctx: Context,
   payload: unknown,
-): Promise<{ ok: true; data: { kind: 'issue' | 'pr'; item: unknown; timeline?: unknown } } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; data: { kind: 'issue' | 'pr'; item: unknown; timeline?: unknown; dependencies?: { blockedBy: IssueDependency[]; blocking: IssueDependency[] } }; dependencyError?: string }
+  | { ok: false; error: string }
+> {
   const url = String((payload as { url?: unknown } | undefined)?.url ?? '').trim()
   const parsed = parseUrl(url)
   if (!parsed) {
@@ -1103,14 +1162,21 @@ async function fetchIssue(
     }
     const parsedJson = JSON.parse(result.stdout.text) as unknown
     const data: { kind: 'issue' | 'pr'; item: unknown; timeline?: unknown; dependencies?: { blockedBy: IssueDependency[]; blocking: IssueDependency[] } } = { kind: parsed.kind, item: parsedJson }
+    let dependencyError: string | undefined
     // issue 额外拉 timeline,提取关联事件(linked PR/commit)——GitHub UI 的
     // "linked a pull request" 就来自 cross-referenced 事件
     if (!isPR) {
       data.timeline = await fetchTimeline(ctx, parsed.owner, parsed.repo, parsed.number)
       // 依赖图:blockedBy 来自本 issue 正文,blocking 扫描 repo 内其它 issue
-      data.dependencies = await fetchDependencies(ctx, parsed, parsedJson as { body?: unknown })
+      const dependencyResult = await fetchDependencies(ctx, parsed, parsedJson as { body?: unknown })
+      if (dependencyResult.ok) {
+        data.dependencies = dependencyResult.dependencies
+        dependencyRefreshClock.mark(`${parsed.owner}/${parsed.repo}`)
+      } else {
+        dependencyError = dependencyResult.error
+      }
     }
-    return { ok: true, data }
+    return { ok: true, data, ...(dependencyError ? { dependencyError } : {}) }
   } catch (error) {
     return { ok: false, error: `抓取异常: ${String(error instanceof Error ? error.message : error)}` }
   }
@@ -1196,19 +1262,18 @@ async function fetchDependencies(
   ctx: Context,
   target: { owner: string; repo: string; number: string },
   item: { body?: unknown },
-): Promise<{ blockedBy: IssueDependency[]; blocking: IssueDependency[] }> {
-  const empty: { blockedBy: IssueDependency[]; blocking: IssueDependency[] } = { blockedBy: [], blocking: [] }
+): Promise<
+  | { ok: true; dependencies: { blockedBy: IssueDependency[]; blocking: IssueDependency[] } }
+  | { ok: false; error: string }
+> {
   const command = `gh issue list --repo ${target.owner}/${target.repo} --state all --limit 100 --json number,title,state,body`
   let issues: { number: number; title: string; state: string; body: string }[] = []
   try {
-    const spec = ctx.shell.resolve({ command, timeoutMs: 20000 })
-    const result = await ctx.shell.run(spec)
-    if (result.exitCode !== 0) return empty
-    const parsed = JSON.parse(result.stdout.text) as unknown
-    if (!Array.isArray(parsed)) return empty
+    const parsed = JSON.parse(await runCommand(ctx, command, { timeoutMs: 20000 })) as unknown
+    if (!Array.isArray(parsed)) throw new Error('GitHub 依赖列表格式无效')
     issues = parsed as { number: number; title: string; state: string; body: string }[]
-  } catch {
-    return empty
+  } catch (error) {
+    return { ok: false, error: `GitHub 依赖刷新失败: ${String(error instanceof Error ? error.message : error)}` }
   }
 
   const current = Number(target.number)
@@ -1230,7 +1295,7 @@ async function fetchDependencies(
   }
   blockedBy.sort((a, b) => a.number - b.number)
   blocking.sort((a, b) => a.number - b.number)
-  return { blockedBy, blocking }
+  return { ok: true, dependencies: { blockedBy, blocking } }
 }
 
 /** Fetch the issue timeline and keep only the events worth showing. */
@@ -2291,6 +2356,19 @@ async function startReview(
     return { ok: false, error: resolvedSnapshot.error }
   }
   await resetLog(workflow.key, 'review')
+
+  // Review must inspect the branch against current remote refs. Keep review
+  // available during an outage, but make the degraded input explicit in its log.
+  try {
+    await runCommand(ctx, 'git fetch origin --prune', {
+      workdir: workflow.worktree,
+      timeoutMs: 60_000,
+      sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: workflow.worktree },
+    })
+    pushTaskLine(live, '[clickvibe] review 前已同步远端(origin)')
+  } catch (error) {
+    pushTaskLine(live, `[clickvibe] review 前 git fetch 失败(继续): ${String(error instanceof Error ? error.message : error)}`)
+  }
 
   if (ownedReviewSession.invalid) {
     await saveWorkflow(workflow)
