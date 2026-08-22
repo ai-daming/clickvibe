@@ -6,23 +6,26 @@ export type AgentAction = 'develop' | 'review' | 'resume' | 'merge'
 
 export const RESUME_REJECT_WINDOW_MS = 15_000
 
+const CODEX_PERMISSION_FLAGS = `-c 'approval_policy="never"' -s danger-full-access`
+const CLAUDE_PERMISSION_FLAGS = '--dangerously-skip-permissions'
+
 /** Build a brand-new agent command; used after an exact resume id is rejected. */
 export function buildFreshAgentCommand(agent: Exclude<DevelopAgent, 'dryrun'>): string {
   return agent === 'claude'
-    ? 'claude -p --dangerously-skip-permissions --verbose --output-format stream-json'
-    : 'codex exec -c approval_policy=never -s danger-full-access --json -'
+    ? `claude -p ${CLAUDE_PERMISSION_FLAGS} --verbose --output-format stream-json`
+    : `codex exec ${CODEX_PERMISSION_FLAGS} --json -`
 }
 
 /** Build the command that continues an existing development session. */
 export function buildResumeAgentCommand(agent: Exclude<DevelopAgent, 'dryrun'>, sessionId: string | null): string {
   if (agent === 'claude') {
     return sessionId
-      ? `claude -p --resume ${shellQuote(sessionId)} --dangerously-skip-permissions --verbose --output-format stream-json`
-      : 'claude -p --continue --dangerously-skip-permissions --verbose --output-format stream-json'
+      ? `claude -p --resume ${shellQuote(sessionId)} ${CLAUDE_PERMISSION_FLAGS} --verbose --output-format stream-json`
+      : `claude -p --continue ${CLAUDE_PERMISSION_FLAGS} --verbose --output-format stream-json`
   }
   return sessionId
-    ? `codex exec resume ${shellQuote(sessionId)} -c approval_policy=never -c 'sandbox_mode="danger-full-access"' --json -`
-    : 'codex exec resume --last -c approval_policy=never -c \'sandbox_mode="danger-full-access"\' --json -'
+    ? `codex exec ${CODEX_PERMISSION_FLAGS} resume ${shellQuote(sessionId)} --json -`
+    : `codex exec ${CODEX_PERMISSION_FLAGS} resume --last --json -`
 }
 
 /** Only a quick failure before session initialization proves an exact id is stale. */

@@ -852,8 +852,8 @@ test('invalid exact dev session falls back once to a fresh session on the same t
     assert.ok(resumed.body.taskId)
     const completed = await waitForTask(handler, resumed.body.taskId)
     assert.equal(starts.length, 2)
-    assert.match(starts[0].command, /exec resume 'dead-session'/)
-    assert.equal(starts[1].command, 'codex exec -c approval_policy=never -s danger-full-access --json -')
+    assert.match(starts[0].command, /danger-full-access resume 'dead-session'/)
+    assert.equal(starts[1].command, `codex exec -c 'approval_policy="never"' -s danger-full-access --json -`)
     assert.deepEqual(starts.map((start) => start.workdir), [worktree, worktree])
     for (const start of starts) {
       assert.match(start.prompt, /=== 需求快照 ===/)
@@ -1154,8 +1154,8 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     const completed = await waitForTask(handler, reviewed.body.taskId)
     assert.equal(starts.length, 2)
     assert.equal(reviewFetches, 1)
-    assert.match(starts[0].command, /exec resume 'dead-review'/)
-    assert.equal(starts[1].command, 'codex exec -c approval_policy=never -s danger-full-access --json -')
+    assert.match(starts[0].command, /danger-full-access resume 'dead-review'/)
+    assert.equal(starts[1].command, `codex exec -c 'approval_policy="never"' -s danger-full-access --json -`)
     for (const start of starts) {
       assert.match(start.prompt, /=== 需求快照 ===/)
       assert.match(start.prompt, /updatedAt: 2026-08-22T01:02:03Z/)
@@ -1163,6 +1163,7 @@ test('invalid exact review session clears the stale id and falls back to a fresh
       assert.match(start.prompt, new RegExp(`契约正文 SHA-256: ${issueBodyHash(reviewedBody)}`))
       assert.match(start.prompt, /PR: https:\/\/github\.com\/o\/r\/pull\/29/)
       assert.match(start.prompt, /被审 commit: abc123/)
+      assert.match(start.prompt, /\[验证不通过\].*\[无法验证\]/)
       assert.match(start.prompt, /=== 信任边界 ===/)
     }
     const reloaded = await loadWorkflow(workflow.key)
