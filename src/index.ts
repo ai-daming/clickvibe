@@ -2163,8 +2163,9 @@ async function postReviewComment(ctx: Context, issueUrl: string, passed: boolean
 }
 
 /** Resume (or continue) a dev session with an exact session id; `context`
- *  carries extra instructions (e.g. review issues for a rework). */
-async function resumeDevelop(
+ *  carries extra instructions (e.g. review issues for a rework).
+ *  Exported for integration tests; the /resume route calls it. */
+export async function resumeDevelop(
   ctx: Context,
   payload: unknown,
 ): Promise<{ ok: true; taskId: string } | { ok: false; error: string }> {
@@ -2227,10 +2228,24 @@ async function resumeDevelop(
   // 被同步门禁挡住送不进来。
   const mergePreface = await buildMergePreface(ctx, workflow.worktree, workflowBaseBranch(workflow.baseRef))
 
+  // issue #26:未解决的 review 意见必须送达 agent。客户端 resume 动作不带
+  // context,精确会话失效/归属不匹配回退全新会话时 fresh prompt 也不能只带
+  // 合并指令——持久化 reviewResult 是权威来源,服务端负责补全(客户端已带
+  // 同样意见时不重复)。
+  const unresolvedIssues = workflow.reviewResult && workflow.reviewResult.passed === false
+    ? workflow.reviewResult.issues
+    : []
+  const reviewContext = unresolvedIssues.length > 0 && !unresolvedIssues.some((issue) => extraContext.includes(issue))
+    ? `请处理以下未解决的 review 意见:\n${unresolvedIssues.join('\n')}`
+    : ''
+  const context = reviewContext === ''
+    ? extraContext
+    : extraContext === '' ? reviewContext : `${extraContext}\n\n${reviewContext}`
+
   const basePrompt = ownedDevSession.invalid
-    ? await buildFreshResumePrompt(ctx, workflow, extraContext)
-    : extraContext !== ''
-      ? `请继续完成开发任务,并处理以下 review 意见:\n${extraContext}`
+    ? await buildFreshResumePrompt(ctx, workflow, context)
+    : context !== ''
+      ? `请继续完成开发任务,并处理以下 review 意见:\n${context}`
       : '请继续完成刚才的开发任务。'
 
   const prompt = mergePreface !== ''
@@ -2261,9 +2276,11 @@ async function resumeDevelop(
     prepare: async () => {
       const reloaded = await loadWorkflow(workflow.key)
       if (reloaded && clearStaleSessionId(reloaded, 'dev', sessionId)) await saveWorkflow(reloaded)
+      // 回退的全新会话同样前置合并指令:冲突现场还在,不能只带意见不带冲突指引
+      const fresh = await buildFreshResumePrompt(ctx, workflow, context)
       return {
         command: buildFreshAgentCommand(agent),
-        prompt: await buildFreshResumePrompt(ctx, workflow, extraContext),
+        prompt: mergePreface !== '' ? `${mergePreface}\n\n${fresh}` : fresh,
       }
     },
   } : undefined)

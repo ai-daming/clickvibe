@@ -6,7 +6,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
-import { buildMergePreface, deriveWorkflowState, syncWorktree, type IssueWorkflow } from '../src/index.ts'
+import { buildMergePreface, deriveWorkflowState, resumeDevelop, syncWorktree, type IssueWorkflow } from '../src/index.ts'
 import { applyDevRunOutcome, loadWorkflow, saveWorkflow } from '../src/state.ts'
 
 const execFileAsync = promisify(execFile)
@@ -154,6 +154,98 @@ test('an interrupted rework on a conflicted worktree resumes instead of re-synci
       assert.equal(derived.nextAction.kind, 'resume')
       const preface = await buildMergePreface(ctx, worktree, 'main')
       assert.match(preface, /未完成的合并/)
+    })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+/** Capture agent launches: start() records command+prompt and reports an
+ *  immediate non-zero exit (the "session died at once" shape). */
+function capturingShellCtx(launches: { command: string; prompt: string }[]) {
+  return {
+    shell: {
+      resolve(spec: unknown) { return spec },
+      async run(spec: { command: string; workdir?: string }) {
+        try {
+          const out = await execFileAsync('/bin/sh', ['-c', spec.command], {
+            cwd: spec.workdir, encoding: 'utf8',
+          })
+          return { exitCode: 0, stdout: { text: out.stdout }, stderr: { text: out.stderr } }
+        } catch (error) {
+          const e = error as { code?: number; stdout?: string; stderr?: string }
+          return { exitCode: e.code ?? 1, stdout: { text: e.stdout ?? '' }, stderr: { text: e.stderr ?? '' } }
+        }
+      },
+      start(spec: { command: string; stdin?: string }) {
+        launches.push({ command: spec.command, prompt: spec.stdin ?? '' })
+        return {
+          status: 'running',
+          exitCode: 1,
+          done: Promise.resolve(),
+          readOutput() { return { delta: '', lossy: false } },
+          kill() { return false },
+        }
+      },
+    },
+  }
+}
+
+test('review issues reach the agent across stale-session fallback on an interrupted rework (issue #26)', async () => {
+  const { root, worktree } = await setupConflictedRepo()
+  const launches: { command: string; prompt: string }[] = []
+  const captureCtx = capturingShellCtx(launches) as never
+  try {
+    await withTempHome(root, async () => {
+      await saveWorkflow(conflictedWorkflow(worktree))
+      const result = await syncWorktree(ctx, { url: 'https://github.com/o/r/issues/26' })
+      assert.equal((result as { conflict?: boolean }).conflict, true)
+
+      // 返工中断:stage=developing、旧 review 结论保留;客户端 resume 不带 context
+      const interrupted = await loadWorkflow('o-r-26')
+      assert.ok(interrupted)
+      interrupted.stage = 'developing'
+      applyDevRunOutcome(interrupted, 'failed', 1, null, 'codex')
+
+      // 场景 A:精确会话可续但秒退(stale)→ 回退全新会话。
+      // 两次 launch 的 prompt 都必须带冲突指引 + 具体 review 意见。
+      interrupted.devTaskId = 'dev-old'
+      interrupted.devSessionId = 'dev-session-1'
+      interrupted.devSessionAgent = 'codex'
+      await saveWorkflow(interrupted)
+      const exact = await resumeDevelop(captureCtx, { url: 'https://github.com/o/r/issues/26' })
+      assert.equal(exact.ok, true)
+      await new Promise((r) => setTimeout(r, 200))
+      assert.equal(launches.length, 2) // 精确会话秒退 → 回退全新会话
+      for (const launch of launches) {
+        assert.match(launch.prompt, /未完成的合并/)
+        assert.match(launch.prompt, /README 内容冲突/)
+      }
+
+      // 场景 B:会话归属不匹配 → 直接全新会话,意见同样送达
+      const mismatched = await loadWorkflow('o-r-26')
+      assert.ok(mismatched)
+      mismatched.devSessionId = 'dev-session-2'
+      mismatched.devSessionAgent = 'claude'
+      await saveWorkflow(mismatched)
+      launches.length = 0
+      const fresh = await resumeDevelop(captureCtx, { url: 'https://github.com/o/r/issues/26' })
+      assert.equal(fresh.ok, true)
+      await new Promise((r) => setTimeout(r, 50))
+      assert.equal(launches.length, 1)
+      assert.match(launches[0]!.prompt, /未完成的合并/)
+      assert.match(launches[0]!.prompt, /README 内容冲突/)
+
+      // 客户端 rework 已带同样意见时,服务端补全不得重复
+      launches.length = 0
+      const rework = await resumeDevelop(captureCtx, {
+        url: 'https://github.com/o/r/issues/26',
+        context: 'README 内容冲突',
+      })
+      assert.equal(rework.ok, true)
+      await new Promise((r) => setTimeout(r, 50))
+      const occurrences = launches[0]!.prompt.split('README 内容冲突').length - 1
+      assert.equal(occurrences, 1)
     })
   } finally {
     await rm(root, { recursive: true, force: true })
