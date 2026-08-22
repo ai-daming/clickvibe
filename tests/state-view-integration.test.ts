@@ -274,7 +274,14 @@ test('/state enrichment checks configured branches and runs GitHub lookups concu
   }
   try {
     const workflows = [
-      workflow({ worktree: join(root, 'missing-5'), branch: 'clickvibe-issue-5' }),
+      workflow({
+        worktree: join(root, 'missing-5'), branch: 'clickvibe-issue-5', stage: 'passed',
+        reviewResult: { passed: true, issues: [] },
+        events: [{
+          kind: 'review', at: new Date().toISOString(), hash: 'abc123', verdict: { passed: true, issues: [] },
+          issueContract: { bodyHash: issueBodyHash('## 验收标准\n- A'), updatedAt: '2026-08-22T00:00:00Z' },
+        }],
+      }),
       workflow({ key: 'repo-6', url: 'https://github.com/o/r/issues/6', worktree: join(root, 'missing-6'), branch: 'clickvibe-issue-6' }),
     ]
     const enriched = await enrichWorkflowStates(fakeCtx as never, workflows, {
@@ -285,6 +292,8 @@ test('/state enrichment checks configured branches and runs GitHub lookups concu
     assert.deepEqual(enriched.map((item) => item.derived.nextAction.label), [
       '恢复 worktree 继续开发', '恢复 worktree 继续开发',
     ])
+    assert.equal(enriched[0].derived.issueContractStatus, 'unknown')
+    assert.equal(enriched[0].derived.issueContractUnknownReason, 'current-contract-unavailable')
   } finally {
     await rm(root, { recursive: true, force: true })
   }

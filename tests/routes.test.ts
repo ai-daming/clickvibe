@@ -8,7 +8,7 @@ import { apply, fetchRepositoryIssues } from '../src/index.ts'
 import { issueBodyHash, loadWorkflow, saveWorkflow, type IssueWorkflow } from '../src/state.ts'
 
 function createHandler(
-  run?: (spec: { command: string; workdir?: string; stdin?: string }) => Promise<unknown>,
+  run?: (spec: { command: string; workdir?: string; stdin?: string; timeoutMs?: number }) => Promise<unknown>,
   start?: (spec: { command: string; workdir?: string; stdin?: string }) => unknown,
 ): RequestListener {
   let handler: RequestListener | null = null
@@ -373,11 +373,15 @@ test('invalid exact review session clears the stale id and falls back to a fresh
       title: 'review issue', body: reviewedBody, state: 'OPEN', updatedAt: reviewedUpdatedAt,
     }))
     const comments: Array<{ command: string; body: string }> = []
+    const issueTimeouts: number[] = []
     const handler = createHandler(async (spec) => {
-      if (spec.command.startsWith('gh issue view')) return {
-        exitCode: 0,
-        stdout: { text: 'truncated tail', truncated: true, spillPath: issueSpill },
-        stderr: { text: '' },
+      if (spec.command.startsWith('gh issue view')) {
+        issueTimeouts.push(spec.timeoutMs ?? 0)
+        return {
+          exitCode: 0,
+          stdout: { text: 'truncated tail', truncated: true, spillPath: issueSpill },
+          stderr: { text: '' },
+        }
       }
       if (spec.command.startsWith('gh pr view')) return { exitCode: 0, stdout: { text: 'main' }, stderr: { text: '' } }
       if (spec.command === 'git rev-parse --short HEAD') return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
@@ -426,6 +430,7 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     assert.equal(reloaded?.reviewSessionId, 'new-review')
     assert.equal(reloaded?.reviewSessionAgent, 'codex')
     assert.equal(reloaded?.reviewResult?.passed, true)
+    assert.deepEqual(issueTimeouts, [5000])
     assert.deepEqual(reloaded?.events.at(-1)?.issueContract, {
       bodyHash: issueBodyHash(reviewedBody), updatedAt: reviewedUpdatedAt,
     })
