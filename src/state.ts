@@ -73,7 +73,7 @@ export interface IssueWorkflow {
 
 /** One historical event in an issue's workflow timeline. */
 export interface WorkflowEvent {
-  kind: 'dev' | 'review' | 'rework' | 'resume' | 'note'
+  kind: 'dev' | 'review' | 'rework' | 'resume' | 'note' | 'merge-override'
   at: string
   /** commit hash 短码(dev/review 锚定的提交)。 */
   hash?: string
@@ -86,6 +86,14 @@ export interface WorkflowEvent {
   /** 对应公开 GitHub 流水节点的发布结果;缺失表示旧的本地事件。 */
   publication?: DeliveryPublication
   note?: string
+  /** 人工放行审计(仅 merge-override 事件):用户确认跳过的门禁项。 */
+  skipped?: string[]
+  /** 人工放行审计(仅 merge-override 事件):跳过项展示文案,由服务端下发,面板零映射。 */
+  skippedLabels?: string[]
+  /** 人工放行审计(仅 merge-override 事件):用户填写的放行原因。 */
+  reason?: string
+  /** 人工放行审计(仅 merge-override 事件):执行放行的本机用户。 */
+  operator?: string
 }
 
 export interface IssueContractSnapshot {

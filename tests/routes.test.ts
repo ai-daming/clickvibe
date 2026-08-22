@@ -475,6 +475,210 @@ test('/merge authorization rejects a changed acceptance contract with the same P
   }
 })
 
+test('/merge gate rejection offers manual override that merges once and audits the timeline', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-merge-override-'))
+  process.env.HOME = tempHome
+  try {
+    const repo = join(tempHome, 'repo')
+    const worktreeRoot = join(tempHome, 'worktrees')
+    const worktree = join(worktreeRoot, 'r-issue-23')
+    await mkdir(repo, { recursive: true })
+    await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
+    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), `repos:\n  o/r: ${repo}\nworktreeRoot: ${worktreeRoot}\n`)
+    const workflow = interruptedWorkflow('o-r-23', 'https://github.com/o/r/issues/23', worktree)
+    workflow.branch = 'r-issue-23'
+    workflow.stage = 'passed'
+    workflow.reviewResult = { passed: true, issues: [] }
+    const reviewedBody = '## 验收标准\n- override contract'
+    workflow.events = [{
+      kind: 'review', at: '2026-08-22T00:00:00Z', hash: '1111111',
+      verdict: { passed: true, issues: [] },
+      issueContract: { bodyHash: issueBodyHash(reviewedBody), updatedAt: '2026-08-22T00:00:00Z' },
+    }]
+    await saveWorkflow(workflow)
+
+    let merged = false
+    let issueClosed = false
+    const commands: string[] = []
+    const handler = createHandler(async (spec) => {
+      commands.push(spec.command)
+      const api = githubApi(spec.command, {
+        item: {
+          url: workflow.url, number: 23, title: 'override issue', body: reviewedBody,
+          state: issueClosed ? 'CLOSED' : 'OPEN', updatedAt: '2026-08-22T00:00:00Z',
+        },
+        pr: {
+          number: 29, state: merged ? 'closed' : 'open', merged_at: merged ? '2026-08-22T01:00:00Z' : null,
+          head: { ref: workflow.branch, sha: '2222222222222222' }, base: { ref: 'main' },
+          html_url: 'https://github.com/o/r/pull/29',
+        },
+        reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
+      })
+      if (api) return api
+      if (spec.command.startsWith('gh pr merge')) {
+        merged = true
+        return { exitCode: 0, stdout: { text: 'merged' }, stderr: { text: '' } }
+      }
+      if (spec.command === 'git worktree list --porcelain') return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      if (spec.command.startsWith('if git show-ref')) return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      if (spec.command.startsWith('if git ls-remote')) return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      if (spec.command.startsWith('gh issue close')) {
+        issueClosed = true
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      }
+      throw new Error(`unexpected command: ${spec.command}`)
+    })
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+
+    // 1) 门禁拒绝:错误文案不变,同时返回可放行的门禁清单
+    const rejected = await post(handler, '/clickvibe/api/authorize', {
+      action: 'merge', url: workflow.url,
+    }, headers) as { status: number; body: { ok: boolean; error?: string; gateFailures?: Array<{ key: string; message: string }> } }
+    assert.equal(rejected.status, 400)
+    assert.match(rejected.body.error ?? '', /合并门禁拒绝.*哈希不一致/)
+    assert.deepEqual(
+      (rejected.body.gateFailures ?? []).map((failure) => failure.key),
+      ['review-hash'],
+    )
+
+    // 2) 人工放行授权:绑定被跳过的门禁项与原因,预览列出明细
+    const overrideReason = '人工确认该提交可合并'
+    const overrideAuthorize = await post(handler, '/clickvibe/api/authorize', {
+      action: 'merge', url: workflow.url, override: true, overrideReason,
+    }, headers) as {
+      status: number
+      body: {
+        ok: boolean
+        authorizationId?: string
+        authorizationDigest?: string
+        target?: { prNumber: string; branch: string; head: string; mergeFlag: string }
+        override?: { skipped: string[]; reason: string }
+        preview?: { override?: { skipped: string[]; reason: string; gates: Array<{ key: string; message: string }> } }
+      }
+    }
+    assert.equal(overrideAuthorize.status, 200, JSON.stringify(overrideAuthorize.body))
+    assert.deepEqual(overrideAuthorize.body.override, { skipped: ['review-hash'], reason: overrideReason })
+    assert.equal(overrideAuthorize.body.preview?.override?.gates.length, 1)
+    assert.equal(commands.some((command) => command.startsWith('gh pr merge')), false)
+
+    // 3) 带放行执行合并:成功且写入审计事件
+    const mergedResponse = await post(handler, '/clickvibe/api/merge', {
+      url: workflow.url,
+      authorizationId: overrideAuthorize.body.authorizationId,
+      authorizationDigest: overrideAuthorize.body.authorizationDigest,
+      target: overrideAuthorize.body.target,
+      override: overrideAuthorize.body.override,
+    }, headers) as { status: number; body: { ok: boolean; archived?: boolean } }
+    assert.equal(mergedResponse.status, 200, JSON.stringify(mergedResponse.body))
+    assert.equal(mergedResponse.body.archived, true)
+    const mergeCommand = commands.find((command) => command.startsWith('gh pr merge')) ?? ''
+    assert.match(mergeCommand, /--match-head-commit '2222222222222222'/)
+    assert.equal(await loadWorkflow(workflow.key), null)
+    const archivedWorkflows = await loadAllArchivedWorkflows()
+    assert.equal(archivedWorkflows.length, 1)
+    const audit = (archivedWorkflows[0].events ?? []).filter((event) => event.kind === 'merge-override')
+    assert.equal(audit.length, 1)
+    assert.deepEqual(audit[0].skipped, ['review-hash'])
+    assert.deepEqual(audit[0].skippedLabels, ['PR HEAD 与 review 结论哈希不一致'])
+    assert.equal(audit[0].reason, overrideReason)
+    assert.ok(typeof audit[0].operator === 'string' && audit[0].operator !== '')
+    assert.ok(typeof audit[0].at === 'string' && audit[0].at !== '')
+
+    // 4) 放行授权单次有效:重放拒绝
+    const replay = await post(handler, '/clickvibe/api/merge', {
+      url: workflow.url,
+      authorizationId: overrideAuthorize.body.authorizationId,
+      authorizationDigest: overrideAuthorize.body.authorizationDigest,
+      target: overrideAuthorize.body.target,
+      override: overrideAuthorize.body.override,
+    }, headers)
+    assert.equal(replay.status, 403)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('/merge manual override refuses gate failures not covered by the confirmation', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-override-stale-'))
+  process.env.HOME = tempHome
+  try {
+    const repo = join(tempHome, 'repo')
+    const worktreeRoot = join(tempHome, 'worktrees')
+    await mkdir(repo, { recursive: true })
+    await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
+    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), `repos:\n  o/r: ${repo}\nworktreeRoot: ${worktreeRoot}\n`)
+    const workflow = interruptedWorkflow('o-r-23', 'https://github.com/o/r/issues/23', join(worktreeRoot, 'r-issue-23'))
+    workflow.branch = 'r-issue-23'
+    workflow.stage = 'passed'
+    workflow.reviewResult = { passed: true, issues: [] }
+    workflow.events = [{
+      kind: 'review', at: 'now', hash: 'abcdef1', verdict: { passed: true, issues: [] },
+      issueContract: {
+        bodyHash: issueBodyHash('## 验收标准\n- reviewed contract'),
+        updatedAt: '2026-08-22T00:00:00Z',
+      },
+    }]
+    await saveWorkflow(workflow)
+    // 授权时:哈希一致、契约已变更 → 只放行 contract-changed;
+    // 合并时:Issue 契约读取失败(合并路径强制刷新)→ 新增 contract-unreadable
+    // 失败项,未被确认覆盖 → 拒绝,且不写放行审计。
+    let issueReadFailing = false
+    const commands: string[] = []
+    const handler = createHandler(async (spec) => {
+      commands.push(spec.command)
+      if (issueReadFailing && /\/issues\/23'/.test(spec.command)) {
+        return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'issue read failed' } }
+      }
+      const api = githubApi(spec.command, {
+        item: {
+          url: workflow.url, number: 23, title: 'changed issue', body: '## 验收标准\n- changed contract',
+          state: 'OPEN', updatedAt: '2026-08-22T01:00:00Z',
+        },
+        pr: {
+          number: 29, state: 'open', merged_at: null,
+          head: { ref: workflow.branch, sha: 'abcdef1234567890' }, base: { ref: 'main' },
+          html_url: 'https://github.com/o/r/pull/29',
+        },
+        reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
+      })
+      if (api) return api
+      throw new Error(`unexpected command: ${spec.command}`)
+    })
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+    const overrideAuthorize = await post(handler, '/clickvibe/api/authorize', {
+      action: 'merge', url: workflow.url, override: true, overrideReason: '契约改动无关紧要',
+    }, headers) as { status: number; body: { authorizationId?: string; authorizationDigest?: string; target?: unknown; override?: unknown } }
+    assert.equal(overrideAuthorize.status, 200, JSON.stringify(overrideAuthorize.body))
+    assert.deepEqual(
+      (overrideAuthorize.body.override as { skipped: string[] } | undefined)?.skipped,
+      ['contract-changed'],
+    )
+
+    issueReadFailing = true
+    const response = await post(handler, '/clickvibe/api/merge', {
+      url: workflow.url,
+      authorizationId: overrideAuthorize.body.authorizationId,
+      authorizationDigest: overrideAuthorize.body.authorizationDigest,
+      target: overrideAuthorize.body.target,
+      override: overrideAuthorize.body.override,
+    }, headers) as { status: number; body: { ok: boolean; error?: string } }
+    assert.equal(response.status, 400)
+    assert.match(response.body.error ?? '', /无法读取当前验收契约.*请重新确认/)
+    assert.equal(commands.some((command) => command.startsWith('gh pr merge')), false)
+    const persisted = await loadWorkflow(workflow.key)
+    assert.equal((persisted?.events ?? []).some((event) => event.kind === 'merge-override'), false)
+    assert.equal(persisted?.delivery, undefined)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
 test('cleanup failure keeps merged terminal state and retries without merging again', async () => {
   const previousHome = process.env.HOME
   const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-merge-retry-'))

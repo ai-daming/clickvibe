@@ -1,6 +1,8 @@
 /**
  * clickvibe host half — routes:
  * - `/clickvibe/api/fetch`          — fetch GitHub issue/PR data via gh
+ * - `/clickvibe/api/command`        — text-command entry (issue #13): conversation
+ *                                      triggers reuse the same action handlers below
  * - `/clickvibe/api/state`          — restore panel context (all workflows)
  * - `/clickvibe/api/develop`        — start dev: worktree+branch+agent
  * - `/clickvibe/api/develop/poll`   — incremental dev log/status (JSON)
@@ -20,7 +22,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { randomBytes } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { homedir, userInfo } from 'node:os'
 import { join, basename, dirname, resolve, relative, isAbsolute } from 'node:path'
 import { parse as parseYaml } from 'yaml'
 import {
@@ -32,6 +34,7 @@ import {
   decideWorktreeRecovery,
   isLoopbackAddress,
   makeAuthorizationInput,
+  mergeGateLabel,
   parseAgent,
   parseDependencies,
   parseGithubUrl,
@@ -42,6 +45,7 @@ import {
   type AgentAuthorizationInput,
   type DevelopAgent,
   type IssuePromptSnapshot,
+  type MergeOverrideGate,
 } from './develop.ts'
 import { checkIssueContract, type IssueContractCheck } from './issue-contract.ts'
 import {
@@ -117,6 +121,20 @@ import {
   githubRest,
   isGithubRateLimitError,
 } from './github-rest.ts'
+import {
+  COMMAND_HELP_TEXT,
+  formatConfirmationPreview,
+  formatIssueList,
+  formatMergeGateRejection,
+  formatProjects,
+  formatStatus,
+  parseCommand,
+  type CommandAction,
+  type CommandAuthorizationPreview,
+  type CommandIssueItem,
+  type CommandStatusWorkflow,
+  type ParsedCommand,
+} from './command.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -897,7 +915,7 @@ export function apply(ctx: Context): void {
       }
       const pathname = new URL(req.url ?? '/', 'http://clickvibe.internal').pathname
       const method = pathname.startsWith(`${ROUTE}/`) ? pathname.slice(`${ROUTE}/`.length) : undefined
-      const knownMethods = new Set(['fetch', 'projects', 'repo/issues', 'state', 'authorize', 'develop', 'develop/poll', 'history', 'stream', 'review', 'resume', 'stop', 'sync', 'merge'])
+      const knownMethods = new Set(['fetch', 'projects', 'repo/issues', 'state', 'authorize', 'develop', 'develop/poll', 'history', 'stream', 'review', 'resume', 'stop', 'sync', 'merge', 'command'])
       if (method === undefined || !knownMethods.has(method)) {
         writeJson(res, 404, { ok: false, error: 'unknown method' })
         return
@@ -937,182 +955,397 @@ export function apply(ctx: Context): void {
         return
       }
 
-      if (method === 'fetch') {
-        const result = await fetchIssue(ctx, payload)
-        writeJson(res, githubAwareStatus(result), result)
-        return
-      }
-      if (method === 'projects') {
-        const result = await listProjects()
-        writeJson(res, 200, result)
-        return
-      }
-      if (method === 'repo/issues') {
-        const result = await fetchRepositoryIssues(ctx, payload)
-        writeJson(res, githubAwareStatus(result), result)
-        return
-      }
-      if (method === 'state') {
-        const filter = payload as { url?: unknown; repoKey?: unknown; forceRefresh?: unknown } | undefined
-        const url = String(filter?.url ?? '')
-        const repoKey = String(filter?.repoKey ?? '')
-        const config = await loadConfig()
-        const active = await loadAllWorkflows()
-        const archived = url === '' ? [] : await loadAllArchivedWorkflows()
-        const workflows = [...active, ...archived].filter((workflow) =>
-          (url === '' || workflow.url === url) && (repoKey === '' || workflow.repoKey === repoKey),
-        )
-        const parsedRepo = parseUrl(url)
-        const repoKeys = new Set(
-          repoKey ? [repoKey]
-            : parsedRepo ? [`${parsedRepo.owner}/${parsedRepo.repo}`]
-              : workflows.map((workflow) => workflow.repoKey),
-        )
-        try {
-          for (const key of repoKeys) {
-            const circuitError = githubRest(ctx).rateLimitError()
-            if (circuitError) throw circuitError
-          }
-          const freshnesses = (await Promise.all([...repoKeys].map((key) =>
-            ensureConfiguredRepoFresh(ctx, config, key, filter?.forceRefresh === true),
-          ))).filter((value): value is RepositoryFreshness => value !== null)
-          const dependenciesRefreshDue = [...repoKeys]
-            .map((key) => dependencyRefreshClock.take(key, fetchTtlMs(config), filter?.forceRefresh === true))
-            .some(Boolean)
-          const enriched = await enrichWorkflowStates(ctx, workflows, config)
-          const freshness = aggregateRepositoryFreshness(freshnesses)
-          writeJson(res, 200, { ok: true, workflows: enriched, freshness, dependenciesRefreshDue })
-        } catch (error) {
-          const message = isGithubRateLimitError(error) ? error.message : `状态刷新失败: ${githubErrorMessage(error)}`
-          writeJson(res, isGithubRateLimitError(error) ? 429 : 400, { ok: false, error: message })
-        }
-        return
-      }
-      if (method === 'authorize') {
-        const securityError = privilegedRequestError(req)
-        if (securityError) {
-          writeJson(res, 403, { ok: false, error: securityError })
-          return
-        }
-        const result = await authorizeAgent(ctx, payload)
-        writeJson(res, result.ok ? 200 : 400, result)
-        return
-      }
-      if (method === 'develop') {
-        let authorization: AgentAuthorization | null = null
-        try {
-          const requestedAgent = parseAgent((payload as { agent?: unknown } | undefined)?.agent)
-          if (requestedAgent === 'dryrun') {
-            if (!isLoopbackAddress(req.socket.remoteAddress)) {
-              writeJson(res, 403, { ok: false, error: 'dryrun 仅允许本机回环地址触发' })
-              return
-            }
-          } else {
-            const securityError = privilegedRequestError(req)
-            if (securityError) {
-              writeJson(res, 403, { ok: false, error: securityError })
-              return
-            }
-            authorization = consumeAuthorization('develop', payload)
-            if (!authorization) {
-              writeJson(res, 403, { ok: false, error: 'Agent 授权无效、已使用或已过期,请重新预览确认' })
-              return
-            }
-          }
-        } catch (error) {
-          writeJson(res, 400, { ok: false, error: String(error instanceof Error ? error.message : error) })
-          return
-        }
-        const result = await startDevelop(ctx, payload, authorization?.snapshot ?? null)
-        writeJson(res, result.ok ? 200 : 400, result)
-        return
-      }
-      if (method === 'develop/poll') {
-        const result = await pollDevelop(payload)
-        writeJson(res, result.ok ? 200 : 400, result)
-        return
-      }
-      if (method === 'review') {
-        const securityError = privilegedRequestError(req)
-        if (securityError) {
-          writeJson(res, 403, { ok: false, error: securityError })
-          return
-        }
-        try {
-          if (!consumeAuthorization('review', payload)) {
-            writeJson(res, 403, { ok: false, error: 'Agent 授权无效、已使用或已过期,请重新确认' })
-            return
-          }
-        } catch (error) {
-          writeJson(res, 400, { ok: false, error: String(error instanceof Error ? error.message : error) })
-          return
-        }
-        const result = await startReview(ctx, payload)
-        writeJson(res, result.ok ? 200 : 400, result)
-        return
-      }
-      if (method === 'resume') {
-        const securityError = privilegedRequestError(req)
-        if (securityError) {
-          writeJson(res, 403, { ok: false, error: securityError })
-          return
-        }
-        try {
-          if (!consumeAuthorization('resume', payload)) {
-            writeJson(res, 403, { ok: false, error: 'Agent 授权无效、已使用或已过期,请重新确认' })
-            return
-          }
-        } catch (error) {
-          writeJson(res, 400, { ok: false, error: String(error instanceof Error ? error.message : error) })
-          return
-        }
-        const result = await resumeDevelop(ctx, payload)
-        writeJson(res, result.ok ? 200 : 400, result)
-        return
-      }
-      if (method === 'stop') {
-        const securityError = privilegedRequestError(req)
-        if (securityError) {
-          writeJson(res, 403, { ok: false, error: securityError })
-          return
-        }
-        const result = stopTask(payload)
-        writeJson(res, result.ok ? 200 : 400, result)
-        return
-      }
-      if (method === 'sync') {
-        const securityError = privilegedRequestError(req)
-        if (securityError) {
-          writeJson(res, 403, { ok: false, error: securityError })
-          return
-        }
-        const result = await syncWorktree(ctx, payload)
-        writeJson(res, result.ok ? 200 : 400, result)
-        return
-      }
-      if (method === 'merge') {
-        const securityError = privilegedRequestError(req)
-        if (securityError) {
-          writeJson(res, 403, { ok: false, error: securityError })
-          return
-        }
-        try {
-          if (!consumeAuthorization('merge', payload)) {
-            writeJson(res, 403, { ok: false, error: '合并授权无效、已使用或已过期,请重新预览确认' })
-            return
-          }
-        } catch (error) {
-          writeJson(res, 400, { ok: false, error: String(error instanceof Error ? error.message : error) })
-          return
-        }
-        const result = await mergeAndCleanup(ctx, payload)
-        writeJson(res, result.ok ? 200 : 400, result)
-        return
-      }
-
-      writeJson(res, 404, { ok: false, error: `unknown method "${method}"` })
+      const { status, body } = await handleApiPost(ctx, req, method, payload)
+      writeJson(res, status, body)
     },
   })
+}
+
+/**
+ * Shared POST dispatch. Both entry points land here:
+ * - the panel UI calls `/clickvibe/api/<method>` directly;
+ * - `/clickvibe/api/command` (issue #13) parses a text command and forwards to
+ *   the same method below, so conversation triggers and UI buttons share one
+ *  set of security checks and backend actions — never a parallel implementation.
+ */
+async function handleApiPost(
+  ctx: Context,
+  req: IncomingMessage,
+  method: string | undefined,
+  payload: unknown,
+): Promise<{ status: number; body: unknown }> {
+  if (method === 'command') return await handleCommand(ctx, req, payload)
+  if (method === 'fetch') {
+    const result = await fetchIssue(ctx, payload)
+    return { status: githubAwareStatus(result), body: result }
+  }
+  if (method === 'projects') {
+    return { status: 200, body: await listProjects() }
+  }
+  if (method === 'repo/issues') {
+    const result = await fetchRepositoryIssues(ctx, payload)
+    return { status: githubAwareStatus(result), body: result }
+  }
+  if (method === 'state') return await stateWorkflows(ctx, payload as { url?: unknown; repoKey?: unknown; forceRefresh?: unknown } | undefined)
+  if (method === 'authorize') {
+    const securityError = privilegedRequestError(req)
+    if (securityError) return { status: 403, body: { ok: false, error: securityError } }
+    const result = await authorizeAgent(ctx, payload)
+    return { status: result.ok ? 200 : 400, body: result }
+  }
+  if (method === 'develop') {
+    let authorization: AgentAuthorization | null = null
+    try {
+      const requestedAgent = parseAgent((payload as { agent?: unknown } | undefined)?.agent)
+      if (requestedAgent === 'dryrun') {
+        if (!isLoopbackAddress(req.socket.remoteAddress)) {
+          return { status: 403, body: { ok: false, error: 'dryrun 仅允许本机回环地址触发' } }
+        }
+      } else {
+        const securityError = privilegedRequestError(req)
+        if (securityError) return { status: 403, body: { ok: false, error: securityError } }
+        authorization = consumeAuthorization('develop', payload)
+        if (!authorization) {
+          return { status: 403, body: { ok: false, error: 'Agent 授权无效、已使用或已过期,请重新预览确认' } }
+        }
+      }
+    } catch (error) {
+      return { status: 400, body: { ok: false, error: String(error instanceof Error ? error.message : error) } }
+    }
+    const result = await startDevelop(ctx, payload, authorization?.snapshot ?? null)
+    return { status: result.ok ? 200 : 400, body: result }
+  }
+  if (method === 'develop/poll') {
+    const result = await pollDevelop(payload)
+    return { status: result.ok ? 200 : 400, body: result }
+  }
+  if (method === 'review') {
+    const securityError = privilegedRequestError(req)
+    if (securityError) return { status: 403, body: { ok: false, error: securityError } }
+    try {
+      if (!consumeAuthorization('review', payload)) {
+        return { status: 403, body: { ok: false, error: 'Agent 授权无效、已使用或已过期,请重新确认' } }
+      }
+    } catch (error) {
+      return { status: 400, body: { ok: false, error: String(error instanceof Error ? error.message : error) } }
+    }
+    const result = await startReview(ctx, payload)
+    return { status: result.ok ? 200 : 400, body: result }
+  }
+  if (method === 'resume') {
+    const securityError = privilegedRequestError(req)
+    if (securityError) return { status: 403, body: { ok: false, error: securityError } }
+    try {
+      if (!consumeAuthorization('resume', payload)) {
+        return { status: 403, body: { ok: false, error: 'Agent 授权无效、已使用或已过期,请重新确认' } }
+      }
+    } catch (error) {
+      return { status: 400, body: { ok: false, error: String(error instanceof Error ? error.message : error) } }
+    }
+    const result = await resumeDevelop(ctx, payload)
+    return { status: result.ok ? 200 : 400, body: result }
+  }
+  if (method === 'stop') {
+    const securityError = privilegedRequestError(req)
+    if (securityError) return { status: 403, body: { ok: false, error: securityError } }
+    const result = stopTask(payload)
+    return { status: result.ok ? 200 : 400, body: result }
+  }
+  if (method === 'sync') {
+    const securityError = privilegedRequestError(req)
+    if (securityError) return { status: 403, body: { ok: false, error: securityError } }
+    const result = await syncWorktree(ctx, payload)
+    return { status: result.ok ? 200 : 400, body: result }
+  }
+  if (method === 'merge') {
+    const securityError = privilegedRequestError(req)
+    if (securityError) return { status: 403, body: { ok: false, error: securityError } }
+    try {
+      if (!consumeAuthorization('merge', payload)) {
+        return { status: 403, body: { ok: false, error: '合并授权无效、已使用或已过期,请重新预览确认' } }
+      }
+    } catch (error) {
+      return { status: 400, body: { ok: false, error: String(error instanceof Error ? error.message : error) } }
+    }
+    const result = await mergeAndCleanup(ctx, payload)
+    return { status: result.ok ? 200 : 400, body: result }
+  }
+  return { status: 404, body: { ok: false, error: `unknown method "${method}"` } }
+}
+
+/** `/state` implementation, shared by the route and the `status` command (issue #13). */
+async function stateWorkflows(
+  ctx: Context,
+  filter: { url?: unknown; repoKey?: unknown; forceRefresh?: unknown } | undefined,
+): Promise<{ status: number; body: unknown }> {
+  const url = String(filter?.url ?? '')
+  const repoKey = String(filter?.repoKey ?? '')
+  const config = await loadConfig()
+  const active = await loadAllWorkflows()
+  const archived = url === '' ? [] : await loadAllArchivedWorkflows()
+  const workflows = [...active, ...archived].filter((workflow) =>
+    (url === '' || workflow.url === url) && (repoKey === '' || workflow.repoKey === repoKey),
+  )
+  const parsedRepo = parseUrl(url)
+  const repoKeys = new Set(
+    repoKey ? [repoKey]
+      : parsedRepo ? [`${parsedRepo.owner}/${parsedRepo.repo}`]
+        : workflows.map((workflow) => workflow.repoKey),
+  )
+  try {
+    const circuitError = githubRest(ctx).rateLimitError()
+    if (circuitError) throw circuitError
+    const freshnesses = (await Promise.all([...repoKeys].map((key) =>
+      ensureConfiguredRepoFresh(ctx, config, key, filter?.forceRefresh === true),
+    ))).filter((value): value is RepositoryFreshness => value !== null)
+    const dependenciesRefreshDue = [...repoKeys]
+      .map((key) => dependencyRefreshClock.take(key, fetchTtlMs(config), filter?.forceRefresh === true))
+      .some(Boolean)
+    const enriched = await enrichWorkflowStates(ctx, workflows, config)
+    const freshness = aggregateRepositoryFreshness(freshnesses)
+    return { status: 200, body: { ok: true, workflows: enriched, freshness, dependenciesRefreshDue } }
+  } catch (error) {
+    const message = isGithubRateLimitError(error) ? error.message : `状态刷新失败: ${githubErrorMessage(error)}`
+    return { status: isGithubRateLimitError(error) ? 429 : 400, body: { ok: false, error: message } }
+  }
+}
+
+/** Resolve the implicit repoKey (single configured repo) or validate the explicit one. */
+async function resolveCommandRepoKey(explicit: string | null): Promise<{ repoKey: string } | { error: string }> {
+  const config = await loadConfig()
+  const keys = Object.keys(config.repos)
+  if (explicit) {
+    if (!(explicit in config.repos)) {
+      return { error: `未配置项目 ${explicit}。可发送 projects 查看已配置的项目。` }
+    }
+    return { repoKey: explicit }
+  }
+  if (keys.length === 0) return { error: '尚未配置任何项目,请在 ~/.clickvibe/config.yaml 的 repos 中添加映射。' }
+  if (keys.length === 1) return { repoKey: keys[0] }
+  return { error: `配置了多个项目(${keys.join('、')}),请在命令中带上 repoKey,如:develop #8 ${keys[0]}` }
+}
+
+/** Resolve a command target to its GitHub URL; PR URLs (review) keep their kind. */
+async function resolveCommandTarget(command: ParsedCommand): Promise<{ url: string } | { error: string }> {
+  if (command.url) return { url: command.url }
+  const resolved = await resolveCommandRepoKey(command.repoKey)
+  if ('error' in resolved) return resolved
+  return { url: `https://github.com/${resolved.repoKey}/issues/${command.number}` }
+}
+
+/** Map a write command onto the same POST method the panel UI uses. */
+const WRITE_METHOD: Partial<Record<CommandAction, 'develop' | 'review' | 'resume' | 'stop' | 'sync' | 'merge'>> = {
+  develop: 'develop',
+  review: 'review',
+  rework: 'resume',
+  resume: 'resume',
+  stop: 'stop',
+  sync: 'sync',
+  merge: 'merge',
+}
+
+/** Render one executed write result as conversation-readable text. */
+function formatWriteOutcome(action: CommandAction, result: { status: number; body: unknown }): { status: number; body: { ok: boolean; action: CommandAction; text: string; error?: string } & Record<string, unknown> } {
+  const body = (result.body ?? {}) as Record<string, unknown>
+  if (!body.ok) {
+    // merge 可能部分完成(PR 已合并、清理失败):不能说「未执行」
+    const prefix = body.merged === true ? `${action} 部分完成,需重试:` : `${action} 未执行:`
+    return {
+      status: result.status,
+      body: { ok: false, action, error: String(body.error ?? '执行失败'), text: `${prefix}${String(body.error ?? '原因未知')}` },
+    }
+  }
+  const followUp = '发送「status + 目标」可查看进度;「stop + 目标」可停止。'
+  const text = action === 'develop'
+    ? `已下单开发:任务 ${String(body.taskId ?? '')}(分支 ${String(body.branch ?? '')},worktree ${String(body.worktree ?? '')})。${followUp}`
+    : action === 'review'
+      ? `已启动 review:任务 ${String(body.taskId ?? '')}。${followUp}`
+      : action === 'rework' || action === 'resume'
+        ? `已恢复开发会话:任务 ${String(body.taskId ?? '')}。${followUp}`
+        : action === 'merge'
+          ? `PR #${String(body.prNumber ?? '')} 已合并,worktree/分支/Issue 清理与归档完成。`
+          : action === 'sync'
+            ? `已同步 ${String(body.branch ?? '')} 到远端基线,HEAD ${String(body.head ?? '未知')}。`
+            : `已请求停止任务 ${String(body.taskId ?? '')}${body.stopped === false ? '(任务此前已结束)' : ''}。`
+  return { status: result.status, body: { ok: true, action, text, ...body } }
+}
+
+/**
+ * `/clickvibe/api/command` (issue #13): one text-command entry for the whole
+ * pipeline. Read commands answer directly; write commands follow the same
+ * preview → user-confirm → one-use authorization protocol as the panel:
+ * 1. without credentials the command returns a readable preview plus a
+ *    one-time authorization (the server itself freezes the snapshot);
+ * 2. with `authorizationId`/`authorizationDigest` the command forwards to the
+ *    identical method handler the UI button uses.
+ */
+async function handleCommand(
+  ctx: Context,
+  req: IncomingMessage,
+  payload: unknown,
+): Promise<{ status: number; body: unknown }> {
+  const text = String((payload as { command?: unknown } | undefined)?.command ?? '')
+  const parsed = parseCommand(text)
+  if (!parsed.ok) return { status: 400, body: { ok: false, error: parsed.error } }
+  const command = parsed.command
+  const confirm = (payload ?? {}) as {
+    authorizationId?: unknown
+    authorizationDigest?: unknown
+    target?: unknown
+    override?: unknown
+  }
+  const authorization = {
+    ...(confirm.authorizationId !== undefined ? { authorizationId: String(confirm.authorizationId) } : {}),
+    ...(confirm.authorizationDigest !== undefined ? { authorizationDigest: String(confirm.authorizationDigest) } : {}),
+    ...(confirm.target !== undefined ? { target: confirm.target } : {}),
+    ...(confirm.override !== undefined ? { override: confirm.override } : {}),
+  }
+  const execute = (method: string, body: Record<string, unknown>) =>
+    handleApiPost(ctx, req, method, { ...body, ...authorization })
+
+  if (command.action === 'help') {
+    return { status: 200, body: { ok: true, action: 'help', text: COMMAND_HELP_TEXT } }
+  }
+  if (command.action === 'projects') {
+    const result = await listProjects()
+    return { status: 200, body: { ok: true, action: 'projects', text: formatProjects(result.projects), projects: result.projects } }
+  }
+  if (command.action === 'issues') {
+    const resolved = await resolveCommandRepoKey(command.repoKey)
+    if ('error' in resolved) return { status: 400, body: { ok: false, action: 'issues', error: resolved.error } }
+    const result = await fetchRepositoryIssues(ctx, { repoKey: resolved.repoKey })
+    if (!result.ok) return { status: 400, body: { ok: false, action: 'issues', error: result.error } }
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        action: 'issues',
+        repoKey: resolved.repoKey,
+        text: formatIssueList(resolved.repoKey, result.issues as CommandIssueItem[]),
+        issues: result.issues,
+      },
+    }
+  }
+  if (command.action === 'status') {
+    const target = await resolveCommandTarget(command)
+    if ('error' in target) return { status: 400, body: { ok: false, action: 'status', error: target.error } }
+    const state = await stateWorkflows(ctx, { url: target.url })
+    if (state.status !== 200) {
+      const error = String((state.body as { error?: string }).error ?? '状态刷新失败')
+      return { status: state.status, body: { ok: false, action: 'status', error } }
+    }
+    const workflows = (state.body as { workflows: CommandStatusWorkflow[] }).workflows
+    const workflow = workflows.find((item) => item.url === target.url) ?? null
+    return {
+      status: 200,
+      body: { ok: true, action: 'status', url: target.url, text: formatStatus(workflow, command.number ?? ''), workflow },
+    }
+  }
+
+  const method = WRITE_METHOD[command.action]
+  if (!method) return { status: 404, body: { ok: false, error: `命令 ${command.action} 不可写` } }
+
+  // 安全门禁先行:未通过来源校验的请求连项目配置都不该看到
+  const securityError = privilegedRequestError(req)
+  if (securityError) return { status: 403, body: { ok: false, action: command.action, error: securityError } }
+  const target = await resolveCommandTarget(command)
+  if ('error' in target) return { status: 400, body: { ok: false, action: command.action, error: target.error } }
+  const { url } = target
+
+  // 直接执行类:sync/stop 不需要一次性授权;dryrun 只需回环校验(在 develop 分支内)
+  if (command.action === 'sync') {
+    return formatWriteOutcome(command.action, await execute('sync', { url }))
+  }
+  if (command.action === 'stop') {
+    const key = parseUrl(url)
+    if (!key) return { status: 400, body: { ok: false, action: 'stop', error: '目标 URL 无效' } }
+    const workflow = await loadWorkflow(issueKey(`${key.owner}/${key.repo}`, key.number))
+    const taskId = [workflow?.devTaskId, workflow?.reviewTaskId]
+      .find((id) => id !== null && id !== undefined && liveTasks.has(id) && !liveTasks.get(id)!.closed)
+    if (!taskId) return { status: 400, body: { ok: false, action: 'stop', error: '该 issue 没有运行中的任务' } }
+    return formatWriteOutcome(command.action, await execute('stop', { taskId }))
+  }
+  if (command.action === 'develop' && command.agent === 'dryrun') {
+    return formatWriteOutcome(command.action, await execute('develop', { url, agent: 'dryrun' }))
+  }
+
+  // 两阶段写命令:预览签发(服务端自己冻结快照)→ 用户在对话中确认 → 携带授权重发
+  const confirmed = authorization.authorizationId !== undefined
+  if (confirmed) {
+    const agent = command.action === 'develop' || command.action === 'review'
+      ? (command.agent ?? 'codex')
+      : command.action === 'rework' || command.action === 'resume'
+        ? await resolveResumeAgent(url)
+        : null
+    return formatWriteOutcome(command.action, await execute(method, {
+      url,
+      ...(agent && agent !== 'dryrun' ? { agent } : {}),
+      ...(command.context !== '' ? { context: command.context } : {}),
+    }))
+  }
+
+  const authAction = command.action === 'rework' ? 'resume' : command.action
+  const agent = command.action === 'develop' || command.action === 'review'
+    ? (command.agent ?? 'codex')
+    : command.action === 'rework' || command.action === 'resume'
+      ? await resolveResumeAgent(url)
+      : null
+  let expectedSnapshot: IssuePromptSnapshot | undefined
+  if (command.action === 'develop') {
+    const fetched = await fetchIssue(ctx, { url, forceRefresh: true })
+    if (!fetched.ok) return { status: 400, body: { ok: false, action: command.action, error: fetched.error } }
+    expectedSnapshot = issueSnapshot(fetched.data.item as Record<string, unknown>)
+  }
+  const authorized = await authorizeAgent(ctx, {
+    action: authAction,
+    url,
+    ...(agent && agent !== 'dryrun' ? { agent } : {}),
+    ...(command.context !== '' ? { context: command.context } : {}),
+    ...(expectedSnapshot ? { expectedSnapshot } : {}),
+    ...(command.action === 'merge' && command.overrideReason !== ''
+      ? { override: true, overrideReason: command.overrideReason }
+      : {}),
+  })
+  if (!authorized.ok) {
+    // 门禁拒绝(issue #49):把全部失败项与人工放行路径说清楚,对话里可直接决策
+    if (authorized.gateFailures && authorized.gateFailures.length > 0) {
+      return {
+        status: 400,
+        body: {
+          ok: false,
+          action: command.action,
+          error: authorized.error,
+          gateFailures: authorized.gateFailures,
+          text: formatMergeGateRejection(url, authorized.gateFailures, mergeGateLabel),
+        },
+      }
+    }
+    return { status: 400, body: { ok: false, action: command.action, error: authorized.error } }
+  }
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      action: command.action,
+      needsConfirmation: true,
+      text: formatConfirmationPreview(command.action, agent, authorized.preview as CommandAuthorizationPreview, authorized.authorizationDigest, authorized.expiresAt),
+      authorization: {
+        authorizationId: authorized.authorizationId,
+        authorizationDigest: authorized.authorizationDigest,
+        expiresAt: authorized.expiresAt,
+        ...(authorized.target ? { target: authorized.target } : {}),
+        ...(authorized.override ? { override: authorized.override } : {}),
+      },
+    },
+  }
+}
+
+/** resume/rework 授权与执行必须用同一 agent 值(digest 覆盖它),以 workflow 记录为准。 */
+async function resolveResumeAgent(url: string): Promise<'codex' | 'claude' | null> {
+  const parsed = parseUrl(url)
+  if (!parsed) return 'codex'
+  const workflow = await loadWorkflow(issueKey(`${parsed.owner}/${parsed.repo}`, parsed.number))
+  return workflow?.devAgent ?? 'codex'
 }
 
 async function listProjects(): Promise<{ ok: true; projects: { repoKey: string; path: string; available: boolean }[] }> {
@@ -1698,6 +1931,12 @@ function sameCommitHash(reviewedHash: string, prHead: string): boolean {
     && (reviewed === head || head.startsWith(reviewed) || reviewed.startsWith(head))
 }
 
+/** One failing ClickVibe merge gate; all items are eligible for manual override (issue #49). */
+interface MergeGateFailure {
+  key: MergeOverrideGate
+  message: string
+}
+
 /**
  * 判定实时 PR HEAD 是否为「R 与 origin/main 的纯同步合并」(issue #48):
  * H 必须是恰好两个父提交的 merge commit,其中一个父提交精确等于被审提交 R
@@ -1768,30 +2007,74 @@ export async function assertReviewHeadMatchesPr(
   throw new Error('合并门禁拒绝:实时 PR HEAD 与最近一次通过的 review 结论哈希不一致,且不满足同步等价,需重新 Review')
 }
 
-/** Server-side merge gate: unknown and changed contracts both fail closed. */
-async function assertReviewContractCurrent(ctx: Context, workflow: IssueWorkflow): Promise<void> {
+/**
+ * Collect every failing ClickVibe-side merge gate in the historical rejection
+ * order (hash first, then contract). GitHub-side protections are not gates here
+ * and can never be overridden. The hash gate reuses the issue #48 head check,
+ * so a pure sync merge of the reviewed commit with origin/main passes without
+ * re-review; its message stays in sync with the assert-based wording.
+ */
+async function collectMergeGateFailures(
+  ctx: Context,
+  workflow: IssueWorkflow,
+  prHead: string,
+): Promise<MergeGateFailure[]> {
+  const failures: MergeGateFailure[] = []
+  const reviewedHash = latestPassingReviewHash(workflow)
+  try {
+    await assertReviewHeadMatchesPr(ctx, workflow.worktree, reviewedHash, prHead)
+  } catch (error) {
+    failures.push({
+      key: 'review-hash',
+      message: String(error instanceof Error ? error.message : error).replace(/^合并门禁拒绝:/, ''),
+    })
+  }
   const reviewedContract = latestPassingReview(workflow)?.issueContract
   if (!reviewedContract) {
-    throw new Error('合并门禁拒绝:最近通过的 review 缺少验收契约快照,需重新 Review')
+    failures.push({ key: 'review-contract-missing', message: '最近通过的 review 缺少验收契约快照,需重新 Review' })
+  } else {
+    let current: ReviewIssueContract
+    try {
+      current = await fetchIssueContract(ctx, workflow.url, true)
+    } catch (error) {
+      failures.push({
+        key: 'contract-unreadable',
+        message: `无法读取当前验收契约: ${String(error instanceof Error ? error.message : error)}`,
+      })
+      return failures
+    }
+    if (current.contract.bodyHash !== reviewedContract.bodyHash) {
+      failures.push({ key: 'contract-changed', message: '验收契约已变更,需重新 Review' })
+    }
   }
-  let current: ReviewIssueContract
-  try {
-    current = await fetchIssueContract(ctx, workflow.url, true)
-  } catch (error) {
-    throw new Error(`合并门禁拒绝:无法读取当前验收契约: ${String(error instanceof Error ? error.message : error)}`)
-  }
-  if (current.contract.bodyHash !== reviewedContract.bodyHash) {
-    throw new Error('合并门禁拒绝:验收契约已变更,需重新 Review')
-  }
+  return failures
 }
 
-async function mergeAuthorizationPreview(ctx: Context, url: string): Promise<{
-  prNumber: string
-  branch: string
-  head: string
-  mergeFlag: '--merge'
-  cleanup: string[]
-}> {
+/** First-failure rejection text; identical to the pre-override single-gate errors. */
+function mergeGateRejection(failures: MergeGateFailure[]): string {
+  return `合并门禁拒绝:${failures[0]?.message ?? '未知原因'}`
+}
+
+type MergeAuthorizationPreview =
+  | {
+      ok: true
+      prNumber: string
+      branch: string
+      head: string
+      mergeFlag: '--merge'
+      cleanup: string[]
+    }
+  | {
+      ok: false
+      gateFailures: MergeGateFailure[]
+      prNumber: string
+      branch: string
+      head: string
+      mergeFlag: '--merge'
+      cleanup: string[]
+    }
+
+async function mergeAuthorizationPreview(ctx: Context, url: string): Promise<MergeAuthorizationPreview> {
   const parsed = parseUrl(url)
   if (!parsed || parsed.kind !== 'issue') throw new Error('合并目标必须是 GitHub Issue URL')
   const repoKey = `${parsed.owner}/${parsed.repo}`
@@ -1801,32 +2084,42 @@ async function mergeAuthorizationPreview(ctx: Context, url: string): Promise<{
   if (!lookup.known || !lookup.pr) throw new Error('无法读取实时 PR 状态,请稍后重试')
   if (lookup.pr.state === 'CLOSED') throw new Error('PR 已关闭且未合并,不能执行合并')
   if (lookup.pr.headRefName !== workflow.branch) throw new Error('实时 PR 分支与 workflow 不一致,拒绝合并')
-  if (!workflow.delivery) {
-    await assertReviewHeadMatchesPr(ctx, workflow.worktree, latestPassingReviewHash(workflow), lookup.pr.headRefOid)
-    await assertReviewContractCurrent(ctx, workflow)
-  }
-  return {
+  const base = {
     prNumber: lookup.pr.number,
     branch: workflow.branch,
     head: lookup.pr.headRefOid ?? workflow.delivery?.prHead ?? '',
-    mergeFlag: '--merge',
+    mergeFlag: '--merge' as const,
     cleanup: ['worktree', '本地分支', '远端分支', `Issue #${parsed.number}`, 'workflow 归档'],
   }
+  if (!workflow.delivery) {
+    const gateFailures = await collectMergeGateFailures(ctx, workflow, lookup.pr.headRefOid ?? '')
+    if (gateFailures.length > 0) return { ok: false, gateFailures, ...base }
+  }
+  return { ok: true, ...base }
 }
 
 async function authorizeAgent(
   ctx: Context,
   payload: unknown,
 ): Promise<
-  | { ok: true; authorizationId: string; authorizationDigest: string; expiresAt: number; preview: unknown }
-  | { ok: false; error: string }
+  | {
+      ok: true
+      authorizationId: string
+      authorizationDigest: string
+      expiresAt: number
+      preview: unknown
+      target?: AgentAuthorizationInput['target']
+      override?: AgentAuthorizationInput['override']
+    }
+  | { ok: false; error: string; gateFailures?: MergeGateFailure[] }
 > {
   try {
-    const body = (payload ?? {}) as { action?: unknown; expectedSnapshot?: unknown }
+    const body = (payload ?? {}) as { action?: unknown; expectedSnapshot?: unknown; override?: unknown; overrideReason?: unknown }
     const action = String(body.action ?? '') as AgentAuthorizationInput['action']
     const input = authorizationInputFromPayload(action, payload)
     let snapshot: IssuePromptSnapshot | null = null
-    let mergePreview: Awaited<ReturnType<typeof mergeAuthorizationPreview>> | null = null
+    let mergePreview: Extract<Awaited<ReturnType<typeof mergeAuthorizationPreview>>, { ok: true }> | null = null
+    let mergeOverride: AgentAuthorizationInput['override']
     if (input.action === 'develop') {
       const fetched = await fetchIssue(ctx, { url: input.url })
       if (!fetched.ok) return fetched
@@ -1836,7 +2129,32 @@ async function authorizeAgent(
         return { ok: false, error: 'Issue 内容已变化或未提供完整预览快照,请刷新面板并重新确认' }
       }
     } else if (input.action === 'merge') {
-      mergePreview = await mergeAuthorizationPreview(ctx, input.url)
+      const preview = await mergeAuthorizationPreview(ctx, input.url)
+      if (preview.ok) {
+        mergePreview = preview
+      } else {
+        // 门禁拒绝(issue #49):未请求人工放行 → 原样拒绝并附门禁清单供面板展示入口。
+        const reason = String(body.overrideReason ?? '').trim()
+        if (body.override !== true || reason === '') {
+          return {
+            ok: false,
+            error: mergeGateRejection(preview.gateFailures),
+            gateFailures: preview.gateFailures,
+          }
+        }
+        if (preview.head === '') throw new Error('合并授权目标无效')
+        mergeOverride = { skipped: preview.gateFailures.map((failure) => failure.key), reason }
+        mergePreview = {
+          ok: true,
+          prNumber: preview.prNumber,
+          branch: preview.branch,
+          head: preview.head,
+          mergeFlag: preview.mergeFlag,
+          cleanup: preview.cleanup,
+          // 预览同时给出被跳过门禁项的明细,供客户端逐项二次确认。
+          ...(mergeOverride ? { override: { ...mergeOverride, gates: preview.gateFailures } } : {}),
+        }
+      }
     }
     const authorizationInput: AgentAuthorizationInput = mergePreview
       ? {
@@ -1847,15 +2165,20 @@ async function authorizeAgent(
             head: mergePreview.head,
             mergeFlag: mergePreview.mergeFlag,
           },
+          ...(mergeOverride ? { override: mergeOverride } : {}),
         }
       : input
     const authorization = authorizations.issue(authorizationInput, snapshot)
+    // 预览沿用量剔除 ok 判别字段,保持既有合并预览结构不变。
+    const mergePreviewBody = mergePreview
+      ? (({ ok, ...fields }) => fields)(mergePreview)
+      : null
     return {
       ok: true,
       authorizationId: authorization.id,
       authorizationDigest: authorization.digest,
       expiresAt: authorization.expiresAt,
-      preview: mergePreview ?? (snapshot
+      preview: mergePreviewBody ?? (snapshot
         ? {
             action: input.action,
             agent: input.agent,
@@ -1867,6 +2190,7 @@ async function authorizeAgent(
           }
         : { action: input.action, agent: input.agent, url: input.url, digest: authorization.digest }),
       ...(mergePreview ? { target: authorizationInput.target } : {}),
+      ...(mergeOverride ? { override: mergeOverride } : {}),
     }
   } catch (error) {
     return { ok: false, error: String(error instanceof Error ? error.message : error) }
@@ -1875,7 +2199,7 @@ async function authorizeAgent(
 
 type MergeResult =
   | { ok: true; merged: true; archived: true; prNumber: string }
-  | { ok: false; error: string; merged?: boolean; cleanupPending?: boolean }
+  | { ok: false; error: string; merged?: boolean; cleanupPending?: boolean; gateFailures?: MergeGateFailure[] }
 
 async function mergeAndCleanup(ctx: Context, payload: unknown): Promise<MergeResult> {
   const url = String((payload as { url?: unknown } | undefined)?.url ?? '').trim()
@@ -1923,11 +2247,37 @@ async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): Promise<
   if (!pr.headRefOid) return { ok: false, error: '实时 PR HEAD 缺失,拒绝合并' }
 
   if (!workflow.delivery) {
-    try {
-      await assertReviewHeadMatchesPr(ctx, workflow.worktree, latestPassingReviewHash(workflow), pr.headRefOid)
-      await assertReviewContractCurrent(ctx, workflow)
-    } catch (error) {
-      return { ok: false, error: String(error instanceof Error ? error.message : error) }
+    const gateFailures = await collectMergeGateFailures(ctx, workflow, pr.headRefOid)
+    if (gateFailures.length > 0) {
+      // 门禁拒绝(issue #49):仅当用户已完成人工放行二次确认(授权绑定被跳过
+      // 门禁项与原因)且当前失败项被完全覆盖时才放行;否则行为与文案保持不变。
+      let override: AgentAuthorizationInput['override'] | null = null
+      try {
+        override = authorizationInputFromPayload('merge', payload).override ?? null
+      } catch {
+        override = null
+      }
+      if (!override) {
+        return { ok: false, error: mergeGateRejection(gateFailures), gateFailures }
+      }
+      const uncovered = gateFailures.filter((failure) => !override.skipped.includes(failure.key))
+      if (uncovered.length > 0) {
+        return {
+          ok: false,
+          error: `${mergeGateRejection(uncovered)}(与人工放行确认时的门禁项不一致,请重新确认)`,
+          gateFailures,
+        }
+      }
+      // 放行审计先于合并写入时间线:即使随后合并失败,放行动作也可追溯,
+      // 且与 review 结论事件分离——放行不冒充 review 通过。
+      await appendEvent(workflow, {
+        kind: 'merge-override',
+        at: new Date().toISOString(),
+        skipped: [...override.skipped],
+        skippedLabels: override.skipped.map(mergeGateLabel),
+        reason: override.reason,
+        operator: userInfo().username,
+      })
     }
     if (pr.state !== 'MERGED') {
       const command = [
