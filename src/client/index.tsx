@@ -733,6 +733,7 @@ interface WorkflowEvent {
   note?: string
   /** 人工放行审计(仅 merge-override 事件)。 */
   skipped?: string[]
+  skippedLabels?: string[]
   reason?: string
   operator?: string
 }
@@ -743,17 +744,8 @@ interface MergeGateFailure {
   message: string
 }
 
-/** 门禁 key → 面板展示文案。 */
-const MERGE_GATE_LABELS: Record<string, string> = {
-  'review-hash': 'PR HEAD 与 review 结论哈希不一致',
-  'review-contract-missing': 'review 缺少验收契约快照',
-  'contract-unreadable': '无法读取当前验收契约',
-  'contract-changed': '验收契约已变更',
-}
-
-function mergeGateLabel(key: string): string {
-  return MERGE_GATE_LABELS[key] ?? key
-}
+/** 放行原因长度上限,与服务端 MERGE_OVERRIDE_REASON_MAX 保持一致(仅本地提示用)。 */
+const OVERRIDE_REASON_MAX = 500
 
 function fmtTime(iso: string): string {
   try { return new Date(iso).toLocaleString() } catch { return iso }
@@ -1085,10 +1077,15 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
     setError(null)
     setOverrideGates(null)
     try {
-      const reasonInput = window.prompt('人工放行合并(必填):\n请填写放行原因,将写入 workflow 审计时间线:')
+      const reasonInput = window.prompt(`人工放行合并(必填,1-${OVERRIDE_REASON_MAX} 字):\n请填写放行原因,将写入 workflow 审计时间线:`)
       if (reasonInput === null) { setBusy(null); return }
       const reason = reasonInput.trim()
       if (reason === '') { setError('人工放行需要填写放行原因'); setBusy(null); return }
+      if (reason.length > OVERRIDE_REASON_MAX) {
+        setError(`放行原因超长(当前 ${reason.length} 字,上限 ${OVERRIDE_REASON_MAX} 字),请精简后重试`)
+        setBusy(null)
+        return
+      }
       const res = await apiCall<
         | {
           ok: true
@@ -1108,18 +1105,18 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
       }
       const override = res.override ?? res.preview.override
       if (override && override.skipped.length > 0) {
-        // 逐项确认:每一项被跳过的门禁都单独确认,任一取消即中止。
+        // 逐项确认:每一项被跳过的门禁都单独确认(文案用服务端下发的 message),任一取消即中止。
         const gates = res.preview.override?.gates ?? []
+        const gateMessage = (key: string): string => gates.find((item) => item.key === key)?.message ?? key
         for (const key of override.skipped) {
-          const gate = gates.find((item) => item.key === key)
           const confirmed = window.confirm(
-            `人工放行 · 逐项确认\n\n即将跳过 ClickVibe 合并门禁项:\n\n• ${gate ? gate.message : mergeGateLabel(key)}\n\n确认跳过这一项并继续?`,
+            `人工放行 · 逐项确认\n\n即将跳过 ClickVibe 合并门禁项:\n\n• ${gateMessage(key)}\n\n确认跳过这一项并继续?`,
           )
           if (!confirmed) { setBusy(null); return }
         }
         const preview = res.preview
         const confirmedMerge = window.confirm(
-          `⚠️ 人工放行合并(最后确认)\n\nPR: #${preview.prNumber ?? '?'}\n分支: ${preview.branch ?? '?'}\n策略: ${preview.mergeFlag ?? '--merge'} (merge commit)\n清理: ${(preview.cleanup ?? []).join('、')}\n\n跳过的门禁项:\n${override.skipped.map((key) => `• ${mergeGateLabel(key)}`).join('\n')}\n放行原因: ${override.reason}\n操作者: 本机用户(将写入审计时间线)\n\n注意:仅跳过 ClickVibe 自身门禁;GitHub 分支保护若拒绝合并将直接报错。\n\n确认放行并执行合并与清理?`,
+          `⚠️ 人工放行合并(最后确认)\n\nPR: #${preview.prNumber ?? '?'}\n分支: ${preview.branch ?? '?'}\n策略: ${preview.mergeFlag ?? '--merge'} (merge commit)\n清理: ${(preview.cleanup ?? []).join('、')}\n\n跳过的门禁项:\n${override.skipped.map((key) => `• ${gateMessage(key)}`).join('\n')}\n放行原因: ${override.reason}\n操作者: 本机用户(将写入审计时间线)\n\n注意:仅跳过 ClickVibe 自身门禁;GitHub 分支保护若拒绝合并将直接报错。\n\n确认放行并执行合并与清理?`,
         )
         if (!confirmedMerge) { setBusy(null); return }
       } else {
@@ -1390,7 +1387,7 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
               {ev.hash ? <code className="cv-tl-hash">{ev.hash}</code> : null}
               {ev.kind === 'merge-override' ? (
                 <span className="cv-tl-note" title={ev.reason}>
-                  跳过 {(ev.skipped ?? []).map(mergeGateLabel).join('、')} · 操作者 @{ev.operator ?? '?'} · 原因:{ev.reason ?? '?'}
+                  跳过 {(ev.skippedLabels ?? ev.skipped ?? []).join('、')} · 操作者 @{ev.operator ?? '?'} · 原因:{ev.reason ?? '?'}
                 </span>
               ) : null}
               {ev.kind === 'review' && ev.verdict

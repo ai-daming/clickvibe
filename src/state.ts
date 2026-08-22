@@ -88,6 +88,8 @@ export interface WorkflowEvent {
   note?: string
   /** 人工放行审计(仅 merge-override 事件):用户确认跳过的门禁项。 */
   skipped?: string[]
+  /** 人工放行审计(仅 merge-override 事件):跳过项展示文案,由服务端下发,面板零映射。 */
+  skippedLabels?: string[]
   /** 人工放行审计(仅 merge-override 事件):用户填写的放行原因。 */
   reason?: string
   /** 人工放行审计(仅 merge-override 事件):执行放行的本机用户。 */

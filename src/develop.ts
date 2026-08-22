@@ -17,6 +17,21 @@ export const MERGE_OVERRIDE_GATES = [
 
 export type MergeOverrideGate = typeof MERGE_OVERRIDE_GATES[number]
 
+/** 人工放行原因的长度上限(与面板本地校验保持一致)。 */
+export const MERGE_OVERRIDE_REASON_MAX = 500
+
+/** 门禁 key → 面板/审计展示文案的唯一来源;服务端下发,客户端不再自行维护映射。 */
+export const MERGE_GATE_LABELS: Record<MergeOverrideGate, string> = {
+  'review-hash': 'PR HEAD 与 review 结论哈希不一致',
+  'review-contract-missing': 'review 缺少验收契约快照',
+  'contract-unreadable': '无法读取当前验收契约',
+  'contract-changed': '验收契约已变更',
+}
+
+export function mergeGateLabel(key: MergeOverrideGate | string): string {
+  return MERGE_GATE_LABELS[key as MergeOverrideGate] ?? key
+}
+
 export const RESUME_REJECT_WINDOW_MS = 15_000
 
 const CODEX_PERMISSION_FLAGS = `-c 'approval_policy="never"' -s danger-full-access`
@@ -381,7 +396,9 @@ export function makeAuthorizationInput(value: {
       throw new Error('人工放行的门禁项无效')
     }
     const reason = String(raw.reason ?? '').trim()
-    if (reason === '' || reason.length > 500) throw new Error('人工放行的放行原因无效')
+    if (reason === '' || reason.length > MERGE_OVERRIDE_REASON_MAX) {
+      throw new Error(`人工放行的放行原因无效(需 1-${MERGE_OVERRIDE_REASON_MAX} 字)`)
+    }
     override = { skipped: skipped as MergeOverrideGate[], reason }
   }
   return {

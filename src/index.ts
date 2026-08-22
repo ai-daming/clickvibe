@@ -32,6 +32,7 @@ import {
   decideWorktreeRecovery,
   isLoopbackAddress,
   makeAuthorizationInput,
+  mergeGateLabel,
   parseAgent,
   parseDependencies,
   parseGithubUrl,
@@ -1905,6 +1906,7 @@ async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): Promise<
         kind: 'merge-override',
         at: new Date().toISOString(),
         skipped: [...override.skipped],
+        skippedLabels: override.skipped.map(mergeGateLabel),
         reason: override.reason,
         operator: userInfo().username,
       })

@@ -237,7 +237,8 @@ test('merge authorization input accepts only a well-formed manual override', () 
   }), /放行原因无效/)
 })
 
-test('LineLog bounds a never-terminated line and handles CRLF split across chunks', () => {  const log = new LineLog(4)
+test('LineLog bounds a never-terminated line and handles CRLF split across chunks', () => {
+  const log = new LineLog(4)
   log.appendChunk('x'.repeat(LineLog.MAX_LINE_CHARS + 10))
   log.appendChunk('discarded\r')
   log.appendChunk('\nnext\r')

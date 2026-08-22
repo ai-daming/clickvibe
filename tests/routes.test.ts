@@ -579,6 +579,7 @@ test('/merge gate rejection offers manual override that merges once and audits t
     const audit = (archivedWorkflows[0].events ?? []).filter((event) => event.kind === 'merge-override')
     assert.equal(audit.length, 1)
     assert.deepEqual(audit[0].skipped, ['review-hash'])
+    assert.deepEqual(audit[0].skippedLabels, ['PR HEAD 与 review 结论哈希不一致'])
     assert.equal(audit[0].reason, overrideReason)
     assert.ok(typeof audit[0].operator === 'string' && audit[0].operator !== '')
     assert.ok(typeof audit[0].at === 'string' && audit[0].at !== '')
@@ -677,7 +678,8 @@ test('/merge manual override refuses gate failures not covered by the confirmati
   }
 })
 
-test('cleanup failure keeps merged terminal state and retries without merging again', async () => {  const previousHome = process.env.HOME
+test('cleanup failure keeps merged terminal state and retries without merging again', async () => {
+  const previousHome = process.env.HOME
   const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-merge-retry-'))
   process.env.HOME = tempHome
   try {
