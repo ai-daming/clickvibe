@@ -18,7 +18,7 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type { LayoutController } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { SidebarFooterActionOwnerProps } from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import { selectHistoryTask } from '../task-history.ts'
-import { githubCompareUrl } from '../state-view.ts'
+import { githubCompareUrl, workflowStatusLabel } from '../state-view.ts'
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 type _SlotLoaders = [typeof LayoutController, SidebarFooterActionOwnerProps]
 
@@ -649,6 +649,7 @@ interface Workflow {
     aheadOfUpstream: number | null
     behindUpstream: number | null
     needsSync: boolean
+    mergeConflict?: boolean
     lastDevHash: string | null
     lastReviewHash: string | null
     reviewedHash: string | null
@@ -681,17 +682,11 @@ function fmtTime(iso: string): string {
 }
 
 function stageLabel(stage: Workflow['stage'], workflow: Workflow | null): string {
-  switch (stage) {
-    case 'idle': return '未开发'
-    case 'developing': return '开发中'
-    case 'review-ready':
-      // 已有 review 结果:未通过 → "Review 未通过";否则 → "待 review"
-      return workflow?.reviewResult
-        ? (workflow.reviewResult.passed ? 'Review 通过' : 'Review 未通过')
-        : '待 review'
-    case 'reviewing': return 'review 中'
-    case 'passed': return '✅ 已通过'
-  }
+  return workflowStatusLabel(
+    stage,
+    workflow?.reviewResult?.passed ?? null,
+    workflow?.derived?.verdictCurrent,
+  )
 }
 
 function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoActionHandled }: {
@@ -847,7 +842,7 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
   }, [workflow?.reviewAgent, workflow?.devAgent])
 
   const refresh = async () => {
-    const res = await apiCall<{ ok: true; workflows: Workflow[] }>('state', {})
+    const res = await apiCall<{ ok: true; workflows: Workflow[] }>('state', { url })
     if (res.ok) {
       onWorkflow(res.workflows.find((w) => w.url === url) ?? null)
     }
@@ -944,9 +939,12 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
     setBusy('syncing')
     setError(null)
     try {
-      const res = await apiCall<{ ok: true; worktree: string; branch: string; head: string | null } | { ok: false; error: string }>('sync', { url })
+      const res = await apiCall<{ ok: true; worktree: string; branch: string; head: string | null } | { ok: false; error: string; conflict?: boolean }>('sync', { url })
       if (!res.ok) {
         setError(res.error)
+        // 冲突现场保留后,唯一动作会切换为「按意见返工」,刷新让按钮立即接手
+        if (res.conflict) await refresh()
+        // sync 没有 LiveTask/SSE;主动重载磁盘日志显示同步/冲突结果。
         if (workflow?.devTaskId) void openStream(workflow.devTaskId, false)
         setBusy(null)
         return
@@ -1067,6 +1065,7 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
                     origin/main <code className="cv-tl-hash">{derived.originMainHead}</code>
                     <span className="cv-state-delta">worktree 落后 {derived.behindBase} · 领先 {derived.aheadOfBase}</span>
                     {derived.needsSync ? <span className="cv-state-warn">⚠ 需要同步</span> : null}
+                    {derived.mergeConflict ? <span className="cv-state-warn">⚠ 合并冲突待解决(转交 agent)</span> : null}
                   </td>
                 </tr>
               ) : null}
@@ -1205,6 +1204,10 @@ interface RepositoryIssue extends GhIssue {
   workflow: Workflow
 }
 
+type WorkflowStateResponse =
+  | { ok: true; workflows: Workflow[] }
+  | { ok: false; error: string }
+
 function PanelContent() {
   const [projects, setProjects] = React.useState<ProjectOption[]>([])
   const [repoKey, setRepoKey] = React.useState('')
@@ -1216,6 +1219,31 @@ function PanelContent() {
   const [error, setError] = React.useState<string | null>(null)
   const [workflow, setWorkflow] = React.useState<Workflow | null>(null)
   const [autoAction, setAutoAction] = React.useState(false)
+
+  const mergeWorkflowStates = React.useCallback((workflows: Workflow[]) => {
+    const byUrl = new Map(workflows.map((item) => [item.url, item]))
+    setIssues((previous) => previous.map((issue) => {
+      const current = byUrl.get(String(issue.url ?? ''))
+      return current ? { ...issue, workflow: current } : issue
+    }))
+    setWorkflow((previous) => previous ? byUrl.get(previous.url) ?? previous : previous)
+  }, [])
+
+  const updateWorkflow = React.useCallback((next: Workflow | null) => {
+    setWorkflow(next)
+    if (next) mergeWorkflowStates([next])
+  }, [mergeWorkflowStates])
+
+  const refreshWorkflowStates = React.useCallback(async () => {
+    if (!repoKey) return
+    try {
+      const response = await apiCall<WorkflowStateResponse>('state', { repoKey })
+      if (response.ok) mergeWorkflowStates(response.workflows)
+    } catch {
+      // Polling is best-effort. Keep the last usable snapshot when the panel
+      // host disconnects; a later tick or explicit refresh will recover it.
+    }
+  }, [mergeWorkflowStates, repoKey])
 
   const loadRepo = async (selected: string) => {
     if (!selected) return
@@ -1251,15 +1279,32 @@ function PanelContent() {
     return () => { cancelled = true }
   }, [])
 
+  // Keep list badges bound to the same live /state facts as the detail view.
+  React.useEffect(() => {
+    if (!repoKey) return
+    const timer = window.setInterval(() => { void refreshWorkflowStates() }, 5000)
+    return () => window.clearInterval(timer)
+  }, [refreshWorkflowStates, repoKey])
+
   const openIssue = async (issue: RepositoryIssue, triggerAction = false) => {
     setLoading(true)
     setError(null)
     setAutoAction(false)
     try {
-      const response = await fetchIssue(String(issue.url ?? ''))
+      const url = String(issue.url ?? '')
+      const [response, stateResponse] = await Promise.all([
+        fetchIssue(url),
+        apiCall<WorkflowStateResponse>('state', { url }).catch(() => null),
+      ])
+      if (stateResponse?.ok) mergeWorkflowStates(stateResponse.workflows)
       if (!response.ok) setError(response.error)
       else {
-        setWorkflow(issue.workflow)
+        // Workflows are persisted only after development starts; keep the
+        // repo snapshot for never-started rows and as a graceful fallback when
+        // /state is temporarily unavailable.
+        setWorkflow(stateResponse?.ok
+          ? stateResponse.workflows.find((item) => item.url === url) ?? issue.workflow
+          : issue.workflow)
         setResult(response.data as { kind: 'issue' | 'pr'; item: GhIssue; timeline?: TimelineEvent[]; dependencies?: Dependencies })
         setAutoAction(triggerAction)
       }
@@ -1303,7 +1348,7 @@ function PanelContent() {
   return (
     <div className="cv-panel">
       <div className="cv-panel-header">
-        <span>{result ? <button className="cv-back" onClick={() => { setResult(null); setAutoAction(false) }}>← 项目 Issues</button> : 'ClickVibe · 项目'}</span>
+        <span>{result ? <button className="cv-back" onClick={() => { setResult(null); setAutoAction(false); void refreshWorkflowStates() }}>← 项目 Issues</button> : 'ClickVibe · 项目'}</span>
         <button className="cv-close" onClick={() => setPanelOpen(false)}>✕</button>
       </div>
       {result ? (
@@ -1311,7 +1356,7 @@ function PanelContent() {
           issue={result.item}
           kind={result.kind}
           workflow={workflow}
-          onWorkflow={setWorkflow}
+          onWorkflow={updateWorkflow}
           timeline={result.timeline}
           dependencies={result.dependencies}
           autoAction={autoAction}
