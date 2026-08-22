@@ -21,7 +21,7 @@ function sectionOf(body: string, name: string): string | null {
   const match = body.match(new RegExp(`^##\\s*${name}\\s*$`, 'm'))
   if (!match || match.index === undefined) return null
   const rest = body.slice(match.index + match[0].length)
-  const next = rest.match(/^##\s/m)
+  const next = rest.match(/^##(?!#)/m)
   return (next ? rest.slice(0, next.index ?? 0) : rest).trim()
 }
 

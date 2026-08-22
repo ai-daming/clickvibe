@@ -16,11 +16,46 @@ export interface AutoDevelopmentDecision {
   reason: string
 }
 
+export interface FirstDevelopmentFacts {
+  workflowHasDevelopmentHistory: boolean
+  hasCommits: boolean
+  hasUncommittedChanges: boolean
+  hasPr: boolean
+  worktreeNeedsRepair: boolean
+}
+
+/**
+ * "First development" is stricter than the generic `develop` UI action.
+ * Recovery actions deliberately reuse `develop`, so automatic ordering must
+ * instead require the absence of every positive development-history fact.
+ */
+export function isFirstDevelopment(facts: FirstDevelopmentFacts): boolean {
+  return !facts.workflowHasDevelopmentHistory
+    && !facts.hasCommits
+    && !facts.hasUncommittedChanges
+    && !facts.hasPr
+    && !facts.worktreeNeedsRepair
+}
+
+export function hasWorkflowDevelopmentHistory(workflow: {
+  baseRef: string | null
+  devAgent: string | null
+  stage: string
+  events?: unknown[]
+} | null | undefined): boolean {
+  return workflow !== null && workflow !== undefined && (
+    workflow.baseRef !== null
+    || workflow.devAgent !== null
+    || workflow.stage !== 'idle'
+    || (workflow.events?.length ?? 0) > 0
+  )
+}
+
 export function deriveAutoDevelopment(input: {
   issueState: string
   dependencyStates: string[]
   contract: IssueContractCheck
-  nextActionKind: string
+  firstDevelopment: boolean
 }): AutoDevelopmentDecision {
   if (input.issueState.toUpperCase() !== 'OPEN') {
     return { status: 'not-open', ready: false, reason: 'issue 不是 OPEN' }
@@ -39,13 +74,52 @@ export function deriveAutoDevelopment(input: {
   if (states.some((state) => state !== 'CLOSED')) {
     return { status: 'dependency-unknown', ready: false, reason: '依赖状态未知，自动选择已关门' }
   }
-  if (input.nextActionKind !== 'develop') {
+  if (!input.firstDevelopment) {
     return { status: 'not-startable', ready: false, reason: '当前阶段不是首次开发' }
   }
   return { status: 'ready', ready: true, reason: '契约完整且直接依赖均已完成' }
 }
 
 export const DEPENDENCY_UNLOCK_MARKER_PREFIX = '<!-- clickvibe:dependency-unlock:'
+
+interface RetryFailure {
+  attempts: number
+  retryAt: number
+  error: string
+}
+
+/** Repo+issue scoped exponential cooldown for best-effort GitHub ledger writes. */
+export class DependencyLedgerRetryGate {
+  readonly #baseMs: number
+  readonly #maxMs: number
+  readonly #now: () => number
+  readonly #failures = new Map<string, RetryFailure>()
+
+  constructor(options: { baseMs?: number; maxMs?: number; now?: () => number } = {}) {
+    this.#baseMs = options.baseMs ?? 30_000
+    this.#maxMs = options.maxMs ?? 15 * 60_000
+    this.#now = options.now ?? Date.now
+    if (this.#baseMs < 1 || this.#maxMs < this.#baseMs) throw new Error('invalid dependency ledger retry bounds')
+  }
+
+  blocked(key: string): RetryFailure | null {
+    const failure = this.#failures.get(key)
+    return failure && failure.retryAt > this.#now() ? { ...failure } : null
+  }
+
+  fail(key: string, error: string): RetryFailure {
+    const previous = this.#failures.get(key)
+    const attempts = (previous?.attempts ?? 0) + 1
+    const delay = Math.min(this.#maxMs, this.#baseMs * 2 ** Math.min(20, attempts - 1))
+    const failure = { attempts, retryAt: this.#now() + delay, error }
+    this.#failures.set(key, failure)
+    return { ...failure }
+  }
+
+  succeed(key: string): void {
+    this.#failures.delete(key)
+  }
+}
 
 export function dependencyUnlockMarker(numbers: number[]): string {
   const stable = [...new Set(numbers)].sort((left, right) => left - right)
@@ -85,7 +159,7 @@ export function rewriteCompletedDependencySection(body: string, numbers: number[
   if (start === -1) return body
   let end = lines.length
   for (let index = start + 1; index < lines.length; index++) {
-    if (/^##\s/.test(lines[index].trim())) {
+    if (/^##(?!#)/.test(lines[index].trim())) {
       end = index
       break
     }

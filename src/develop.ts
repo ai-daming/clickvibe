@@ -80,15 +80,16 @@ export function shellQuote(value: string): string {
  */
 export function parseDependencies(body: string | null | undefined): number[] {
   const lines = String(body ?? '').split('\n')
-  const depIndex = lines.findIndex((line) => /^##\s*依赖/.test(line.trim()))
+  const depIndex = lines.findIndex((line) => /^##\s*依赖\s*$/.test(line.trim()))
   if (depIndex === -1) return []
-  const section = lines.slice(depIndex + 1).find((line) => line.trim() !== '')?.trim() ?? ''
-  if (/^(?:依赖\s*:\s*)?无(?:\s|\(|（|$)/.test(section)) return []
   const numbers: number[] = []
   for (let i = depIndex + 1; i < lines.length; i++) {
     const line = lines[i].trim()
     if (line === '') continue
-    if (/^##\s/.test(line)) break // 下一个章节
+    if (/^##(?!#)/.test(line)) break // 下一个二级章节,兼容 `##参考`
+    // 自动改写行里的旧编号只用于审计,不能重新形成活跃依赖边。
+    if (/^(?:依赖\s*:\s*)?无\s*[（(]原\s+Blocked by\b.*已完成.*自动更新[)）]\s*$/i.test(line)) continue
+    if (!/Blocked by\s*#\d+/i.test(line)) continue
     for (const match of line.matchAll(/#(\d+)/g)) {
       const number = Number(match[1])
       if (!numbers.includes(number)) numbers.push(number)
