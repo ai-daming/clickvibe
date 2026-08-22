@@ -10,6 +10,7 @@ import { mkdir, readFile, writeFile, appendFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import type { DeliveryPublication } from './delivery-publication.ts'
+import type { PromptSnapshot } from './prompt.ts'
 
 /** The workflow stage of one issue. */
 export type WorkflowStage =
@@ -44,6 +45,8 @@ export interface IssueWorkflow {
   issueState: 'OPEN' | 'CLOSED'
   /** 开发基线:开 worktree 时基于的分支与提交(如 origin/main @ a8a7b5f)。 */
   baseRef: string | null
+  /** 最近一次成功抓取或启动授权确认的完整 Issue 需求快照。 */
+  issueSnapshot?: PromptSnapshot
   updatedAt: number
   /** 完整历史事件链:每次开发提交/review/恢复各一条,按时间追加。 */
   events: WorkflowEvent[]
