@@ -1289,14 +1289,14 @@ type FetchIssueResponse =
   | { ok: true; data: { kind: 'issue' | 'pr'; item: unknown; timeline?: TimelineEvent[]; dependencies?: Dependencies }; dependencyError?: string }
   | { ok: false; error: string }
 
-async function fetchIssue(url: string, timeoutMs?: number): Promise<FetchIssueResponse> {
+async function fetchIssue(url: string, timeoutMs?: number, forceRefresh = false): Promise<FetchIssueResponse> {
   const controller = timeoutMs === undefined ? null : new AbortController()
   const timeout = controller ? window.setTimeout(() => controller.abort(), timeoutMs) : null
   try {
     const response = await fetch('/clickvibe/api/fetch', {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-clickvibe-request': '1' },
-      body: JSON.stringify({ url }),
+      body: JSON.stringify({ url, forceRefresh }),
       ...(controller ? { signal: controller.signal } : {}),
     })
     return response.json() as Promise<FetchIssueResponse>
@@ -1398,6 +1398,8 @@ function PanelContent() {
             setDependencyRefreshError(`GitHub 依赖刷新失败: ${String(reason)}`)
           }
         }
+      } else {
+        setStateRefreshError(response.error)
       }
     } catch (reason) {
       // Polling is best-effort. Keep the last usable snapshot when the panel
@@ -1473,6 +1475,8 @@ function PanelContent() {
       if (stateResponse?.ok) {
         setFreshness(stateResponse.freshness)
         setStateRefreshError(null)
+      } else if (stateResponse && !stateResponse.ok) {
+        setStateRefreshError(stateResponse.error)
       }
       if (!response.ok) setError(response.error)
       else {
@@ -1500,7 +1504,7 @@ function PanelContent() {
     setError(null)
     try {
       const [issueResponse, stateResponse] = await Promise.all([
-        fetchIssue(url),
+        fetchIssue(url, undefined, true),
         apiCall<WorkflowStateResponse>('state', { url, forceRefresh: true }),
       ])
       if (!issueResponse.ok) setError(issueResponse.error)
@@ -1516,6 +1520,8 @@ function PanelContent() {
         setWorkflow(stateResponse.workflows.find((item) => item.url === url) ?? workflow)
         setFreshness(stateResponse.freshness)
         setStateRefreshError(null)
+      } else {
+        setStateRefreshError(stateResponse.error)
       }
     } catch (reason) {
       setError(`Issue 刷新失败: ${String(reason)}`)
@@ -1566,8 +1572,8 @@ function PanelContent() {
             : '⚠ 状态可能过期 · 远端同步失败，当前使用本地 refs'}
         </div>
       ) : null}
-      {stateRefreshError ? <div className="cv-stale" title={stateRefreshError}>⚠ 状态可能过期 · 自动刷新失败，当前保留上次结果</div> : null}
-      {dependencyRefreshError ? <div className="cv-stale" title={dependencyRefreshError}>⚠ 依赖状态可能过期 · GitHub 刷新失败，当前保留上次结果</div> : null}
+      {stateRefreshError ? <div className="cv-stale" title={stateRefreshError}>{stateRefreshError.startsWith('GitHub 额度已用完,约 ') ? stateRefreshError : '⚠ 状态可能过期 · 自动刷新失败，当前保留上次结果'}</div> : null}
+      {dependencyRefreshError ? <div className="cv-stale" title={dependencyRefreshError}>{dependencyRefreshError.startsWith('GitHub 额度已用完,约 ') ? dependencyRefreshError : '⚠ 依赖状态可能过期 · GitHub 刷新失败，当前保留上次结果'}</div> : null}
       {result ? (
         <IssueView
           issue={result.item}
