@@ -48,6 +48,7 @@ function usePanelOpen(): boolean {
 const PANEL_CSS = `
 .cv-panel { width: 420px; max-width: 90vw; height: 100%; display: flex; flex-direction: column; background: #ffffff; border-left: 1px solid #d0d7de; box-shadow: -8px 0 24px rgba(0,0,0,0.18); font-size: 13px; color: #1f2328; }
 .cv-panel-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; font-weight: 600; color: #1f2328; border-bottom: 1px solid #d0d7de; flex-shrink: 0; }
+.cv-panel-header-actions { display: flex; align-items: center; gap: 6px; }
 .cv-close { border: none; background: transparent; cursor: pointer; font-size: 14px; color: #57606a; }
 .cv-close:hover { color: #1f2328; }
 .cv-input-row { display: flex; gap: 6px; padding: 4px 14px; flex-shrink: 0; }
@@ -71,6 +72,7 @@ const PANEL_CSS = `
 .cv-fetch { padding: 6px 12px; border: none; border-radius: 6px; background: #0969da; color: #ffffff; cursor: pointer; font-size: 12px; }
 .cv-fetch:disabled { opacity: 0.6; }
 .cv-error { margin: 0 14px 10px; padding: 8px 10px; border-radius: 6px; background: #ffebe9; color: #cf222e; border: 1px solid #ff8182; flex-shrink: 0; }
+.cv-stale { margin: 8px 12px 0; padding: 6px 8px; border-radius: 6px; background: #fff8c5; color: #9a6700; border: 1px solid #d4a72c; font-size: 11.5px; flex-shrink: 0; }
 .cv-hint { padding: 20px 14px; color: #8c959f; text-align: center; }
 .cv-loading { padding: 20px 14px; color: #57606a; text-align: center; }
 .cv-issue { padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; flex: 1; overflow-y: auto; }
@@ -540,33 +542,35 @@ function IssueView({ issue, kind, workflow, onWorkflow, timeline, dependencies, 
           {dependencies.blockedBy.length > 0 ? (
             <div className="cv-dep-block">
               <div className="cv-dep-label">🔒 blockedBy(依赖,需先完成)</div>
-              {dependencies.blockedBy.map((dep, i) => (
-                <div key={i} className="cv-link-row">
+              {dependencies.blockedBy.map((dep, i) => {
+                const dependencyState = dep.state.toLowerCase()
+                return <div key={i} className="cv-link-row">
                   <a className="cv-link" href={`https://github.com/${repoOf(issue.url)}/issues/${dep.number}`} target="_blank" rel="noreferrer">
                     #{dep.number}{dep.title ? ` ${dep.title}` : ''}
                   </a>
-                  {dep.state === 'closed'
+                  {dependencyState === 'closed'
                     ? <span className="cv-link-state cv-link-state-closed">已关闭(依赖完成)</span>
-                    : dep.state === 'open'
+                    : dependencyState === 'open'
                       ? <span className="cv-link-state cv-link-state-open">打开(未完成)</span>
                       : null}
                 </div>
-              ))}
+              })}
             </div>
           ) : null}
           {dependencies.blocking.length > 0 ? (
             <div className="cv-dep-block">
               <div className="cv-dep-label">🔓 blocking(被依赖,等我完成)</div>
-              {dependencies.blocking.map((dep, i) => (
-                <div key={i} className="cv-link-row">
+              {dependencies.blocking.map((dep, i) => {
+                const dependencyState = dep.state.toLowerCase()
+                return <div key={i} className="cv-link-row">
                   <a className="cv-link" href={`https://github.com/${repoOf(issue.url)}/issues/${dep.number}`} target="_blank" rel="noreferrer">
                     #{dep.number}{dep.title ? ` ${dep.title}` : ''}
                   </a>
-                  <span className={`cv-link-state cv-link-state-${dep.state}`}>
-                    {dep.state === 'closed' ? '已关闭' : dep.state === 'open' ? '打开' : dep.state}
+                  <span className={`cv-link-state cv-link-state-${dependencyState}`}>
+                    {dependencyState === 'closed' ? '已关闭' : dependencyState === 'open' ? '打开' : dep.state}
                   </span>
                 </div>
-              ))}
+              })}
             </div>
           ) : null}
         </div>
@@ -613,13 +617,20 @@ function IssueView({ issue, kind, workflow, onWorkflow, timeline, dependencies, 
   )
 }
 
-async function apiCall<T>(method: string, body: Record<string, unknown>): Promise<T> {
-  const response = await fetch(`/clickvibe/api/${method}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-clickvibe-request': '1' },
-    body: JSON.stringify(body),
-  })
-  return response.json() as Promise<T>
+async function apiCall<T>(method: string, body: Record<string, unknown>, timeoutMs?: number): Promise<T> {
+  const controller = timeoutMs === undefined ? null : new AbortController()
+  const timeout = controller ? window.setTimeout(() => controller.abort(), timeoutMs) : null
+  try {
+    const response = await fetch(`/clickvibe/api/${method}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-clickvibe-request': '1' },
+      body: JSON.stringify(body),
+      ...(controller ? { signal: controller.signal } : {}),
+    })
+    return response.json() as Promise<T>
+  } finally {
+    if (timeout !== null) window.clearTimeout(timeout)
+  }
 }
 
 interface Workflow {
@@ -1258,13 +1269,24 @@ function CommentsSection({ comments }: { comments: GhComment[] }) {
   )
 }
 
-async function fetchIssue(url: string): Promise<{ ok: true; data: { kind: 'issue' | 'pr'; item: unknown; timeline?: TimelineEvent[]; dependencies?: Dependencies } } | { ok: false; error: string }> {
-  const response = await fetch('/clickvibe/api/fetch', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-clickvibe-request': '1' },
-    body: JSON.stringify({ url }),
-  })
-  return response.json() as Promise<{ ok: true; data: { kind: 'issue' | 'pr'; item: unknown } } | { ok: false; error: string }>
+type FetchIssueResponse =
+  | { ok: true; data: { kind: 'issue' | 'pr'; item: unknown; timeline?: TimelineEvent[]; dependencies?: Dependencies }; dependencyError?: string }
+  | { ok: false; error: string }
+
+async function fetchIssue(url: string, timeoutMs?: number): Promise<FetchIssueResponse> {
+  const controller = timeoutMs === undefined ? null : new AbortController()
+  const timeout = controller ? window.setTimeout(() => controller.abort(), timeoutMs) : null
+  try {
+    const response = await fetch('/clickvibe/api/fetch', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-clickvibe-request': '1' },
+      body: JSON.stringify({ url }),
+      ...(controller ? { signal: controller.signal } : {}),
+    })
+    return response.json() as Promise<FetchIssueResponse>
+  } finally {
+    if (timeout !== null) window.clearTimeout(timeout)
+  }
 }
 
 interface ProjectOption { repoKey: string; path: string; available: boolean }
@@ -1273,8 +1295,20 @@ interface RepositoryIssue extends GhIssue {
   workflow: Workflow
 }
 
+interface RepositoryFreshness {
+  stale: boolean
+  refreshed: boolean
+  refreshing: boolean
+  lastAttemptAt: number
+  lastSuccessAt: number | null
+  repositoryCount?: number
+  successfulRepositoryCount?: number
+  partial?: boolean
+  error?: string
+}
+
 type WorkflowStateResponse =
-  | { ok: true; workflows: Workflow[] }
+  | { ok: true; workflows: Workflow[]; freshness: RepositoryFreshness | null; dependenciesRefreshDue: boolean }
   | { ok: false; error: string }
 
 function PanelContent() {
@@ -1288,6 +1322,10 @@ function PanelContent() {
   const [error, setError] = React.useState<string | null>(null)
   const [workflow, setWorkflow] = React.useState<Workflow | null>(null)
   const [autoAction, setAutoAction] = React.useState(false)
+  const [freshness, setFreshness] = React.useState<RepositoryFreshness | null>(null)
+  const [dependencyRefreshError, setDependencyRefreshError] = React.useState<string | null>(null)
+  const [stateRefreshError, setStateRefreshError] = React.useState<string | null>(null)
+  const workflowRefreshInFlight = React.useRef(false)
 
   const mergeWorkflowStates = React.useCallback((workflows: Workflow[]) => {
     const byUrl = new Map(workflows.map((item) => [item.url, item]))
@@ -1304,26 +1342,76 @@ function PanelContent() {
   }, [mergeWorkflowStates])
 
   const refreshWorkflowStates = React.useCallback(async () => {
-    if (!repoKey) return
+    if (!repoKey || workflowRefreshInFlight.current) return
+    workflowRefreshInFlight.current = true
     try {
-      const response = await apiCall<WorkflowStateResponse>('state', { repoKey })
-      if (response.ok) mergeWorkflowStates(response.workflows)
-    } catch {
+      const response = await apiCall<WorkflowStateResponse>('state', { repoKey }, 8_000)
+      if (response.ok) {
+        setStateRefreshError(null)
+        mergeWorkflowStates(response.workflows)
+        setFreshness(response.freshness)
+        // GitHub dependency freshness has its own repo-scoped TTL clock. It is
+        // deliberately independent from local git availability.
+        if (response.dependenciesRefreshDue) {
+          try {
+            if (result) {
+              const next = await fetchIssue(String(result.item.url ?? ''), 4_000)
+              if (next.ok) {
+                setResult({
+                  ...(next.data as NonNullable<typeof result>),
+                  dependencies: next.data.dependencies ?? result.dependencies,
+                })
+                setDependencyRefreshError(next.dependencyError ?? null)
+              } else {
+                setDependencyRefreshError(next.error)
+              }
+            } else {
+              const next = await apiCall<
+                { ok: true; issues: RepositoryIssue[]; freshness: RepositoryFreshness | null }
+                | { ok: false; error: string }
+              >('repo/issues', { repoKey }, 4_000)
+              if (next.ok) {
+                setIssues(next.issues)
+                setFreshness(next.freshness)
+                setDependencyRefreshError(null)
+              } else {
+                setDependencyRefreshError(next.error)
+              }
+            }
+          } catch (reason) {
+            setDependencyRefreshError(`GitHub 依赖刷新失败: ${String(reason)}`)
+          }
+        }
+      }
+    } catch (reason) {
       // Polling is best-effort. Keep the last usable snapshot when the panel
       // host disconnects; a later tick or explicit refresh will recover it.
+      setStateRefreshError(`状态轮询失败: ${String(reason)}`)
+    } finally {
+      workflowRefreshInFlight.current = false
     }
-  }, [mergeWorkflowStates, repoKey])
+  }, [mergeWorkflowStates, repoKey, result])
 
-  const loadRepo = async (selected: string) => {
+  const loadRepo = async (selected: string, forceRefresh = false) => {
     if (!selected) return
     setLoading(true)
     setError(null)
     setResult(null)
     setIssues([])
+    setFreshness(null)
+    setStateRefreshError(null)
+    setDependencyRefreshError(null)
     try {
-      const response = await apiCall<{ ok: true; issues: RepositoryIssue[] } | { ok: false; error: string }>('repo/issues', { repoKey: selected })
+      const response = await apiCall<
+        { ok: true; issues: RepositoryIssue[]; freshness: RepositoryFreshness | null }
+        | { ok: false; error: string }
+      >('repo/issues', { repoKey: selected, forceRefresh })
       if (!response.ok) setError(response.error)
-      else setIssues(response.issues)
+      else {
+        setIssues(response.issues)
+        setFreshness(response.freshness)
+        setDependencyRefreshError(null)
+      }
     } catch (reason) {
       setError(`项目加载失败: ${String(reason)}`)
     } finally {
@@ -1366,6 +1454,10 @@ function PanelContent() {
         apiCall<WorkflowStateResponse>('state', { url }).catch(() => null),
       ])
       if (stateResponse?.ok) mergeWorkflowStates(stateResponse.workflows)
+      if (stateResponse?.ok) {
+        setFreshness(stateResponse.freshness)
+        setStateRefreshError(null)
+      }
       if (!response.ok) setError(response.error)
       else {
         // Workflows are persisted only after development starts; keep the
@@ -1375,10 +1467,42 @@ function PanelContent() {
           ? stateResponse.workflows.find((item) => item.url === url) ?? issue.workflow
           : issue.workflow)
         setResult(response.data as { kind: 'issue' | 'pr'; item: GhIssue; timeline?: TimelineEvent[]; dependencies?: Dependencies })
+        setDependencyRefreshError(response.dependencyError ?? null)
         setAutoAction(triggerAction)
       }
     } catch (reason) {
       setError(`Issue 加载失败: ${String(reason)}`)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const refreshDetail = async () => {
+    if (!result) return
+    const url = String(result.item.url ?? '')
+    setLoading(true)
+    setError(null)
+    try {
+      const [issueResponse, stateResponse] = await Promise.all([
+        fetchIssue(url),
+        apiCall<WorkflowStateResponse>('state', { url, forceRefresh: true }),
+      ])
+      if (!issueResponse.ok) setError(issueResponse.error)
+      else {
+        setResult({
+          ...(issueResponse.data as NonNullable<typeof result>),
+          dependencies: issueResponse.data.dependencies ?? result.dependencies,
+        })
+        setDependencyRefreshError(issueResponse.dependencyError ?? null)
+      }
+      if (stateResponse.ok) {
+        mergeWorkflowStates(stateResponse.workflows)
+        setWorkflow(stateResponse.workflows.find((item) => item.url === url) ?? workflow)
+        setFreshness(stateResponse.freshness)
+        setStateRefreshError(null)
+      }
+    } catch (reason) {
+      setError(`Issue 刷新失败: ${String(reason)}`)
     } finally {
       setLoading(false)
     }
@@ -1414,8 +1538,20 @@ function PanelContent() {
     <div className="cv-panel">
       <div className="cv-panel-header">
         <span>{result ? <button className="cv-back" onClick={() => { setResult(null); setAutoAction(false); void refreshWorkflowStates() }}>← 项目 Issues</button> : 'ClickVibe · 项目'}</span>
-        <button className="cv-close" onClick={() => setPanelOpen(false)}>✕</button>
+        <span className="cv-panel-header-actions">
+          {result ? <button className="cv-refresh" onClick={() => void refreshDetail()} disabled={loading} title="强制同步远端并刷新详情">⟳</button> : null}
+          <button className="cv-close" onClick={() => setPanelOpen(false)}>✕</button>
+        </span>
       </div>
+      {freshness?.stale ? (
+        <div className="cv-stale" title={freshness.error}>
+          {freshness.refreshing
+            ? '⚠ 状态可能过期 · 远端同步较慢，后台仍在刷新，当前使用本地 refs'
+            : '⚠ 状态可能过期 · 远端同步失败，当前使用本地 refs'}
+        </div>
+      ) : null}
+      {stateRefreshError ? <div className="cv-stale" title={stateRefreshError}>⚠ 状态可能过期 · 自动刷新失败，当前保留上次结果</div> : null}
+      {dependencyRefreshError ? <div className="cv-stale" title={dependencyRefreshError}>⚠ 依赖状态可能过期 · GitHub 刷新失败，当前保留上次结果</div> : null}
       {result ? (
         <IssueView
           issue={result.item}
@@ -1446,7 +1582,7 @@ function PanelContent() {
               <select className="cv-select" value={groupBy} onChange={(event) => setGroupBy(event.target.value as typeof groupBy)}>
                 <option value="milestone">按里程碑分组</option><option value="dependency">按依赖分组</option>
               </select>
-              <button className="cv-refresh" onClick={() => void loadRepo(repoKey)} disabled={loading} title="刷新 GitHub 与 git 状态">⟳</button>
+              <button className="cv-refresh" onClick={() => void loadRepo(repoKey, true)} disabled={loading} title="刷新 GitHub 与 git 状态">⟳</button>
             </div>
             {repoKey ? <div className="cv-project-meta">{issues.length} 个 open issue · {projects.find((project) => project.repoKey === repoKey)?.available ? '本机 git + GitHub' : '远程配置 · GitHub'} 实时事实</div> : null}
           </div>
