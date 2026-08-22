@@ -5,7 +5,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { apply, fetchRepositoryIssues } from '../src/index.ts'
-import { loadAllArchivedWorkflows, loadWorkflow, saveWorkflow, type IssueWorkflow } from '../src/state.ts'
+import {
+  appendLog,
+  loadAllArchivedWorkflows,
+  loadWorkflow,
+  readLogHistory,
+  saveWorkflow,
+  type IssueWorkflow,
+} from '../src/state.ts'
 
 function createHandler(
   run?: (spec: { command: string; workdir?: string; stdin?: string }) => Promise<unknown>,
@@ -61,6 +68,30 @@ async function post(
       })
       req.on('error', reject)
       req.end(payload)
+    })
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+  }
+}
+
+async function get(
+  listener: RequestListener,
+  path: string,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const server = createServer(listener)
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  assert.ok(address && typeof address === 'object')
+  try {
+    return await new Promise((resolve, reject) => {
+      request({ host: '127.0.0.1', port: address.port, path, method: 'GET' }, (res) => {
+        const chunks: Buffer[] = []
+        res.on('data', (chunk: Buffer) => chunks.push(chunk))
+        res.on('end', () => resolve({
+          status: res.statusCode ?? 0,
+          body: JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>,
+        }))
+      }).on('error', reject).end()
     })
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
@@ -400,6 +431,113 @@ test('/projects route returns the configured-project envelope without invoking s
   assert.equal(Array.isArray((result.body as { projects?: unknown[] }).projects), true)
 })
 
+test('a rejected dry-run worktree attempt preserves the previous durable dev history', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-history-conflict-'))
+  process.env.HOME = tempHome
+  try {
+    const repo = join(tempHome, 'repo')
+    const worktreeRoot = join(tempHome, 'worktrees')
+    const target = join(worktreeRoot, 'repo', 'repo-issue-905')
+    await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
+    await mkdir(repo, { recursive: true })
+    await mkdir(target, { recursive: true })
+    await writeFile(join(target, 'unregistered.txt'), 'must not be removed')
+    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), [
+      'repos:',
+      `  o/r: ${repo}`,
+      `worktreeRoot: ${worktreeRoot}`,
+      '',
+    ].join('\n'))
+    await appendLog('o-r-905', 'dev', 'previous completed task history')
+
+    const issue = {
+      url: 'https://github.com/o/r/issues/905', title: 'conflicting worktree', body: '',
+      state: 'OPEN', updatedAt: 'now', comments: [],
+    }
+    const handler = createHandler(async ({ command }) => {
+      if (command.startsWith('gh issue view')) return { exitCode: 0, stdout: { text: JSON.stringify(issue) }, stderr: { text: '' } }
+      if (command.startsWith('gh api') || command.startsWith('gh issue list')) return { exitCode: 0, stdout: { text: '[]' }, stderr: { text: '' } }
+      if (command === 'git fetch origin --prune') return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      if (command === 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD') return { exitCode: 0, stdout: { text: 'origin/main' }, stderr: { text: '' } }
+      if (command === "git rev-parse --short 'origin/main'") return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
+      if (command === 'git worktree list --porcelain') return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      if (command.includes("git show-ref --verify --quiet 'refs/heads/repo-issue-905'")) return { exitCode: 0, stdout: { text: '1' }, stderr: { text: '' } }
+      throw new Error(`unexpected command: ${command}`)
+    })
+
+    const result = await post(handler, '/clickvibe/api/develop', { url: issue.url, agent: 'dryrun' })
+    assert.equal(result.status, 400)
+    assert.match(result.body.error ?? '', /worktree 冲突/)
+    const history = await readLogHistory('o-r-905', 'dev')
+    assert.equal(history[0], 'previous completed task history')
+    assert.ok(history.some((line) => line.includes('worktree 冲突')))
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('/history restores the complete disk log by task id after Host restart', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-history-restart-'))
+  process.env.HOME = tempHome
+  try {
+    const workflow = interruptedWorkflow(
+      'o-r-903',
+      'https://github.com/o/r/issues/903',
+      join(tempHome, 'worktree'),
+    )
+    workflow.devTaskId = 'dev-before-restart'
+    await saveWorkflow(workflow)
+    await appendLog(workflow.key, 'dev', 'thinking one')
+    await appendLog(workflow.key, 'dev', 'thinking two')
+
+    const result = await get(createHandler(), '/clickvibe/api/history?taskId=dev-before-restart')
+    assert.equal(result.status, 200)
+    assert.deepEqual(result.body.lines, ['thinking one', 'thinking two'])
+    assert.equal(result.body.cursor, 0)
+    assert.equal(result.body.active, false)
+    assert.equal(result.body.kind, 'dev')
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('/history accepts a safe workflow key and rejects unknown or traversal targets', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-history-key-'))
+  process.env.HOME = tempHome
+  try {
+    const workflow = interruptedWorkflow('o-r-904', 'https://github.com/o/r/issues/904', join(tempHome, 'worktree'))
+    await saveWorkflow(workflow)
+    await appendLog(workflow.key, 'review', 'review history')
+    const handler = createHandler()
+
+    const found = await get(handler, `/clickvibe/api/history?key=${workflow.key}&kind=review`)
+    assert.equal(found.status, 200)
+    assert.deepEqual(found.body.lines, ['review history'])
+
+    const traversal = await get(handler, '/clickvibe/api/history?key=..%2Fsecret&kind=dev')
+    assert.equal(traversal.status, 404)
+    const missing = await get(handler, '/clickvibe/api/history?taskId=missing')
+    assert.equal(missing.status, 404)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('/stream reports a cleaned-up task as 404 instead of a silent empty SSE', async () => {
+  const result = await get(createHandler(), '/clickvibe/api/stream?taskId=already-cleaned')
+  assert.equal(result.status, 404)
+  assert.match(String(result.body.error), /未知任务/)
+})
+
 function interruptedWorkflow(key: string, url: string, worktree: string): IssueWorkflow {
   return {
     key, url, repoKey: 'o/r', worktree, branch: 'r-issue-17', stage: 'developing',
@@ -430,6 +568,7 @@ test('invalid exact dev session falls back once to a fresh session on the same t
     const workflow = interruptedWorkflow('o-r-917', 'https://github.com/o/r/issues/917', worktree)
     workflow.reviewResult = { passed: false, issues: ['修复竞态', '补充失败测试'] }
     await saveWorkflow(workflow)
+    await appendLog(workflow.key, 'dev', 'prior run must be rotated')
     const starts: Array<{ command: string; workdir?: string }> = []
     const comments: Array<{ command: string; body: string }> = []
     const handler = createHandler(async (spec) => {
@@ -477,6 +616,8 @@ test('invalid exact dev session falls back once to a fresh session on the same t
     assert.equal(starts[1].command, 'codex exec -c approval_policy=never -s danger-full-access --json -')
     assert.deepEqual(starts.map((start) => start.workdir), [worktree, worktree])
     assert.ok(completed.delta.some((line) => line.includes('回退全新会话')))
+    assert.ok(completed.delta.some((line) => line.includes('恢复结束,退出码 0')))
+    assert.equal((await readLogHistory(workflow.key, 'dev')).includes('prior run must be rotated'), false)
     const reloaded = await loadWorkflow(workflow.key)
     assert.equal(reloaded?.devSessionId, 'new-session')
     assert.equal(reloaded?.devSessionAgent, 'codex')
@@ -669,7 +810,7 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     }, headers) as { status: number; body: { ok: boolean; taskId?: string } }
     assert.equal(reviewed.status, 200, JSON.stringify(reviewed.body))
     assert.ok(reviewed.body.taskId)
-    await waitForTask(handler, reviewed.body.taskId)
+    const completed = await waitForTask(handler, reviewed.body.taskId)
     assert.equal(starts.length, 2)
     assert.match(starts[0], /exec resume 'dead-review'/)
     assert.equal(starts[1], 'codex exec -c approval_policy=never -s danger-full-access --json -')
@@ -677,6 +818,8 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     assert.equal(reloaded?.reviewSessionId, 'new-review')
     assert.equal(reloaded?.reviewSessionAgent, 'codex')
     assert.equal(reloaded?.reviewResult?.passed, true)
+    assert.ok(completed.delta.some((line) => line.includes('review 结束,退出码 0')))
+    assert.ok(completed.delta.some((line) => line.includes('review 结论来源')))
     assert.equal(reloaded?.reviewResult?.commentUrl, 'https://github.com/o/r/pull/29#issuecomment-2')
     assert.equal(comments.length, 1)
     assert.match(comments[0].command, /github\.com\/o\/r\/pull\/29/)
