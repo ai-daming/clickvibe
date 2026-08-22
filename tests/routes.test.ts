@@ -479,6 +479,71 @@ test('completed development without a PR appends its Dev Meta comment to the iss
   }
 })
 
+test('concurrent resume requests reserve one workflow task before refreshing the snapshot', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-resume-gate-'))
+  process.env.HOME = tempHome
+  try {
+    const worktree = join(tempHome, 'worktree')
+    await mkdir(worktree, { recursive: true })
+    const workflow = interruptedWorkflow('o-r-930', 'https://github.com/o/r/issues/930', worktree)
+    workflow.prNumber = null
+    workflow.devSessionId = null
+    await saveWorkflow(workflow)
+    let issueReads = 0
+    let starts = 0
+    const handler = createHandler(async (spec) => {
+      if (spec.command.startsWith('gh issue view')) {
+        issueReads += 1
+        await new Promise((resolve) => setTimeout(resolve, 25))
+        return { exitCode: 0, stdout: { text: JSON.stringify({
+          url: workflow.url, title: 'resume gate', body: '## 验收标准\n- one task',
+          state: 'OPEN', updatedAt: '2026-08-22T07:00:00Z', comments: [],
+        }) }, stderr: { text: '' } }
+      }
+      if (spec.command.startsWith('gh issue comment')) {
+        return { exitCode: 0, stdout: { text: 'https://github.com/o/r/issues/930#issuecomment-1' }, stderr: { text: '' } }
+      }
+      return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+    }, () => {
+      starts += 1
+      let read = false
+      return {
+        status: 'running', exitCode: 0,
+        done: new Promise<void>((resolve) => setTimeout(resolve, 50)),
+        readOutput() {
+          if (read) return { delta: '', lossy: false }
+          read = true
+          return { delta: '{"type":"thread.started","thread_id":"resume-gate"}\n', lossy: false }
+        },
+        kill() { return true },
+      }
+    })
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+    const authorize = () => post(handler, '/clickvibe/api/authorize', {
+      action: 'resume', url: workflow.url, agent: 'codex', context: '',
+    }, headers) as Promise<{ status: number; body: { authorizationId?: string; authorizationDigest?: string } }>
+    const [firstAuth, secondAuth] = await Promise.all([authorize(), authorize()])
+    const resume = (authorization: typeof firstAuth.body) => post(handler, '/clickvibe/api/resume', {
+      url: workflow.url, agent: 'codex', context: '',
+      authorizationId: authorization.authorizationId,
+      authorizationDigest: authorization.authorizationDigest,
+    }, headers) as Promise<{ status: number; body: { ok: boolean; taskId?: string } }>
+    const [first, second] = await Promise.all([resume(firstAuth.body), resume(secondAuth.body)])
+    assert.equal(first.status, 200)
+    assert.equal(second.status, 200)
+    assert.equal(first.body.taskId, second.body.taskId)
+    assert.equal(issueReads, 1)
+    assert.equal(starts, 1)
+    assert.ok(first.body.taskId)
+    await waitForTask(handler, first.body.taskId)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
 test('comment publication failure keeps the delivery event and stores a bounded visible error', async () => {
   const previousHome = process.env.HOME
   const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-dev-comment-failure-'))

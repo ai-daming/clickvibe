@@ -87,11 +87,15 @@ export function buildStagePrompt(input: StagePromptInput): string {
  * local review event, then the current local verdict cache.
  */
 export function selectReviewFeedback(input: {
+  unresolvedReview: boolean
   snapshot: PromptSnapshot
   freshness: SnapshotFreshness
   localEvents: LocalReviewEvent[]
   localIssues: string[]
 }): { source: 'github-comment' | 'local-event' | 'local-verdict'; text: string } | null {
+  // The current structured verdict decides whether rework exists. Comment Meta
+  // stays opaque external text and is only selected after that decision.
+  if (!input.unresolvedReview) return null
   if (input.freshness === 'current') {
     const comment = [...input.snapshot.comments]
       .reverse()

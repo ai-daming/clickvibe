@@ -63,6 +63,7 @@ test('resume keeps session memory but explicitly makes the current snapshot auth
 
 test('rework uses the latest raw Review Meta comment when live comments are available', () => {
   const feedback = selectReviewFeedback({
+    unresolvedReview: true,
     snapshot: {
       ...snapshot,
       comments: [
@@ -80,6 +81,7 @@ test('rework uses the latest raw Review Meta comment when live comments are avai
 
 test('rework falls back to local review event text without parsing comment meta', () => {
   const feedback = selectReviewFeedback({
+    unresolvedReview: true,
     snapshot,
     freshness: 'persisted',
     localEvents: [{ kind: 'review', at: '2026-08-22T05:00:00Z', hash: 'abc123', verdict: { passed: false, issues: ['race', 'missing test'] } }],
@@ -89,4 +91,18 @@ test('rework falls back to local review event text without parsing comment meta'
   assert.match(feedback.text, /commit: abc123/)
   assert.match(feedback.text, /race/)
   assert.match(feedback.text, /missing test/)
+})
+
+test('a current passed review never turns resume into rework from old feedback', () => {
+  const feedback = selectReviewFeedback({
+    unresolvedReview: false,
+    snapshot: {
+      ...snapshot,
+      comments: [{ author: 'bot', body: '== Review Meta ==\n- event: review\n- passed: true\n- next: merge' }],
+    },
+    freshness: 'current',
+    localEvents: [{ kind: 'review', at: 'old', verdict: { passed: false, issues: ['already fixed'] } }],
+    localIssues: [],
+  })
+  assert.equal(feedback, null)
 })

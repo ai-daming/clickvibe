@@ -157,6 +157,7 @@ interface LiveTask {
 
 const liveTasks = new Map<string, LiveTask>()
 const reviewTaskGate = new ExclusiveTaskGate<LiveTask>()
+const resumeTaskGate = new ExclusiveTaskGate<LiveTask>()
 const liveWaiters = new Map<string, Set<() => void>>()
 const authorizations = new AuthorizationStore()
 const TASK_LOG_LINES = 2000
@@ -1278,7 +1279,6 @@ async function fetchPrPromptComments(
 async function resolvePromptSnapshot(
   ctx: Context,
   workflow: IssueWorkflow,
-  fallback?: PromptSnapshot,
 ): Promise<ResolvedPromptSnapshot | { error: string }> {
   const fetched = await fetchIssue(ctx, { url: workflow.url })
   if (fetched.ok) {
@@ -1290,7 +1290,7 @@ async function resolvePromptSnapshot(
     await saveWorkflow(workflow)
     return { snapshot, freshness: 'current' }
   }
-  const snapshot = workflow.issueSnapshot ?? fallback
+  const snapshot = workflow.issueSnapshot
   if (!snapshot) {
     return { error: `无法刷新 Issue,且没有可回退的持久化需求快照: ${fetched.error}` }
   }
@@ -1379,6 +1379,7 @@ async function buildResumePrompt(
 ): Promise<string> {
   const localIssues = workflow.reviewResult?.passed === false ? workflow.reviewResult.issues : []
   const selected = selectReviewFeedback({
+    unresolvedReview: workflow.reviewResult?.passed === false,
     snapshot: resolved.snapshot,
     freshness: resolved.freshness,
     localEvents: workflow.events,
@@ -1693,6 +1694,7 @@ function finishTask(
   task.status = status
   task.exitCode = exitCode
   if (task.kind === 'review') reviewTaskGate.release(task.workflowKey, task)
+  else resumeTaskGate.release(task.workflowKey, task)
   if (task.timeout) clearTimeout(task.timeout)
   notifyTask(task.taskId)
   scheduleTaskCleanup(task)
@@ -2267,12 +2269,11 @@ async function startReview(
   if (!existsSync(workflow.worktree)) {
     return { ok: false, error: `worktree 不存在: ${workflow.worktree}` }
   }
-  const resolvedSnapshot = await resolvePromptSnapshot(ctx, workflow)
-  if ('error' in resolvedSnapshot) return { ok: false, error: resolvedSnapshot.error }
   const ownedReviewSession = resolveSessionForAgent(workflow, 'review', agent)
   const sessionId = ownedReviewSession.sessionId
-  // 必须在第一个 await 之前同步占位。只检查持久化 reviewTaskId 会有 TOCTOU:
-  // 两个请求可同时读到旧 workflow,再在清理结果文件时交错并双开 review。
+  // Network reads happen only after this synchronous per-workflow reservation.
+  // Concurrent requests may load the same workflow, but only one can create a
+  // LiveTask; every follower reuses that exact task without refreshing again.
   let reservation: { task: LiveTask; created: boolean }
   try {
     reservation = reviewTaskGate.reserve(workflow.key, () => {
@@ -2284,6 +2285,11 @@ async function startReview(
   }
   if (!reservation.created) return { ok: true, taskId: reservation.task.taskId }
   const live = reservation.task
+  const resolvedSnapshot = await resolvePromptSnapshot(ctx, workflow)
+  if ('error' in resolvedSnapshot) {
+    finishTask(live, 'failed', 1)
+    return { ok: false, error: resolvedSnapshot.error }
+  }
   await resetLog(workflow.key, 'review')
 
   if (ownedReviewSession.invalid) {
@@ -2474,20 +2480,30 @@ export async function resumeDevelop(
     return { ok: true, taskId: oldLive.taskId }
   }
 
-  const resolvedSnapshot = await resolvePromptSnapshot(ctx, workflow)
-  if ('error' in resolvedSnapshot) return { ok: false, error: resolvedSnapshot.error }
   const agent = workflow.devAgent ?? 'codex'
   const ownedDevSession = resolveSessionForAgent(workflow, 'dev', agent)
   const sessionId = ownedDevSession.sessionId
-  const taskIdValue = taskId('dev')
-  let live: LiveTask
+  // Reserve synchronously before the snapshot's GitHub awaits. This is the
+  // per-workflow invariant preventing double-clicked resume requests from
+  // launching multiple agents against the same git worktree.
+  let reservation: { task: LiveTask; created: boolean }
   try {
-    live = createLiveTask(taskIdValue, workflow.key, 'dev', agent, sessionId)
+    reservation = resumeTaskGate.reserve(workflow.key, () => {
+      const id = taskId('dev')
+      return createLiveTask(id, workflow.key, 'dev', agent, sessionId)
+    })
   } catch (error) {
     return { ok: false, error: String(error instanceof Error ? error.message : error) }
   }
+  if (!reservation.created) return { ok: true, taskId: reservation.task.taskId }
+  const live = reservation.task
+  const resolvedSnapshot = await resolvePromptSnapshot(ctx, workflow)
+  if ('error' in resolvedSnapshot) {
+    finishTask(live, 'failed', 1)
+    return { ok: false, error: resolvedSnapshot.error }
+  }
   await resetLog(workflow.key, 'dev')
-  workflow.devTaskId = taskIdValue
+  workflow.devTaskId = live.taskId
   workflow.devInterrupted = false
   workflow.stage = 'developing'
   await saveWorkflow(workflow)
@@ -2553,5 +2569,5 @@ export async function resumeDevelop(
     },
   } : undefined)
 
-  return { ok: true, taskId: taskIdValue }
+  return { ok: true, taskId: live.taskId }
 }

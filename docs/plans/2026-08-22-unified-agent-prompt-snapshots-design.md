@@ -18,6 +18,8 @@
 
 在线时从最新的 `== Review Meta ==` PR/Issue 评论中选择正文并原样拼接，不解析 Meta 字段。评论不可用时，依次回退最新本地 Review event 和当前本地 verdict。精确 resume 与 stale-session 后的全新会话使用同一份阶段启动快照与意见，避免回退时丢上下文。
 
+是否存在待返工意见由当前结构化 `reviewResult.passed === false` 判定；已通过的当前结论不会因为历史失败事件或 `passed:true` 评论而重新进入 rework。Review 和 resume 都在任何 GitHub 快照刷新前同步占用 per-workflow 任务门禁，确保并发请求只启动一个 Agent，后续请求复用同一 task。
+
 ## 验证
 
 纯函数测试覆盖四阶段统一结构、`updatedAt` 锚定、信任边界、过期标记和意见降级。路由集成测试覆盖 Issue 在确认后变化、精确 resume 与全新会话回退、PR Review Meta 优先、离线持久化快照以及 Review 的 PR/commit 信息。最终门禁为全量测试、类型检查、构建和 `git diff --check`。
