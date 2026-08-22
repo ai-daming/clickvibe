@@ -648,6 +648,7 @@ interface Workflow {
     aheadOfUpstream: number | null
     behindUpstream: number | null
     needsSync: boolean
+    mergeConflict?: boolean
     lastDevHash: string | null
     lastReviewHash: string | null
     reviewedHash: string | null
@@ -977,6 +978,7 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
                     origin/main <code className="cv-tl-hash">{derived.originMainHead}</code>
                     <span className="cv-state-delta">worktree 落后 {derived.behindBase} · 领先 {derived.aheadOfBase}</span>
                     {derived.needsSync ? <span className="cv-state-warn">⚠ 需要同步</span> : null}
+                    {derived.mergeConflict ? <span className="cv-state-warn">⚠ 合并冲突待解决(转交 agent)</span> : null}
                   </td>
                 </tr>
               ) : null}

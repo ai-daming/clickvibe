@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
 import { buildMergePreface, deriveWorkflowState, resumeDevelop, syncWorktree, type IssueWorkflow } from '../src/index.ts'
-import { applyDevRunOutcome, loadWorkflow, saveWorkflow } from '../src/state.ts'
+import { applyDevRunOutcome, loadWorkflow, readLogTail, saveWorkflow } from '../src/state.ts'
 
 const execFileAsync = promisify(execFile)
 
@@ -102,6 +102,12 @@ test('sync keeps the conflicted merge scene and rework stays reachable (issue #2
       assert.equal(result.ok, false)
       assert.equal((result as { conflict?: boolean }).conflict, true)
       assert.match(result.error, /冲突/)
+      // 冲突详情透传(issue #26):文件清单随错误返回、记入日志与时间线
+      assert.deepEqual((result as { files?: string[] }).files, ['readme.md'])
+      assert.match(result.error, /readme\.md/)
+      assert.match(result.error, /Automatic merge failed|CONFLICT|冲突/)
+      const logLines = (await readLogTail('o-r-26', 'dev', 10)).join('\n')
+      assert.match(logLines, /冲突文件:readme\.md/)
 
       // 现场保留:合并仍在进行(MERGE_HEAD 存在)、文件带冲突标记,没有被 abort
       const mergeHead = await execFileAsync('git', ['-C', worktree, 'rev-parse', '--verify', 'MERGE_HEAD'])
@@ -109,12 +115,24 @@ test('sync keeps the conflicted merge scene and rework stays reachable (issue #2
       const content = await readFile(join(worktree, 'readme.md'), 'utf8')
       assert.match(content, /<<<<<<< HEAD/)
 
-      // 冲突已记录到权威时间线
+      // 冲突已记录到权威时间线(含文件清单)
       const reloaded = await loadWorkflow('o-r-26')
       assert.ok(reloaded)
       const lastEvent = reloaded.events.at(-1)
       assert.equal(lastEvent?.kind, 'note')
       assert.match(lastEvent?.note ?? '', /冲突/)
+      assert.match(lastEvent?.note ?? '', /readme\.md/)
+
+      // 门禁降级覆盖复审阶段(PR #33 现场):rework 完成后待复审(reviewResult
+      // 已清空),冲突现场下唯一动作必须是恢复(由 agent 先解决冲突),不能是
+      // 只会再次失败的 sync。
+      const awaitingReReview = structuredClone(reloaded)
+      awaitingReReview.stage = 'review-ready'
+      awaitingReReview.reviewResult = null
+      const reReviewDerived = (await deriveWorkflowState(ctx, awaitingReReview)).derived
+      assert.equal(reReviewDerived.mergeConflict, true)
+      assert.equal(reReviewDerived.needsSync, true)
+      assert.equal(reReviewDerived.nextAction.kind, 'resume')
 
       // 门禁降级:即使 worktree 仍落后(needsSync),失败结论的下一步是返工而非同步
       const derived = (await deriveWorkflowState(ctx, reloaded)).derived
@@ -260,6 +278,7 @@ test('merge preface guides the resume/rework agent through conflict then stalene
     await wt('merge', '--no-edit', 'origin/main').catch(() => {}) // 预期冲突
     const conflicted = await buildMergePreface(ctx, worktree, 'main')
     assert.match(conflicted, /未完成的合并/)
+    assert.match(conflicted, /readme\.md/)
 
     // 冲突解决、合并完成后:不再有前置指令
     await writeFile(join(worktree, 'readme.md'), 'resolved\n')

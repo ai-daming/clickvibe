@@ -70,6 +70,8 @@ export interface WorkflowFacts {
   hasNewCommits: boolean
   /** Worktree is behind its base / remote branch and should be synced. */
   needsSync: boolean
+  /** Worktree sits in an unresolved conflicted merge (MERGE_HEAD exists). */
+  mergeConflict?: boolean
   /** Hard git facts used when the workflow cache is absent. */
   branchExists?: boolean
   worktreeExists?: boolean
@@ -164,6 +166,13 @@ export function deriveNextAction(facts: WorkflowFacts): NextAction {
     }
     if (facts.stage === 'review-ready' && facts.reviewPassed === false) {
       return action('rework', '按意见返工', 'worktree 落后基线,返工会先合并 origin/main 解决冲突,再按意见修改')
+    }
+    // 未完成的冲突合并(MERGE_HEAD 存在):sync 只会因「合并未完成」再次失败,
+    // 没有任何非 agent 动作能推进。待 review/复审阶段也一样(PR #33 现场:
+    // rework 完成后待复审、同步冲突、唯一按钮永远停在 sync)。放行恢复,
+    // 由 agent 先解决冲突,再自然回到 review 流程。
+    if (facts.mergeConflict) {
+      return action('resume', '恢复开发', '存在未完成的合并冲突,恢复会话由 agent 先解决冲突再继续')
     }
     return action('sync', '同步 worktree', 'worktree 落后远端基线,先同步再继续')
   }

@@ -228,6 +228,25 @@ test('a failed review verdict reworks even when the worktree is stale (issue #26
   assert.match(reworkCase.hint, /合并 origin\/main/)
 })
 
+test('a conflicted merge resumes instead of syncing across review stages (issue #26, PR #33)', () => {
+  // MERGE_HEAD 存在时 sync 只会再次失败:待 review / 复审中断(reviewing)阶段
+  // 也必须放行恢复,由 agent 先解决冲突,否则唯一按钮永远停在 sync(死锁)。
+  const awaitingReview = deriveNextAction(facts({
+    stage: 'review-ready', reviewPassed: null, needsSync: true, mergeConflict: true,
+  }))
+  assert.equal(awaitingReview.kind, 'resume')
+  assert.match(awaitingReview.hint, /未完成的合并冲突/)
+  const reReviewing = deriveNextAction(facts({
+    stage: 'reviewing', needsSync: true, mergeConflict: true,
+  }))
+  assert.equal(reReviewing.kind, 'resume')
+  // 无冲突时这些阶段仍先同步(快进/干净合并可以成功)
+  const cleanSync = deriveNextAction(facts({
+    stage: 'review-ready', reviewPassed: null, needsSync: true, mergeConflict: false,
+  }))
+  assert.equal(cleanSync.kind, 'sync')
+})
+
 test('an interrupted rework resumes even when the worktree is stale (issue #26)', () => {
   // 返工启动后 stage 已变为 developing;返工 agent 失败/停止/超时/Host 重启时
   // stage 保持 developing,门禁必须同样放行恢复,否则唯一动作退回 sync 再次
