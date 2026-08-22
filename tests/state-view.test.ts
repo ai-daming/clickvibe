@@ -112,6 +112,9 @@ test('a stale review verdict is labelled as awaiting re-review', () => {
   assert.equal(workflowStatusLabel('review-ready', false, false), '待重新 Review')
   assert.equal(workflowStatusLabel('review-ready', true, false), '待重新 Review')
   assert.equal(workflowStatusLabel('review-ready', false, true), 'Review 未通过')
+  assert.equal(workflowStatusLabel(
+    'review-ready', true, false, 'unknown', 'current-contract-unavailable',
+  ), '验收状态未知')
 })
 
 test('interrupted development resumes the agent session', () => {
