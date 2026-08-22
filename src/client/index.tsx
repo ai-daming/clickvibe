@@ -33,6 +33,7 @@ import { resolveDesktopPanelWidth, resolvePanelLayout } from './panel-layout.ts'
 type _SlotLoaders = [typeof LayoutController, SidebarFooterActionOwnerProps]
 
 const PANEL_ID = 'clickvibe'
+const MAX_BATCH_ISSUES = 10
 
 /** Panel open state shared between the footer toggle and the overlay. */
 const panelState: {
@@ -76,16 +77,26 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 .cv-input-row:last-of-type { padding-bottom: 10px; }
 .cv-project-toolbar { padding: 10px 12px; border-bottom: 1px solid #d0d7de; display: grid; gap: 8px; }
 .cv-project-selects { display: flex; gap: 6px; }
+.cv-batch-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.cv-batch-btn { border: none; border-radius: 6px; padding: 6px 9px; background: #0969da; color: #fff; font-size: 11px; font-weight: 600; cursor: pointer; }
+.cv-batch-btn:disabled { opacity: .5; cursor: not-allowed; }
+.cv-batch-btn.cv-batch-secondary { background: #57606a; }
+.cv-batch-agent { display: inline-flex; border: 1px solid #d0d7de; border-radius: 6px; overflow: hidden; }
+.cv-batch-agent button { border: none; padding: 5px 8px; background: #fff; color: #57606a; cursor: pointer; font-size: 11px; }
+.cv-batch-agent button.on { background: #1f2328; color: #fff; }
+.cv-batch-status { color: #57606a; font-size: 11px; }
+.cv-row-select { margin: 0; accent-color: #0969da; }
 .cv-select { min-width: 0; flex: 1; border: 1px solid #d0d7de; border-radius: 6px; background: #fff; padding: 6px 8px; color: #1f2328; }
 .cv-project-meta { color: #57606a; font-size: 11px; }
 .cv-project-list { flex: 1; overflow-y: auto; padding: 8px 10px 16px; }
 .cv-group-title { margin: 10px 2px 5px; color: #57606a; font-size: 11px; font-weight: 700; }
-.cv-issue-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 9px 8px; border: 1px solid #d8dee4; border-radius: 7px; margin-bottom: 6px; background: #fff; }
+.cv-issue-row { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 9px 8px; border: 1px solid #d8dee4; border-radius: 7px; margin-bottom: 6px; background: #fff; }
 .cv-issue-row-main { min-width: 0; }
 .cv-issue-row-title { display: block; color: #0969da; font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .cv-issue-row-meta { color: #57606a; font-size: 10.5px; margin-top: 3px; display: flex; gap: 7px; flex-wrap: wrap; }
 .cv-row-lag { color: #9a6700; font-weight: 600; }
 .cv-row-contract { color: #cf222e; font-weight: 600; }
+.cv-row-ready { color: #1a7f37; font-weight: 600; }
 .cv-row-action { border: none; border-radius: 6px; padding: 5px 8px; background: #1f883d; color: white; font-size: 11px; white-space: nowrap; cursor: pointer; }
 .cv-row-action.cv-row-none { background: #afb8c1; cursor: default; }
 .cv-row-action.cv-row-running { background: #0969da; cursor: default; }
@@ -1440,6 +1451,8 @@ interface RepositoryIssue extends GhIssue {
   blockedBy: Dependency[]
   workflow: Workflow
   contract?: { ok: boolean; missing: string[] }
+  autoDevelopment?: { ready: boolean; status: string; reason: string }
+  dependencyLedger?: { updated: boolean; error?: string }
 }
 
 interface RepositoryFreshness {
@@ -1472,6 +1485,10 @@ function PanelContent() {
   const [freshness, setFreshness] = React.useState<RepositoryFreshness | null>(null)
   const [dependencyRefreshError, setDependencyRefreshError] = React.useState<string | null>(null)
   const [stateRefreshError, setStateRefreshError] = React.useState<string | null>(null)
+  const [selectedIssues, setSelectedIssues] = React.useState<Set<number>>(new Set())
+  const [batchAgent, setBatchAgent] = React.useState<'codex' | 'claude'>('codex')
+  const [batchBusy, setBatchBusy] = React.useState(false)
+  const [batchStatus, setBatchStatus] = React.useState<string | null>(null)
   const workflowRefreshInFlight = React.useRef(false)
 
   const mergeWorkflowStates = React.useCallback((workflows: Workflow[]) => {
@@ -1550,6 +1567,8 @@ function PanelContent() {
     setFreshness(null)
     setStateRefreshError(null)
     setDependencyRefreshError(null)
+    setSelectedIssues(new Set())
+    setBatchStatus(null)
     try {
       const response = await apiCall<
         { ok: true; issues: RepositoryIssue[]; freshness: RepositoryFreshness | null }
@@ -1687,6 +1706,91 @@ function PanelContent() {
     void openIssue(issue, true)
   }
 
+  const readyIssues = issues.filter((issue) => issue.autoDevelopment?.ready === true)
+  const batchCandidates = readyIssues.slice(0, MAX_BATCH_ISSUES)
+  const selectedReadyIssues = batchCandidates.filter((issue) => selectedIssues.has(Number(issue.number)))
+
+  const toggleReadySelection = () => {
+    setSelectedIssues(selectedReadyIssues.length === batchCandidates.length && batchCandidates.length > 0
+      ? new Set()
+      : new Set(batchCandidates.map((issue) => Number(issue.number))))
+  }
+
+  const startBatchDevelopment = async () => {
+    const chosen = batchCandidates.filter((issue) => selectedIssues.has(Number(issue.number)))
+    if (chosen.length === 0) return
+    setBatchBusy(true)
+    setError(null)
+    setBatchStatus(`正在刷新并冻结 ${chosen.length} 个 issue…`)
+    try {
+      const prepared: Array<{
+        issue: RepositoryIssue
+        snapshot: GhIssue
+        authorizationId: string
+        authorizationDigest: string
+      }> = []
+      for (const issue of chosen) {
+        const url = String(issue.url ?? '')
+        // The first item refreshes the shared repository dependency snapshot;
+        // later items consume its versions instead of multiplying full-repo reads.
+        const fetched = await fetchIssue(url, 20_000, prepared.length === 0)
+        if (!fetched.ok) throw new Error(`#${issue.number} 刷新失败: ${fetched.error}`)
+        const snapshot = fetched.data.item as GhIssue
+        const expectedSnapshot = {
+          url,
+          title: String(snapshot.title ?? ''),
+          body: String(snapshot.body ?? ''),
+          state: String(snapshot.state ?? '').toUpperCase(),
+          updatedAt: String(snapshot.updatedAt ?? ''),
+          comments: (snapshot.comments ?? []).map((comment) => ({
+            author: String(comment.author?.login ?? 'unknown'),
+            body: String(comment.body ?? ''),
+          })),
+        }
+        const authorization = await apiCall<
+          | { ok: true; authorizationId: string; authorizationDigest: string }
+          | { ok: false; error: string }
+        >('authorize', { action: 'develop', url, agent: batchAgent, context: '', expectedSnapshot }, 20_000)
+        if (!authorization.ok) throw new Error(`#${issue.number} 授权预览失败: ${authorization.error}`)
+        prepared.push({ issue, snapshot, ...authorization })
+      }
+      const preview = prepared.map(({ issue, snapshot, authorizationDigest }) =>
+        `#${issue.number} ${snapshot.title ?? issue.title} · ${authorizationDigest.slice(0, 12)}`,
+      ).join('\n')
+      if (!window.confirm(`${batchAgent} 将批量开发以下 ${prepared.length} 个 ready issue:\n\n${preview}\n\n每项启动前仍会重验契约与依赖。确认启动?`)) {
+        setBatchStatus('已取消批量开发，未启动任何任务')
+        return
+      }
+      const failures: string[] = []
+      let started = 0
+      for (const item of prepared) {
+        const response = await apiCall<
+          | { ok: true; taskId: string; worktree: string; branch: string }
+          | { ok: false; error: string }
+        >('develop', {
+          url: String(item.issue.url ?? ''),
+          agent: batchAgent,
+          automatic: true,
+          authorizationId: item.authorizationId,
+          authorizationDigest: item.authorizationDigest,
+        }, 30_000)
+        if (response.ok) started++
+        else failures.push(`#${item.issue.number}: ${response.error}`)
+      }
+      setSelectedIssues(new Set())
+      const finalStatus = failures.length === 0
+        ? `已启动 ${started}/${prepared.length} 个开发任务`
+        : `已启动 ${started}/${prepared.length}；失败 ${failures.join('；')}`
+      await loadRepo(repoKey, true)
+      setBatchStatus(finalStatus)
+    } catch (reason) {
+      setError(`批量开发未启动: ${String(reason instanceof Error ? reason.message : reason)}`)
+      setBatchStatus(null)
+    } finally {
+      setBatchBusy(false)
+    }
+  }
+
   return (
     <div className="cv-panel">
       <div className="cv-panel-header">
@@ -1737,6 +1841,19 @@ function PanelContent() {
               </select>
               <button className="cv-refresh" onClick={() => void loadRepo(repoKey, true)} disabled={loading} title="刷新 GitHub 与 git 状态">⟳</button>
             </div>
+            <div className="cv-batch-bar">
+              <button className="cv-batch-btn cv-batch-secondary" onClick={toggleReadySelection} disabled={batchBusy || readyIssues.length === 0}>
+                {selectedReadyIssues.length === batchCandidates.length && batchCandidates.length > 0 ? '取消全选' : `选择 ready (${batchCandidates.length}${readyIssues.length > MAX_BATCH_ISSUES ? `/${readyIssues.length}` : ''})`}
+              </button>
+              <span className="cv-batch-agent">
+                <button className={batchAgent === 'codex' ? 'on' : ''} onClick={() => setBatchAgent('codex')} disabled={batchBusy}>Codex</button>
+                <button className={batchAgent === 'claude' ? 'on' : ''} onClick={() => setBatchAgent('claude')} disabled={batchBusy}>Claude</button>
+              </span>
+              <button className="cv-batch-btn" onClick={() => void startBatchDevelopment()} disabled={batchBusy || selectedReadyIssues.length === 0}>
+                {batchBusy ? '批量启动中…' : `批量下单 (${selectedReadyIssues.length})`}
+              </button>
+              {batchStatus ? <span className="cv-batch-status">{batchStatus}</span> : null}
+            </div>
             {repoKey ? <div className="cv-project-meta">{issues.length} 个 open issue · {projects.find((project) => project.repoKey === repoKey)?.available ? '本机 git + GitHub' : '远程配置 · GitHub'} 实时事实</div> : null}
           </div>
           {error ? <div className="cv-error">{error}</div> : null}
@@ -1772,6 +1889,22 @@ function PanelContent() {
                       ? { ...action, hint: `该 issue 缺:${contract.missing.join('、')},建议先在 GitHub 补齐契约(目标/验收标准/依赖);人工仍可开发` }
                       : action
                     return <div className="cv-issue-row" key={issue.number}>
+                      <input
+                        className="cv-row-select"
+                        type="checkbox"
+                        aria-label={`选择 issue #${issue.number}`}
+                        checked={selectedIssues.has(Number(issue.number))}
+                        disabled={!batchCandidates.includes(issue) || batchBusy}
+                        title={issue.autoDevelopment?.ready && !batchCandidates.includes(issue)
+                          ? `每批最多 ${MAX_BATCH_ISSUES} 个，请先启动当前批次`
+                          : issue.autoDevelopment?.reason ?? '自动选择状态不可用'}
+                        onChange={(event) => setSelectedIssues((previous) => {
+                          const next = new Set(previous)
+                          if (event.target.checked) next.add(Number(issue.number))
+                          else next.delete(Number(issue.number))
+                          return next
+                        })}
+                      />
                       <span className={`cv-stage cv-stage-${status}`}>{stageLabel(status, issue.workflow)}</span>
                       <div className="cv-issue-row-main">
                         <span className="cv-issue-row-title" onClick={() => void openIssue(issue)}>#{issue.number} {issue.title}</span>
@@ -1781,6 +1914,9 @@ function PanelContent() {
                           <span>里程碑: {issue.milestone?.title ?? '无'}</span>
                           <span>blockedBy: {issue.blockedBy.length ? issue.blockedBy.map((dependency) => `#${dependency.number}${dependency.state.toUpperCase() === 'OPEN' ? '⏳' : '✓'}`).join(' ') : '无'}</span>
                           {contract && !contract.ok ? <span className="cv-row-contract">⚠ 不满足契约(缺:{contract.missing.join('、')})</span> : null}
+                          {issue.autoDevelopment?.ready ? <span className="cv-row-ready">ready · 可自动下单</span> : null}
+                          {issue.dependencyLedger?.updated ? <span className="cv-row-ready">依赖账本已自动更新</span> : null}
+                          {issue.dependencyLedger?.error ? <span className="cv-row-contract" title={issue.dependencyLedger.error}>⚠ 依赖账本更新失败</span> : null}
                         </div>
                       </div>
                       <button className={`cv-row-action${shownAction.kind === 'none' ? (shownAction.label === '任务进行中' ? ' cv-row-running' : ' cv-row-none') : ''}`} disabled={shownAction.kind === 'none'} title={shownAction.hint} onClick={() => rowAction(issue)}>{shownAction.kind === 'none' ? (status === 'passed' ? '已交付' : shownAction.label) : shownAction.label}</button>

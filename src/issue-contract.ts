@@ -21,7 +21,7 @@ function sectionOf(body: string, name: string): string | null {
   const match = body.match(new RegExp(`^##\\s*${name}\\s*$`, 'm'))
   if (!match || match.index === undefined) return null
   const rest = body.slice(match.index + match[0].length)
-  const next = rest.match(/^##\s/m)
+  const next = rest.match(/^##(?!#)/m)
   return (next ? rest.slice(0, next.index ?? 0) : rest).trim()
 }
 
@@ -34,6 +34,6 @@ export function checkIssueContract(body: string): IssueContractCheck {
   const deps = sectionOf(body, '依赖')
   if (!goal) missing.push('目标')
   if (!acceptance || !CHECKLIST_RE.test(acceptance)) missing.push('验收标准')
-  if (!deps || !(/^无\s*$/m.test(deps) || /Blocked by\s*#\d+/i.test(deps))) missing.push('依赖')
+  if (!deps || !(/^(?:依赖\s*:\s*)?无(?:\s|\(|（|$)/m.test(deps) || /Blocked by\s*#\d+/i.test(deps))) missing.push('依赖')
   return { ok: missing.length === 0, missing }
 }

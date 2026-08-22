@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises'
 
 interface ShellContext {
   shell: {
-    resolve(spec: { command: string; timeoutMs?: number }): unknown
+    resolve(spec: { command: string; timeoutMs?: number; stdin?: string }): unknown
     run(spec: unknown): Promise<{
       exitCode: number | null
       stdout: { text: string; truncated?: boolean; spillPath?: string }
@@ -158,14 +158,24 @@ export class GithubRestReader {
     return stdout.text
   }
 
-  private async request(path: string, accept?: string, timeoutMs = 30_000): Promise<IncludedResponse> {
+  private async request(
+    path: string,
+    accept?: string,
+    timeoutMs = 30_000,
+    mutation?: { method: 'POST' | 'PATCH'; body: unknown },
+  ): Promise<IncludedResponse> {
     this.assertCircuitOpen()
     const command = [
       'gh api --include',
       shellQuote(path),
+      mutation ? `--method ${mutation.method} --input -` : '',
       accept ? `-H ${shellQuote(`Accept: ${accept}`)}` : '',
     ].filter(Boolean).join(' ')
-    const spec = this.ctx.shell.resolve({ command, timeoutMs })
+    const spec = this.ctx.shell.resolve({
+      command,
+      timeoutMs,
+      ...(mutation ? { stdin: JSON.stringify(mutation.body) } : {}),
+    })
     const result = await this.ctx.shell.run(spec)
     const stdout = await this.output(result)
     let response: IncludedResponse
@@ -198,6 +208,15 @@ export class GithubRestReader {
 
   async json<T = unknown>(path: string, accept?: string, timeoutMs?: number): Promise<T> {
     const response = await this.request(path, accept, timeoutMs)
+    try {
+      return JSON.parse(response.body || 'null') as T
+    } catch {
+      throw new Error(`GitHub REST 返回了无效 JSON: ${path}`)
+    }
+  }
+
+  async mutate<T = unknown>(path: string, method: 'POST' | 'PATCH', body: unknown, timeoutMs?: number): Promise<T> {
+    const response = await this.request(path, undefined, timeoutMs, { method, body })
     try {
       return JSON.parse(response.body || 'null') as T
     } catch {
