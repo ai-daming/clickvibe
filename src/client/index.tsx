@@ -616,13 +616,20 @@ function IssueView({ issue, kind, workflow, onWorkflow, timeline, dependencies, 
   )
 }
 
-async function apiCall<T>(method: string, body: Record<string, unknown>): Promise<T> {
-  const response = await fetch(`/clickvibe/api/${method}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-clickvibe-request': '1' },
-    body: JSON.stringify(body),
-  })
-  return response.json() as Promise<T>
+async function apiCall<T>(method: string, body: Record<string, unknown>, timeoutMs?: number): Promise<T> {
+  const controller = timeoutMs === undefined ? null : new AbortController()
+  const timeout = controller ? window.setTimeout(() => controller.abort(), timeoutMs) : null
+  try {
+    const response = await fetch(`/clickvibe/api/${method}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-clickvibe-request': '1' },
+      body: JSON.stringify(body),
+      ...(controller ? { signal: controller.signal } : {}),
+    })
+    return response.json() as Promise<T>
+  } finally {
+    if (timeout !== null) window.clearTimeout(timeout)
+  }
 }
 
 interface Workflow {
@@ -1228,13 +1235,24 @@ function CommentsSection({ comments }: { comments: GhComment[] }) {
   )
 }
 
-async function fetchIssue(url: string): Promise<{ ok: true; data: { kind: 'issue' | 'pr'; item: unknown; timeline?: TimelineEvent[]; dependencies?: Dependencies } } | { ok: false; error: string }> {
-  const response = await fetch('/clickvibe/api/fetch', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-clickvibe-request': '1' },
-    body: JSON.stringify({ url }),
-  })
-  return response.json() as Promise<{ ok: true; data: { kind: 'issue' | 'pr'; item: unknown } } | { ok: false; error: string }>
+type FetchIssueResponse =
+  | { ok: true; data: { kind: 'issue' | 'pr'; item: unknown; timeline?: TimelineEvent[]; dependencies?: Dependencies }; dependencyError?: string }
+  | { ok: false; error: string }
+
+async function fetchIssue(url: string, timeoutMs?: number): Promise<FetchIssueResponse> {
+  const controller = timeoutMs === undefined ? null : new AbortController()
+  const timeout = controller ? window.setTimeout(() => controller.abort(), timeoutMs) : null
+  try {
+    const response = await fetch('/clickvibe/api/fetch', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-clickvibe-request': '1' },
+      body: JSON.stringify({ url }),
+      ...(controller ? { signal: controller.signal } : {}),
+    })
+    return response.json() as Promise<FetchIssueResponse>
+  } finally {
+    if (timeout !== null) window.clearTimeout(timeout)
+  }
 }
 
 interface ProjectOption { repoKey: string; path: string; available: boolean }
@@ -1246,13 +1264,17 @@ interface RepositoryIssue extends GhIssue {
 interface RepositoryFreshness {
   stale: boolean
   refreshed: boolean
+  refreshing: boolean
   lastAttemptAt: number
   lastSuccessAt: number | null
+  repositoryCount?: number
+  successfulRepositoryCount?: number
+  partial?: boolean
   error?: string
 }
 
 type WorkflowStateResponse =
-  | { ok: true; workflows: Workflow[]; freshness: RepositoryFreshness | null }
+  | { ok: true; workflows: Workflow[]; freshness: RepositoryFreshness | null; dependenciesRefreshDue: boolean }
   | { ok: false; error: string }
 
 function PanelContent() {
@@ -1267,6 +1289,9 @@ function PanelContent() {
   const [workflow, setWorkflow] = React.useState<Workflow | null>(null)
   const [autoAction, setAutoAction] = React.useState(false)
   const [freshness, setFreshness] = React.useState<RepositoryFreshness | null>(null)
+  const [dependencyRefreshError, setDependencyRefreshError] = React.useState<string | null>(null)
+  const [stateRefreshError, setStateRefreshError] = React.useState<string | null>(null)
+  const workflowRefreshInFlight = React.useRef(false)
 
   const mergeWorkflowStates = React.useCallback((workflows: Workflow[]) => {
     const byUrl = new Map(workflows.map((item) => [item.url, item]))
@@ -1283,34 +1308,53 @@ function PanelContent() {
   }, [mergeWorkflowStates])
 
   const refreshWorkflowStates = React.useCallback(async () => {
-    if (!repoKey) return
+    if (!repoKey || workflowRefreshInFlight.current) return
+    workflowRefreshInFlight.current = true
     try {
-      const response = await apiCall<WorkflowStateResponse>('state', { repoKey })
+      const response = await apiCall<WorkflowStateResponse>('state', { repoKey }, 8_000)
       if (response.ok) {
+        setStateRefreshError(null)
         mergeWorkflowStates(response.workflows)
         setFreshness(response.freshness)
-        // A new TTL cycle is also the dependency refresh clock. Git refs come
-        // from /state's shared fetch gate; GitHub issue states are re-read only
-        // when that gate actually advances.
-        if (response.freshness?.refreshed) {
-          if (result) {
-            const next = await fetchIssue(String(result.item.url ?? ''))
-            if (next.ok) setResult(next.data as typeof result)
-          } else {
-            const next = await apiCall<
-              { ok: true; issues: RepositoryIssue[]; freshness: RepositoryFreshness | null }
-              | { ok: false; error: string }
-            >('repo/issues', { repoKey })
-            if (next.ok) {
-              setIssues(next.issues)
-              setFreshness(next.freshness)
+        // GitHub dependency freshness has its own repo-scoped TTL clock. It is
+        // deliberately independent from local git availability.
+        if (response.dependenciesRefreshDue) {
+          try {
+            if (result) {
+              const next = await fetchIssue(String(result.item.url ?? ''), 4_000)
+              if (next.ok) {
+                setResult({
+                  ...(next.data as NonNullable<typeof result>),
+                  dependencies: next.data.dependencies ?? result.dependencies,
+                })
+                setDependencyRefreshError(next.dependencyError ?? null)
+              } else {
+                setDependencyRefreshError(next.error)
+              }
+            } else {
+              const next = await apiCall<
+                { ok: true; issues: RepositoryIssue[]; freshness: RepositoryFreshness | null }
+                | { ok: false; error: string }
+              >('repo/issues', { repoKey }, 4_000)
+              if (next.ok) {
+                setIssues(next.issues)
+                setFreshness(next.freshness)
+                setDependencyRefreshError(null)
+              } else {
+                setDependencyRefreshError(next.error)
+              }
             }
+          } catch (reason) {
+            setDependencyRefreshError(`GitHub 依赖刷新失败: ${String(reason)}`)
           }
         }
       }
-    } catch {
+    } catch (reason) {
       // Polling is best-effort. Keep the last usable snapshot when the panel
       // host disconnects; a later tick or explicit refresh will recover it.
+      setStateRefreshError(`状态轮询失败: ${String(reason)}`)
+    } finally {
+      workflowRefreshInFlight.current = false
     }
   }, [mergeWorkflowStates, repoKey, result])
 
@@ -1320,6 +1364,9 @@ function PanelContent() {
     setError(null)
     setResult(null)
     setIssues([])
+    setFreshness(null)
+    setStateRefreshError(null)
+    setDependencyRefreshError(null)
     try {
       const response = await apiCall<
         { ok: true; issues: RepositoryIssue[]; freshness: RepositoryFreshness | null }
@@ -1329,6 +1376,7 @@ function PanelContent() {
       else {
         setIssues(response.issues)
         setFreshness(response.freshness)
+        setDependencyRefreshError(null)
       }
     } catch (reason) {
       setError(`项目加载失败: ${String(reason)}`)
@@ -1372,7 +1420,10 @@ function PanelContent() {
         apiCall<WorkflowStateResponse>('state', { url }).catch(() => null),
       ])
       if (stateResponse?.ok) mergeWorkflowStates(stateResponse.workflows)
-      if (stateResponse?.ok) setFreshness(stateResponse.freshness)
+      if (stateResponse?.ok) {
+        setFreshness(stateResponse.freshness)
+        setStateRefreshError(null)
+      }
       if (!response.ok) setError(response.error)
       else {
         // Workflows are persisted only after development starts; keep the
@@ -1382,6 +1433,7 @@ function PanelContent() {
           ? stateResponse.workflows.find((item) => item.url === url) ?? issue.workflow
           : issue.workflow)
         setResult(response.data as { kind: 'issue' | 'pr'; item: GhIssue; timeline?: TimelineEvent[]; dependencies?: Dependencies })
+        setDependencyRefreshError(response.dependencyError ?? null)
         setAutoAction(triggerAction)
       }
     } catch (reason) {
@@ -1402,11 +1454,18 @@ function PanelContent() {
         apiCall<WorkflowStateResponse>('state', { url, forceRefresh: true }),
       ])
       if (!issueResponse.ok) setError(issueResponse.error)
-      else setResult(issueResponse.data as typeof result)
+      else {
+        setResult({
+          ...(issueResponse.data as NonNullable<typeof result>),
+          dependencies: issueResponse.data.dependencies ?? result.dependencies,
+        })
+        setDependencyRefreshError(issueResponse.dependencyError ?? null)
+      }
       if (stateResponse.ok) {
         mergeWorkflowStates(stateResponse.workflows)
         setWorkflow(stateResponse.workflows.find((item) => item.url === url) ?? workflow)
         setFreshness(stateResponse.freshness)
+        setStateRefreshError(null)
       }
     } catch (reason) {
       setError(`Issue 刷新失败: ${String(reason)}`)
@@ -1454,7 +1513,15 @@ function PanelContent() {
           <button className="cv-close" onClick={() => setPanelOpen(false)}>✕</button>
         </span>
       </div>
-      {freshness?.stale ? <div className="cv-stale" title={freshness.error}>⚠ 状态可能过期 · 远端同步失败，当前使用本地 refs</div> : null}
+      {freshness?.stale ? (
+        <div className="cv-stale" title={freshness.error}>
+          {freshness.refreshing
+            ? '⚠ 状态可能过期 · 远端同步较慢，后台仍在刷新，当前使用本地 refs'
+            : '⚠ 状态可能过期 · 远端同步失败，当前使用本地 refs'}
+        </div>
+      ) : null}
+      {stateRefreshError ? <div className="cv-stale" title={stateRefreshError}>⚠ 状态可能过期 · 自动刷新失败，当前保留上次结果</div> : null}
+      {dependencyRefreshError ? <div className="cv-stale" title={dependencyRefreshError}>⚠ 依赖状态可能过期 · GitHub 刷新失败，当前保留上次结果</div> : null}
       {result ? (
         <IssueView
           issue={result.item}

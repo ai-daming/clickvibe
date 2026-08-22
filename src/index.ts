@@ -70,7 +70,12 @@ import {
   REVIEW_RESULT_RELATIVE_PATH,
 } from './review-result.ts'
 import { ExclusiveTaskGate } from './task-gate.ts'
-import { RepositoryFreshnessGate, type RepositoryFreshness } from './repo-freshness.ts'
+import {
+  RepositoryFreshnessGate,
+  RepositoryRefreshClock,
+  aggregateRepositoryFreshness,
+  type RepositoryFreshness,
+} from './repo-freshness.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -135,7 +140,9 @@ interface ClickVibeConfig {
 }
 
 const DEFAULT_FETCH_TTL_SECONDS = 45
+const READ_FETCH_WAIT_MS = 2_000
 const repositoryFreshness = new RepositoryFreshnessGate()
+const dependencyRefreshClock = new RepositoryRefreshClock()
 
 /** In-memory live task handle: the running process + a status-line buffer. */
 interface LiveTask {
@@ -325,13 +332,13 @@ async function ensureConfiguredRepoFresh(
   if (!configuredPath) return null
   const repoPath = resolve(expandHome(configuredPath))
   if (!existsSync(repoPath)) return null
-  return repositoryFreshness.ensure(repoPath, fetchTtlMs(config), async () => {
+  return repositoryFreshness.ensureWithin(repoPath, fetchTtlMs(config), async () => {
     await runCommand(ctx, 'git fetch origin --prune', {
       workdir: repoPath,
-      timeoutMs: 60_000,
+      timeoutMs: 30_000,
       sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: repoPath },
     })
-  }, force)
+  }, READ_FETCH_WAIT_MS, force)
 }
 
 /** Read the current HEAD short-hash of a worktree (empty string on failure). */
@@ -739,17 +746,12 @@ export function apply(ctx: Context): void {
         const freshnesses = (await Promise.all([...repoKeys].map((key) =>
           ensureConfiguredRepoFresh(ctx, config, key, filter?.forceRefresh === true),
         ))).filter((value): value is RepositoryFreshness => value !== null)
+        const dependenciesRefreshDue = [...repoKeys]
+          .map((key) => dependencyRefreshClock.take(key, fetchTtlMs(config), filter?.forceRefresh === true))
+          .some(Boolean)
         const enriched = await enrichWorkflowStates(ctx, workflows, config)
-        const freshness = freshnesses.length === 0 ? null : {
-          stale: freshnesses.some((value) => value.stale),
-          refreshed: freshnesses.some((value) => value.refreshed),
-          lastAttemptAt: Math.max(...freshnesses.map((value) => value.lastAttemptAt)),
-          lastSuccessAt: freshnesses.every((value) => value.lastSuccessAt !== null)
-            ? Math.min(...freshnesses.map((value) => value.lastSuccessAt as number))
-            : null,
-          error: freshnesses.find((value) => value.error)?.error,
-        }
-        writeJson(res, 200, { ok: true, workflows: enriched, freshness })
+        const freshness = aggregateRepositoryFreshness(freshnesses)
+        writeJson(res, 200, { ok: true, workflows: enriched, freshness, dependenciesRefreshDue })
         return
       }
       if (method === 'authorize') {
@@ -1122,6 +1124,7 @@ export async function fetchRepositoryIssues(
       })
       return { ...issue, blockedBy, workflow: derived }
     }))
+    dependencyRefreshClock.mark(repoKey)
     return { ok: true, repoKey, issues, freshness }
   } catch (error) {
     return { ok: false, error: `项目 issue 抓取失败: ${String(error instanceof Error ? error.message : error)}` }
@@ -1132,7 +1135,10 @@ export async function fetchRepositoryIssues(
 async function fetchIssue(
   ctx: Context,
   payload: unknown,
-): Promise<{ ok: true; data: { kind: 'issue' | 'pr'; item: unknown; timeline?: unknown } } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; data: { kind: 'issue' | 'pr'; item: unknown; timeline?: unknown; dependencies?: { blockedBy: IssueDependency[]; blocking: IssueDependency[] } }; dependencyError?: string }
+  | { ok: false; error: string }
+> {
   const url = String((payload as { url?: unknown } | undefined)?.url ?? '').trim()
   const parsed = parseUrl(url)
   if (!parsed) {
@@ -1149,14 +1155,21 @@ async function fetchIssue(
     }
     const parsedJson = JSON.parse(result.stdout.text) as unknown
     const data: { kind: 'issue' | 'pr'; item: unknown; timeline?: unknown; dependencies?: { blockedBy: IssueDependency[]; blocking: IssueDependency[] } } = { kind: parsed.kind, item: parsedJson }
+    let dependencyError: string | undefined
     // issue 额外拉 timeline,提取关联事件(linked PR/commit)——GitHub UI 的
     // "linked a pull request" 就来自 cross-referenced 事件
     if (!isPR) {
       data.timeline = await fetchTimeline(ctx, parsed.owner, parsed.repo, parsed.number)
       // 依赖图:blockedBy 来自本 issue 正文,blocking 扫描 repo 内其它 issue
-      data.dependencies = await fetchDependencies(ctx, parsed, parsedJson as { body?: unknown })
+      const dependencyResult = await fetchDependencies(ctx, parsed, parsedJson as { body?: unknown })
+      if (dependencyResult.ok) {
+        data.dependencies = dependencyResult.dependencies
+        dependencyRefreshClock.mark(`${parsed.owner}/${parsed.repo}`)
+      } else {
+        dependencyError = dependencyResult.error
+      }
     }
-    return { ok: true, data }
+    return { ok: true, data, ...(dependencyError ? { dependencyError } : {}) }
   } catch (error) {
     return { ok: false, error: `抓取异常: ${String(error instanceof Error ? error.message : error)}` }
   }
@@ -1242,19 +1255,18 @@ async function fetchDependencies(
   ctx: Context,
   target: { owner: string; repo: string; number: string },
   item: { body?: unknown },
-): Promise<{ blockedBy: IssueDependency[]; blocking: IssueDependency[] }> {
-  const empty: { blockedBy: IssueDependency[]; blocking: IssueDependency[] } = { blockedBy: [], blocking: [] }
+): Promise<
+  | { ok: true; dependencies: { blockedBy: IssueDependency[]; blocking: IssueDependency[] } }
+  | { ok: false; error: string }
+> {
   const command = `gh issue list --repo ${target.owner}/${target.repo} --state all --limit 100 --json number,title,state,body`
   let issues: { number: number; title: string; state: string; body: string }[] = []
   try {
-    const spec = ctx.shell.resolve({ command, timeoutMs: 20000 })
-    const result = await ctx.shell.run(spec)
-    if (result.exitCode !== 0) return empty
-    const parsed = JSON.parse(result.stdout.text) as unknown
-    if (!Array.isArray(parsed)) return empty
+    const parsed = JSON.parse(await runCommand(ctx, command, { timeoutMs: 20000 })) as unknown
+    if (!Array.isArray(parsed)) throw new Error('GitHub 依赖列表格式无效')
     issues = parsed as { number: number; title: string; state: string; body: string }[]
-  } catch {
-    return empty
+  } catch (error) {
+    return { ok: false, error: `GitHub 依赖刷新失败: ${String(error instanceof Error ? error.message : error)}` }
   }
 
   const current = Number(target.number)
@@ -1276,7 +1288,7 @@ async function fetchDependencies(
   }
   blockedBy.sort((a, b) => a.number - b.number)
   blocking.sort((a, b) => a.number - b.number)
-  return { blockedBy, blocking }
+  return { ok: true, dependencies: { blockedBy, blocking } }
 }
 
 /** Fetch the issue timeline and keep only the events worth showing. */

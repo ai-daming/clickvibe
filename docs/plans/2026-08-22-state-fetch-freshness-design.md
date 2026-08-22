@@ -8,10 +8,10 @@ Git fetch 只负责 refs，不能代表 GitHub Issue 的依赖状态。依赖状
 
 ## 数据流与并发
 
-进程内 `RepositoryFreshnessGate` 以规范化仓库路径为 key，记录最近尝试、最近成功、错误以及 in-flight promise。TTL 内的 `/state` 与 `repo/issues` 直接复用快照；并发请求复用同一 promise；失败尝试也按 TTL 节流。列表和详情的 ⟳ 传入 `forceRefresh`，强制发起一次新 fetch。
+进程内 `RepositoryFreshnessGate` 以规范化仓库路径为 key，记录最近尝试、最近成功、错误以及 in-flight promise。TTL 内的 `/state` 与 `repo/issues` 直接复用快照；并发请求复用同一 promise；失败尝试也按 TTL 节流。查看路径最多等待 fetch 两秒，超时便返回 stale 本地 refs，后台 fetch 继续；已有 fetch 进行中时后续轮询立即返回，不重复等待。列表和详情的 ⟳ 传入 `forceRefresh`，强制发起或复用一次 fetch。
 
-`/state` 在 fetch 完成或降级后才推导 worktree、`origin/main` 和远端分支差异。`repo/issues` 也先经过相同 gate，再加载 GitHub issues/PRs 和本地 refs。客户端收到 `freshness.refreshed=true` 时才同步刷新 GitHub 依赖快照；收到 `freshness.stale=true` 时显示“状态可能过期”。review 动作在启动 reviewer 之前执行 `git fetch origin --prune`，失败写入任务日志并继续。
+`/state` 在 fetch 完成或有界降级后推导 worktree、`origin/main` 和远端分支差异。`repo/issues` 也经过相同 gate，再加载 GitHub issues/PRs 和本地 refs。GitHub 依赖使用独立的 repo 级 TTL clock，因此没有本地路径的远程配置项目也会自动刷新；客户端轮询有 in-flight 去重与超时，依赖二次拉取失败时保留旧数据并显示单独的过期提示。多仓库 freshness 同时返回仓库数、成功数与 partial 标记。review 动作在启动 reviewer 之前执行 `git fetch origin --prune`，失败写入任务日志并继续。
 
 ## 验证
 
-单元测试覆盖 TTL 内不重复、过期刷新、并发合并、强制刷新和失败降级。路由测试覆盖 `/state` 与 `repo/issues` 共用 fetch，以及 fetch 失败仍返回可读状态和 stale 标记。全套 TypeScript、Node 测试与构建作为交付门禁。
+单元测试覆盖 TTL 内不重复、过期刷新、并发合并、有界等待、强制刷新、失败降级和部分成功聚合。路由测试覆盖 `/state` 与 `repo/issues` 共用 fetch、远程配置项目的依赖刷新时钟，以及 fetch 挂起时仍快速返回可读状态和 stale 标记。全套 TypeScript、Node 测试与构建作为交付门禁。

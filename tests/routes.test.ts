@@ -240,6 +240,65 @@ test('/state keeps local-ref state readable and marks freshness stale when fetch
   }
 })
 
+test('/state schedules dependency refreshes for a remote-only configured repository', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-remote-dependencies-'))
+  process.env.HOME = tempHome
+  try {
+    await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
+    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), [
+      'repos:',
+      '  remote/only: /path/not/on/this/host',
+      '',
+    ].join('\n'))
+    const handler = createHandler()
+
+    const first = await post(handler, '/clickvibe/api/state', { repoKey: 'remote/only' })
+    const second = await post(handler, '/clickvibe/api/state', { repoKey: 'remote/only' })
+
+    assert.equal((first.body as { dependenciesRefreshDue?: boolean }).dependenciesRefreshDue, true)
+    assert.equal((second.body as { dependenciesRefreshDue?: boolean }).dependenciesRefreshDue, false)
+    assert.equal((first.body as { freshness?: unknown }).freshness, null)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('/state returns stale local facts within a bounded wait when git fetch hangs', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-fetch-hang-'))
+  process.env.HOME = tempHome
+  try {
+    const repo = join(tempHome, 'repo')
+    await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
+    await mkdir(repo, { recursive: true })
+    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), [
+      'repos:',
+      `  hanging/repo: ${repo}`,
+      '',
+    ].join('\n'))
+    const handler = createHandler(async ({ command }) => {
+      assert.equal(command, 'git fetch origin --prune')
+      return new Promise(() => {})
+    })
+
+    const startedAt = Date.now()
+    const result = await post(handler, '/clickvibe/api/state', { repoKey: 'hanging/repo' })
+    const elapsedMs = Date.now() - startedAt
+
+    assert.equal(result.status, 200)
+    assert.equal((result.body as { freshness?: { stale: boolean; refreshing: boolean } }).freshness?.stale, true)
+    assert.equal((result.body as { freshness?: { stale: boolean; refreshing: boolean } }).freshness?.refreshing, true)
+    assert.ok(elapsedMs < 3_000, `state response took ${elapsedMs}ms`)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
 test('a rejected dry-run worktree attempt preserves the previous durable dev history', async () => {
   const previousHome = process.env.HOME
   const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-history-conflict-'))
@@ -766,6 +825,33 @@ test('/fetch on an issue without a 依赖 section yields no blockedBy (and no bl
   assert.ok(deps)
   assert.deepEqual(deps.blockedBy, [])
   assert.deepEqual(deps.blocking.map((d) => (d as { number: number }).number), [7])
+})
+
+test('/fetch keeps issue data but reports dependency refresh failure without inventing an empty graph', async () => {
+  const item = {
+    url: 'https://github.com/ai-daming/clickvibe/issues/938',
+    number: 938, title: 'dependency refresh failure', state: 'OPEN',
+    body: '## 依赖\n\nBlocked by #4', comments: [],
+  }
+  const handler = createHandler(async (spec) => {
+    if (spec.command.startsWith('gh issue view')) {
+      return { exitCode: 0, stdout: { text: JSON.stringify(item) }, stderr: { text: '' } }
+    }
+    if (spec.command.startsWith('gh issue list')) {
+      return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'offline' } }
+    }
+    if (spec.command.startsWith('gh api')) {
+      return { exitCode: 0, stdout: { text: '[]' }, stderr: { text: '' } }
+    }
+    throw new Error(`unexpected command: ${spec.command}`)
+  })
+
+  const result = await post(handler, '/clickvibe/api/fetch', { url: item.url })
+
+  assert.equal(result.status, 200)
+  assert.equal(result.body.ok, true)
+  assert.match((result.body as { dependencyError?: string }).dependencyError ?? '', /offline/)
+  assert.equal((result.body as { data?: { dependencies?: unknown } }).data?.dependencies, undefined)
 })
 
 test('repo issue aggregation includes open issues without workflows and honors live merged PR state', async () => {
