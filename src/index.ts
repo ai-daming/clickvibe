@@ -20,7 +20,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { randomBytes } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { homedir, userInfo } from 'node:os'
 import { join, basename, dirname, resolve, relative, isAbsolute } from 'node:path'
 import { parse as parseYaml } from 'yaml'
 import {
@@ -42,6 +42,7 @@ import {
   type AgentAuthorizationInput,
   type DevelopAgent,
   type IssuePromptSnapshot,
+  type MergeOverrideGate,
 } from './develop.ts'
 import { checkIssueContract, type IssueContractCheck } from './issue-contract.ts'
 import {
@@ -1561,30 +1562,73 @@ function sameCommitHash(reviewedHash: string, prHead: string): boolean {
     && (reviewed === head || head.startsWith(reviewed) || reviewed.startsWith(head))
 }
 
-/** Server-side merge gate: unknown and changed contracts both fail closed. */
-async function assertReviewContractCurrent(ctx: Context, workflow: IssueWorkflow): Promise<void> {
-  const reviewedContract = latestPassingReview(workflow)?.issueContract
-  if (!reviewedContract) {
-    throw new Error('合并门禁拒绝:最近通过的 review 缺少验收契约快照,需重新 Review')
-  }
-  let current: ReviewIssueContract
-  try {
-    current = await fetchIssueContract(ctx, workflow.url, true)
-  } catch (error) {
-    throw new Error(`合并门禁拒绝:无法读取当前验收契约: ${String(error instanceof Error ? error.message : error)}`)
-  }
-  if (current.contract.bodyHash !== reviewedContract.bodyHash) {
-    throw new Error('合并门禁拒绝:验收契约已变更,需重新 Review')
-  }
+/** One failing ClickVibe merge gate; all items are eligible for manual override (issue #49). */
+interface MergeGateFailure {
+  key: MergeOverrideGate
+  message: string
 }
 
-async function mergeAuthorizationPreview(ctx: Context, url: string): Promise<{
-  prNumber: string
-  branch: string
-  head: string
-  mergeFlag: '--merge'
-  cleanup: string[]
-}> {
+/**
+ * Collect every failing ClickVibe-side merge gate in the historical rejection
+ * order (hash first, then contract). GitHub-side protections are not gates here
+ * and can never be overridden.
+ */
+async function collectMergeGateFailures(
+  ctx: Context,
+  workflow: IssueWorkflow,
+  prHead: string,
+): Promise<MergeGateFailure[]> {
+  const failures: MergeGateFailure[] = []
+  const reviewedHash = latestPassingReviewHash(workflow)
+  if (!prHead || !reviewedHash || !sameCommitHash(reviewedHash, prHead)) {
+    failures.push({ key: 'review-hash', message: '实时 PR HEAD 与最近一次通过的 review 结论哈希不一致' })
+  }
+  const reviewedContract = latestPassingReview(workflow)?.issueContract
+  if (!reviewedContract) {
+    failures.push({ key: 'review-contract-missing', message: '最近通过的 review 缺少验收契约快照,需重新 Review' })
+  } else {
+    let current: ReviewIssueContract
+    try {
+      current = await fetchIssueContract(ctx, workflow.url, true)
+    } catch (error) {
+      failures.push({
+        key: 'contract-unreadable',
+        message: `无法读取当前验收契约: ${String(error instanceof Error ? error.message : error)}`,
+      })
+      return failures
+    }
+    if (current.contract.bodyHash !== reviewedContract.bodyHash) {
+      failures.push({ key: 'contract-changed', message: '验收契约已变更,需重新 Review' })
+    }
+  }
+  return failures
+}
+
+/** First-failure rejection text; identical to the pre-override single-gate errors. */
+function mergeGateRejection(failures: MergeGateFailure[]): string {
+  return `合并门禁拒绝:${failures[0]?.message ?? '未知原因'}`
+}
+
+type MergeAuthorizationPreview =
+  | {
+      ok: true
+      prNumber: string
+      branch: string
+      head: string
+      mergeFlag: '--merge'
+      cleanup: string[]
+    }
+  | {
+      ok: false
+      gateFailures: MergeGateFailure[]
+      prNumber: string
+      branch: string
+      head: string
+      mergeFlag: '--merge'
+      cleanup: string[]
+    }
+
+async function mergeAuthorizationPreview(ctx: Context, url: string): Promise<MergeAuthorizationPreview> {
   const parsed = parseUrl(url)
   if (!parsed || parsed.kind !== 'issue') throw new Error('合并目标必须是 GitHub Issue URL')
   const repoKey = `${parsed.owner}/${parsed.repo}`
@@ -1594,35 +1638,42 @@ async function mergeAuthorizationPreview(ctx: Context, url: string): Promise<{
   if (!lookup.known || !lookup.pr) throw new Error('无法读取实时 PR 状态,请稍后重试')
   if (lookup.pr.state === 'CLOSED') throw new Error('PR 已关闭且未合并,不能执行合并')
   if (lookup.pr.headRefName !== workflow.branch) throw new Error('实时 PR 分支与 workflow 不一致,拒绝合并')
-  if (!workflow.delivery) {
-    const reviewedHash = latestPassingReviewHash(workflow)
-    if (!lookup.pr.headRefOid || !reviewedHash || !sameCommitHash(reviewedHash, lookup.pr.headRefOid)) {
-      throw new Error('合并门禁拒绝:实时 PR HEAD 与最近一次通过的 review 结论哈希不一致')
-    }
-    await assertReviewContractCurrent(ctx, workflow)
-  }
-  return {
+  const base = {
     prNumber: lookup.pr.number,
     branch: workflow.branch,
     head: lookup.pr.headRefOid ?? workflow.delivery?.prHead ?? '',
-    mergeFlag: '--merge',
+    mergeFlag: '--merge' as const,
     cleanup: ['worktree', '本地分支', '远端分支', `Issue #${parsed.number}`, 'workflow 归档'],
   }
+  if (!workflow.delivery) {
+    const gateFailures = await collectMergeGateFailures(ctx, workflow, lookup.pr.headRefOid ?? '')
+    if (gateFailures.length > 0) return { ok: false, gateFailures, ...base }
+  }
+  return { ok: true, ...base }
 }
 
 async function authorizeAgent(
   ctx: Context,
   payload: unknown,
 ): Promise<
-  | { ok: true; authorizationId: string; authorizationDigest: string; expiresAt: number; preview: unknown }
-  | { ok: false; error: string }
+  | {
+      ok: true
+      authorizationId: string
+      authorizationDigest: string
+      expiresAt: number
+      preview: unknown
+      target?: AgentAuthorizationInput['target']
+      override?: AgentAuthorizationInput['override']
+    }
+  | { ok: false; error: string; gateFailures?: MergeGateFailure[] }
 > {
   try {
-    const body = (payload ?? {}) as { action?: unknown; expectedSnapshot?: unknown }
+    const body = (payload ?? {}) as { action?: unknown; expectedSnapshot?: unknown; override?: unknown; overrideReason?: unknown }
     const action = String(body.action ?? '') as AgentAuthorizationInput['action']
     const input = authorizationInputFromPayload(action, payload)
     let snapshot: IssuePromptSnapshot | null = null
-    let mergePreview: Awaited<ReturnType<typeof mergeAuthorizationPreview>> | null = null
+    let mergePreview: Extract<Awaited<ReturnType<typeof mergeAuthorizationPreview>>, { ok: true }> | null = null
+    let mergeOverride: AgentAuthorizationInput['override']
     if (input.action === 'develop') {
       const fetched = await fetchIssue(ctx, { url: input.url })
       if (!fetched.ok) return fetched
@@ -1632,7 +1683,32 @@ async function authorizeAgent(
         return { ok: false, error: 'Issue 内容已变化或未提供完整预览快照,请刷新面板并重新确认' }
       }
     } else if (input.action === 'merge') {
-      mergePreview = await mergeAuthorizationPreview(ctx, input.url)
+      const preview = await mergeAuthorizationPreview(ctx, input.url)
+      if (preview.ok) {
+        mergePreview = preview
+      } else {
+        // 门禁拒绝(issue #49):未请求人工放行 → 原样拒绝并附门禁清单供面板展示入口。
+        const reason = String(body.overrideReason ?? '').trim()
+        if (body.override !== true || reason === '') {
+          return {
+            ok: false,
+            error: mergeGateRejection(preview.gateFailures),
+            gateFailures: preview.gateFailures,
+          }
+        }
+        if (preview.head === '') throw new Error('合并授权目标无效')
+        mergeOverride = { skipped: preview.gateFailures.map((failure) => failure.key), reason }
+        mergePreview = {
+          ok: true,
+          prNumber: preview.prNumber,
+          branch: preview.branch,
+          head: preview.head,
+          mergeFlag: preview.mergeFlag,
+          cleanup: preview.cleanup,
+          // 预览同时给出被跳过门禁项的明细,供客户端逐项二次确认。
+          ...(mergeOverride ? { override: { ...mergeOverride, gates: preview.gateFailures } } : {}),
+        }
+      }
     }
     const authorizationInput: AgentAuthorizationInput = mergePreview
       ? {
@@ -1643,15 +1719,20 @@ async function authorizeAgent(
             head: mergePreview.head,
             mergeFlag: mergePreview.mergeFlag,
           },
+          ...(mergeOverride ? { override: mergeOverride } : {}),
         }
       : input
     const authorization = authorizations.issue(authorizationInput, snapshot)
+    // 预览沿用量剔除 ok 判别字段,保持既有合并预览结构不变。
+    const mergePreviewBody = mergePreview
+      ? (({ ok, ...fields }) => fields)(mergePreview)
+      : null
     return {
       ok: true,
       authorizationId: authorization.id,
       authorizationDigest: authorization.digest,
       expiresAt: authorization.expiresAt,
-      preview: mergePreview ?? (snapshot
+      preview: mergePreviewBody ?? (snapshot
         ? {
             action: input.action,
             agent: input.agent,
@@ -1663,6 +1744,7 @@ async function authorizeAgent(
           }
         : { action: input.action, agent: input.agent, url: input.url, digest: authorization.digest }),
       ...(mergePreview ? { target: authorizationInput.target } : {}),
+      ...(mergeOverride ? { override: mergeOverride } : {}),
     }
   } catch (error) {
     return { ok: false, error: String(error instanceof Error ? error.message : error) }
@@ -1671,7 +1753,7 @@ async function authorizeAgent(
 
 type MergeResult =
   | { ok: true; merged: true; archived: true; prNumber: string }
-  | { ok: false; error: string; merged?: boolean; cleanupPending?: boolean }
+  | { ok: false; error: string; merged?: boolean; cleanupPending?: boolean; gateFailures?: MergeGateFailure[] }
 
 async function mergeAndCleanup(ctx: Context, payload: unknown): Promise<MergeResult> {
   const url = String((payload as { url?: unknown } | undefined)?.url ?? '').trim()
@@ -1719,14 +1801,36 @@ async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): Promise<
   if (!pr.headRefOid) return { ok: false, error: '实时 PR HEAD 缺失,拒绝合并' }
 
   if (!workflow.delivery) {
-    const reviewedHash = latestPassingReviewHash(workflow)
-    if (!reviewedHash || !sameCommitHash(reviewedHash, pr.headRefOid)) {
-      return { ok: false, error: '合并门禁拒绝:实时 PR HEAD 与最近一次通过的 review 结论哈希不一致' }
-    }
-    try {
-      await assertReviewContractCurrent(ctx, workflow)
-    } catch (error) {
-      return { ok: false, error: String(error instanceof Error ? error.message : error) }
+    const gateFailures = await collectMergeGateFailures(ctx, workflow, pr.headRefOid)
+    if (gateFailures.length > 0) {
+      // 门禁拒绝(issue #49):仅当用户已完成人工放行二次确认(授权绑定被跳过
+      // 门禁项与原因)且当前失败项被完全覆盖时才放行;否则行为与文案保持不变。
+      let override: AgentAuthorizationInput['override'] | null = null
+      try {
+        override = authorizationInputFromPayload('merge', payload).override ?? null
+      } catch {
+        override = null
+      }
+      if (!override) {
+        return { ok: false, error: mergeGateRejection(gateFailures), gateFailures }
+      }
+      const uncovered = gateFailures.filter((failure) => !override.skipped.includes(failure.key))
+      if (uncovered.length > 0) {
+        return {
+          ok: false,
+          error: `${mergeGateRejection(uncovered)}(与人工放行确认时的门禁项不一致,请重新确认)`,
+          gateFailures,
+        }
+      }
+      // 放行审计先于合并写入时间线:即使随后合并失败,放行动作也可追溯,
+      // 且与 review 结论事件分离——放行不冒充 review 通过。
+      await appendEvent(workflow, {
+        kind: 'merge-override',
+        at: new Date().toISOString(),
+        skipped: [...override.skipped],
+        reason: override.reason,
+        operator: userInfo().username,
+      })
     }
     if (pr.state !== 'MERGED') {
       const command = [

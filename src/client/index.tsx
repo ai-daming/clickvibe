@@ -187,6 +187,9 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 .cv-tl-kind-review { background: #fbefff; color: #8250df; }
 .cv-tl-kind-resume { background: #f6f8fa; color: #57606a; }
 .cv-tl-kind-note { background: #f6f8fa; color: #57606a; }
+.cv-tl-kind-merge-override { background: #ffebe9; color: #cf222e; }
+.cv-override-entry { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; margin: 4px 0; }
+.cv-override-gates { margin: 0; padding-left: 18px; font-size: 11.5px; color: #9a6700; }
 .cv-tl-time { color: #8c959f; }
 .cv-tl-hash { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; background: #eff1f3; padding: 0 4px; border-radius: 4px; }
 .cv-tl-verdict { font-weight: 600; }
@@ -720,7 +723,7 @@ interface NextAction {
 }
 
 interface WorkflowEvent {
-  kind: 'dev' | 'review' | 'rework' | 'resume' | 'note'
+  kind: 'dev' | 'review' | 'rework' | 'resume' | 'note' | 'merge-override'
   at: string
   hash?: string
   verdict?: { passed: boolean; issues: string[] }
@@ -728,6 +731,28 @@ interface WorkflowEvent {
   fixed?: number
   publication?: DeliveryPublication
   note?: string
+  /** 人工放行审计(仅 merge-override 事件)。 */
+  skipped?: string[]
+  reason?: string
+  operator?: string
+}
+
+/** ClickVibe 自身合并门禁失败项(服务端下发,issue #49 人工放行用)。 */
+interface MergeGateFailure {
+  key: string
+  message: string
+}
+
+/** 门禁 key → 面板展示文案。 */
+const MERGE_GATE_LABELS: Record<string, string> = {
+  'review-hash': 'PR HEAD 与 review 结论哈希不一致',
+  'review-contract-missing': 'review 缺少验收契约快照',
+  'contract-unreadable': '无法读取当前验收契约',
+  'contract-changed': '验收契约已变更',
+}
+
+function mergeGateLabel(key: string): string {
+  return MERGE_GATE_LABELS[key] ?? key
 }
 
 function fmtTime(iso: string): string {
@@ -755,6 +780,8 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
 }) {
   const [busy, setBusy] = React.useState<string | null>(null)
   const [error, setError] = React.useState<string | null>(null)
+  /** 合并门禁失败清单:非空时在错误旁展示「人工放行」入口(issue #49)。 */
+  const [overrideGates, setOverrideGates] = React.useState<MergeGateFailure[] | null>(null)
   const [statusLines, setStatusLines] = React.useState<string[]>([])
   const [activeTaskId, setActiveTaskId] = React.useState<string | null>(null)
   const [streamState, setStreamState] = React.useState<'idle' | 'history' | 'connecting' | 'streaming' | 'retrying' | 'ended'>('idle')
@@ -924,9 +951,14 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
     }
     const res = await apiCall<
       | { ok: true; authorizationId: string; authorizationDigest: string; target?: { prNumber: string; branch: string; head: string; mergeFlag: '--merge' }; preview: { title?: string; updatedAt?: string; commentCount?: number; digest: string } }
-      | { ok: false; error: string }
+      | { ok: false; error: string; gateFailures?: MergeGateFailure[] }
     >('authorize', { action, url, ...(agent ? { agent } : {}), context, ...(action === 'develop' ? { expectedSnapshot } : {}) })
-    if (!res.ok) { setError(res.error); return null }
+    if (!res.ok) {
+      setError(res.error)
+      // 门禁拒绝时保留失败清单,在错误旁提供「人工放行」入口(issue #49)。
+      setOverrideGates(res.gateFailures ?? null)
+      return null
+    }
     const preview = res.preview
     const mergePreview = preview as typeof preview & { prNumber?: string; branch?: string; mergeFlag?: string; cleanup?: string[] }
     const summary = action === 'develop'
@@ -1021,16 +1053,91 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
   const mergeAndCleanup = async () => {
     setBusy('merging')
     setError(null)
+    setOverrideGates(null)
     try {
       const authorization = await authorize('merge', null)
       if (!authorization) { setBusy(null); return }
       const res = await apiCall<
         | { ok: true; merged: true; archived: true; prNumber: string }
-        | { ok: false; error: string; merged?: boolean; cleanupPending?: boolean }
+        | { ok: false; error: string; merged?: boolean; cleanupPending?: boolean; gateFailures?: MergeGateFailure[] }
       >('merge', { url, ...authorization })
       if (!res.ok) {
         setError(res.error)
+        setOverrideGates(res.gateFailures ?? null)
         if (res.merged) await refresh()
+        setBusy(null)
+        return
+      }
+      await refresh()
+      setBusy(null)
+      onDelivered?.()
+    } catch (e) {
+      setError(String(e)); setBusy(null)
+    }
+  }
+
+  // 人工放行(issue #49):门禁拒绝后的兜底出口。独立二次确认——服务端重新
+  // 弹预览并列出本次跳过的门禁项,用户逐项确认、填写放行原因后才执行;
+  // 放行记录写入 workflow 时间线,且只跳过 ClickVibe 自身门禁,GitHub 侧
+  // 保护(protected branch / required reviews)不受影响。
+  const mergeWithOverride = async () => {
+    setBusy('merging')
+    setError(null)
+    setOverrideGates(null)
+    try {
+      const reasonInput = window.prompt('人工放行合并(必填):\n请填写放行原因,将写入 workflow 审计时间线:')
+      if (reasonInput === null) { setBusy(null); return }
+      const reason = reasonInput.trim()
+      if (reason === '') { setError('人工放行需要填写放行原因'); setBusy(null); return }
+      const res = await apiCall<
+        | {
+          ok: true
+          authorizationId: string
+          authorizationDigest: string
+          target?: { prNumber: string; branch: string; head: string; mergeFlag: '--merge' }
+          override?: { skipped: string[]; reason: string }
+          preview: { prNumber?: string; branch?: string; mergeFlag?: string; cleanup?: string[]; override?: { skipped: string[]; reason: string; gates: MergeGateFailure[] } }
+        }
+        | { ok: false; error: string; gateFailures?: MergeGateFailure[] }
+      >('authorize', { action: 'merge', url, override: true, overrideReason: reason })
+      if (!res.ok) {
+        setError(res.error)
+        setOverrideGates(res.gateFailures ?? null)
+        setBusy(null)
+        return
+      }
+      const override = res.override ?? res.preview.override
+      if (override && override.skipped.length > 0) {
+        // 逐项确认:每一项被跳过的门禁都单独确认,任一取消即中止。
+        const gates = res.preview.override?.gates ?? []
+        for (const key of override.skipped) {
+          const gate = gates.find((item) => item.key === key)
+          const confirmed = window.confirm(
+            `人工放行 · 逐项确认\n\n即将跳过 ClickVibe 合并门禁项:\n\n• ${gate ? gate.message : mergeGateLabel(key)}\n\n确认跳过这一项并继续?`,
+          )
+          if (!confirmed) { setBusy(null); return }
+        }
+        const preview = res.preview
+        const confirmedMerge = window.confirm(
+          `⚠️ 人工放行合并(最后确认)\n\nPR: #${preview.prNumber ?? '?'}\n分支: ${preview.branch ?? '?'}\n策略: ${preview.mergeFlag ?? '--merge'} (merge commit)\n清理: ${(preview.cleanup ?? []).join('、')}\n\n跳过的门禁项:\n${override.skipped.map((key) => `• ${mergeGateLabel(key)}`).join('\n')}\n放行原因: ${override.reason}\n操作者: 本机用户(将写入审计时间线)\n\n注意:仅跳过 ClickVibe 自身门禁;GitHub 分支保护若拒绝合并将直接报错。\n\n确认放行并执行合并与清理?`,
+        )
+        if (!confirmedMerge) { setBusy(null); return }
+      } else {
+        // 确认时门禁已全部通过(此前拒绝基于过期数据):按正常合并预览确认。
+        const preview = res.preview
+        const confirmedMerge = window.confirm(
+          `门禁已全部通过,无需放行。ClickVibe 将执行不可逆的合并与清理:\n\nPR: #${preview.prNumber ?? '?'}\n分支: ${preview.branch ?? '?'}\n策略: ${preview.mergeFlag ?? '--merge'}\n清理: ${(preview.cleanup ?? []).join('、')}\n\n确认合并并清理?`,
+        )
+        if (!confirmedMerge) { setBusy(null); return }
+      }
+      const mergeRes = await apiCall<
+        | { ok: true; merged: true; archived: true; prNumber: string }
+        | { ok: false; error: string; merged?: boolean; cleanupPending?: boolean; gateFailures?: MergeGateFailure[] }
+      >('merge', { url, authorizationId: res.authorizationId, authorizationDigest: res.authorizationDigest, ...(res.target ? { target: res.target } : {}), ...(res.override ? { override: res.override } : {}) })
+      if (!mergeRes.ok) {
+        setError(mergeRes.error)
+        setOverrideGates(mergeRes.gateFailures ?? null)
+        if (mergeRes.merged) await refresh()
         setBusy(null)
         return
       }
@@ -1101,6 +1208,19 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
           : 'cv-dev-btn cv-dev-codex'
 
   const busyLabel = busy === 'merging' ? '合并并清理中…' : busy === 'syncing' ? '同步中…' : busy === 'resuming' ? '恢复中…' : busy === 'reviewing' ? 'Review 中…' : busy === 'developing' ? '启动中…' : null
+
+  // 人工放行入口(issue #49):合并尝试被门禁拒绝后(动态),或 review 已通过
+  // 但结论/契约过期、面板停留在「重新 Review」/「无法读取契约」时(静态)。
+  const overrideEntryVisible = overrideGates !== null || Boolean(
+    workflow?.prNumber
+    && workflow.reviewResult?.passed === true
+    && derived
+    && !derived.verdictCurrent
+    && !issueClosed
+    && busy === null
+    && (effectiveAction.kind === 'review'
+      || (effectiveAction.kind === 'none' && derived.issueContractUnknownReason === 'current-contract-unavailable')),
+  )
 
   return (
     <div className="cv-dev">
@@ -1230,6 +1350,23 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
       </div>
 
       {error ? <div className="cv-dev-error">{error}</div> : null}
+      {overrideEntryVisible ? (
+        <div className="cv-override-entry">
+          {overrideGates ? (
+            <ul className="cv-override-gates">
+              {overrideGates.map((gate) => <li key={gate.key}>门禁未过:{gate.message}</li>)}
+            </ul>
+          ) : null}
+          <button
+            className="cv-dev-btn cv-dev-warn"
+            disabled={busy !== null}
+            title="门禁拒绝时的兜底:二次确认逐项跳过 ClickVibe 门禁后合并,GitHub 侧保护不受影响"
+            onClick={() => void mergeWithOverride()}
+          >
+            仍要合并(人工放行)
+          </button>
+        </div>
+      ) : null}
       {streamNotice ? <div className="cv-dev-error">{streamNotice}</div> : null}
 
       {statusLines.length > 0 ? (
@@ -1247,10 +1384,15 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
           {[...workflowEvents].reverse().map((ev, i) => (
             <div key={i} className="cv-tl-row">
               <span className={`cv-tl-kind cv-tl-kind-${ev.kind}`}>
-                {ev.kind === 'dev' ? '开发' : ev.kind === 'rework' ? '返工' : ev.kind === 'review' ? 'Review' : ev.kind === 'resume' ? '恢复' : '备注'}
+                {ev.kind === 'dev' ? '开发' : ev.kind === 'rework' ? '返工' : ev.kind === 'review' ? 'Review' : ev.kind === 'resume' ? '恢复' : ev.kind === 'merge-override' ? '人工放行' : '备注'}
               </span>
               <span className="cv-tl-time">{fmtTime(ev.at)}</span>
               {ev.hash ? <code className="cv-tl-hash">{ev.hash}</code> : null}
+              {ev.kind === 'merge-override' ? (
+                <span className="cv-tl-note" title={ev.reason}>
+                  跳过 {(ev.skipped ?? []).map(mergeGateLabel).join('、')} · 操作者 @{ev.operator ?? '?'} · 原因:{ev.reason ?? '?'}
+                </span>
+              ) : null}
               {ev.kind === 'review' && ev.verdict
                 ? <span className={ev.verdict.passed ? 'cv-tl-verdict cv-tl-pass' : 'cv-tl-verdict cv-tl-fail'}>
                     {ev.verdict.passed ? '✅ 通过' : `❌ ${ev.verdict.issues.length} 个问题`}
