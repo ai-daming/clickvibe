@@ -68,7 +68,7 @@ ClickVibe 启动 agent 的命令行**按次显式传参**,不读取也不假设�
 - [#17](https://github.com/ai-daming/clickvibe/issues/17) 超时/中断后会话恢复(会话 id 捕获 + resume 命令形式)
 - [#18](https://github.com/ai-daming/clickvibe/issues/18) 任务超时上限可配置,支持小时级长任务
 - [#20](https://github.com/ai-daming/clickvibe/issues/20) 提示词统一:各阶段自带需求快照
-- [#22](https://github.com/ai-daming/clickvibe/issues/22) review 结论解析器支持 JSON 格式
+- [#22](https://github.com/ai-daming/clickvibe/issues/22) review 结论物化为 worktree 内 JSON 文件
 - [#23](https://github.com/ai-daming/clickvibe/issues/23) 合并后清理(worktree/分支/issue/workflow)
 
 ## 开发
@@ -139,5 +139,11 @@ curl -X POST http://127.0.0.1:3080/clickvibe/api/develop/poll \
 ```
 
 任务状态只保存在当前 Host 进程内,重启后旧 `taskId` 失效。真实 Agent 必须从面板发起:面板先把当前显示的完整 Issue 快照交给服务端比对,再展示 Agent、更新时间、评论数和快照摘要供确认；确认后的授权只能使用一次且会过期。`dryrun` 不需要高权限授权、不启动 Agent,适合用 curl 验证配置、worktree 恢复和增量轮询。
+
+### Review 结论与历史恢复
+
+Review agent 会把结构化结论写到 worktree 的 `.clickvibe/review-result.json`。完成回调优先读取并严格校验这个文件；文件缺失、过大、不是普通文件、JSON 损坏或 schema 不符时，会在 `~/.clickvibe/state/<issue-key>/review.log` 记录原因，再依次回退 stdout JSON 和表情结论。该文件已被 git 忽略，且每次 review 启动前都会删除，避免上一次结论污染新一轮 review；因此不要手工预置它。
+
+对 #19/#12 这类旧版本已截断的结论，先从 `~/.clickvibe/state/<issue-key>.json` 读取 `reviewAgent` 与 `reviewSessionId`，必要时用该 id 在 Claude 的 `~/.claude/projects/**/*.jsonl` 或 Codex 的 `~/.codex/sessions/**/*.jsonl` 中定位原会话。不要直接篡改 workflow JSON：旧结论必须绑定它实际审查的 commit。将 worktree 恢复到需要审查的 HEAD 后，在面板使用同一 reviewer 执行「重新 Review」；ClickVibe 会续接精确 session、要求 agent 从原会话上下文复核问题并物化新结论，新的 review 事件会记录本次实际 HEAD。若原 session 已不存在，只能发起一次全新 review，不能把无法验证 commit 的旧文本冒充当前结论。
 
 不要把 ClickVibe 暴露到局域网或公网。服务端会拒绝非回环来源的 Agent 操作,但同一操作系统账号下的恶意进程本来就可能读取代码、配置和开发凭据,本工具不把同账号进程隔离当作安全边界。
