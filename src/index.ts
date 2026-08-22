@@ -51,6 +51,12 @@ import {
   type IssueWorkflow,
 } from './state.ts'
 import { parseAgentChunk, type AgentKind } from './agent-stream.ts'
+import {
+  clearReviewResultFile,
+  loadReviewResult,
+  REVIEW_RESULT_RELATIVE_PATH,
+} from './review-result.ts'
+import { ExclusiveTaskGate } from './task-gate.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -131,6 +137,7 @@ interface LiveTask {
 }
 
 const liveTasks = new Map<string, LiveTask>()
+const reviewTaskGate = new ExclusiveTaskGate<LiveTask>()
 const liveWaiters = new Map<string, Set<() => void>>()
 const authorizations = new AuthorizationStore()
 const TASK_LOG_LINES = 2000
@@ -1226,10 +1233,11 @@ async function buildReviewPrompt(ctx: Context, workflow: IssueWorkflow): Promise
     `0. 先执行 git fetch origin 同步远端最新状态(并行开发时 base 可能已变化)`,
     `1. 再执行 git diff ${base}...HEAD 查看完整改动(在 worktree 内)`,
     '2. 检查:需求是否完整实现、是否有 bug/安全隐患、测试是否覆盖',
-    '3. 不要修改任何文件,只做只读 review',
-    '4. 最后一行必须输出一个 JSON 对象(单独一行,不要包裹在代码块里),格式:',
+    `3. 除 ${REVIEW_RESULT_RELATIVE_PATH} 外不要修改任何文件,只做只读 review`,
+    `4. 必须使用写文件工具把最终结论写入 worktree 内 ${REVIEW_RESULT_RELATIVE_PATH},格式:`,
     '{"passed": true|false, "issues": ["问题1(含文件/位置/原因)", "问题2", ...]}',
     '   passed=true 表示无问题;有任意问题则 passed=false 并列出全部。',
+    '5. 同时在最后一行输出同一个 JSON 对象(单独一行,不要包裹在代码块里),仅作为兼容兜底。',
   ].join('\n')
 }
 
@@ -1263,26 +1271,6 @@ async function fetchPrHeadBranch(ctx: Context, owner: string, repo: string, prNu
   } catch {
     return null
   }
-}
-
-/** Extract the final JSON verdict object from review log lines. */
-function extractReviewJson(lines: string[]): { passed: boolean; issues: string[] } | null {
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i]
-    const match = line.match(/\{.*"passed".*\}/)
-    if (!match) continue
-    try {
-      const obj = JSON.parse(match[0]) as { passed?: unknown; issues?: unknown }
-      if (typeof obj.passed !== 'boolean') continue
-      const issues = Array.isArray(obj.issues)
-        ? obj.issues.filter((x): x is string => typeof x === 'string')
-        : []
-      return { passed: obj.passed, issues }
-    } catch {
-      // 不是合法 JSON,继续找前一行
-    }
-  }
-  return null
 }
 
 /** Create (or reuse) the workflow record and the worktree+branch. */
@@ -1526,6 +1514,7 @@ function finishTask(
   task.closed = true
   task.status = status
   task.exitCode = exitCode
+  if (task.kind === 'review') reviewTaskGate.release(task.workflowKey, task)
   if (task.timeout) clearTimeout(task.timeout)
   notifyTask(task.taskId)
   scheduleTaskCleanup(task)
@@ -1976,21 +1965,38 @@ async function startReview(
   if (!existsSync(workflow.worktree)) {
     return { ok: false, error: `worktree 不存在: ${workflow.worktree}` }
   }
+  // 必须在第一个 await 之前同步占位。只检查持久化 reviewTaskId 会有 TOCTOU:
+  // 两个请求可同时读到旧 workflow,再在清理结果文件时交错并双开 review。
+  let reservation: { task: LiveTask; created: boolean }
+  try {
+    reservation = reviewTaskGate.reserve(workflow.key, () => {
+      const id = taskId('review')
+      return createLiveTask(id, workflow.key, 'review', agent, workflow.reviewSessionId)
+    })
+  } catch (error) {
+    return { ok: false, error: String(error instanceof Error ? error.message : error) }
+  }
+  if (!reservation.created) return { ok: true, taskId: reservation.task.taskId }
+  const live = reservation.task
+
   // 记录关联 PR(若 review 的是 PR 且未记录)
   if (parsed.kind === 'pr' && !workflow.prNumber) {
     workflow.prNumber = parsed.number
     await saveWorkflow(workflow)
   }
 
-  const taskIdValue = taskId('review')
-  let live: LiveTask
+  // A prior run's file must never become the next run's verdict.
   try {
-    live = createLiveTask(taskIdValue, workflow.key, 'review', agent, workflow.reviewSessionId)
+    await clearReviewResultFile(workflow.worktree)
   } catch (error) {
-    return { ok: false, error: String(error instanceof Error ? error.message : error) }
+    const message = String(error instanceof Error ? error.message : error)
+    await appendLog(workflow.key, 'review', `[clickvibe] 无法清除旧 review 结论文件: ${message}`)
+    finishTask(live, 'failed', 1)
+    return { ok: false, error: `无法清除旧 review 结论文件: ${message}` }
   }
+
   workflow.reviewAgent = agent
-  workflow.reviewTaskId = taskIdValue
+  workflow.reviewTaskId = live.taskId
   workflow.stage = 'reviewing'
   await saveWorkflow(workflow)
 
@@ -2008,7 +2014,7 @@ async function startReview(
       : 'codex exec -c approval_policy=never -s danger-full-access --json -'
   }
   const prompt = sessionId
-    ? '请继续 review。代码已更新,请先确认之前发现的问题是否已解决,再审查新改动,最后输出同样的 JSON 结论。'
+    ? `请继续 review。代码已更新,请先确认之前发现的问题是否已解决,再审查新改动。除 ${REVIEW_RESULT_RELATIVE_PATH} 外不要修改任何文件;必须使用写文件工具把最终结论写入该路径,格式为 {"passed":true|false,"issues":[...]};最后一行再输出同一个 JSON 作为兼容兜底。`
     : await buildReviewPrompt(ctx, workflow)
 
   await appendLog(workflow.key, 'review', `[clickvibe] 启动 ${agent} review${sessionId ? `(续会话 ${sessionId})` : ''}…`)
@@ -2022,12 +2028,18 @@ async function startReview(
       }
       return
     }
-    // 优先用 agent 输出的 JSON 结论(完整、不受截断/分块影响);
-    // JSON 缺失时回退到 ❌/✅ 文本判定。
     const lines = await readLogTail(workflow.key, 'review', 200)
-    const json = extractReviewJson(lines)
-    const passed = json ? json.passed : reviewVerdict(lines).passed
-    const issues = passed ? [] : (json?.issues ?? extractIssues(lines))
+    const resolved = await loadReviewResult(workflow.worktree, lines)
+    if (resolved.source === 'file') {
+      await appendLog(workflow.key, 'review', `[clickvibe] review 结论来源: ${REVIEW_RESULT_RELATIVE_PATH}`)
+    } else {
+      await appendLog(
+        workflow.key,
+        'review',
+        `[clickvibe] review 结论文件不可用(${resolved.fileError ?? '原因未知'}),回退 ${resolved.source === 'stdout-json' ? 'stdout JSON' : 'stdout 表情行'}判定`,
+      )
+    }
+    const { passed, issues } = resolved.result
     const reloaded = await loadWorkflow(workflow.key)
     if (reloaded) {
       reloaded.reviewResult = { passed, issues }
@@ -2053,51 +2065,7 @@ async function startReview(
     }
   })
 
-  return { ok: true, taskId: taskIdValue }
-}
-
-/** Decide the review verdict from the log: ❌ wins over ✅; neither → fail closed. */
-function reviewVerdict(lines: string[]): { passed: boolean } {
-  let sawFail = false
-  let sawPass = false
-  for (const line of lines) {
-    const t = line.trim()
-    // 结论可能带 emoji/状态前缀(💬/🔧/⚠️…),用 includes 判断更稳
-    if (t.includes('❌') && /发现|存在|问题|Review/.test(t)) sawFail = true
-    if (t.includes('✅') && !/本轮完成|会话结束/.test(t)) sawPass = true
-    if (/Review\s*通过|未发现问题|无问题/.test(t)) sawPass = true
-  }
-  return { passed: !sawFail && sawPass }
-}
-
-/** Extract issue lines from a review result (lines after a ❌ header). */
-/** Extract issue lines from review log lines (lines after a ❌ verdict). */
-function extractIssues(lines: string[]): string[] {
-  const out: string[] = []
-  // 只取最后一个包含 ❌ 的行(agent 的最终结论;前面可能有中间自查的 ❌)
-  let verdictIndex = -1
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i].includes('❌')) verdictIndex = i
-  }
-  if (verdictIndex === -1) return []
-  const verdict = lines[verdictIndex]
-  const rest = verdict.slice(verdict.indexOf('❌') + 1)
-  // 按 "N. " 编号切分条目;若无编号条目则走下面的行收集
-  const parts = rest.split(/(?=\d+\.\s)/).filter((s) => /^\d+\./.test(s.trim()))
-  if (parts.length > 0) {
-    for (const p of parts) {
-      const item = p.replace(/^\d+\.\s*/, '').trim()
-      if (item !== '') out.push(item)
-    }
-  } else {
-    // 无编号条目:收集结论行之后非状态、非 clickvibe 的行
-    for (let i = verdictIndex + 1; i < lines.length; i++) {
-      const t = lines[i].trim()
-      if (t === '' || /^✅|^⚠️|^🚀|^💭|^🔧|^\[clickvibe\]|本轮完成|会话结束/.test(t)) break
-      out.push(t)
-    }
-  }
-  return out.slice(0, 20)
+  return { ok: true, taskId: live.taskId }
 }
 
 /** Post the review result to the issue's GitHub comments. */

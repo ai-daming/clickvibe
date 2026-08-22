@@ -97,6 +97,12 @@ pnpm test
 - [产品蓝图](docs/product-blueprint.md):定位、架构演进、设计约束
 - [设计文档与调研](docs/plans/):布局改造、dry-run 等实施前设计
 
+### Review 结论与历史恢复
+
+Review agent 会把结构化结论写到 worktree 的 `.clickvibe/review-result.json`。完成回调优先读取并严格校验这个文件；文件缺失、过大、不是普通文件、JSON 损坏或 schema 不符时，会在 `~/.clickvibe/state/<issue-key>/review.log` 记录原因，再依次回退 stdout JSON 和表情结论。该文件已被 git 忽略，且每次 review 启动前都会删除，避免上一次结论污染新一轮 review；因此不要手工预置它。
+
+对 #19/#12 这类旧版本已截断的结论，先从 `~/.clickvibe/state/<issue-key>.json` 读取 `reviewAgent` 与 `reviewSessionId`，必要时用该 id 在 Claude 的 `~/.claude/projects/**/*.jsonl` 或 Codex 的 `~/.codex/sessions/**/*.jsonl` 中定位原会话。不要直接篡改 workflow JSON：旧结论必须绑定它实际审查的 commit。将 worktree 恢复到需要审查的 HEAD 后，在面板使用同一 reviewer 执行「重新 Review」；ClickVibe 会续接精确 session、要求 agent 从原会话上下文复核问题并物化新结论，新的 review 事件会记录本次实际 HEAD。若原 session 已不存在，只能发起一次全新 review，不能把无法验证 commit 的旧文本冒充当前结论。
+
 ## 安全说明
 
 真实 Agent 只接受**本机回环、同源、带专用请求头**的请求启动;启动前会冻结并展示当前 Issue 快照,签发**一次性、两分钟过期**的授权。不要把面板暴露到局域网或公网——它不把同账号进程隔离当作安全边界。
