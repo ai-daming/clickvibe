@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -95,5 +95,16 @@ test('clearing the materialized result prevents a stale review from being reused
     const resolved = await loadReviewResult(worktree, ['💬 ❌ Review 发现问题'])
     assert.equal(resolved.source, 'stdout-verdict')
     assert.deepEqual(resolved.result, { passed: false, issues: [] })
+  })
+})
+
+test('clearing creates the .clickvibe parent directory on a brand-new worktree', async () => {
+  await withWorktree(async (worktree) => {
+    // 真实启动链路:新 worktree 里没有 .clickvibe,Host 必须先建目录,
+    // review agent 的写文件工具才有落点(多数写工具不自动创建父目录)。
+    await clearReviewResultFile(worktree)
+    await assert.rejects(lstat(join(worktree, '.clickvibe/review-result.json')), { code: 'ENOENT' })
+    const info = await lstat(join(worktree, '.clickvibe'))
+    assert.equal(info.isDirectory(), true)
   })
 })

@@ -1920,6 +1920,11 @@ async function startReview(
   if (!existsSync(workflow.worktree)) {
     return { ok: false, error: `worktree 不存在: ${workflow.worktree}` }
   }
+  // 已有 review 在跑:复用同一任务,而不是再开一个并发 review——
+  // 并发任务共用同一个 .clickvibe/review-result.json,会互删/互读结论导致 verdict 错绑。
+  if (workflow.reviewTaskId && liveTasks.has(workflow.reviewTaskId) && !liveTasks.get(workflow.reviewTaskId)!.closed) {
+    return { ok: true, taskId: workflow.reviewTaskId }
+  }
   // 记录关联 PR(若 review 的是 PR 且未记录)
   if (parsed.kind === 'pr' && !workflow.prNumber) {
     workflow.prNumber = parsed.number

@@ -1,5 +1,5 @@
-import { lstat, readFile, unlink } from 'node:fs/promises'
-import { join } from 'node:path'
+import { lstat, mkdir, readFile, unlink } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 
 export const REVIEW_RESULT_RELATIVE_PATH = '.clickvibe/review-result.json'
 const MAX_REVIEW_RESULT_BYTES = 2 * 1024 * 1024
@@ -30,10 +30,16 @@ function parseMaterializedResult(raw: string): ReviewResult | null {
   return { passed: record.passed, issues: record.issues }
 }
 
-/** Remove the prior run's verdict before starting another review. */
+/** Remove the prior run's verdict before starting another review.
+ *  Also creates the `.clickvibe` parent directory: brand-new worktrees have no
+ *  such dir, and the review agent's write-tool often refuses to create parent
+ *  directories itself — without this, materialization silently falls back to
+ *  stdout parsing. The dir must exist before the agent starts. */
 export async function clearReviewResultFile(worktree: string): Promise<void> {
+  const dir = join(worktree, dirname(REVIEW_RESULT_RELATIVE_PATH))
+  await mkdir(dir, { recursive: true })
   try {
-    await unlink(join(worktree, REVIEW_RESULT_RELATIVE_PATH))
+    await unlink(join(dir, 'review-result.json'))
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   }
