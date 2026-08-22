@@ -155,6 +155,36 @@ test('authorization route freezes the displayed snapshot and consumes tampered c
   assert.equal(replay.status, 403)
 })
 
+test('development rejects a confirmed snapshot when the issue changes before stage start', async () => {
+  const url = 'https://github.com/ai-daming/clickvibe/issues/20'
+  const oldItem = {
+    url, title: 'old target', body: 'old acceptance', state: 'OPEN',
+    updatedAt: '2026-08-22T05:00:00Z', comments: [],
+  }
+  let issueReads = 0
+  const handler = createHandler(async (spec) => {
+    if (spec.command.startsWith('gh issue view')) {
+      issueReads += 1
+      return { exitCode: 0, stdout: { text: JSON.stringify(issueReads === 1 ? oldItem : {
+        ...oldItem, body: 'new acceptance', updatedAt: '2026-08-22T06:00:00Z',
+      }) }, stderr: { text: '' } }
+    }
+    return { exitCode: 0, stdout: { text: '[]' }, stderr: { text: '' } }
+  })
+  const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+  const authorized = await post(handler, '/clickvibe/api/authorize', {
+    action: 'develop', url, agent: 'codex', context: '', expectedSnapshot: oldItem,
+  }, headers) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
+  assert.equal(authorized.status, 200)
+  const developed = await post(handler, '/clickvibe/api/develop', {
+    url, agent: 'codex', context: '', authorizationId: authorized.body.authorizationId,
+    authorizationDigest: authorized.body.authorizationDigest,
+  }, headers)
+  assert.equal(developed.status, 400)
+  assert.match(developed.body.error ?? '', /内容在确认后已变化/)
+  assert.equal(issueReads, 2)
+})
+
 test('/sync rejects worktree mutation without the same-origin privileged headers', async () => {
   const result = await post(createHandler(), '/clickvibe/api/sync', {
     url: 'https://github.com/ai-daming/clickvibe/issues/1',
@@ -681,6 +711,10 @@ function interruptedWorkflow(key: string, url: string, worktree: string): IssueW
     devAgent: 'codex', devTaskId: 'old-dev', devSessionId: 'dead-session', devSessionAgent: 'codex', devInterrupted: true,
     reviewAgent: 'codex', reviewTaskId: null, reviewSessionId: null, reviewSessionAgent: null,
     reviewResult: null, prNumber: '29', issueState: 'OPEN', baseRef: 'origin/main @ abc',
+    issueSnapshot: {
+      url, title: 'persisted issue', body: '## 验收标准\n- persisted', state: 'OPEN',
+      updatedAt: '2026-08-21T00:00:00Z', comments: [],
+    },
     updatedAt: 1, events: [],
   }
 }
@@ -706,11 +740,15 @@ test('invalid exact dev session falls back once to a fresh session on the same t
     workflow.reviewResult = { passed: false, issues: ['修复竞态', '补充失败测试'] }
     await saveWorkflow(workflow)
     await appendLog(workflow.key, 'dev', 'prior run must be rotated')
-    const starts: Array<{ command: string; workdir?: string }> = []
+    const starts: Array<{ command: string; workdir?: string; prompt: string }> = []
     const comments: Array<{ command: string; body: string }> = []
     const handler = createHandler(async (spec) => {
       if (spec.command.startsWith('gh issue view')) return { exitCode: 0, stdout: { text: JSON.stringify({
-        url: workflow.url, title: 'resume issue', body: '## 验收标准\n- fallback', state: 'OPEN', updatedAt: 'now', comments: [],
+        url: workflow.url, title: 'resume issue', body: '## 验收标准\n- fallback', state: 'OPEN', updatedAt: 'now',
+        comments: [],
+      }) }, stderr: { text: '' } }
+      if (spec.command === 'gh pr view 29 --repo o/r --json comments') return { exitCode: 0, stdout: { text: JSON.stringify({
+        comments: [{ author: { login: 'review-bot' }, body: '== Review Meta ==\n- event: review\n- passed: false\n\n- 修复竞态\n- 补充失败测试' }],
       }) }, stderr: { text: '' } }
       if (spec.command.startsWith('gh api') || spec.command.startsWith('gh issue list')) {
         return { exitCode: 0, stdout: { text: '[]' }, stderr: { text: '' } }
@@ -722,7 +760,7 @@ test('invalid exact dev session falls back once to a fresh session on the same t
       }
       return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
     }, (spec) => {
-      starts.push({ command: spec.command, workdir: spec.workdir })
+      starts.push({ command: spec.command, workdir: spec.workdir, prompt: spec.stdin ?? '' })
       const fresh = starts.length === 2
       let read = false
       return {
@@ -752,6 +790,14 @@ test('invalid exact dev session falls back once to a fresh session on the same t
     assert.match(starts[0].command, /exec resume 'dead-session'/)
     assert.equal(starts[1].command, 'codex exec -c approval_policy=never -s danger-full-access --json -')
     assert.deepEqual(starts.map((start) => start.workdir), [worktree, worktree])
+    for (const start of starts) {
+      assert.match(start.prompt, /=== 需求快照 ===/)
+      assert.match(start.prompt, /updatedAt: now/)
+      assert.match(start.prompt, /## 验收标准\n- fallback/)
+      assert.match(start.prompt, /== Review Meta ==\n- event: review/)
+      assert.match(start.prompt, /修复竞态/)
+      assert.match(start.prompt, /=== 信任边界 ===/)
+    }
     assert.ok(completed.delta.some((line) => line.includes('回退全新会话')))
     assert.ok(completed.delta.some((line) => line.includes('恢复结束,退出码 0')))
     assert.equal((await readLogHistory(workflow.key, 'dev')).includes('prior run must be rotated'), false)
@@ -782,6 +828,7 @@ test('completed development without a PR appends its Dev Meta comment to the iss
     workflow.prNumber = null
     await saveWorkflow(workflow)
     const comments: Array<{ command: string; body: string }> = []
+    const prompts: string[] = []
     const handler = createHandler(async (spec) => {
       if (spec.command === 'git rev-parse --short HEAD') {
         return { exitCode: 0, stdout: { text: 'def4567' }, stderr: { text: '' } }
@@ -794,7 +841,8 @@ test('completed development without a PR appends its Dev Meta comment to the iss
         return { exitCode: 0, stdout: { text: 'https://github.com/o/r/issues/920#issuecomment-3' }, stderr: { text: '' } }
       }
       return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-    }, () => {
+    }, (spec) => {
+      prompts.push(spec.stdin ?? '')
       let read = false
       return {
         status: 'running', exitCode: 0,
@@ -820,12 +868,81 @@ test('completed development without a PR appends its Dev Meta comment to the iss
     assert.ok(resumed.body.taskId)
     await waitForTask(handler, resumed.body.taskId)
 
+    assert.equal(prompts.length, 1)
+    assert.match(prompts[0], /持久化回退\(可能过期\)/)
+    assert.match(prompts[0], /updatedAt: 2026-08-21T00:00:00Z/)
+    assert.match(prompts[0], /## 验收标准\n- persisted/)
     assert.equal(comments.length, 1)
     assert.match(comments[0].command, /github\.com\/o\/r\/issues\/920/)
     assert.match(comments[0].body, /^== Dev Meta ==\n- event: dev\n- commit: def4567\n- issue: #920\n- fixed: 0/m)
     const reloaded = await loadWorkflow(workflow.key)
     assert.equal(reloaded?.events.at(-1)?.publication?.target, 'issue')
     assert.equal(reloaded?.events.at(-1)?.publication?.status, 'posted')
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('concurrent resume requests reserve one workflow task before refreshing the snapshot', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-resume-gate-'))
+  process.env.HOME = tempHome
+  try {
+    const worktree = join(tempHome, 'worktree')
+    await mkdir(worktree, { recursive: true })
+    const workflow = interruptedWorkflow('o-r-930', 'https://github.com/o/r/issues/930', worktree)
+    workflow.prNumber = null
+    workflow.devSessionId = null
+    await saveWorkflow(workflow)
+    let issueReads = 0
+    let starts = 0
+    const handler = createHandler(async (spec) => {
+      if (spec.command.startsWith('gh issue view')) {
+        issueReads += 1
+        await new Promise((resolve) => setTimeout(resolve, 25))
+        return { exitCode: 0, stdout: { text: JSON.stringify({
+          url: workflow.url, title: 'resume gate', body: '## 验收标准\n- one task',
+          state: 'OPEN', updatedAt: '2026-08-22T07:00:00Z', comments: [],
+        }) }, stderr: { text: '' } }
+      }
+      if (spec.command.startsWith('gh issue comment')) {
+        return { exitCode: 0, stdout: { text: 'https://github.com/o/r/issues/930#issuecomment-1' }, stderr: { text: '' } }
+      }
+      return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+    }, () => {
+      starts += 1
+      let read = false
+      return {
+        status: 'running', exitCode: 0,
+        done: new Promise<void>((resolve) => setTimeout(resolve, 50)),
+        readOutput() {
+          if (read) return { delta: '', lossy: false }
+          read = true
+          return { delta: '{"type":"thread.started","thread_id":"resume-gate"}\n', lossy: false }
+        },
+        kill() { return true },
+      }
+    })
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+    const authorize = () => post(handler, '/clickvibe/api/authorize', {
+      action: 'resume', url: workflow.url, agent: 'codex', context: '',
+    }, headers) as Promise<{ status: number; body: { authorizationId?: string; authorizationDigest?: string } }>
+    const [firstAuth, secondAuth] = await Promise.all([authorize(), authorize()])
+    const resume = (authorization: typeof firstAuth.body) => post(handler, '/clickvibe/api/resume', {
+      url: workflow.url, agent: 'codex', context: '',
+      authorizationId: authorization.authorizationId,
+      authorizationDigest: authorization.authorizationDigest,
+    }, headers) as Promise<{ status: number; body: { ok: boolean; taskId?: string } }>
+    const [first, second] = await Promise.all([resume(firstAuth.body), resume(secondAuth.body)])
+    assert.equal(first.status, 200)
+    assert.equal(second.status, 200)
+    assert.equal(first.body.taskId, second.body.taskId)
+    assert.equal(issueReads, 1)
+    assert.equal(starts, 1)
+    assert.ok(first.body.taskId)
+    await waitForTask(handler, first.body.taskId)
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
@@ -905,7 +1022,7 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     workflow.reviewSessionId = 'dead-review'
     workflow.reviewSessionAgent = 'codex'
     await saveWorkflow(workflow)
-    const starts: string[] = []
+    const starts: Array<{ command: string; prompt: string }> = []
     let reviewFetches = 0
     const comments: Array<{ command: string; body: string }> = []
     const handler = createHandler(async (spec) => {
@@ -913,6 +1030,10 @@ test('invalid exact review session clears the stale id and falls back to a fresh
         reviewFetches++
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       }
+      if (spec.command.startsWith('gh issue view')) return { exitCode: 0, stdout: { text: JSON.stringify({
+        url: workflow.url, title: 'current review issue', body: '## 验收标准\n- review current snapshot',
+        state: 'OPEN', updatedAt: '2026-08-22T06:00:00Z', comments: [{ author: { login: 'bot' }, body: 'related note' }],
+      }) }, stderr: { text: '' } }
       if (spec.command.startsWith('gh pr view')) return { exitCode: 0, stdout: { text: 'main' }, stderr: { text: '' } }
       if (spec.command === 'git rev-parse --short HEAD') return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
       if (spec.command.startsWith('gh issue comment')) {
@@ -921,7 +1042,7 @@ test('invalid exact review session clears the stale id and falls back to a fresh
       }
       return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
     }, (spec) => {
-      starts.push(spec.command)
+      starts.push({ command: spec.command, prompt: spec.stdin ?? '' })
       const fresh = starts.length === 2
       let read = false
       return {
@@ -955,8 +1076,16 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     const completed = await waitForTask(handler, reviewed.body.taskId)
     assert.equal(starts.length, 2)
     assert.equal(reviewFetches, 1)
-    assert.match(starts[0], /exec resume 'dead-review'/)
-    assert.equal(starts[1], 'codex exec -c approval_policy=never -s danger-full-access --json -')
+    assert.match(starts[0].command, /exec resume 'dead-review'/)
+    assert.equal(starts[1].command, 'codex exec -c approval_policy=never -s danger-full-access --json -')
+    for (const start of starts) {
+      assert.match(start.prompt, /=== 需求快照 ===/)
+      assert.match(start.prompt, /updatedAt: 2026-08-22T06:00:00Z/)
+      assert.match(start.prompt, /review current snapshot/)
+      assert.match(start.prompt, /PR: https:\/\/github\.com\/o\/r\/pull\/29/)
+      assert.match(start.prompt, /当前 commit: abc123/)
+      assert.match(start.prompt, /=== 信任边界 ===/)
+    }
     const reloaded = await loadWorkflow(workflow.key)
     assert.equal(reloaded?.reviewSessionId, 'new-review')
     assert.equal(reloaded?.reviewSessionAgent, 'codex')

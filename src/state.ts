@@ -9,6 +9,7 @@ import { mkdir, readFile, writeFile, appendFile, rename } from 'node:fs/promises
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import type { DeliveryPublication } from './delivery-publication.ts'
+import type { PromptSnapshot } from './prompt.ts'
 
 /** The workflow stage of one issue. */
 export type WorkflowStage =
@@ -62,6 +63,8 @@ export interface IssueWorkflow {
   baseRef: string | null
   /** GitHub merge 已确认后的不可逆事实与幂等清理进度。 */
   delivery?: WorkflowDelivery
+  /** 最近一次成功抓取或启动授权确认的完整 Issue 需求快照。 */
+  issueSnapshot?: PromptSnapshot
   updatedAt: number
   /** 完整历史事件链:每次开发提交/review/恢复各一条,按时间追加。 */
   events: WorkflowEvent[]

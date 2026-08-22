@@ -72,7 +72,12 @@ function conflictedWorkflow(worktree: string): IssueWorkflow {
     devAgent: 'codex', devTaskId: null, devSessionId: null, devInterrupted: false,
     reviewAgent: 'codex', reviewTaskId: null, reviewSessionId: null,
     reviewResult: { passed: false, issues: ['README 内容冲突'] },
-    prNumber: null, issueState: 'OPEN', baseRef: null, updatedAt: Date.now(), events: [],
+    prNumber: null, issueState: 'OPEN', baseRef: null,
+    issueSnapshot: {
+      url: 'https://github.com/o/r/issues/26', title: 'conflict issue',
+      body: '## 验收标准\n- resolve conflicts', state: 'OPEN', updatedAt: '2026-08-21T00:00:00Z', comments: [],
+    },
+    updatedAt: Date.now(), events: [],
   }
 }
 
