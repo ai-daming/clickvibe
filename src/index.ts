@@ -56,7 +56,9 @@ import {
   resolveSessionForAgent,
   saveWorkflow,
   type IssueWorkflow,
+  type WorkflowEvent,
 } from './state.ts'
+import { buildDevComment, buildReviewComment } from './delivery-comment.ts'
 import { parseAgentChunk, type AgentKind } from './agent-stream.ts'
 import {
   clearReviewResultFile,
@@ -1759,22 +1761,12 @@ async function startDevelop(
         await appendLog(workflow.key, 'dev', `[clickvibe] ${agent} 结束,退出码 ${exitCode}`)
         const reloaded = await loadWorkflow(workflow.key)
         if (reloaded) {
+          const fixedIssues = reloaded.reviewResult?.passed === false ? [...reloaded.reviewResult.issues] : []
           if (applyDevRunOutcome(reloaded, live.status, exitCode, sessionId, agent)) {
             // 开发完成(含 rework):旧的 review 结论已归档到 events 历史,
             // 当前回到"待 review"——不能继续显示"Review 未通过"
-            // 检测关联 PR:开发可能创建了 PR,记录到 workflow(issue 为 key,PR 是产物)
-            if (!reloaded.prNumber) {
-              const pr = await detectLinkedPr(ctx, workflow.repoKey, workflow.branch)
-              if (pr) reloaded.prNumber = pr
-            }
-            // 记录开发提交事件:读 worktree HEAD 作为锚定哈希
             const head = await readWorktreeHead(ctx, workflow.worktree)
-            await appendEvent(reloaded, {
-              kind: extraContext !== '' ? 'rework' : 'dev',
-              at: new Date().toISOString(),
-              hash: head ?? undefined,
-              note: `${agent} 完成开发${extraContext !== '' ? '(按 review 意见返工)' : ''}`,
-            })
+            await recordDevDelivery(ctx, reloaded, agent, head, fixedIssues, extraContext !== '' ? 'rework' : 'dev')
           }
           await saveWorkflow(reloaded)
         }
@@ -2073,21 +2065,23 @@ async function startReview(
       reloaded.stage = passed ? 'passed' : 'review-ready' // 有问题 → 可回开发(rework)
       // 记录 review 会话 id(供下次 review 续会话)
       recordSessionId(reloaded, 'review', newSessionId, agent)
-      // 记录 review 历史事件:锚定被 review 的 HEAD
       const reviewedHead = await readWorktreeHead(ctx, workflow.worktree)
-      await appendEvent(reloaded, {
+      const event: WorkflowEvent = {
         kind: 'review',
         at: new Date().toISOString(),
         hash: reviewedHead ?? undefined,
         verdict: { passed, issues },
         note: `${agent} review${passed ? ' 通过' : ` 发现 ${issues.length} 个问题`}`,
+      }
+      await appendEvent(reloaded, event)
+      const issueNumber = parseUrl(reloaded.url)?.number ?? 'unknown'
+      const body = buildReviewComment({
+        commit: reviewedHead ?? 'unknown', issueNumber, passed, issues, agent, at: event.at,
       })
-      await saveWorkflow(reloaded)
-      // 发评论:有 PR 则发到 PR 评论(review 对象是代码/PR),否则发 issue
-      if (reloaded.prNumber) {
-        void postReviewComment(ctx, `https://github.com/${workflow.repoKey}/pull/${reloaded.prNumber}`, passed, issues)
-      } else {
-        void postReviewComment(ctx, workflow.url, passed, issues)
+      await publishDeliveryComment(ctx, reloaded, event, body)
+      if (event.publication?.status === 'posted' && event.publication.url && reloaded.reviewResult) {
+        reloaded.reviewResult.commentUrl = event.publication.url
+        await saveWorkflow(reloaded)
       }
     }
   }, sessionId ? {
@@ -2105,19 +2099,60 @@ async function startReview(
   return { ok: true, taskId: live.taskId }
 }
 
-/** Post the review result to the issue's GitHub comments. */
-async function postReviewComment(ctx: Context, issueUrl: string, passed: boolean, issues: string[]): Promise<void> {
-  const body = passed
-    ? '## ✅ ClickVibe Review 通过\n\n自动 review 未发现问题。'
-    : `## ❌ ClickVibe Review 发现问题(${issues.length} 条)\n\n${issues.map((i) => `- ${i}`).join('\n')}`
-  // body 走 stdin(--body-file -),避免 shell 转义破坏反引号/换行;
-  // URL 用单引号安全引用(与 develop.ts 的 shellQuote 一致)。
-  const command = `gh issue comment '${issueUrl.replaceAll("'", "'\\''")}' --body-file -`
-  try {
-    await runCommand(ctx, command, { stdin: body, timeoutMs: 30000 })
-  } catch {
-    // posting is best-effort
+/** Record one dev/rework delivery and publish its matching GitHub node. */
+async function recordDevDelivery(
+  ctx: Context,
+  workflow: IssueWorkflow,
+  agent: 'codex' | 'claude',
+  head: string | null,
+  fixedIssues: string[],
+  kind: 'dev' | 'rework',
+): Promise<void> {
+  if (!workflow.prNumber) {
+    const pr = await detectLinkedPr(ctx, workflow.repoKey, workflow.branch)
+    if (pr) workflow.prNumber = pr
   }
+  const event: WorkflowEvent = {
+    kind,
+    at: new Date().toISOString(),
+    hash: head ?? undefined,
+    fixed: fixedIssues.length,
+    note: `${agent} 完成开发${kind === 'rework' ? '(按 review 意见返工)' : ''}`,
+  }
+  await appendEvent(workflow, event)
+  const issueNumber = parseUrl(workflow.url)?.number ?? 'unknown'
+  const body = buildDevComment({
+    commit: head ?? 'unknown', issueNumber, fixedIssues, agent, at: event.at,
+  })
+  await publishDeliveryComment(ctx, workflow, event, body)
+}
+
+/** Publish a public delivery node without pretending a failed write succeeded. */
+async function publishDeliveryComment(
+  ctx: Context,
+  workflow: IssueWorkflow,
+  event: WorkflowEvent,
+  body: string,
+): Promise<void> {
+  const target = workflow.prNumber ? 'pr' : 'issue'
+  const targetUrl = workflow.prNumber
+    ? `https://github.com/${workflow.repoKey}/pull/${workflow.prNumber}`
+    : workflow.url
+  const command = `gh issue comment ${shellQuote(targetUrl)} --body-file -`
+  try {
+    const output = await runCommand(ctx, command, { stdin: body, timeoutMs: 30000 })
+    event.publication = {
+      target,
+      status: 'posted',
+      ...(output.startsWith('https://github.com/') ? { url: output.split('\n').at(-1) } : {}),
+    }
+    await appendLog(workflow.key, event.kind === 'review' ? 'review' : 'dev', `[clickvibe] 已发布 GitHub ${target === 'pr' ? 'PR' : 'Issue'} 评论${event.publication.url ? `: ${event.publication.url}` : ''}`)
+  } catch (error) {
+    const message = String(error instanceof Error ? error.message : error).slice(0, 500)
+    event.publication = { target, status: 'failed', error: message }
+    await appendLog(workflow.key, event.kind === 'review' ? 'review' : 'dev', `[clickvibe] GitHub 评论发布失败: ${message}`)
+  }
+  await saveWorkflow(workflow)
 }
 
 /** Resume (or continue) a dev session with an exact session id; `context`
@@ -2191,17 +2226,12 @@ async function resumeDevelop(
     await appendLog(workflow.key, 'dev', `[clickvibe] ${agent} 恢复结束,退出码 ${exitCode}`)
     const reloaded = await loadWorkflow(workflow.key)
     if (reloaded) {
+      const fixedIssues = reloaded.reviewResult?.passed === false ? [...reloaded.reviewResult.issues] : []
       if (applyDevRunOutcome(reloaded, live.status, exitCode, newSessionId, agent)) {
         // rework 完成:旧的 review 结论已归档到 events,回到"待 review",
         // 不能继续显示"Review 未通过"让用户无限重复点
-        // 记录 rework 事件(带新 HEAD)
         const head = await readWorktreeHead(ctx, workflow.worktree)
-        await appendEvent(reloaded, {
-          kind: 'rework',
-          at: new Date().toISOString(),
-          hash: head ?? undefined,
-          note: `${agent} 完成 rework(按 review 意见)`,
-        })
+        await recordDevDelivery(ctx, reloaded, agent, head, fixedIssues, 'rework')
       }
       await saveWorkflow(reloaded)
     }

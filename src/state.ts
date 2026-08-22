@@ -55,6 +55,15 @@ export interface WorkflowEvent {
   hash?: string
   /** review 结论(仅 review 事件)。 */
   verdict?: { passed: boolean; issues: string[] }
+  /** 本次开发完成前仍待修复的上一轮 review 问题数。 */
+  fixed?: number
+  /** 对应公开 GitHub 流水节点的发布结果;缺失表示旧的本地事件。 */
+  publication?: {
+    target: 'pr' | 'issue'
+    status: 'posted' | 'failed'
+    url?: string
+    error?: string
+  }
   note?: string
 }
 
