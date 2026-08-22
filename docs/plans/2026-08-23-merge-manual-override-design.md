@@ -6,7 +6,7 @@ ClickVibe 自身合并门禁(PR HEAD 与 review 结论哈希一致、验收契�
 
 ## 门禁建模与放行绑定
 
-服务端把原先散落的哈希/契约前置校验统一为 `collectMergeGateFailures`,按历史报错优先级(哈希 → 契约缺失 → 不可读 → 已变更)收集全部失败项,每项带稳定 key(`review-hash` / `review-contract-missing` / `contract-unreadable` / `contract-changed`)。预览与执行共用同一收集函数;未请求放行时按首条失败生成与旧实现逐字相同的拒绝文案。
+服务端把原先散落的哈希/契约前置校验统一为 `collectMergeGateFailures`,按历史报错优先级(哈希 → 契约缺失 → 不可读 → 已变更)收集全部失败项,每项带稳定 key(`review-hash` / `review-contract-missing` / `contract-unreadable` / `contract-changed`)。预览与执行共用同一收集函数;未请求放行时按首条失败生成与旧实现逐字相同的拒绝文案。与 issue #48 的同步等价免重审衔接:哈希门禁直接复用 `assertReviewHeadMatchesPr`——R 与最新 origin/main 的纯同步合并视为门禁通过,不进入可放行失败项;其拒绝文案跟随 #48 的新措辞(含「且不满足同步等价」)。
 
 放行通过既有单次授权机制绑定:`AgentAuthorizationInput` 增加可选 `override { skipped, reason }`,计入授权摘要 SHA-256,篡改或重放即失效。授权路由在门禁失败且请求携带 `override: true` + 非空原因时,以**当时实际失败项**生成 skipped 集合;`/merge` 执行时重新收集门禁,失败项必须被授权的 skipped 完全覆盖才放行——确认后新增的门禁失败(如新推送提交导致哈希再次不一致)不被旧确认覆盖,需重新走放行流程。放行授权同样单次使用。
 

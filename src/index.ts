@@ -1569,9 +1569,81 @@ interface MergeGateFailure {
 }
 
 /**
+ * 判定实时 PR HEAD 是否为「R 与 origin/main 的纯同步合并」(issue #48):
+ * H 必须是恰好两个父提交的 merge commit,其中一个父提交精确等于被审提交 R
+ * (R 的任何后代 —— 分支侧新提交、叠加 merge —— 都不放行),另一个父提交位于
+ * 当前 origin/main 的历史上,且 H 的树与 git merge-tree 对两父的自动合并结果
+ * 完全一致 —— 任何手工冲突决断(哪怕一行)都会破坏该等价。
+ * 任一 git 事实无法核实时按不满足处理(fail closed)。
+ */
+export async function isSyncEquivalentMerge(
+  ctx: Context,
+  worktree: string,
+  reviewedHash: string,
+  prHead: string,
+): Promise<boolean> {
+  if (!existsSync(worktree)) return false
+  const policy = { mode: 'danger-full-access' as const, workspaceRoot: worktree }
+  const gitOk = async (args: string, timeoutMs = 30_000): Promise<boolean> => {
+    try {
+      await runCommand(ctx, `git ${args}`, { workdir: worktree, timeoutMs, sandboxPolicy: policy })
+      return true
+    } catch {
+      return false
+    }
+  }
+  const gitOut = async (args: string): Promise<string | null> => {
+    try {
+      const output = await runCommand(ctx, `git ${args}`, { workdir: worktree, timeoutMs: 30_000, sandboxPolicy: policy })
+      return output.trim() || null
+    } catch {
+      return null
+    }
+  }
+  // 先同步远端:被检的 H(远端分支 HEAD)与最新 origin/main 对象必须在本地可解析
+  if (!await gitOk('fetch origin --prune', 60_000)) return false
+  const head = await gitOut(`rev-parse --verify ${shellQuote(`${prHead}^{commit}`)}`)
+  const reviewed = await gitOut(`rev-parse --verify ${shellQuote(`${reviewedHash}^{commit}`)}`)
+  if (!head || !reviewed || head === reviewed) return false
+  const parentsLine = await gitOut(`rev-list --parents -n 1 ${head}`)
+  if (!parentsLine) return false
+  const [headOid, ...parents] = parentsLine.split(/\s+/)
+  if (headOid !== head || parents.length !== 2) return false
+  if (!parents.includes(reviewed)) return false
+  const mainSide = parents[0] === reviewed ? parents[1] : parents[0]
+  // 另一父必须位于当前 origin/main 历史上(同步来源只能是 main)
+  const mergeBase = await gitOut(`merge-base ${mainSide} origin/main`)
+  if (!mergeBase || mergeBase !== mainSide) return false
+  // 树等价:H 的树必须与 R、main 侧的干净自动合并结果逐字节一致
+  const autoTree = await gitOut(`merge-tree --write-tree ${reviewed} ${mainSide}`)
+  const headTree = autoTree === null ? null : await gitOut(`rev-parse ${head}^{tree}`)
+  return !!autoTree && !!headTree && headTree === autoTree.split(/\s+/)[0]
+}
+
+/**
+ * 合并门禁的 HEAD 一致性校验(issue #48):R 与 H 哈希一致直接放行;不一致时
+ * 唯一例外是 H 为 R 与最新 origin/main 的纯同步合并,其余(含 H 比 R 旧、
+ * 分叉、分支侧新提交)一律要求重新 Review。
+ */
+export async function assertReviewHeadMatchesPr(
+  ctx: Context,
+  worktree: string,
+  reviewedHash: string | null,
+  prHead: string | null | undefined,
+): Promise<void> {
+  if (prHead && reviewedHash) {
+    if (sameCommitHash(reviewedHash, prHead)) return
+    if (await isSyncEquivalentMerge(ctx, worktree, reviewedHash, prHead)) return
+  }
+  throw new Error('合并门禁拒绝:实时 PR HEAD 与最近一次通过的 review 结论哈希不一致,且不满足同步等价,需重新 Review')
+}
+
+/**
  * Collect every failing ClickVibe-side merge gate in the historical rejection
  * order (hash first, then contract). GitHub-side protections are not gates here
- * and can never be overridden.
+ * and can never be overridden. The hash gate reuses the issue #48 head check,
+ * so a pure sync merge of the reviewed commit with origin/main passes without
+ * re-review; its message stays in sync with the assert-based wording.
  */
 async function collectMergeGateFailures(
   ctx: Context,
@@ -1580,8 +1652,13 @@ async function collectMergeGateFailures(
 ): Promise<MergeGateFailure[]> {
   const failures: MergeGateFailure[] = []
   const reviewedHash = latestPassingReviewHash(workflow)
-  if (!prHead || !reviewedHash || !sameCommitHash(reviewedHash, prHead)) {
-    failures.push({ key: 'review-hash', message: '实时 PR HEAD 与最近一次通过的 review 结论哈希不一致' })
+  try {
+    await assertReviewHeadMatchesPr(ctx, workflow.worktree, reviewedHash, prHead)
+  } catch (error) {
+    failures.push({
+      key: 'review-hash',
+      message: String(error instanceof Error ? error.message : error).replace(/^合并门禁拒绝:/, ''),
+    })
   }
   const reviewedContract = latestPassingReview(workflow)?.issueContract
   if (!reviewedContract) {
