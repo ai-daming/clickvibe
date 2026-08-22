@@ -101,6 +101,13 @@ pnpm test
 
 Review agent 会把结构化结论写到 worktree 的 `.clickvibe/review-result.json`。完成回调优先读取并严格校验这个文件；文件缺失、过大、不是普通文件、JSON 损坏或 schema 不符时，会在 `~/.clickvibe/state/<issue-key>/review.log` 记录原因，再依次回退 stdout JSON 和表情结论。该文件已被 git 忽略，且每次 review 启动前都会删除，避免上一次结论污染新一轮 review；因此不要手工预置它。
 
+开发与 Review 状态行完整保存在 `~/.clickvibe/state/<issue-key>/dev.log` 和 `review.log`。面板先读取磁盘历史，再从返回的 cursor 连接 SSE 增量；Host 重启后仍能恢复历史，移动网络切换时 EventSource 会按事件序号续传。排障时可直接查询：
+
+```sh
+curl 'http://127.0.0.1:3080/clickvibe/api/history?taskId=<task-id>'
+curl 'http://127.0.0.1:3080/clickvibe/api/history?key=<issue-key>&kind=dev'
+```
+
 对 #19/#12 这类旧版本已截断的结论，先从 `~/.clickvibe/state/<issue-key>.json` 读取 `reviewAgent`、`reviewSessionId` 与 `reviewSessionAgent`，必要时只在归属匹配的 Claude `~/.claude/projects/**/*.jsonl` 或 Codex `~/.codex/sessions/**/*.jsonl` 中定位原会话。不要直接篡改 workflow JSON：旧结论必须绑定它实际审查的 commit。将 worktree 恢复到需要审查的 HEAD 后，在面板使用同一 reviewer 执行「重新 Review」；ClickVibe 会续接归属匹配的精确 session、要求 agent 从原会话上下文复核问题并物化新结论，新的 review 事件会记录本次实际 HEAD。若归属未知、不匹配或原 session 已不存在，只能发起一次全新 review，不能跨 agent 续会话，也不能把无法验证 commit 的旧文本冒充当前结论。
 
 ## 安全说明

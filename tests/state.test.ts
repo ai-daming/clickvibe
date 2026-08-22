@@ -1,12 +1,35 @@
 import assert from 'node:assert/strict'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 import {
+  appendLog,
   applyDevRunOutcome,
   clearStaleSessionId,
+  readLogHistory,
   recordSessionId,
   resolveSessionForAgent,
   type IssueWorkflow,
 } from '../src/state.ts'
+
+test('persistent log snapshots preserve append order without truncating history', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-log-order-'))
+  process.env.HOME = tempHome
+  try {
+    const writes = Array.from({ length: 2100 }, (_, index) => appendLog('o-r-3', 'dev', `line-${index}`))
+    await Promise.all(writes)
+    const lines = await readLogHistory('o-r-3', 'dev')
+    assert.equal(lines.length, 2100)
+    assert.equal(lines[0], 'line-0')
+    assert.equal(lines[2099], 'line-2099')
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
 
 function workflow(): IssueWorkflow {
   return {

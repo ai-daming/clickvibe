@@ -705,54 +705,140 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
   const [error, setError] = React.useState<string | null>(null)
   const [statusLines, setStatusLines] = React.useState<string[]>([])
   const [activeTaskId, setActiveTaskId] = React.useState<string | null>(null)
+  const [streamState, setStreamState] = React.useState<'idle' | 'history' | 'connecting' | 'streaming' | 'retrying' | 'ended'>('idle')
+  const [streamNotice, setStreamNotice] = React.useState<string | null>(null)
   const [agentChoice, setAgentChoice] = React.useState<'codex' | 'claude'>(() => workflow?.reviewAgent ?? workflow?.devAgent ?? 'codex')
   const esRef = React.useRef<EventSource | null>(null)
+  const streamGenerationRef = React.useRef(0)
+  const checkingStreamRef = React.useRef(false)
   const autoActionConsumedRef = React.useRef(false)
   const derived = workflow?.derived
   const stage = derived?.status ?? workflow?.stage ?? 'idle'
   const nextAction = derived?.nextAction
 
   const appendStatusLine = (line: string) => {
-    setStatusLines((previous) => {
-      const next = [...previous, line]
-      if (next.length <= 2000) return next
-      return ['[clickvibe] 面板较早日志已截断', ...next.slice(next.length - 1999)]
-    })
+    setStatusLines((previous) => [...previous, line])
   }
 
-  // 打开 SSE 实时流
-  const openStream = (taskId: string) => {
+  type HistoryResponse =
+    | { ok: true; taskId: string | null; key: string; kind: 'dev' | 'review'; lines: string[]; cursor: number; active: boolean }
+    | { ok: false; error: string }
+
+  const fetchHistory = async (taskId: string): Promise<HistoryResponse> => {
+    const response = await fetch(`/clickvibe/api/history?taskId=${encodeURIComponent(taskId)}`)
+    return response.json() as Promise<HistoryResponse>
+  }
+
+  // 磁盘历史是基线;只有 /history 返回的 cursor 之后才接 SSE 增量。
+  const openStream = async (taskId: string, expectRunning = true) => {
+    const generation = ++streamGenerationRef.current
     setActiveTaskId(taskId)
+    setStreamState('history')
+    setStreamNotice(null)
     esRef.current?.close()
-    const es = new EventSource(`/clickvibe/api/stream?taskId=${encodeURIComponent(taskId)}`)
+    setStatusLines([])
+
+    let history: HistoryResponse
+    try {
+      history = await fetchHistory(taskId)
+    } catch {
+      if (generation !== streamGenerationRef.current) return
+      setStreamState('retrying')
+      setStreamNotice('历史加载失败,正在等待网络恢复…')
+      window.setTimeout(() => {
+        if (generation === streamGenerationRef.current) void openStream(taskId, expectRunning)
+      }, 1500)
+      return
+    }
+    if (generation !== streamGenerationRef.current) return
+    if (!history.ok) {
+      setActiveTaskId(null)
+      setStreamState('ended')
+      setStreamNotice('任务已结束/中断')
+      if (expectRunning) void refresh()
+      return
+    }
+
+    setStatusLines(history.lines)
+    if (!history.active) {
+      setActiveTaskId(null)
+      setStreamState(expectRunning ? 'ended' : 'idle')
+      setStreamNotice(expectRunning ? '任务已结束/中断' : null)
+      if (expectRunning) void refresh()
+      return
+    }
+
+    setStreamState('connecting')
+    const es = new EventSource(`/clickvibe/api/stream?taskId=${encodeURIComponent(taskId)}&cursor=${history.cursor}`)
     esRef.current = es
+    es.onopen = () => {
+      if (generation === streamGenerationRef.current) setStreamState('streaming')
+    }
     es.onmessage = (e) => {
+      if (generation !== streamGenerationRef.current) return
       try {
-        const data = JSON.parse(e.data) as string | { __done?: boolean }
+        const data = JSON.parse(e.data) as string | { __done?: boolean; __historyRequired?: boolean; line?: string; cursor?: number }
         if (typeof data === 'object' && data.__done) {
           es.close()
           setActiveTaskId(null)
+          setStreamState('ended')
           void refresh()
           return
         }
-        appendStatusLine(String(data))
+        if (typeof data === 'object' && data.__historyRequired) {
+          es.close()
+          void openStream(taskId, true)
+          return
+        }
+        appendStatusLine(typeof data === 'object' && typeof data.line === 'string' ? data.line : String(data))
       } catch {
         appendStatusLine(e.data)
       }
     }
-    es.onerror = () => { es.close() }
+    es.onerror = () => {
+      if (generation !== streamGenerationRef.current || checkingStreamRef.current) return
+      setStreamState('retrying')
+      checkingStreamRef.current = true
+      // EventSource hides HTTP status. Re-read the authoritative task target:
+      // active means native EventSource retry should continue; inactive/404 is
+      // terminal and must clear the stop control instead of failing silently.
+      void fetchHistory(taskId).then((latest) => {
+        if (generation !== streamGenerationRef.current) return
+        if (latest.ok && latest.active) return
+        es.close()
+        setActiveTaskId(null)
+        setStreamState('ended')
+        setStreamNotice('任务已结束/中断')
+        void refresh()
+      }).catch(() => {
+        // Network outage: leave EventSource open so its built-in retry survives
+        // phone network switches and temporary Host unreachability.
+      }).finally(() => {
+        checkingStreamRef.current = false
+      })
+    }
   }
 
   React.useEffect(() => () => {
+    streamGenerationRef.current += 1
     esRef.current?.close()
   }, [])
 
-  // 恢复现场:若已有进行中的任务,重连其 SSE
+  // 恢复现场:完成态也加载最后一次磁盘历史;进行态再接 SSE。
   React.useEffect(() => {
     if (!workflow) return
-    const taskId = workflow.stage === 'reviewing' ? workflow.reviewTaskId : workflow.devTaskId
-    if (taskId && (workflow.stage === 'developing' || workflow.stage === 'reviewing')) {
-      openStream(taskId)
+    const taskStartedAt = (taskId: string | null): number => {
+      const matched = taskId?.match(/^[a-z]+-(\d+)-/)
+      return matched ? Number(matched[1]) : 0
+    }
+    const showReview = workflow.stage === 'reviewing'
+      || workflow.stage === 'passed'
+      || Boolean(workflow.reviewResult)
+      || taskStartedAt(workflow.reviewTaskId) > taskStartedAt(workflow.devTaskId)
+    const taskId = showReview ? workflow.reviewTaskId : workflow.devTaskId
+    if (taskId) {
+      const expectRunning = workflow.stage === 'developing' || workflow.stage === 'reviewing'
+      void openStream(taskId, expectRunning)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workflow?.devTaskId, workflow?.reviewTaskId, workflow?.stage])
@@ -809,7 +895,7 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
       const res = await apiCall<{ ok: true; taskId: string; worktree: string; branch: string } | { ok: false; error: string }>('develop', { url, agent, ...(context ? { context } : {}), ...authorization })
       if (!res.ok) { setError(res.error); setBusy(null); return }
       await refresh()
-      openStream(res.taskId)
+      void openStream(res.taskId)
       setBusy(null)
     } catch (e) {
       setError(String(e)); setBusy(null)
@@ -827,7 +913,7 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
       const res = await apiCall<{ ok: true; taskId: string } | { ok: false; error: string }>('resume', { url, agent, ...(context ? { context } : {}), ...authorization })
       if (!res.ok) { setError(res.error); setBusy(null); return }
       await refresh()
-      openStream(res.taskId)
+      void openStream(res.taskId)
       setBusy(null)
     } catch (e) {
       setError(String(e)); setBusy(null)
@@ -844,7 +930,7 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
       const res = await apiCall<{ ok: true; taskId: string } | { ok: false; error: string }>('review', { url, agent, ...authorization })
       if (!res.ok) { setError(res.error); setBusy(null); return }
       await refresh()
-      openStream(res.taskId)
+      void openStream(res.taskId)
       setBusy(null)
     } catch (e) {
       setError(String(e)); setBusy(null)
@@ -1042,9 +1128,14 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
       </div>
 
       {error ? <div className="cv-dev-error">{error}</div> : null}
+      {streamNotice ? <div className="cv-dev-error">{streamNotice}</div> : null}
 
       {statusLines.length > 0 ? (
         <pre className="cv-dev-log">{statusLines.join('\n')}</pre>
+      ) : streamState === 'history' ? (
+        <pre className="cv-dev-log">正在恢复历史…</pre>
+      ) : activeTaskId ? (
+        <pre className="cv-dev-log">等待 agent 输出…{streamState === 'retrying' ? '\n连接中断,正在自动重连…' : ''}</pre>
       ) : null}
 
       {/* 历史时间线:全部事件,按时间顺序 */}

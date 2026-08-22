@@ -5,7 +5,7 @@
  * files. Survives web restarts and page refreshes so the panel can restore
  * its context (the issue being viewed + its dev/review workflow stage).
  */
-import { mkdir, readFile, writeFile, appendFile, stat } from 'node:fs/promises'
+import { mkdir, readFile, writeFile, appendFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 
@@ -159,6 +159,22 @@ export function logPath(key: string, kind: 'dev' | 'review'): string {
   return join(stateDir(), key, `${kind}.log`)
 }
 
+// Keep every operation for one persistent log in call order. Besides avoiding
+// reordered appendFile completions, this gives /history a real snapshot
+// boundary: writes queued before the read are included, later writes are SSE
+// increments after the returned in-memory cursor.
+const logQueues = new Map<string, Promise<unknown>>()
+
+function enqueueLogOperation<T>(path: string, operation: () => Promise<T>): Promise<T> {
+  const previous = logQueues.get(path) ?? Promise.resolve()
+  const current = previous.catch(() => undefined).then(operation)
+  logQueues.set(path, current)
+  void current.finally(() => {
+    if (logQueues.get(path) === current) logQueues.delete(path)
+  }).catch(() => undefined)
+  return current
+}
+
 /** Load one issue's workflow state; missing file yields a fresh idle record. */
 export async function loadWorkflow(key: string): Promise<IssueWorkflow | null> {
   try {
@@ -203,33 +219,36 @@ export async function saveWorkflow(workflow: IssueWorkflow): Promise<void> {
 
 /** Append one line to an issue's log file (creating the directory). */
 export async function appendLog(key: string, kind: 'dev' | 'review', line: string): Promise<void> {
+  const path = logPath(key, kind)
   try {
-    const path = logPath(key, kind)
-    const dir = dirname(path)
-    await mkdir(dir, { recursive: true })
-    await appendFile(path, `${line}\n`, 'utf8')
-    const info = await stat(path)
-    if (info.size > 2 * 1024 * 1024) {
-      const raw = await readFile(path)
-      const tail = raw.subarray(Math.max(0, raw.length - 1024 * 1024)).toString('utf8')
-      const firstNewline = tail.indexOf('\n')
-      const completeTail = firstNewline >= 0 ? tail.slice(firstNewline + 1) : tail
-      await writeFile(path, `[clickvibe] 较早持久日志已截断\n${completeTail}`, 'utf8')
-    }
+    await enqueueLogOperation(path, async () => {
+      await mkdir(dirname(path), { recursive: true })
+      await appendFile(path, `${line}\n`, 'utf8')
+    })
   } catch {
     // log persistence is best-effort
   }
 }
 
-/** Read a log file's tail; returns up to `limit` last lines. */
-export async function readLogTail(key: string, kind: 'dev' | 'review', limit = 500): Promise<string[]> {
+/** Read the complete durable log at an ordered snapshot boundary. */
+export async function readLogHistory(key: string, kind: 'dev' | 'review'): Promise<string[]> {
+  const path = logPath(key, kind)
   try {
-    const raw = await readFile(logPath(key, kind), 'utf8')
-    const lines = raw.split('\n')
-    return lines.slice(Math.max(0, lines.length - limit - 1), lines.length - 1)
+    return await enqueueLogOperation(path, async () => {
+      const raw = await readFile(path, 'utf8')
+      const lines = raw.split('\n')
+      if (lines.at(-1) === '') lines.pop()
+      return lines
+    })
   } catch {
     return []
   }
+}
+
+/** Read a log file's tail; returns up to `limit` last lines. */
+export async function readLogTail(key: string, kind: 'dev' | 'review', limit = 500): Promise<string[]> {
+  const lines = await readLogHistory(key, kind)
+  return lines.slice(Math.max(0, lines.length - limit))
 }
 
 /** Derive a stable issue key from repo + number (safe for filenames). */

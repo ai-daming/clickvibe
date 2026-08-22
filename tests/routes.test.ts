@@ -67,6 +67,30 @@ async function post(
   }
 }
 
+async function get(
+  listener: RequestListener,
+  path: string,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const server = createServer(listener)
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  assert.ok(address && typeof address === 'object')
+  try {
+    return await new Promise((resolve, reject) => {
+      request({ host: '127.0.0.1', port: address.port, path, method: 'GET' }, (res) => {
+        const chunks: Buffer[] = []
+        res.on('data', (chunk: Buffer) => chunks.push(chunk))
+        res.on('end', () => resolve({
+          status: res.statusCode ?? 0,
+          body: JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>,
+        }))
+      }).on('error', reject).end()
+    })
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+  }
+}
+
 test('/develop rejects a real agent before any shell command without server authorization', async () => {
   const result = await post(createHandler(), '/clickvibe/api/develop', {
     url: 'https://github.com/ai-daming/clickvibe/issues/1', agent: 'codex',
@@ -136,6 +160,67 @@ test('/projects route returns the configured-project envelope without invoking s
   const result = await post(createHandler(), '/clickvibe/api/projects', {})
   assert.equal(result.status, 200)
   assert.equal(Array.isArray((result.body as { projects?: unknown[] }).projects), true)
+})
+
+test('/history restores the complete disk log by task id after Host restart', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-history-restart-'))
+  process.env.HOME = tempHome
+  try {
+    const workflow = interruptedWorkflow(
+      'o-r-903',
+      'https://github.com/o/r/issues/903',
+      join(tempHome, 'worktree'),
+    )
+    workflow.devTaskId = 'dev-before-restart'
+    await saveWorkflow(workflow)
+    const { appendLog } = await import('../src/state.ts')
+    await appendLog(workflow.key, 'dev', 'thinking one')
+    await appendLog(workflow.key, 'dev', 'thinking two')
+
+    const result = await get(createHandler(), '/clickvibe/api/history?taskId=dev-before-restart')
+    assert.equal(result.status, 200)
+    assert.deepEqual(result.body.lines, ['thinking one', 'thinking two'])
+    assert.equal(result.body.cursor, 0)
+    assert.equal(result.body.active, false)
+    assert.equal(result.body.kind, 'dev')
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('/history accepts a safe workflow key and rejects unknown or traversal targets', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-history-key-'))
+  process.env.HOME = tempHome
+  try {
+    const workflow = interruptedWorkflow('o-r-904', 'https://github.com/o/r/issues/904', join(tempHome, 'worktree'))
+    await saveWorkflow(workflow)
+    const { appendLog } = await import('../src/state.ts')
+    await appendLog(workflow.key, 'review', 'review history')
+    const handler = createHandler()
+
+    const found = await get(handler, `/clickvibe/api/history?key=${workflow.key}&kind=review`)
+    assert.equal(found.status, 200)
+    assert.deepEqual(found.body.lines, ['review history'])
+
+    const traversal = await get(handler, '/clickvibe/api/history?key=..%2Fsecret&kind=dev')
+    assert.equal(traversal.status, 404)
+    const missing = await get(handler, '/clickvibe/api/history?taskId=missing')
+    assert.equal(missing.status, 404)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('/stream reports a cleaned-up task as 404 instead of a silent empty SSE', async () => {
+  const result = await get(createHandler(), '/clickvibe/api/stream?taskId=already-cleaned')
+  assert.equal(result.status, 404)
+  assert.match(String(result.body.error), /未知任务/)
 })
 
 function interruptedWorkflow(key: string, url: string, worktree: string): IssueWorkflow {

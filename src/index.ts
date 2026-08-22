@@ -4,6 +4,7 @@
  * - `/clickvibe/api/state`          — restore panel context (all workflows)
  * - `/clickvibe/api/develop`        — start dev: worktree+branch+agent
  * - `/clickvibe/api/develop/poll`   — incremental dev log/status (JSON)
+ * - `/clickvibe/api/history`        — complete disk-backed task history
  * - `/clickvibe/api/stream`         — SSE live status stream for a task
  * - `/clickvibe/api/review`         — review the dev branch with codex/claude
  * - `/clickvibe/api/resume`         — resume an interrupted dev session
@@ -51,6 +52,7 @@ import {
   issueKey,
   loadAllWorkflows,
   loadWorkflow,
+  readLogHistory,
   readLogTail,
   recordSessionId,
   resolveSessionForAgent,
@@ -588,7 +590,7 @@ export function apply(ctx: Context): void {
       }
       const pathname = new URL(req.url ?? '/', 'http://clickvibe.internal').pathname
       const method = pathname.startsWith(`${ROUTE}/`) ? pathname.slice(`${ROUTE}/`.length) : undefined
-      const knownMethods = new Set(['fetch', 'projects', 'repo/issues', 'state', 'authorize', 'develop', 'develop/poll', 'stream', 'review', 'resume', 'stop', 'sync'])
+      const knownMethods = new Set(['fetch', 'projects', 'repo/issues', 'state', 'authorize', 'develop', 'develop/poll', 'history', 'stream', 'review', 'resume', 'stop', 'sync'])
       if (method === undefined || !knownMethods.has(method)) {
         writeJson(res, 404, { ok: false, error: 'unknown method' })
         return
@@ -601,6 +603,16 @@ export function apply(ctx: Context): void {
           return
         }
         handleStream(req, res)
+        return
+      }
+
+      if (method === 'history') {
+        if (req.method !== 'GET') {
+          writeJson(res, 405, { ok: false, error: 'history requires GET' })
+          return
+        }
+        const result = await getTaskHistory(req)
+        writeJson(res, result.ok ? 200 : 404, result)
         return
       }
 
@@ -1820,6 +1832,61 @@ async function pollDevelop(
   }
 }
 
+type HistoryKind = 'dev' | 'review'
+
+async function resolveHistoryTarget(taskIdValue: string, requestedKey: string, requestedKind: string): Promise<{
+  taskId: string | null
+  key: string
+  kind: HistoryKind
+  live: LiveTask | null
+} | null> {
+  if (taskIdValue !== '') {
+    const live = liveTasks.get(taskIdValue) ?? null
+    if (live) return { taskId: taskIdValue, key: live.workflowKey, kind: live.kind, live }
+    const workflow = (await loadAllWorkflows()).find((item) =>
+      item.devTaskId === taskIdValue || item.reviewTaskId === taskIdValue)
+    if (!workflow) return null
+    const kind: HistoryKind = workflow.reviewTaskId === taskIdValue ? 'review' : 'dev'
+    return { taskId: taskIdValue, key: workflow.key, kind, live: null }
+  }
+  if (!/^[A-Za-z0-9_.-]+$/.test(requestedKey)) return null
+  if (requestedKind !== 'dev' && requestedKind !== 'review') return null
+  const workflow = await loadWorkflow(requestedKey)
+  if (!workflow) return null
+  const storedTaskId = requestedKind === 'dev' ? workflow.devTaskId : workflow.reviewTaskId
+  const live = storedTaskId ? liveTasks.get(storedTaskId) ?? null : null
+  return { taskId: storedTaskId, key: requestedKey, kind: requestedKind, live }
+}
+
+/** Complete disk history plus the exact cursor where SSE increments begin. */
+async function getTaskHistory(req: IncomingMessage): Promise<
+  | { ok: true; taskId: string | null; key: string; kind: HistoryKind; lines: string[]; cursor: number; active: boolean }
+  | { ok: false; error: string }
+> {
+  const url = new URL(req.url ?? '/', 'http://clickvibe.internal')
+  const target = await resolveHistoryTarget(
+    url.searchParams.get('taskId')?.trim() ?? '',
+    url.searchParams.get('key')?.trim() ?? '',
+    url.searchParams.get('kind')?.trim() ?? '',
+  )
+  if (!target) return { ok: false, error: '找不到对应任务历史' }
+
+  // Capture the live sequence before enqueueing the ordered disk read. No
+  // await may occur between these operations: that is the history/SSE fence.
+  const cursor = target.live?.log.read(Number.MAX_SAFE_INTEGER).cursor ?? 0
+  const historyPromise = readLogHistory(target.key, target.kind)
+  const lines = await historyPromise
+  return {
+    ok: true,
+    taskId: target.taskId,
+    key: target.key,
+    kind: target.kind,
+    lines,
+    cursor,
+    active: target.live !== null && !target.live.closed,
+  }
+}
+
 /** SSE live stream: pushes parsed status lines for a task as they arrive. */
 function handleStream(req: IncomingMessage, res: ServerResponse): void {
   const url = new URL(req.url ?? '/', 'http://clickvibe.internal')
@@ -1834,24 +1901,43 @@ function handleStream(req: IncomingMessage, res: ServerResponse): void {
   res.writeHead(200, {
     'content-type': 'text/event-stream',
     'cache-control': 'no-cache',
+    'x-accel-buffering': 'no',
     connection: 'keep-alive',
   })
 
-  let cursor = Number(url.searchParams.get('cursor') ?? 0)
-  if (!Number.isSafeInteger(cursor) || cursor < 0) cursor = 0
+  const lastEventId = Array.isArray(req.headers['last-event-id'])
+    ? req.headers['last-event-id'][0]
+    : req.headers['last-event-id']
+  const parseCursor = (value: string | undefined | null): number => {
+    const parsed = Number(value ?? 0)
+    return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0
+  }
+  let cursor = Math.max(parseCursor(url.searchParams.get('cursor')), parseCursor(lastEventId))
   let closed = false
+  let heartbeat: ReturnType<typeof setInterval> | undefined
+
+  const close = () => {
+    if (closed) return
+    closed = true
+    if (heartbeat) clearInterval(heartbeat)
+    res.end()
+  }
 
   const flush = () => {
     if (closed) return
-    const read = live.log.read(cursor)
+    const read = live.log.readDetailed(cursor)
+    if (read.truncated) {
+      res.write(`data: ${JSON.stringify({ __historyRequired: true })}\n\n`)
+      close()
+      return
+    }
     cursor = read.cursor
-    for (const line of read.lines) {
-      res.write(`data: ${JSON.stringify(line)}\n\n`)
+    for (const entry of read.entries) {
+      res.write(`id: ${entry.sequence}\ndata: ${JSON.stringify({ line: entry.line, cursor: entry.sequence })}\n\n`)
     }
     if (live.closed) {
       res.write(`data: ${JSON.stringify({ __done: true })}\n\n`)
-      res.end()
-      closed = true
+      close()
     }
   }
 
@@ -1861,9 +1947,15 @@ function handleStream(req: IncomingMessage, res: ServerResponse): void {
     const waiters = liveWaiters.get(taskId) ?? new Set<() => void>()
     waiters.add(wake)
     liveWaiters.set(taskId, waiters)
+    heartbeat = setInterval(() => {
+      if (!closed) res.write(': keep-alive\n\n')
+    }, 15_000)
+    heartbeat.unref?.()
     req.on('close', () => {
       waiters.delete(wake)
       if (waiters.size === 0) liveWaiters.delete(taskId)
+      if (heartbeat) clearInterval(heartbeat)
+      closed = true
     })
   }
 }
