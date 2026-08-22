@@ -91,6 +91,11 @@ import {
 import { buildDevComment, buildReviewComment } from './delivery-comment.ts'
 import { extractGithubCommentUrl } from './delivery-publication.ts'
 import { approvePassedReview } from './review-approval.ts'
+import {
+  decodeLiveLogLine,
+  encodeLiveLogEvent,
+  type LiveLogEvent,
+} from './live-output.ts'
 import { parseAgentChunk, type AgentKind } from './agent-stream.ts'
 import {
   clearReviewResultFile,
@@ -2921,7 +2926,13 @@ function createLiveTask(
   return task
 }
 
-function pushTaskLine(task: LiveTask, line: string): void {
+function pushTaskLine(task: LiveTask, value: string | LiveLogEvent): void {
+  const event: LiveLogEvent = typeof value === 'string'
+    ? value.startsWith('[clickvibe]')
+      ? { source: 'system', kind: 'system', text: value }
+      : { source: 'agent', kind: 'text', text: value }
+    : value
+  const line = encodeLiveLogEvent(event)
   task.log.appendLine(line)
   void appendLog(task.workflowKey, task.kind, line)
   notifyTask(task.taskId)
@@ -3010,7 +3021,13 @@ function attachAgentProcess(
       if (raw.lines.length > 0) {
         const parsed = parseAgentChunk(task.agent as AgentKind, raw.lines.join('\n'))
         for (const line of parsed.lines) {
-          pushTaskLine(task, line.text)
+          pushTaskLine(task, {
+            source: 'agent',
+            agent: task.agent as AgentKind,
+            kind: line.kind,
+            text: line.text,
+            ...(line.usage ? { usage: line.usage } : {}),
+          })
         }
         if (parsed.sessionId) {
           sawSessionId = true
@@ -3317,13 +3334,14 @@ async function pollDevelop(
     return { ok: false, error: `未知任务 ${taskId}` }
   }
   const read = live.log.read(cursor)
+  const decoded = read.lines.map(decodeLiveLogLine)
   return {
     ok: true,
     taskId,
     status: live.status,
     exitCode: live.exitCode,
     cursor: read.cursor,
-    delta: read.lines,
+    delta: decoded.map((event) => event.text),
     truncated: read.truncated,
     done: live.closed,
   }
@@ -3357,7 +3375,7 @@ async function resolveHistoryTarget(taskIdValue: string, requestedKey: string, r
 
 /** Complete disk history plus the exact cursor where SSE increments begin. */
 async function getTaskHistory(req: IncomingMessage): Promise<
-  | { ok: true; taskId: string | null; key: string; kind: HistoryKind; lines: string[]; cursor: number; active: boolean }
+  | { ok: true; taskId: string | null; key: string; kind: HistoryKind; lines: string[]; events: LiveLogEvent[]; cursor: number; active: boolean }
   | { ok: false; error: string }
 > {
   const url = new URL(req.url ?? '/', 'http://clickvibe.internal')
@@ -3373,12 +3391,14 @@ async function getTaskHistory(req: IncomingMessage): Promise<
   const cursor = target.live?.log.read(Number.MAX_SAFE_INTEGER).cursor ?? 0
   const historyPromise = readLogHistory(target.key, target.kind)
   const lines = await historyPromise
+  const events = lines.map(decodeLiveLogLine)
   return {
     ok: true,
     taskId: target.taskId,
     key: target.key,
     kind: target.kind,
-    lines,
+    lines: events.map((event) => event.text),
+    events,
     cursor,
     active: target.live !== null && !target.live.closed,
   }
@@ -3430,7 +3450,8 @@ function handleStream(req: IncomingMessage, res: ServerResponse): void {
     }
     cursor = read.cursor
     for (const entry of read.entries) {
-      res.write(`id: ${entry.sequence}\ndata: ${JSON.stringify({ line: entry.line, cursor: entry.sequence })}\n\n`)
+      const event = decodeLiveLogLine(entry.line)
+      res.write(`id: ${entry.sequence}\ndata: ${JSON.stringify({ line: event.text, event, cursor: entry.sequence })}\n\n`)
     }
     if (live.closed) {
       res.write(`data: ${JSON.stringify({ __done: true })}\n\n`)
@@ -3716,7 +3737,7 @@ async function startReview(
       }
       return
     }
-    const lines = await readLogTail(workflow.key, 'review', 200)
+    const lines = (await readLogTail(workflow.key, 'review', 200)).map((line) => decodeLiveLogLine(line).text)
     const resolved = await loadReviewResult(workflow.worktree, lines)
     if (!resolved.result) {
       pushTaskLine(live, `[clickvibe] review 结论解析异常:${resolved.parseError ?? '原因未知'},需要重新 Review`)

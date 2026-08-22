@@ -21,6 +21,13 @@ import type { SidebarFooterActionOwnerProps } from '@deepseek-ai/dsh-client-ui-s
 import { selectHistoryTask } from '../task-history.ts'
 import { githubCompareUrl, workflowStatusLabel } from '../state-view.ts'
 import { deliveryPublicationLabel, type DeliveryPublication } from '../delivery-publication.ts'
+import {
+  decodeLiveLogLine,
+  formatElapsed,
+  latestTokenUsage,
+  taskStartedAt,
+  type LiveLogEvent,
+} from '../live-output.ts'
 import { resolveDesktopPanelWidth, resolvePanelLayout } from './panel-layout.ts'
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 type _SlotLoaders = [typeof LayoutController, SidebarFooterActionOwnerProps]
@@ -154,7 +161,29 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 .cv-dev-status { font-size: 12px; color: #57606a; }
 .cv-dev-path { font-size: 11px; color: #8c959f; word-break: break-all; margin-top: 2px; }
 .cv-dev-error { font-size: 12px; color: #cf222e; background: #ffebe9; border: 1px solid #ff8182; border-radius: 4px; padding: 6px 8px; }
-.cv-dev-log { background: #0d1117; color: #e6edf3; border-radius: 6px; padding: 8px 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow-y: auto; margin: 0; }
+.cv-terminal { position: relative; display: flex; flex-direction: column; min-height: 0; overflow: hidden; border: 1px solid #30363d; border-radius: 8px; background: #0d1117; color: #e6edf3; box-shadow: inset 0 1px 0 rgb(255 255 255 / 4%); }
+.cv-terminal-head { min-height: 32px; padding: 0 8px 0 10px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid #21262d; background: #161b22; font: 600 10.5px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; color: #8b949e; }
+.cv-terminal-agent { color: #58a6ff; text-transform: uppercase; letter-spacing: .04em; }
+.cv-terminal-agent[data-agent="claude"] { color: #f2a65a; }
+.cv-terminal-spacer { flex: 1; }
+.cv-terminal-detach { border: 0; border-radius: 4px; padding: 3px 6px; background: #21262d; color: #c9d1d9; cursor: pointer; font: inherit; }
+.cv-terminal-detach:hover { background: #30363d; }
+.cv-dev-log { min-height: 72px; max-height: 200px; overflow: auto; overscroll-behavior: contain; padding: 8px 10px; font: 11px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; scrollbar-color: #30363d #0d1117; }
+.cv-terminal-line { min-height: 1.55em; }
+.cv-terminal-line-system { margin: 2px 0; padding: 1px 5px; border-left: 2px solid #58a6ff; color: #79c0ff; background: rgb(56 139 253 / 9%); }
+.cv-terminal-line-stage { color: #d2a8ff; }
+.cv-terminal-line-command { color: #7ee787; font-weight: 600; }
+.cv-terminal-line-command_output { padding-left: 12px; color: #b1bac4; }
+.cv-terminal-line-reasoning, .cv-terminal-line-thinking { color: #8b949e; font-style: italic; }
+.cv-terminal-line-tool { color: #ffa657; }
+.cv-terminal-line-message { color: #f0f6fc; }
+.cv-terminal-overlay { position: fixed; z-index: 10000; inset: 32px; display: flex; padding: 0; background: #0d1117; border-radius: 10px; box-shadow: 0 16px 48px rgb(1 4 9 / 55%); }
+.cv-terminal-overlay::before { content: ''; position: fixed; z-index: -1; inset: 0; background: rgb(1 4 9 / 62%); }
+.cv-terminal-overlay .cv-terminal { width: 100%; border-radius: inherit; }
+.cv-terminal-overlay .cv-dev-log { flex: 1; max-height: none; font-size: 13px; }
+.cv-log-history { border-radius: 6px; background: #f6f8fa; }
+.cv-log-history summary { padding: 5px 8px; cursor: pointer; color: #57606a; font-size: 11.5px; font-weight: 600; }
+@media (max-width: 767px) { .cv-terminal-overlay { inset: 0; border-radius: 0; } .cv-terminal-overlay .cv-dev-log { font-size: 12px; } }
 .cv-dev-done { font-size: 12px; color: #1a7f37; font-weight: 600; }
 .cv-stage { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; margin-left: 6px; }
 .cv-stage-idle { background: #f6f8fa; color: #57606a; }
@@ -772,6 +801,89 @@ function stageLabel(stage: Workflow['stage'], workflow: Workflow | null): string
   )
 }
 
+function LiveTerminal({ events, taskId, active, streamState, agent: fallbackAgent }: {
+  events: LiveLogEvent[]
+  taskId: string | null
+  active: boolean
+  streamState: 'idle' | 'history' | 'connecting' | 'streaming' | 'retrying' | 'ended'
+  agent?: 'codex' | 'claude' | null
+}) {
+  const [detached, setDetached] = React.useState(false)
+  const [now, setNow] = React.useState(() => Date.now())
+  const logRef = React.useRef<HTMLDivElement | null>(null)
+  const startedAt = taskStartedAt(taskId)
+  const usage = latestTokenUsage(events)
+  const agent = [...events].reverse().find((event) => event.agent)?.agent ?? fallbackAgent ?? undefined
+
+  React.useEffect(() => {
+    if (!active) return
+    setNow(Date.now())
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [active, taskId])
+
+  React.useEffect(() => {
+    const node = logRef.current
+    if (node) node.scrollTop = node.scrollHeight
+  }, [events.length, detached, streamState])
+
+  React.useEffect(() => {
+    if (!detached) return
+    const priorOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setDetached(false)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.body.style.overflow = priorOverflow
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [detached])
+
+  const tokenLabel = usage
+    ? `tokens ${usage.totalTokens?.toLocaleString() ?? '?'}${usage.inputTokens !== undefined || usage.outputTokens !== undefined ? ` · in ${usage.inputTokens?.toLocaleString() ?? '?'} / out ${usage.outputTokens?.toLocaleString() ?? '?'}` : ''}`
+    : null
+  const stateLabel = streamState === 'retrying'
+    ? '重连中'
+    : streamState === 'history'
+      ? '恢复历史'
+      : active ? 'LIVE' : '已结束'
+
+  const terminal = (
+    <div className="cv-terminal" data-agent={agent ?? undefined}>
+      <div className="cv-terminal-head">
+        <span aria-hidden="true">●</span>
+        <span className="cv-terminal-agent" data-agent={agent ?? undefined}>{agent ?? 'agent'}</span>
+        <span>{stateLabel}</span>
+        {active && startedAt !== null ? <span aria-label="任务已运行时长">{formatElapsed(now - startedAt)}</span> : null}
+        {tokenLabel ? <span>{tokenLabel}</span> : null}
+        <span className="cv-terminal-spacer" />
+        <button
+          type="button"
+          className="cv-terminal-detach"
+          aria-label={detached ? '收回实时输出' : '放大实时输出'}
+          title={detached ? '收回(Esc)' : '放大查看'}
+          onClick={() => setDetached((value) => !value)}
+        >{detached ? '↙ 收回' : '↗ 放大'}</button>
+      </div>
+      <div className="cv-dev-log" ref={logRef} role="log" aria-live="polite" aria-label="实时输出">
+        {events.filter((event) => event.kind !== 'usage').map((event, index) => (
+          <div key={index} className={`cv-terminal-line cv-terminal-line-${event.source === 'system' ? 'system' : event.kind}`}>
+            {event.text}
+          </div>
+        ))}
+        {events.length === 0 ? <div className="cv-terminal-line">{streamState === 'history' ? '正在恢复历史…' : '等待 agent 输出…'}</div> : null}
+        {streamState === 'retrying' ? <div className="cv-terminal-line cv-terminal-line-system">[clickvibe] 连接中断,正在自动重连…</div> : null}
+      </div>
+    </div>
+  )
+
+  return detached
+    ? createPortal(<div className="cv-terminal-overlay" role="dialog" aria-modal="true" aria-label="放大的实时输出">{terminal}</div>, document.body)
+    : terminal
+}
+
 function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoActionHandled, onDelivered }: {
   url: string
   issue: GhIssue
@@ -785,7 +897,8 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
   const [error, setError] = React.useState<string | null>(null)
   /** 合并门禁失败清单:非空时在错误旁展示「人工放行」入口(issue #49)。 */
   const [overrideGates, setOverrideGates] = React.useState<MergeGateFailure[] | null>(null)
-  const [statusLines, setStatusLines] = React.useState<string[]>([])
+  const [logEvents, setLogEvents] = React.useState<LiveLogEvent[]>([])
+  const [historyKind, setHistoryKind] = React.useState<'dev' | 'review' | null>(null)
   const [activeTaskId, setActiveTaskId] = React.useState<string | null>(null)
   const [streamState, setStreamState] = React.useState<'idle' | 'history' | 'connecting' | 'streaming' | 'retrying' | 'ended'>('idle')
   const [streamNotice, setStreamNotice] = React.useState<string | null>(null)
@@ -800,12 +913,12 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
   const workflowEvents = workflow?.events ?? []
   const lastDelivery = [...workflowEvents].reverse().find((event) => event.kind === 'dev' || event.kind === 'rework')
 
-  const appendStatusLine = (line: string) => {
-    setStatusLines((previous) => [...previous, line])
+  const appendLogEvent = (event: LiveLogEvent) => {
+    setLogEvents((previous) => [...previous, event])
   }
 
   type HistoryResponse =
-    | { ok: true; taskId: string | null; key: string; kind: 'dev' | 'review'; lines: string[]; cursor: number; active: boolean }
+    | { ok: true; taskId: string | null; key: string; kind: 'dev' | 'review'; lines: string[]; events?: LiveLogEvent[]; cursor: number; active: boolean }
     | { ok: false; error: string }
 
   const fetchHistory = async (taskId: string): Promise<HistoryResponse> => {
@@ -820,7 +933,8 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
     setStreamState('history')
     setStreamNotice(null)
     esRef.current?.close()
-    setStatusLines([])
+    setLogEvents([])
+    setHistoryKind(null)
 
     let history: HistoryResponse
     try {
@@ -843,7 +957,8 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
       return
     }
 
-    setStatusLines(history.lines)
+    setHistoryKind(history.kind)
+    setLogEvents(history.events ?? history.lines.map(decodeLiveLogLine))
     if (!history.active) {
       setActiveTaskId(null)
       setStreamState(expectRunning ? 'ended' : 'idle')
@@ -861,7 +976,7 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
     es.onmessage = (e) => {
       if (generation !== streamGenerationRef.current) return
       try {
-        const data = JSON.parse(e.data) as string | { __done?: boolean; __historyRequired?: boolean; line?: string; cursor?: number }
+        const data = JSON.parse(e.data) as string | { __done?: boolean; __historyRequired?: boolean; line?: string; event?: LiveLogEvent; cursor?: number }
         if (typeof data === 'object' && data.__done) {
           es.close()
           setActiveTaskId(null)
@@ -874,9 +989,11 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
           void openStream(taskId, true)
           return
         }
-        appendStatusLine(typeof data === 'object' && typeof data.line === 'string' ? data.line : String(data))
+        appendLogEvent(typeof data === 'object' && data.event
+          ? data.event
+          : decodeLiveLogLine(typeof data === 'object' && typeof data.line === 'string' ? data.line : String(data)))
       } catch {
-        appendStatusLine(e.data)
+        appendLogEvent(decodeLiveLogLine(e.data))
       }
     }
     es.onerror = () => {
@@ -976,7 +1093,8 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
   const startDev = async (agent: 'codex' | 'claude' | 'dryrun', context?: string) => {
     setBusy('developing')
     setError(null)
-    setStatusLines([])
+    setLogEvents([])
+    setHistoryKind(null)
     try {
       const authorization = agent === 'dryrun' ? {} : await authorize('develop', agent, context ?? '')
       if (agent !== 'dryrun' && !authorization) { setBusy(null); return }
@@ -993,7 +1111,8 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
   const resume = async (context?: string) => {
     setBusy('resuming')
     setError(null)
-    setStatusLines([])
+    setLogEvents([])
+    setHistoryKind(null)
     try {
       const agent = workflow?.devAgent ?? 'codex'
       const authorization = await authorize('resume', agent, context ?? '')
@@ -1011,7 +1130,8 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
   const startReview = async (agent: 'codex' | 'claude') => {
     setBusy('reviewing')
     setError(null)
-    setStatusLines([])
+    setLogEvents([])
+    setHistoryKind(null)
     try {
       const authorization = await authorize('review', agent)
       if (!authorization) { setBusy(null); return }
@@ -1377,12 +1497,25 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
       ) : null}
       {streamNotice ? <div className="cv-dev-error">{streamNotice}</div> : null}
 
-      {statusLines.length > 0 ? (
-        <pre className="cv-dev-log">{statusLines.join('\n')}</pre>
-      ) : streamState === 'history' ? (
-        <pre className="cv-dev-log">正在恢复历史…</pre>
-      ) : activeTaskId ? (
-        <pre className="cv-dev-log">等待 agent 输出…{streamState === 'retrying' ? '\n连接中断,正在自动重连…' : ''}</pre>
+      {activeTaskId || streamState === 'history' ? (
+        <LiveTerminal
+          events={logEvents}
+          taskId={activeTaskId}
+          active={activeTaskId !== null}
+          streamState={streamState}
+          agent={historyKind === 'review' ? workflow?.reviewAgent : historyKind === 'dev' ? workflow?.devAgent : agentChoice}
+        />
+      ) : logEvents.length > 0 ? (
+        <details className="cv-log-history">
+          <summary>📜 历史输出 · {logEvents.filter((event) => event.kind !== 'usage').length} 行</summary>
+          <LiveTerminal
+            events={logEvents}
+            taskId={null}
+            active={false}
+            streamState="ended"
+            agent={historyKind === 'review' ? workflow?.reviewAgent : historyKind === 'dev' ? workflow?.devAgent : null}
+          />
+        </details>
       ) : null}
 
       {/* 交付流水:本地事件与其公开 GitHub 评论状态,按时间倒序 */}

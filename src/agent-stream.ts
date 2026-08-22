@@ -8,9 +8,12 @@
  */
 export type AgentKind = 'codex' | 'claude'
 
+import { tokenUsage, type LiveLogKind, type TokenUsage } from './live-output.ts'
+
 export interface StatusLine {
-  kind: 'stage' | 'tool' | 'message' | 'text'
+  kind: Exclude<LiveLogKind, 'system'>
   text: string
+  usage?: TokenUsage
 }
 
 /** Trim a string to a bounded single line for display. */
@@ -67,8 +70,10 @@ export function parseCodexEvent(line: string): StatusLine[] {
   const out: StatusLine[] = []
   let event: {
     type?: string
-    item?: { type?: string; text?: string; name?: string; arguments?: unknown }
+    item?: { type?: string; text?: string; name?: string; arguments?: unknown; command?: string; aggregated_output?: string }
     thread_id?: string
+    usage?: unknown
+    info?: unknown
   }
   try {
     event = JSON.parse(line)
@@ -84,7 +89,13 @@ export function parseCodexEvent(line: string): StatusLine[] {
       break
     case 'turn.completed':
       out.push({ kind: 'stage', text: '✅ 本轮完成' })
+      if (tokenUsage(event.usage)) out.push({ kind: 'usage', text: '', usage: tokenUsage(event.usage) })
       break
+    case 'token_count': {
+      const usage = tokenUsage(event.usage ?? event.info ?? event)
+      if (usage) out.push({ kind: 'usage', text: '', usage })
+      break
+    }
     case 'item.completed': {
       const item = event.item ?? {}
       switch (item.type) {
@@ -100,6 +111,22 @@ export function parseCodexEvent(line: string): StatusLine[] {
             try { args = JSON.stringify(item.arguments) } catch { /* ignore */ }
           }
           out.push({ kind: 'tool', text: toolLabel(item.name ?? 'tool', args) })
+          break
+        }
+        case 'command_execution':
+          if (item.command) out.push({ kind: 'command', text: `$ ${oneLine(item.command, 1000)}` })
+          if (item.aggregated_output) {
+            for (const output of item.aggregated_output.replace(/\s+$/, '').split(/\r?\n/)) {
+              if (output !== '') out.push({ kind: 'command_output', text: output })
+            }
+          }
+          break
+        case 'reasoning':
+          if (item.text) out.push({ kind: 'reasoning', text: `◌ ${oneLine(item.text, 4000)}` })
+          break
+        case 'token_count': {
+          const usage = tokenUsage(item)
+          if (usage) out.push({ kind: 'usage', text: '', usage })
           break
         }
         case 'error':
@@ -121,8 +148,9 @@ export function parseClaudeEvent(line: string): StatusLine[] {
   const out: StatusLine[] = []
   let event: {
     type?: string
-    message?: { content?: { type?: string; text?: string; name?: string; input?: unknown }[] }
+    message?: { content?: { type?: string; text?: string; thinking?: string; name?: string; input?: unknown }[]; usage?: unknown }
     session_id?: string
+    usage?: unknown
   }
   try {
     event = JSON.parse(line)
@@ -134,11 +162,14 @@ export function parseClaudeEvent(line: string): StatusLine[] {
       for (const block of event.message?.content ?? []) {
         if (block.type === 'text' && block.text) {
           out.push({ kind: 'message', text: `💬 ${oneLine(block.text, 4000)}` })
+        } else if (block.type === 'thinking' && (block.thinking || block.text)) {
+          out.push({ kind: 'thinking', text: `◌ ${oneLine(block.thinking ?? block.text ?? '', 4000)}` })
         } else if (block.type === 'tool_use' && block.name) {
           const args = block.input ? oneLine(JSON.stringify(block.input), 80) : ''
           out.push({ kind: 'tool', text: toolLabel(block.name, args) })
         }
       }
+      if (tokenUsage(event.message?.usage)) out.push({ kind: 'usage', text: '', usage: tokenUsage(event.message?.usage) })
       break
     }
     case 'system': {
@@ -151,6 +182,7 @@ export function parseClaudeEvent(line: string): StatusLine[] {
     }
     case 'result':
       out.push({ kind: 'stage', text: '✅ 会话结束' })
+      if (tokenUsage(event.usage)) out.push({ kind: 'usage', text: '', usage: tokenUsage(event.usage) })
       break
     default:
       break

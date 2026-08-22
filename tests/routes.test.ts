@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { apply, fetchRepositoryIssues } from '../src/index.ts'
+import { encodeLiveLogEvent } from '../src/live-output.ts'
 import {
   appendLog,
   issueBodyHash,
@@ -1014,6 +1015,32 @@ test('/history restores the complete disk log by task id after Host restart', as
     assert.equal(result.body.cursor, 0)
     assert.equal(result.body.active, false)
     assert.equal(result.body.kind, 'dev')
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('/history restores structured agent records and keeps legacy lines compatible', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-history-events-'))
+  process.env.HOME = tempHome
+  try {
+    const workflow = interruptedWorkflow('o-r-906', 'https://github.com/o/r/issues/906', join(tempHome, 'worktree'))
+    workflow.devTaskId = 'dev-1720000000000-event'
+    await saveWorkflow(workflow)
+    await appendLog(workflow.key, 'dev', encodeLiveLogEvent({
+      source: 'agent', agent: 'codex', kind: 'command', text: '$ pnpm test',
+    }))
+    await appendLog(workflow.key, 'dev', '[clickvibe] legacy system line')
+
+    const result = await get(createHandler(), '/clickvibe/api/history?taskId=dev-1720000000000-event')
+    assert.deepEqual(result.body.lines, ['$ pnpm test', '[clickvibe] legacy system line'])
+    assert.deepEqual(result.body.events, [
+      { source: 'agent', agent: 'codex', kind: 'command', text: '$ pnpm test' },
+      { source: 'system', kind: 'system', text: '[clickvibe] legacy system line' },
+    ])
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
