@@ -1,6 +1,8 @@
 # ClickVibe 状态模型:事实分级与按钮决策表
 
 > 2026-08-22 讨论沉淀。回答一个问题:**"这个 issue 现在处于什么状态,下一步该做什么、显示什么按钮"** —— 判断必须只依赖客观、保证存在的事实,任何"可能缺失"的东西都只能当增强器,不能当门槛。
+>
+> 2026-08-22 增补(吸收 gh-issue 轻量版):review 结论额外绑定**契约指纹**(issue 目标/验收正文),正文被改 → 结论过期;自动写动作后**回读验证**。
 
 ## 一、核心原则
 
@@ -14,6 +16,7 @@
 | 级别 | 事实 | 来源 | 获取手段 |
 |---|---|---|---|
 | **硬** | issue OPEN/CLOSED | GitHub | `gh issue view` |
+| **硬** | issue 契约正文(目标/验收,用于契约指纹) | GitHub | `gh issue view` 取正文算指纹 |
 | **硬** | worktree 有无、registered branch | 本地 git | `git worktree list --porcelain` 交叉约定路径 |
 | **硬** | 目标分支有无(本地/远端) | 本地 git | `git show-ref` / `for-each-ref` |
 | **硬** | 内容更新(不管是否 commit) | 本地 git | `git status --porcelain` + `git log <fork点>..HEAD` |
@@ -63,8 +66,8 @@
 | 4 | 有提交,无 PR | 「创建 PR」(开发完成,推送建 PR 后 Review) |
 | 5 | PR open,无 review 结论 | 「Review」 |
 | 6 | review 未通过 | 「按意见返工」 |
-| 7 | review 通过 + HEAD == 结论哈希 | 「合并 PR」 |
-| 8 | review 通过 + HEAD ≠ 结论哈希 | 「重新 Review」(结论过期) |
+| 7 | review 通过 + HEAD == 结论哈希 + 契约指纹 == 结论指纹 | 「合并 PR」 |
+| 8 | review 通过 + (HEAD ≠ 结论哈希 或 契约指纹 ≠ 结论指纹) | 「重新 Review」(结论过期) |
 | 9 | PR closed 未合并 | 「查看原因 / 重新开发」(异常,需人) |
 
 ### 软事实降级链(贯穿)
@@ -74,6 +77,7 @@
 - **精确会话 id 被 agent 快速拒绝** → 清除 stale id,在同一 task/worktree 内仅回退一次全新会话;已完成 session 初始化或长时间运行后的普通失败不得触发回退
 - **review 未通过但问题列表为空** → 视为结论解析异常,清空当前 verdict 并要求重新 Review,不得进入空意见返工
 - **review 结论缺失** → ①本地事件缓存 → ②comment meta → ③GitHub 原生 review(`reviews` 字段)→ ④「人工确认」(不自动合并、不自动返工)
+- **结论缺契约指纹**(历史旧结论) → 视为 ≠ 当前指纹,结论过期,按 #8「重新 Review」(宁重审不盲合)
 - **comment meta 缺失** → 只影响时间线展示,不影响判断
 
 ## 四、与现状的差异(落地清单)
@@ -81,6 +85,8 @@
 1. **去掉 workflow 门槛**:状态推导入口从"已持久化 workflow"改为"GitHub 枚举的每个 open issue"。对无 workflow 的 issue,用约定算候选 worktree/分支,直接查 git 填事实(worktree 无 → head=null;分支无 → 无内容;PR 用 `gh pr list --head <branch>` 查)。`deriveNextAction` 纯函数已支持 idle 分支,缺的只是入口。**回归示例**:本次 "#5 后从未开发过的 issue 不显示开发按钮" 就是 workflow 门槛的症状。
 2. **PR / Issue 实时状态与合并执行**:`/state` 实时读取 GitHub PR / Issue 状态；「合并 PR」经单次特权授权后执行 `gh pr merge --merge --match-head-commit <HEAD>`，确认 MERGED 后进入可重入清理链并归档 workflow。清理未完成的 closed Issue 仍保留在活跃列表，避免失去重试入口。
 3. **comment 流水带 meta**(关联 #4):开发完成 / review 完成 / 合并都要发评论,meta 至少含:事件类型、绑定的 HEAD、结论(passed + 问题列表)、issue 号。写入是尽力而为,失败时本地事件照记,状态不倒退。
+4. **结论绑定契约指纹**:review 结论的 meta 增加 issue 契约指纹(目标/验收正文 hash);保存结论与合并前都校验。issue 正文目标/验收被改 → 旧结论自动过期,按钮回到「重新 Review」,与 HEAD 过期走同一条路径。
+5. **自动写动作回读验证**:建 PR / 发评论 / 更新 issue 状态后,立即用 `gh pr view` / `gh api` 回读确认落盘;回读失败只记录,不得把写动作当成功(原则同"写死状态实时查")。
 
 ## 五、关联
 
@@ -138,6 +144,7 @@
 | 落后 N > 0 | ⚠ 落后 origin/main N | 主干自基线后新增 N 个提交,还没并入 | 「同步 worktree」 |
 | 领先 M > 0 | 领先 M | 比主干多 M 个提交(开发成果/待 review 量) | 无(状态徽章已表达"有内容") |
 | 领先 M · 落后 N(分叉) | 领先 M · 落后 N | 分支与主干分叉,同步将 merge 主干进来 | 「同步 worktree」 |
+| 契约已变 | 📋 issue 契约已改 | issue 正文目标/验收与结论绑定指纹不符,结论过期 | 「重新 Review」 |
 
 配套出现项:
 
