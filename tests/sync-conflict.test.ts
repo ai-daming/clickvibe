@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
 import { buildMergePreface, deriveWorkflowState, syncWorktree, type IssueWorkflow } from '../src/index.ts'
-import { loadWorkflow, saveWorkflow } from '../src/state.ts'
+import { applyDevRunOutcome, loadWorkflow, saveWorkflow } from '../src/state.ts'
 
 const execFileAsync = promisify(execFile)
 
@@ -120,6 +120,40 @@ test('sync keeps the conflicted merge scene and rework stays reachable (issue #2
       const derived = (await deriveWorkflowState(ctx, reloaded)).derived
       assert.equal(derived.needsSync, true)
       assert.equal(derived.nextAction.kind, 'rework')
+    })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('an interrupted rework on a conflicted worktree resumes instead of re-syncing (issue #26)', async () => {
+  const { root, worktree } = await setupConflictedRepo()
+  try {
+    await withTempHome(root, async () => {
+      await saveWorkflow(conflictedWorkflow(worktree))
+      // 冲突:现场保留
+      const result = await syncWorktree(ctx, { url: 'https://github.com/o/r/issues/26' })
+      assert.equal((result as { conflict?: boolean }).conflict, true)
+
+      // 用户点「按意见返工」:resumeDevelop 把 stage 置为 developing;
+      // 随后返工 agent 非零退出(被停止/超时/Host 重启同理),
+      // applyDevRunOutcome 把 stage 留在 developing、旧 review 结论保留。
+      const started = await loadWorkflow('o-r-26')
+      assert.ok(started)
+      started.stage = 'developing'
+      applyDevRunOutcome(started, 'failed', 1, null, 'codex')
+      assert.equal(started.stage, 'developing')
+      assert.equal(started.devInterrupted, true)
+      assert.deepEqual(started.reviewResult, { passed: false, issues: ['README 内容冲突'] })
+      await saveWorkflow(started)
+
+      // 门禁不得退回 sync(那只会再次冲突):唯一动作是恢复会话,
+      // 恢复 prompt 会前置「先解决未完成的合并」指令。
+      const derived = (await deriveWorkflowState(ctx, started)).derived
+      assert.equal(derived.needsSync, true)
+      assert.equal(derived.nextAction.kind, 'resume')
+      const preface = await buildMergePreface(ctx, worktree, 'main')
+      assert.match(preface, /未完成的合并/)
     })
   } finally {
     await rm(root, { recursive: true, force: true })

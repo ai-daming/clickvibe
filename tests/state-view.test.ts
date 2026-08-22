@@ -174,6 +174,23 @@ test('a failed review verdict reworks even when the worktree is stale (issue #26
   assert.match(reworkCase.hint, /合并 origin\/main/)
 })
 
+test('an interrupted rework resumes even when the worktree is stale (issue #26)', () => {
+  // 返工启动后 stage 已变为 developing;返工 agent 失败/停止/超时/Host 重启时
+  // stage 保持 developing,门禁必须同样放行恢复,否则唯一动作退回 sync 再次
+  // 冲突,死锁在第一次返工中断后复现。
+  const failedCase = deriveNextAction(facts({
+    stage: 'developing', reviewPassed: false, reviewedHash: 'a1b2c3d', head: 'a1b2c3d',
+    needsSync: true, devInterrupted: true,
+  }))
+  assert.equal(failedCase.kind, 'resume')
+  assert.match(failedCase.hint, /合并 origin\/main/)
+  // Host 重启(devInterrupted 未标记)同样恢复
+  const lostCase = deriveNextAction(facts({
+    stage: 'developing', needsSync: true, devInterrupted: false,
+  }))
+  assert.equal(lostCase.kind, 'resume')
+})
+
 test('a missing worktree on a started workflow has no safe action', () => {
   const next = deriveNextAction(facts({ stage: 'review-ready', head: null }))
   assert.equal(next.kind, 'none')
