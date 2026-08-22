@@ -42,7 +42,7 @@ import {
   type DevelopAgent,
   type IssuePromptSnapshot,
 } from './develop.ts'
-import { deriveNextAction, workflowBaseBranch, type NextAction, type WorkflowFacts } from './state-view.ts'
+import { deriveNextAction, deriveWorkflowStatus, workflowBaseBranch, type NextAction, type WorkflowFacts } from './state-view.ts'
 import {
   appendEvent,
   appendLog,
@@ -536,15 +536,7 @@ export async function deriveWorkflowState(
   }
   const nextAction = deriveNextAction(facts)
   const baseBranch = workflowBaseBranch(workflow.baseRef, options.defaultBranch ?? 'main')
-  const status: WorkflowDerived['status'] = facts.prMerged || reviewPassed === true
-    ? 'passed'
-    : taskRunning && workflow.stage === 'reviewing'
-      ? 'reviewing'
-      : facts.prNumber
-        ? 'review-ready'
-        : taskRunning || hasUncommittedChanges || facts.hasCommits
-          ? 'developing'
-          : 'idle'
+  const status = deriveWorkflowStatus(facts)
 
   return {
     ...workflow,
@@ -634,7 +626,12 @@ export function apply(ctx: Context): void {
         return
       }
       if (method === 'state') {
-        const workflows = await loadAllWorkflows()
+        const filter = payload as { url?: unknown; repoKey?: unknown } | undefined
+        const url = String(filter?.url ?? '')
+        const repoKey = String(filter?.repoKey ?? '')
+        const workflows = (await loadAllWorkflows()).filter((workflow) =>
+          (url === '' || workflow.url === url) && (repoKey === '' || workflow.repoKey === repoKey),
+        )
         const enriched = await enrichWorkflowStates(ctx, workflows)
         writeJson(res, 200, { ok: true, workflows: enriched })
         return

@@ -42,6 +42,7 @@ export function githubCompareUrl(
 }
 
 export type WorkflowStageInput = 'idle' | 'developing' | 'review-ready' | 'reviewing' | 'passed'
+export type WorkflowStatus = WorkflowStageInput
 
 export interface WorkflowFacts {
   /** The issue itself is still open (closed issues have no next action). */
@@ -80,6 +81,46 @@ export interface WorkflowFacts {
 
 function action(kind: NextActionKind, label: string, hint: string): NextAction {
   return { kind, label, hint }
+}
+
+/** Derive the badge/detail status from the same live facts as the next action. */
+export function deriveWorkflowStatus(facts: WorkflowFacts): WorkflowStatus {
+  const verdictCurrent = facts.reviewPassed !== null
+    && facts.head !== null
+    && facts.reviewedHash !== null
+    && facts.head === facts.reviewedHash
+
+  if (facts.prMerged) return 'passed'
+  // A live task outranks the linked PR and any verdict bound to an older HEAD.
+  if (facts.taskRunning) return facts.stage === 'reviewing' ? 'reviewing' : 'developing'
+  // When the worktree cannot be inspected, preserve a known passing verdict
+  // unless there is positive evidence of a newer commit. This matches the
+  // pre-derived-state behavior without treating a known changed HEAD as current.
+  const passedWithoutContradictingHead = facts.reviewPassed === true
+    && (verdictCurrent || (facts.head === null && !facts.hasNewCommits))
+  if (passedWithoutContradictingHead) return 'passed'
+  if (facts.reviewPassed !== null || facts.prNumber || facts.stage === 'review-ready') return 'review-ready'
+  if (facts.hasUncommittedChanges || facts.hasCommits) return 'developing'
+  return 'idle'
+}
+
+/** Human label shared by the issue list and detail header. */
+export function workflowStatusLabel(
+  status: WorkflowStatus,
+  reviewPassed: boolean | null,
+  verdictCurrent: boolean | undefined,
+): string {
+  switch (status) {
+    case 'idle': return '未开发'
+    case 'developing': return '开发中'
+    case 'review-ready':
+      if (reviewPassed !== null && verdictCurrent === false) return '待重新 Review'
+      if (reviewPassed === true) return 'Review 通过'
+      if (reviewPassed === false) return 'Review 未通过'
+      return '待 review'
+    case 'reviewing': return 'review 中'
+    case 'passed': return '✅ 已通过'
+  }
 }
 
 /**

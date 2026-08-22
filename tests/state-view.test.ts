@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { deriveNextAction, githubCompareUrl, workflowBaseBranch, type WorkflowFacts } from '../src/state-view.ts'
+import {
+  deriveNextAction,
+  deriveWorkflowStatus,
+  githubCompareUrl,
+  workflowBaseBranch,
+  workflowStatusLabel,
+  type WorkflowFacts,
+} from '../src/state-view.ts'
 
 function facts(overrides: Partial<WorkflowFacts> = {}): WorkflowFacts {
   return {
@@ -56,6 +63,53 @@ test('a running task has no next action until it settles', () => {
   assert.equal(next.kind, 'none')
   const reviewing = deriveNextAction(facts({ stage: 'reviewing', taskRunning: true }))
   assert.equal(reviewing.kind, 'none')
+})
+
+test('a running development task stays developing even when a PR and old verdict exist', () => {
+  const runningRework = facts({
+    stage: 'developing', taskRunning: true, prNumber: '9', reviewPassed: false,
+    reviewedHash: 'a1b2c3d', head: 'e5f6g7', hasCommits: true,
+  })
+  assert.equal(deriveWorkflowStatus(runningRework), 'developing')
+
+  const runningDevWithPr = facts({
+    stage: 'developing', taskRunning: true, prNumber: '9', reviewPassed: null, hasCommits: true,
+  })
+  assert.equal(deriveWorkflowStatus(runningDevWithPr), 'developing')
+})
+
+test('a running review task stays reviewing even when a PR exists', () => {
+  assert.equal(deriveWorkflowStatus(facts({
+    stage: 'reviewing', taskRunning: true, prNumber: '9', hasCommits: true,
+  })), 'reviewing')
+})
+
+test('a current passed verdict passes while a known changed head requires review', () => {
+  assert.equal(deriveWorkflowStatus(facts({
+    stage: 'review-ready', prNumber: '9', reviewPassed: true,
+    reviewedHash: 'a1b2c3d', head: 'a1b2c3d',
+  })), 'passed')
+  assert.equal(deriveWorkflowStatus(facts({
+    stage: 'review-ready', prNumber: '9', reviewPassed: true,
+    reviewedHash: 'a1b2c3d', head: 'e5f6g7',
+  })), 'review-ready')
+  assert.equal(deriveWorkflowStatus(facts({
+    stage: 'review-ready', prNumber: null, reviewPassed: false,
+    reviewedHash: 'a1b2c3d', head: 'e5f6g7', hasCommits: true,
+  })), 'review-ready')
+})
+
+test('an unavailable worktree preserves a passed verdict without evidence of new commits', () => {
+  assert.equal(deriveWorkflowStatus(facts({
+    stage: 'review-ready', prNumber: '9', reviewPassed: true,
+    reviewedHash: 'a1b2c3d', head: null, hasNewCommits: false,
+  })), 'passed')
+})
+
+test('a stale review verdict is labelled as awaiting re-review', () => {
+  assert.equal(workflowStatusLabel('review-ready', false, false), '待重新 Review')
+  assert.equal(workflowStatusLabel('review-ready', true, false), '待重新 Review')
+  assert.equal(workflowStatusLabel('review-ready', false, true), 'Review 未通过')
 })
 
 test('interrupted development resumes the agent session', () => {
