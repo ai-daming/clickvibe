@@ -77,7 +77,9 @@ Milestone(交付批次:如"一期自动入群承接系统")
 - **手机(<768px)**:全屏 100vw 展开,主内容让位
 - 实现:测量主列(ResizeObserver),主列让位,面板占位 —— 直接操作 DOM(如 better-sidebar 的 `document.getElementById('root')` + centerRect 测量)
 
-**架构含义**:这使 ClickVibe 从"受 slot 约束的 overlay"转向"自己控制布局"——面板展开/收起、主列宽度、移动端全屏全部自管(参考 better-sidebar 的 Sidebar.tsx 模式)。涉及 DSH 布局集成,风险高,应作为 ClickVibe 自举开发的独立 issue。
+**架构含义**:这使 ClickVibe 从"受 slot 约束的 overlay"转向"自己控制布局"——面板展开/收起、主列宽度、移动端全屏全部自管(参考 better-sidebar 的 Sidebar.tsx 模式)。涉及 DSH 布局集成,风险高,应作为 ClickVibe 自举开发的独立 issue(已提 #12)。
+
+**参考深挖**(2026-08-22):参考实现已定位为同为 DSH 插件的 `omdsh-dev/DSH-better-sidebar`(`src/client/layout.css` + `Sidebar.tsx`)。核心机制 = 在 `<html>` 写 CSS 变量 → `#root` 的 `margin-right` 消费它让位(用 `calc(100% - var(...))` 兼容 `width:100%` 的 shell);宿主 AppFrame 中心列是 `minmax(0,1fr)` 唯一弹性列,壳被挤窄时回收宽度全落在中心列,让位天然成立;窄屏(<768px,刻意不对齐宿主 1024)抽屉 100vw 悬浮、布局变量恒 0。完整机制、宿主结构事实与 #12 落地建议见 [plans/2026-08-22-sidebar-layout-research.md](plans/2026-08-22-sidebar-layout-research.md)。
 
 ## 六、自动化边界(信任设计)
 
@@ -91,7 +93,7 @@ Milestone(交付批次:如"一期自动入群承接系统")
 | #3 | 长任务会话持久化(历史以磁盘为准,SSE 增量) | 待开发 |
 | #4 | PR 交付/审查 comment 流水 + UI 重新设计 | 待开发 |
 | #5 | 权威状态视图(worktree/main/远端对比、流程推导、唯一动作) | 待开发 |
-| 新 | 布局改造:better-sidebar 式右侧占位展开,不打架,手机全屏 | 待提 |
+| #12 | 布局改造:better-sidebar 式右侧占位展开,不打架,手机全屏 | 已提,参考调研完成 |
 
 ## 八、设计约束(贯穿所有开发)
 

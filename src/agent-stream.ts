@@ -133,7 +133,7 @@ export function parseClaudeEvent(line: string): StatusLine[] {
     case 'assistant': {
       for (const block of event.message?.content ?? []) {
         if (block.type === 'text' && block.text) {
-          out.push({ kind: 'message', text: `💬 ${oneLine(block.text)}` })
+          out.push({ kind: 'message', text: `💬 ${oneLine(block.text, 4000)}` })
         } else if (block.type === 'tool_use' && block.name) {
           const args = block.input ? oneLine(JSON.stringify(block.input), 80) : ''
           out.push({ kind: 'tool', text: toolLabel(block.name, args) })

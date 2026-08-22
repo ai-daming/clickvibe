@@ -1,143 +1,116 @@
-# clickvibe
+# ClickVibe
 
-DSH web 插件:右侧面板先选择已配置的 GitHub repo,再按依赖、状态和里程碑浏览全部 open issue；每个 issue 由 git/GitHub 硬事实推导唯一下一步动作,可创建独立 worktree 并启动 Codex/Claude 开发。
+> 在 DeepSeek Harness(DSH)Web 里开一个右侧面板,把你 GitHub 仓库的 open issue 变成一条看得见、点得动的开发流水线:选项目、看依赖、一键下单,Codex/Claude 在独立 worktree 里开发、review、返工自动跑——你只负责拆 issue 和拍板合并。
 
-## 功能
+## 它是干什么的
 
-- 侧栏底部 **ClickVibe** 按钮(窄栏显示 "CV")开关右侧面板
-- 项目选择器读取 `~/.clickvibe/config.yaml` 的全部 repo 映射,路径不在本机的跨机器配置也保留在列表
-- 选中项目后展示全部 open issue,支持按里程碑或依赖状态分组、按依赖就绪/阻塞过滤
-- 每行展示状态徽章、约定分支、落后提示、milestone、blockedBy 与唯一动作；点开后进入完整详情
-- **blockedBy 门槛**:有 OPEN 依赖时,「开始/恢复开发」替换为「被 #N 阻塞」(禁用);review/返工/合并等已开发流程不受影响
-- **就绪优先排序**:组内按 就绪(未开发+依赖OK)→ 开发中 → 阻塞 → 已交付 排列,同档按编号;一眼看到能下什么单
-- Host 半通过 `gh issue view` / `gh pr view` 抓取,返回结构化 JSON
-- Client 半渲染:
-  - 状态徽章(Open / Closed / Merged)、编号、作者、创建/更新/关闭/合并时间
-  - labels、assignees、milestone
-  - PR 额外:分支 `base ← head`、变更统计、提交数、合并状态
-  - 正文与评论:轻量 Markdown 渲染器(标题/粗斜体/代码块/列表/引用/链接),评论默认展开
-  - 整块内容区一个滚动条(GitHub 风格)
-- **权威状态视图**(#5):每次请求实时推导
-  - 三方对比:worktree / main / 远端(origin/main、远端同名分支)的哈希与 ahead/behind
-  - worktree 落后远端时提示「需要同步」并提供 /sync 动作(fetch + merge origin/main,冲突自动回滚)
-  - review 结论标注它审查的 HEAD;HEAD 变化后自动显示「结论已过期」,不冒充当前状态
-  - 任意时刻只有一个「下一步动作」按钮(开发/恢复/同步/创建 PR/Review/返工/合并),由 git 事实推导,workflow 文件只做增强
-  - PR 状态每次从 GitHub 查询；merged 立即进入已交付终态,查询失败则 fail-closed,不沿用旧的合并按钮
-- Open issue 一键开发:
-  - `Codex 开发` / `Claude 开发`:在 issue worktree 中启动非交互 agent
-  - `安全演练`:走完整 worktree/任务/轮询链路,只执行 `pwd`、当前分支和 `git status`
-  - 真实 Agent 启动只接受本机回环、同源且带专用请求头的请求；服务端冻结面板已展示的完整 Issue 快照,签发两分钟内一次性授权,启动时不再重新抓取 Issue
-  - 日志按完整行、cursor 增量轮询；服务端与面板最多保留 2000 行,持久日志也有大小上限,超出时明确提示截断
-  - Agent 最长运行 10 分钟,面板可主动停止；完成任务延迟回收,任务表本身有总量上限
-  - 已有正确 worktree/分支会复用；缺分支、缺 worktree 或 detached 等半完成状态会安全恢复
-  - 创建或修复缺失分支前先 `git fetch origin --prune`,并显式从 `origin/HEAD`(兼容回退 `origin/main`)创建,不继承配置仓库当前 HEAD
-  - 冲突分支或未注册的非空目录不会被覆盖
+ClickVibe 是一个 DSH Web 插件,给**「让 AI 帮你写代码」这件事补上最后一块拼图:状态与指挥**。
 
-## 架构
+装上之后,DSH 侧栏底部会出现一个 **ClickVibe** 按钮,点开是一个项目面板:
 
-| 半侧 | 文件 | 职责 |
-|---|---|---|
-| Host | `src/index.ts` | 注册 `/clickvibe/api` 前缀路由,处理 GitHub 抓取、开发任务和 cursor 日志轮询 |
-| 开发内核 | `src/develop.ts` | agent/URL 校验、shell 参数转义、有界行日志和 worktree 恢复决策 |
-| 状态视图 | `src/state-view.ts` | 纯函数 `deriveNextAction`:由 git 事实 + 事件历史推导唯一下一步动作 |
-| Client | `src/client/index.tsx` | `shell.overlay` 项目优先面板 + `sidebar.footer.action` 开关按钮；项目 issue 列表、筛选/分组、详情和唯一动作 |
-| 构建 | `tsdown.config.ts` | host → `lib/index.js`(ESM),client → `lib/client.js`(CJS 闭包,`window.__ModuleLoader__.load` 注册) |
+- **选一个 GitHub 仓库**,所有 open issue 按里程碑 / 依赖关系分组铺开;
+- **每一行就是一个工单**:当前进度、约定分支、被谁阻塞(blockedBy)、下一步该干什么——一眼扫完;
+- **点一下按钮**,Codex 或 Claude 就在这个 issue 专属的 worktree 里开始开发;
+- 开发完成自动进入 review,不过关按意见返工,过关后你确认合并。
 
-Client→Host 走 **HTTP API 路由**(正式插件没有动态插件的 `harness.handle`),这是与原型最大的结构差异。
+人负责「下订单」和「验收」,中间(开发 → review → 返工 → PR)全程自动、无人值守。用我们自己的话讲,它是个**里程碑驱动的异步开发执行器**——把「人不在电脑前的时间」变成「有效开发时间」:
 
-## 设计文档
+> 人在路上/开会/睡觉,ClickVibe 在家把代码写好、review 完、PR 挂起来,等你回来拍板。
 
-| 文档 | 内容 |
-|---|---|
-| [docs/state-model.md](docs/state-model.md) | **状态模型**:事实分级(git/GitHub 硬事实 vs 软事实)、按钮决策表(P0-P3)、软事实降级链、状态视图展示规范 |
-| [docs/issue-contract.md](docs/issue-contract.md) | Issue 契约:可被自动开发的 issue 写法(目标/验收标准/依赖 三行最小集) |
-| [docs/product-blueprint.md](docs/product-blueprint.md) | 产品蓝图:里程碑驱动的异步开发执行器定位、架构、UI 演进 |
+## 愿景:随身交付平台
 
-核心设计原则:**判断只依赖 git/GitHub 硬事实**(客观、保证存在),workflow 文件与 comment meta 只是增强器——允许缺失,缺失时走降级链,永不因缺 meta 卡死,也永不因缺判据瞎猜。
+ClickVibe 想成为的最终样子,是一个**随身携带的交付平台**:不管你在哪、手边是什么设备,像聊天一样就能查进度、下开发单、验收拍板;代码在远端无人值守地施工,该你决定的时候它来找你。
 
-## Agent 启动参数(显式,不依赖机器配置)
+「人不在电脑前的时间 = 有效开发时间」这句话,今天说的是"睡觉时电脑还在跑";往后它想说的是:**你在哪,指挥所就在哪**。
 
-ClickVibe 启动 agent 的命令行**按次显式传参**,不读取也不假设目标机器的全局配置(#11 跨机器可移植):
+这条路最后会走成什么样,现在没人说得准——所以这里不写路线图,只记方向。
 
-- claude:`--dangerously-skip-permissions`
-- codex:`-c approval_policy=never -s danger-full-access`(新会话)/ `-c 'sandbox_mode="danger-full-access"'`(resume 子命令无 `-s`,用 `-c` 覆盖)
+## 为什么会有它
 
-## 进行中(open issues)
+给 AI 下开发单这件事本身不难,难在下面三件事,ClickVibe 就是为它们做的:
 
-- [#16](https://github.com/ai-daming/clickvibe/issues/16) 实时输出 TUI 化 + detach 放大 + 运行时长 + token 用量
-- [#17](https://github.com/ai-daming/clickvibe/issues/17) 超时/中断后会话恢复(会话 id 捕获 + resume 命令形式)
-- [#18](https://github.com/ai-daming/clickvibe/issues/18) 任务超时上限可配置,支持小时级长任务
-- [#20](https://github.com/ai-daming/clickvibe/issues/20) 提示词统一:各阶段自带需求快照
-- [#22](https://github.com/ai-daming/clickvibe/issues/22) review 结论解析器支持 JSON 格式
-- [#23](https://github.com/ai-daming/clickvibe/issues/23) 合并后清理(worktree/分支/issue/workflow)
+1. **状态靠猜,是反复出事故的根源。** 以前开发/审查流程里,worktree 和主干脱节、review 结论不知道针对的是哪个 commit、按钮该不该点全凭记忆——来回折腾才发现「哦它其实卡在这了」。所以 ClickVibe 把 **git / GitHub 当成唯一事实源**,任何时刻只推导出**一个**「下一步动作」:开发、恢复、同步、Review、返工、合并,绝不存在「两个按钮都能点」的歧义。
 
-## 开发
+2. **「人在场」的 agent 工具,解决不了「人不在场」的需求。** 常见的 agent 编排器管的是「人在时,一群 agent 并行干活」;但真实需求往往是你不在电脑前:代码该有人写,review 该有人盯,依赖图该有人排。ClickVibe 管的不是「agent 干活」,而是 **「需求从 issue 到合并的完整旅程」**——异步施工、全程无人值守、状态可推导可审计。
+
+3. **机器不该替你做关键决策。** 版本能不能发、PR 要不要合并,是核心决策权。ClickVibe 把自动化停在「开发/review/返工/同步」,把 merge 和发版留给**你亲手确认**。
+
+一个佐证:这个仓库自己的功能(#5 权威状态视图、#7 项目优先面板等)就是 ClickVibe 自己开工单、自己开发、自己 review 合进来的(PR #15 / #19)。
+
+## 用了以后,你可以干什么
+
+**1. 一张图看清整个仓库的施工进度**
+选一个 repo,所有 open issue 按里程碑或依赖分组,按依赖就绪/阻塞过滤。每一行自带:状态徽章、约定分支、落后提示、blockedBy 和唯一动作按钮。组内「就绪 → 开发中 → 被阻塞 → 已交付」排序,**永远先看到现在能下什么单**。
+
+**2. 一键下单,无人值守开发**
+点「开始开发」,ClickVibe 自动做好一切:从远端默认分支创建独立 worktree 和分支、启动 Codex/Claude 非交互开发。最长可跑 24 小时,随时可停;超时/断线后点「恢复开发」优先续上同一个会话,会话已失效时自动在原 worktree 降级为一次全新会话,未提交改动不会丢。
+
+**3. 自动 review,按意见一键返工**
+开发完成 → 自动进入待 review → 你点 Review,agent 对照验收标准审查代码;**结论自动发到 PR/issue 评论**,并标注它审查的是哪个 commit。没过 → 点「按意见返工」,带着全部问题续会话改;过了 → 你确认合并。
+
+**4. 状态永远可信,不用猜、不用刷新**
+权威状态视图实时对比 worktree / main / 远端三方哈希与领先落后;落后了提示你并一键同步(fetch + merge)。合并冲突不再回滚现场:冲突状态原样保留,交给返工 agent 先解决冲突、再修 review 意见,流水线不会死锁(#26);review 结论过时了会标注「已过期」,不会拿旧结论冒充当前状态。PR 合并了立刻显示「已交付」,不会还停在一个过期的合并按钮上。
+
+**5. 没把握时,先「安全演练」**
+怕链路没配好?点「安全演练」走完整流程,但 agent 只执行 `pwd`、`git branch`、`git status`,零代码副作用,验证完再放心下单。
+
+**6. 你只需要在两个时刻出现**
+拆 issue(目标 / 验收标准 / 依赖,三行就够,写法见 [issue 契约](docs/issue-contract.md))和验收决策(点合并、拍板发版)。中间一切由 ClickVibe 自动施工。
+
+## 快速开始
 
 ```sh
-pnpm install
-pnpm run build     # tsc 声明 + tsdown 双 bundle
-pnpm test          # Host 纯逻辑回归测试
-pnpm run watch     # client 热更新
+# 1. 安装到 DSH profile(本机路径)
+dsh plugin --profile web add link:/path/to/clickvibe
+
+# 2. 配置 ~/.clickvibe/config.yaml
 ```
-
-## 一键开发配置
-
-配置文件固定为 `~/.clickvibe/config.yaml`：
 
 ```yaml
 repos:
-  ai-daming/clickvibe: /Users/me/work/clickvibe
+  ai-daming/clickvibe: /Users/me/work/clickvibe   # owner/repo → 本机路径
 
 worktreeRoot: ~/.clickvibe/worktrees
+fetchTtlSeconds: 45  # 查看状态时自动 fetch 的 TTL，可配置为 30–60 秒
 ```
-
-仓库按 `owner/repo` 精确匹配。目标路径为 `<worktreeRoot>/<仓库目录名>/<仓库目录名>-issue-<N>`，分支名为 `<仓库目录名>-issue-<N>`。
-
-## 安装到 profile
 
 ```sh
-dsh plugin --profile web add link:/Users/yinwm/work/clickvibe
+# 3. (开发者)构建与测试
+pnpm install && pnpm run build
+pnpm test
 ```
 
-- client 半改动:**硬刷新浏览器**(⌘⇧R)即可
-- host 半改动:重启 `dsh web`
+重启 `dsh web` 后,在侧栏底部点 **ClickVibe** 打开面板,选项目,点「开始开发」即可。client 端改动硬刷新浏览器(⌘⇧R)即可生效。
 
-## 验证
+## 在路上的能力(open issues)
+
+| 方向 | 内容 |
+|---|---|
+| 手机端 | [#14](https://github.com/ai-daming/clickvibe/issues/14) 手机对话优先界面(碎片时间看状态/下单/验收)、[#13](https://github.com/ai-daming/clickvibe/issues/13) 所有操作命令化、可被对话触发 |
+| 规模化 | [#11](https://github.com/ai-daming/clickvibe/issues/11) 跨机器执行、[#9](https://github.com/ai-daming/clickvibe/issues/9)/[#10](https://github.com/ai-daming/clickvibe/issues/10) 按依赖图自动选取、并行多工位调度 |
+| 更跟手 | [#16](https://github.com/ai-daming/clickvibe/issues/16) TUI 实时输出 + 放大 detach + 运行时长/token、[#12](https://github.com/ai-daming/clickvibe/issues/12) 右侧占位式布局(PR #24)、[#8](https://github.com/ai-daming/clickvibe/issues/8) 提 issue 模板引导 |
+| 更可靠 | [#3](https://github.com/ai-daming/clickvibe/issues/3)/[#17](https://github.com/ai-daming/clickvibe/issues/17) 长任务断线/中断恢复、[#18](https://github.com/ai-daming/clickvibe/issues/18) 超时上限可配置、[#20](https://github.com/ai-daming/clickvibe/issues/20) 提示词自带需求快照、[#22](https://github.com/ai-daming/clickvibe/issues/22) review 结论文件化不被截断、[#4](https://github.com/ai-daming/clickvibe/issues/4) 交付/审查评论流水、[#23](https://github.com/ai-daming/clickvibe/issues/23) 合并后自动清理 |
+
+## 给维护者
+
+- [架构与状态模型](docs/state-model.md):事实分级、按钮决策表、软事实降级链
+- [Issue 契约](docs/issue-contract.md):可自动开发的 issue 怎么写(目标/验收/依赖)
+- [产品蓝图](docs/product-blueprint.md):定位、架构演进、设计约束
+- [设计文档与调研](docs/plans/):布局改造、dry-run 等实施前设计
+
+### Review 结论与历史恢复
+
+Review agent 会把结构化结论写到 worktree 的 `.clickvibe/review-result.json`。完成回调优先读取并严格校验这个文件；文件缺失、过大、不是普通文件、JSON 损坏或 schema 不符时，会在 `~/.clickvibe/state/<issue-key>/review.log` 记录原因，再依次回退 stdout JSON 和表情结论。该文件已被 git 忽略，且每次 review 启动前都会删除，避免上一次结论污染新一轮 review；因此不要手工预置它。
+
+当前一轮开发与 Review 的状态行完整保存在 `~/.clickvibe/state/<issue-key>/dev.log` 和 `review.log`；新一轮同类型任务启动时重置对应日志，避免多轮任务无限累积，跨轮摘要保留在 workflow events。面板先读取磁盘历史，再从返回的 cursor 连接 SSE 增量；Host 重启后仍能恢复历史，移动网络切换时 EventSource 会按事件序号续传。排障时可直接查询：
 
 ```sh
-# host 路由
-curl -X POST http://127.0.0.1:3080/clickvibe/api/projects \
-  -H 'content-type: application/json' -d '{}'
-
-curl -X POST http://127.0.0.1:3080/clickvibe/api/repo/issues \
-  -H 'content-type: application/json' \
-  -d '{"repoKey":"ai-daming/clickvibe"}'
-
-curl -X POST http://127.0.0.1:3080/clickvibe/api/fetch \
-  -H 'content-type: application/json' \
-  -d '{"url":"https://github.com/cli/cli/issues/100"}'
-
-# client bundle
-curl http://127.0.0.1:3080/plugins/clickvibe/client.js
-
-# 启动无代码副作用的 dry-run
-curl -X POST http://127.0.0.1:3080/clickvibe/api/develop \
-  -H 'content-type: application/json' \
-  -d '{"url":"https://github.com/ai-daming/clickvibe/issues/1","agent":"dryrun"}'
-
-# 同步 worktree 到远端基线(fetch + merge origin/main,冲突自动回滚)
-curl -X POST http://127.0.0.1:3080/clickvibe/api/sync \
-  -H 'content-type: application/json' \
-  -H 'origin: http://127.0.0.1:3080' \
-  -H 'x-clickvibe-request: 1' \
-  -d '{"url":"https://github.com/ai-daming/clickvibe/issues/5"}'
-
-# 用启动响应中的 taskId 和 poll 响应中的 cursor 增量轮询
-curl -X POST http://127.0.0.1:3080/clickvibe/api/develop/poll \
-  -H 'content-type: application/json' \
-  -d '{"taskId":"dev-...","cursor":0}'
+curl 'http://127.0.0.1:3080/clickvibe/api/history?taskId=<task-id>'
+curl 'http://127.0.0.1:3080/clickvibe/api/history?key=<issue-key>&kind=dev'
 ```
 
-任务状态只保存在当前 Host 进程内,重启后旧 `taskId` 失效。真实 Agent 必须从面板发起:面板先把当前显示的完整 Issue 快照交给服务端比对,再展示 Agent、更新时间、评论数和快照摘要供确认；确认后的授权只能使用一次且会过期。`dryrun` 不需要高权限授权、不启动 Agent,适合用 curl 验证配置、worktree 恢复和增量轮询。
+对 #19/#12 这类旧版本已截断的结论，先从 `~/.clickvibe/state/<issue-key>.json` 读取 `reviewAgent`、`reviewSessionId` 与 `reviewSessionAgent`，必要时只在归属匹配的 Claude `~/.claude/projects/**/*.jsonl` 或 Codex `~/.codex/sessions/**/*.jsonl` 中定位原会话。不要直接篡改 workflow JSON：旧结论必须绑定它实际审查的 commit。将 worktree 恢复到需要审查的 HEAD 后，在面板使用同一 reviewer 执行「重新 Review」；ClickVibe 会续接归属匹配的精确 session、要求 agent 从原会话上下文复核问题并物化新结论，新的 review 事件会记录本次实际 HEAD。若归属未知、不匹配或原 session 已不存在，只能发起一次全新 review，不能跨 agent 续会话，也不能把无法验证 commit 的旧文本冒充当前结论。
 
-不要把 ClickVibe 暴露到局域网或公网。服务端会拒绝非回环来源的 Agent 操作,但同一操作系统账号下的恶意进程本来就可能读取代码、配置和开发凭据,本工具不把同账号进程隔离当作安全边界。
+## 安全说明
+
+真实 Agent 只接受**本机回环、同源、带专用请求头**的请求启动;启动前会冻结并展示当前 Issue 快照,签发**一次性、两分钟过期**的授权。不要把面板暴露到局域网或公网——它不把同账号进程隔离当作安全边界。

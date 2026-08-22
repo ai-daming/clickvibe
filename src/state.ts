@@ -5,9 +5,11 @@
  * files. Survives web restarts and page refreshes so the panel can restore
  * its context (the issue being viewed + its dev/review workflow stage).
  */
-import { mkdir, readFile, writeFile, appendFile, stat } from 'node:fs/promises'
+import { mkdir, readFile, writeFile, appendFile, rename } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
+import type { DeliveryPublication } from './delivery-publication.ts'
+import type { PromptSnapshot } from './prompt.ts'
 
 /** The workflow stage of one issue. */
 export type WorkflowStage =
@@ -16,6 +18,25 @@ export type WorkflowStage =
   | 'review-ready'// 开发完成,待 review
   | 'reviewing'   // review 中
   | 'passed'      // review 通过
+
+export type SessionAgent = 'codex' | 'claude'
+
+export interface DeliveryCleanup {
+  worktree: boolean
+  localBranch: boolean
+  remoteBranch: boolean
+  issue: boolean
+}
+
+/** Durable, irreversible delivery fact plus the retryable cleanup cursor. */
+export interface WorkflowDelivery {
+  status: 'merged' | 'cleanup-pending' | 'archived'
+  mergedAt: string
+  prHead: string
+  mergeStrategy: 'merge'
+  cleanup: DeliveryCleanup
+  lastError?: string
+}
 
 export interface IssueWorkflow {
   key: string
@@ -27,10 +48,12 @@ export interface IssueWorkflow {
   devAgent: 'codex' | 'claude' | null
   devTaskId: string | null
   devSessionId: string | null
+  devSessionAgent: SessionAgent | null
   devInterrupted: boolean
   reviewAgent: 'codex' | 'claude' | null
   reviewTaskId: string | null
   reviewSessionId: string | null
+  reviewSessionAgent: SessionAgent | null
   reviewResult: { passed: boolean; issues: string[]; commentUrl?: string } | null
   /** 关联的 PR 号(开发分支的代码产物);issue 为 key,PR 记录在这里。 */
   prNumber: string | null
@@ -38,6 +61,10 @@ export interface IssueWorkflow {
   issueState: 'OPEN' | 'CLOSED'
   /** 开发基线:开 worktree 时基于的分支与提交(如 origin/main @ a8a7b5f)。 */
   baseRef: string | null
+  /** GitHub merge 已确认后的不可逆事实与幂等清理进度。 */
+  delivery?: WorkflowDelivery
+  /** 最近一次成功抓取或启动授权确认的完整 Issue 需求快照。 */
+  issueSnapshot?: PromptSnapshot
   updatedAt: number
   /** 完整历史事件链:每次开发提交/review/恢复各一条,按时间追加。 */
   events: WorkflowEvent[]
@@ -51,7 +78,90 @@ export interface WorkflowEvent {
   hash?: string
   /** review 结论(仅 review 事件)。 */
   verdict?: { passed: boolean; issues: string[] }
+  /** 本次开发完成前仍待修复的上一轮 review 问题数。 */
+  fixed?: number
+  /** 对应公开 GitHub 流水节点的发布结果;缺失表示旧的本地事件。 */
+  publication?: DeliveryPublication
   note?: string
+}
+
+/** Apply the durable state shared by initial-development and resumed runs. */
+export function applyDevRunOutcome(
+  workflow: IssueWorkflow,
+  status: 'running' | 'done' | 'failed' | 'stopped' | 'timed_out',
+  exitCode: number | null,
+  sessionId: string | null,
+  agent: SessionAgent,
+): boolean {
+  const completed = status === 'done' && exitCode === 0
+  workflow.stage = completed ? 'review-ready' : 'developing'
+  workflow.devInterrupted = !completed
+  // The session starts before the task completes. Keep its id even when the
+  // process is later killed or exits non-zero so recovery resumes this session.
+  recordSessionId(workflow, 'dev', sessionId, agent)
+  if (completed) workflow.reviewResult = null
+  return completed
+}
+
+/** Persist a session id together with the agent family that emitted it. */
+export function recordSessionId(
+  workflow: IssueWorkflow,
+  kind: 'dev' | 'review',
+  sessionId: string | null,
+  agent: SessionAgent,
+): void {
+  if (!sessionId) return
+  if (kind === 'dev') {
+    workflow.devSessionId = sessionId
+    workflow.devSessionAgent = agent
+  } else {
+    workflow.reviewSessionId = sessionId
+    workflow.reviewSessionAgent = agent
+  }
+}
+
+/** Validate ownership before resume; legacy/unknown/mismatched owners are stale. */
+export function resolveSessionForAgent(
+  workflow: IssueWorkflow,
+  kind: 'dev' | 'review',
+  agent: SessionAgent,
+): { sessionId: string | null; invalid: boolean } {
+  const idField = kind === 'dev' ? 'devSessionId' : 'reviewSessionId'
+  const agentField = kind === 'dev' ? 'devSessionAgent' : 'reviewSessionAgent'
+  const sessionId = workflow[idField]
+  if (!sessionId) {
+    workflow[agentField] = null
+    return { sessionId: null, invalid: false }
+  }
+  if (workflow[agentField] !== agent) {
+    workflow[idField] = null
+    workflow[agentField] = null
+    return { sessionId: null, invalid: true }
+  }
+  return { sessionId, invalid: false }
+}
+
+/** Clear only the rejected id, never a newer session captured concurrently. */
+export function clearStaleSessionId(
+  workflow: IssueWorkflow,
+  kind: 'dev' | 'review',
+  rejectedSessionId: string,
+): boolean {
+  const field = kind === 'dev' ? 'devSessionId' : 'reviewSessionId'
+  const agentField = kind === 'dev' ? 'devSessionAgent' : 'reviewSessionAgent'
+  if (workflow[field] !== rejectedSessionId) return false
+  workflow[field] = null
+  workflow[agentField] = null
+  return true
+}
+
+function normalizeWorkflow(workflow: IssueWorkflow): IssueWorkflow {
+  const raw = workflow as IssueWorkflow & Record<string, unknown>
+  if (raw.devSessionAgent !== 'codex' && raw.devSessionAgent !== 'claude') workflow.devSessionAgent = null
+  if (raw.reviewSessionAgent !== 'codex' && raw.reviewSessionAgent !== 'claude') workflow.reviewSessionAgent = null
+  if (!workflow.devSessionId) workflow.devSessionAgent = null
+  if (!workflow.reviewSessionId) workflow.reviewSessionAgent = null
+  return workflow
 }
 
 /** Append one event to a workflow and persist. */
@@ -71,16 +181,36 @@ export function statePath(key: string): string {
   return join(stateDir(), `${key}.json`)
 }
 
+export function archiveStatePath(key: string): string {
+  return join(stateDir(), 'archive', `${key}.json`)
+}
+
 /** Derive the log file path for one issue's dev/review log. */
 export function logPath(key: string, kind: 'dev' | 'review'): string {
   return join(stateDir(), key, `${kind}.log`)
+}
+
+// Keep every operation for one persistent log in call order. Besides avoiding
+// reordered appendFile completions, this gives /history a real snapshot
+// boundary: writes queued before the read are included, later writes are SSE
+// increments after the returned in-memory cursor.
+const logQueues = new Map<string, Promise<unknown>>()
+
+function enqueueLogOperation<T>(path: string, operation: () => Promise<T>): Promise<T> {
+  const previous = logQueues.get(path) ?? Promise.resolve()
+  const current = previous.catch(() => undefined).then(operation)
+  logQueues.set(path, current)
+  void current.finally(() => {
+    if (logQueues.get(path) === current) logQueues.delete(path)
+  }).catch(() => undefined)
+  return current
 }
 
 /** Load one issue's workflow state; missing file yields a fresh idle record. */
 export async function loadWorkflow(key: string): Promise<IssueWorkflow | null> {
   try {
     const raw = await readFile(statePath(key), 'utf8')
-    return JSON.parse(raw) as IssueWorkflow
+    return normalizeWorkflow(JSON.parse(raw) as IssueWorkflow)
   } catch {
     return null
   }
@@ -96,9 +226,31 @@ export async function loadAllWorkflows(): Promise<IssueWorkflow[]> {
       if (!entry.endsWith('.json')) continue
       try {
         const raw = await readFile(join(stateDir(), entry), 'utf8')
-        workflows.push(JSON.parse(raw) as IssueWorkflow)
+        workflows.push(normalizeWorkflow(JSON.parse(raw) as IssueWorkflow))
       } catch {
         // corrupt state file: skip
+      }
+    }
+    return workflows.sort((a, b) => b.updatedAt - a.updatedAt)
+  } catch {
+    return []
+  }
+}
+
+/** Load archived terminal workflows for direct URL restoration only. */
+export async function loadAllArchivedWorkflows(): Promise<IssueWorkflow[]> {
+  try {
+    const { readdir } = await import('node:fs/promises')
+    const dir = join(stateDir(), 'archive')
+    const entries = await readdir(dir)
+    const workflows: IssueWorkflow[] = []
+    for (const entry of entries) {
+      if (!entry.endsWith('.json')) continue
+      try {
+        const raw = await readFile(join(dir, entry), 'utf8')
+        workflows.push(normalizeWorkflow(JSON.parse(raw) as IssueWorkflow))
+      } catch {
+        // corrupt archived file: skip
       }
     }
     return workflows.sort((a, b) => b.updatedAt - a.updatedAt)
@@ -110,43 +262,71 @@ export async function loadAllWorkflows(): Promise<IssueWorkflow[]> {
 /** Persist one issue's workflow state (atomic-ish: write then ignore errors). */
 export async function saveWorkflow(workflow: IssueWorkflow): Promise<void> {
   try {
-    await mkdir(stateDir(), { recursive: true })
-    workflow.updatedAt = Date.now()
-    await writeFile(statePath(workflow.key), JSON.stringify(workflow, null, 2), 'utf8')
+    await saveWorkflowStrict(workflow)
   } catch {
     // state persistence must never break the request path
   }
 }
 
+/** Persist workflow state or surface the failure to transactional callers. */
+export async function saveWorkflowStrict(workflow: IssueWorkflow): Promise<void> {
+  await mkdir(stateDir(), { recursive: true })
+  workflow.updatedAt = Date.now()
+  await writeFile(statePath(workflow.key), JSON.stringify(workflow, null, 2), 'utf8')
+}
+
+/** Persist the final workflow and atomically remove it from the active set. */
+export async function archiveWorkflow(workflow: IssueWorkflow): Promise<void> {
+  await mkdir(join(stateDir(), 'archive'), { recursive: true })
+  await saveWorkflowStrict(workflow)
+  await rename(statePath(workflow.key), archiveStatePath(workflow.key))
+}
+
 /** Append one line to an issue's log file (creating the directory). */
 export async function appendLog(key: string, kind: 'dev' | 'review', line: string): Promise<void> {
+  const path = logPath(key, kind)
   try {
-    const path = logPath(key, kind)
-    const dir = dirname(path)
-    await mkdir(dir, { recursive: true })
-    await appendFile(path, `${line}\n`, 'utf8')
-    const info = await stat(path)
-    if (info.size > 2 * 1024 * 1024) {
-      const raw = await readFile(path)
-      const tail = raw.subarray(Math.max(0, raw.length - 1024 * 1024)).toString('utf8')
-      const firstNewline = tail.indexOf('\n')
-      const completeTail = firstNewline >= 0 ? tail.slice(firstNewline + 1) : tail
-      await writeFile(path, `[clickvibe] 较早持久日志已截断\n${completeTail}`, 'utf8')
-    }
+    await enqueueLogOperation(path, async () => {
+      await mkdir(dirname(path), { recursive: true })
+      await appendFile(path, `${line}\n`, 'utf8')
+    })
   } catch {
     // log persistence is best-effort
   }
 }
 
-/** Read a log file's tail; returns up to `limit` last lines. */
-export async function readLogTail(key: string, kind: 'dev' | 'review', limit = 500): Promise<string[]> {
+/** Start a new task generation while preserving full history within that run. */
+export async function resetLog(key: string, kind: 'dev' | 'review'): Promise<void> {
+  const path = logPath(key, kind)
   try {
-    const raw = await readFile(logPath(key, kind), 'utf8')
-    const lines = raw.split('\n')
-    return lines.slice(Math.max(0, lines.length - limit - 1), lines.length - 1)
+    await enqueueLogOperation(path, async () => {
+      await mkdir(dirname(path), { recursive: true })
+      await writeFile(path, '', 'utf8')
+    })
+  } catch {
+    // log persistence is best-effort
+  }
+}
+
+/** Read the complete durable log at an ordered snapshot boundary. */
+export async function readLogHistory(key: string, kind: 'dev' | 'review'): Promise<string[]> {
+  const path = logPath(key, kind)
+  try {
+    return await enqueueLogOperation(path, async () => {
+      const raw = await readFile(path, 'utf8')
+      const lines = raw.split('\n')
+      if (lines.at(-1) === '') lines.pop()
+      return lines
+    })
   } catch {
     return []
   }
+}
+
+/** Read a log file's tail; returns up to `limit` last lines. */
+export async function readLogTail(key: string, kind: 'dev' | 'review', limit = 500): Promise<string[]> {
+  const lines = await readLogHistory(key, kind)
+  return lines.slice(Math.max(0, lines.length - limit))
 }
 
 /** Derive a stable issue key from repo + number (safe for filenames). */

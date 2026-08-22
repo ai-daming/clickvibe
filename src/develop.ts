@@ -1,7 +1,45 @@
 import { createHash, randomBytes } from 'node:crypto'
+import type { PromptSnapshot } from './prompt.ts'
 
 export type DevelopAgent = 'codex' | 'claude' | 'dryrun'
-export type AgentAction = 'develop' | 'review' | 'resume'
+export type AgentAction = 'develop' | 'review' | 'resume' | 'merge'
+
+export const RESUME_REJECT_WINDOW_MS = 15_000
+
+/** Build a brand-new agent command; used after an exact resume id is rejected. */
+export function buildFreshAgentCommand(agent: Exclude<DevelopAgent, 'dryrun'>): string {
+  return agent === 'claude'
+    ? 'claude -p --dangerously-skip-permissions --verbose --output-format stream-json'
+    : 'codex exec -c approval_policy=never -s danger-full-access --json -'
+}
+
+/** Build the command that continues an existing development session. */
+export function buildResumeAgentCommand(agent: Exclude<DevelopAgent, 'dryrun'>, sessionId: string | null): string {
+  if (agent === 'claude') {
+    return sessionId
+      ? `claude -p --resume ${shellQuote(sessionId)} --dangerously-skip-permissions --verbose --output-format stream-json`
+      : 'claude -p --continue --dangerously-skip-permissions --verbose --output-format stream-json'
+  }
+  return sessionId
+    ? `codex exec resume ${shellQuote(sessionId)} -c approval_policy=never -c 'sandbox_mode="danger-full-access"' --json -`
+    : 'codex exec resume --last -c approval_policy=never -c \'sandbox_mode="danger-full-access"\' --json -'
+}
+
+/** Only a quick failure before session initialization proves an exact id is stale. */
+export function shouldFallbackFromExactResume(facts: {
+  hadExactSessionId: boolean
+  status: 'running' | 'done' | 'failed' | 'stopped' | 'timed_out'
+  exitCode: number | null
+  elapsedMs: number
+  sawSessionId: boolean
+}): boolean {
+  return facts.hadExactSessionId
+    && facts.status === 'failed'
+    && facts.exitCode !== null
+    && facts.exitCode !== 0
+    && facts.elapsedMs <= RESUME_REJECT_WINDOW_MS
+    && !facts.sawSessionId
+}
 
 export interface GithubTarget {
   kind: 'issue' | 'pr'
@@ -66,9 +104,13 @@ export function buildWorktreeAddCommand(options: {
     : `git worktree add -b ${shellQuote(options.branch)} ${shellQuote(options.path)} ${shellQuote(options.remoteBase)}`
 }
 
-interface LogEntry {
+export interface LogEntry {
   sequence: number
   line: string
+}
+
+export interface DetailedLogRead extends LogRead {
+  entries: LogEntry[]
 }
 
 export interface LogRead {
@@ -142,31 +184,39 @@ export class LineLog {
   }
 
   read(cursor: number): LogRead {
+    const detailed = this.readDetailed(cursor)
+    const lines = detailed.entries.map((entry) => entry.line)
+    if (detailed.truncated) lines.unshift('[clickvibe] 较早日志已截断')
+    return {
+      cursor: detailed.cursor,
+      lines,
+      truncated: detailed.truncated,
+    }
+  }
+
+  readDetailed(cursor: number): DetailedLogRead {
     const safeCursor = Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0
     const oldest = this.#entries[0]?.sequence ?? this.#sequence + 1
     const truncated = safeCursor < oldest - 1
-    const lines = this.#entries
+    const entries = this.#entries
       .filter((entry) => entry.sequence > safeCursor)
-      .map((entry) => entry.line)
-    if (truncated) lines.unshift('[clickvibe] 较早日志已截断')
-    return { cursor: this.#sequence, lines, truncated }
+    return { cursor: this.#sequence, lines: entries.map((entry) => entry.line), entries, truncated }
   }
 }
 
-export interface IssuePromptSnapshot {
-  url: string
-  title: string
-  body: string
-  state: string
-  updatedAt: string
-  comments: { author: string; body: string }[]
-}
+export type IssuePromptSnapshot = PromptSnapshot
 
 export interface AgentAuthorizationInput {
   action: AgentAction
   url: string
-  agent: 'codex' | 'claude'
+  agent: 'codex' | 'claude' | null
   context: string
+  target?: {
+    prNumber: string
+    branch: string
+    head: string
+    mergeFlag: '--merge'
+  }
 }
 
 export interface AgentAuthorization {
@@ -277,20 +327,33 @@ export function makeAuthorizationInput(value: {
   url?: unknown
   agent?: unknown
   context?: unknown
+  target?: unknown
 }): AgentAuthorizationInput {
   const action = String(value.action ?? '') as AgentAction
-  if (action !== 'develop' && action !== 'review' && action !== 'resume') {
+  if (action !== 'develop' && action !== 'review' && action !== 'resume' && action !== 'merge') {
     throw new Error('不支持的 Agent 操作')
   }
-  const agent = parseAgent(value.agent)
-  if (agent === 'dryrun') throw new Error('dryrun 不需要高权限授权')
+  const parsedAgent = action === 'merge' ? null : parseAgent(value.agent)
+  if (parsedAgent === 'dryrun') throw new Error('dryrun 不需要高权限授权')
   const url = String(value.url ?? '').trim()
   if (!parseGithubUrl(url)) throw new Error('GitHub URL 无效')
+  let target: AgentAuthorizationInput['target']
+  if (action === 'merge' && value.target !== undefined) {
+    const raw = value.target as Record<string, unknown>
+    const prNumber = String(raw?.prNumber ?? '').trim()
+    const branch = String(raw?.branch ?? '').trim()
+    const head = String(raw?.head ?? '').trim()
+    if (!/^\d+$/.test(prNumber) || branch === '' || !/^[0-9a-f]{7,64}$/i.test(head) || raw?.mergeFlag !== '--merge') {
+      throw new Error('合并授权目标无效')
+    }
+    target = { prNumber, branch, head, mergeFlag: '--merge' }
+  }
   return {
     action,
     url,
-    agent,
+    agent: parsedAgent,
     context: typeof value.context === 'string' ? value.context.trim() : '',
+    ...(target ? { target } : {}),
   }
 }
 
