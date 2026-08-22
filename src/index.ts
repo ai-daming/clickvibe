@@ -4,6 +4,7 @@
  * - `/clickvibe/api/state`          — restore panel context (all workflows)
  * - `/clickvibe/api/develop`        — start dev: worktree+branch+agent
  * - `/clickvibe/api/develop/poll`   — incremental dev log/status (JSON)
+ * - `/clickvibe/api/history`        — complete disk-backed task history
  * - `/clickvibe/api/stream`         — SSE live status stream for a task
  * - `/clickvibe/api/review`         — review the dev branch with codex/claude
  * - `/clickvibe/api/resume`         — resume an interrupted dev session
@@ -60,8 +61,10 @@ import {
   issueBodyHash,
   loadAllWorkflows,
   loadWorkflow,
+  readLogHistory,
   readLogTail,
   recordSessionId,
+  resetLog,
   resolveSessionForAgent,
   saveWorkflow,
   type IssueWorkflow,
@@ -77,6 +80,12 @@ import {
   REVIEW_RESULT_RELATIVE_PATH,
 } from './review-result.ts'
 import { ExclusiveTaskGate } from './task-gate.ts'
+import {
+  RepositoryFreshnessGate,
+  RepositoryRefreshClock,
+  aggregateRepositoryFreshness,
+  type RepositoryFreshness,
+} from './repo-freshness.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -136,7 +145,14 @@ const PR_FIELDS = [
 interface ClickVibeConfig {
   repos: Record<string, string>
   worktreeRoot: string
+  /** Remote-ref refresh interval for read paths. Clamped to 30-60 seconds. */
+  fetchTtlSeconds?: number
 }
+
+const DEFAULT_FETCH_TTL_SECONDS = 45
+const READ_FETCH_WAIT_MS = 2_000
+const repositoryFreshness = new RepositoryFreshnessGate()
+const dependencyRefreshClock = new RepositoryRefreshClock()
 
 /** In-memory live task handle: the running process + a status-line buffer. */
 interface LiveTask {
@@ -191,11 +207,13 @@ async function loadConfig(): Promise<ClickVibeConfig> {
     return {
       repos: parsed?.repos ?? {},
       worktreeRoot: parsed?.worktreeRoot ? expandHome(parsed.worktreeRoot) : join(homedir(), '.clickvibe', 'worktrees'),
+      fetchTtlSeconds: parsed?.fetchTtlSeconds,
     }
   } catch {
     return {
       repos: {},
       worktreeRoot: join(homedir(), '.clickvibe', 'worktrees'),
+      fetchTtlSeconds: DEFAULT_FETCH_TTL_SECONDS,
     }
   }
 }
@@ -307,6 +325,30 @@ async function runCommand(
     throw new Error(`命令输出超过上限且无 spill 文件,无法获取完整输出`)
   }
   return out.text.trim()
+}
+
+function fetchTtlMs(config: ClickVibeConfig): number {
+  const seconds = Number(config.fetchTtlSeconds ?? DEFAULT_FETCH_TTL_SECONDS)
+  return Math.min(60, Math.max(30, Number.isFinite(seconds) ? seconds : DEFAULT_FETCH_TTL_SECONDS)) * 1000
+}
+
+async function ensureConfiguredRepoFresh(
+  ctx: Context,
+  config: ClickVibeConfig,
+  repoKey: string,
+  force = false,
+): Promise<RepositoryFreshness | null> {
+  const configuredPath = config.repos[repoKey]
+  if (!configuredPath) return null
+  const repoPath = resolve(expandHome(configuredPath))
+  if (!existsSync(repoPath)) return null
+  return repositoryFreshness.ensureWithin(repoPath, fetchTtlMs(config), async () => {
+    await runCommand(ctx, 'git fetch origin --prune', {
+      workdir: repoPath,
+      timeoutMs: 30_000,
+      sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: repoPath },
+    })
+  }, READ_FETCH_WAIT_MS, force)
 }
 
 /** Read the current HEAD short-hash of a worktree (empty string on failure). */
@@ -682,7 +724,7 @@ export function apply(ctx: Context): void {
       }
       const pathname = new URL(req.url ?? '/', 'http://clickvibe.internal').pathname
       const method = pathname.startsWith(`${ROUTE}/`) ? pathname.slice(`${ROUTE}/`.length) : undefined
-      const knownMethods = new Set(['fetch', 'projects', 'repo/issues', 'state', 'authorize', 'develop', 'develop/poll', 'stream', 'review', 'resume', 'stop', 'sync'])
+      const knownMethods = new Set(['fetch', 'projects', 'repo/issues', 'state', 'authorize', 'develop', 'develop/poll', 'history', 'stream', 'review', 'resume', 'stop', 'sync'])
       if (method === undefined || !knownMethods.has(method)) {
         writeJson(res, 404, { ok: false, error: 'unknown method' })
         return
@@ -695,6 +737,16 @@ export function apply(ctx: Context): void {
           return
         }
         handleStream(req, res)
+        return
+      }
+
+      if (method === 'history') {
+        if (req.method !== 'GET') {
+          writeJson(res, 405, { ok: false, error: 'history requires GET' })
+          return
+        }
+        const result = await getTaskHistory(req)
+        writeJson(res, result.ok ? 200 : 404, result)
         return
       }
 
@@ -728,14 +780,28 @@ export function apply(ctx: Context): void {
         return
       }
       if (method === 'state') {
-        const filter = payload as { url?: unknown; repoKey?: unknown } | undefined
+        const filter = payload as { url?: unknown; repoKey?: unknown; forceRefresh?: unknown } | undefined
         const url = String(filter?.url ?? '')
         const repoKey = String(filter?.repoKey ?? '')
+        const config = await loadConfig()
         const workflows = (await loadAllWorkflows()).filter((workflow) =>
           (url === '' || workflow.url === url) && (repoKey === '' || workflow.repoKey === repoKey),
         )
-        const enriched = await enrichWorkflowStates(ctx, workflows)
-        writeJson(res, 200, { ok: true, workflows: enriched })
+        const parsedRepo = parseUrl(url)
+        const repoKeys = new Set(
+          repoKey ? [repoKey]
+            : parsedRepo ? [`${parsedRepo.owner}/${parsedRepo.repo}`]
+              : workflows.map((workflow) => workflow.repoKey),
+        )
+        const freshnesses = (await Promise.all([...repoKeys].map((key) =>
+          ensureConfiguredRepoFresh(ctx, config, key, filter?.forceRefresh === true),
+        ))).filter((value): value is RepositoryFreshness => value !== null)
+        const dependenciesRefreshDue = [...repoKeys]
+          .map((key) => dependencyRefreshClock.take(key, fetchTtlMs(config), filter?.forceRefresh === true))
+          .some(Boolean)
+        const enriched = await enrichWorkflowStates(ctx, workflows, config)
+        const freshness = aggregateRepositoryFreshness(freshnesses)
+        writeJson(res, 200, { ok: true, workflows: enriched, freshness, dependenciesRefreshDue })
         return
       }
       if (method === 'authorize') {
@@ -982,13 +1048,15 @@ export async function fetchRepositoryIssues(
   payload: unknown,
   overrides: { config?: ClickVibeConfig; workflows?: IssueWorkflow[] } = {},
 ): Promise<
-  | { ok: true; repoKey: string; issues: unknown[] }
+  | { ok: true; repoKey: string; issues: unknown[]; freshness: RepositoryFreshness | null }
   | { ok: false; error: string }
 > {
   const repoKey = String((payload as { repoKey?: unknown } | undefined)?.repoKey ?? '').trim()
   const config = overrides.config ?? await loadConfig()
   const configuredPath = config.repos[repoKey]
   if (!configuredPath) return { ok: false, error: `未配置项目 ${repoKey}` }
+  const forceRefresh = (payload as { forceRefresh?: unknown } | undefined)?.forceRefresh === true
+  const freshness = await ensureConfiguredRepoFresh(ctx, config, repoKey, forceRefresh)
 
   const issueCommand = `gh api --paginate --slurp ${shellQuote(`repos/${repoKey}/issues?state=all&per_page=100`)}`
   const prCommand = `gh api --paginate --slurp ${shellQuote(`repos/${repoKey}/pulls?state=all&per_page=100`)}`
@@ -1116,7 +1184,8 @@ export async function fetchRepositoryIssues(
       })
       return { ...issue, blockedBy, workflow: derived }
     }))
-    return { ok: true, repoKey, issues }
+    dependencyRefreshClock.mark(repoKey)
+    return { ok: true, repoKey, issues, freshness }
   } catch (error) {
     return { ok: false, error: `项目 issue 抓取失败: ${String(error instanceof Error ? error.message : error)}` }
   }
@@ -1126,7 +1195,10 @@ export async function fetchRepositoryIssues(
 async function fetchIssue(
   ctx: Context,
   payload: unknown,
-): Promise<{ ok: true; data: { kind: 'issue' | 'pr'; item: unknown; timeline?: unknown } } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; data: { kind: 'issue' | 'pr'; item: unknown; timeline?: unknown; dependencies?: { blockedBy: IssueDependency[]; blocking: IssueDependency[] } }; dependencyError?: string }
+  | { ok: false; error: string }
+> {
   const url = String((payload as { url?: unknown } | undefined)?.url ?? '').trim()
   const parsed = parseUrl(url)
   if (!parsed) {
@@ -1143,14 +1215,21 @@ async function fetchIssue(
     }
     const parsedJson = JSON.parse(result.stdout.text) as unknown
     const data: { kind: 'issue' | 'pr'; item: unknown; timeline?: unknown; dependencies?: { blockedBy: IssueDependency[]; blocking: IssueDependency[] } } = { kind: parsed.kind, item: parsedJson }
+    let dependencyError: string | undefined
     // issue 额外拉 timeline,提取关联事件(linked PR/commit)——GitHub UI 的
     // "linked a pull request" 就来自 cross-referenced 事件
     if (!isPR) {
       data.timeline = await fetchTimeline(ctx, parsed.owner, parsed.repo, parsed.number)
       // 依赖图:blockedBy 来自本 issue 正文,blocking 扫描 repo 内其它 issue
-      data.dependencies = await fetchDependencies(ctx, parsed, parsedJson as { body?: unknown })
+      const dependencyResult = await fetchDependencies(ctx, parsed, parsedJson as { body?: unknown })
+      if (dependencyResult.ok) {
+        data.dependencies = dependencyResult.dependencies
+        dependencyRefreshClock.mark(`${parsed.owner}/${parsed.repo}`)
+      } else {
+        dependencyError = dependencyResult.error
+      }
     }
-    return { ok: true, data }
+    return { ok: true, data, ...(dependencyError ? { dependencyError } : {}) }
   } catch (error) {
     return { ok: false, error: `抓取异常: ${String(error instanceof Error ? error.message : error)}` }
   }
@@ -1265,19 +1344,18 @@ async function fetchDependencies(
   ctx: Context,
   target: { owner: string; repo: string; number: string },
   item: { body?: unknown },
-): Promise<{ blockedBy: IssueDependency[]; blocking: IssueDependency[] }> {
-  const empty: { blockedBy: IssueDependency[]; blocking: IssueDependency[] } = { blockedBy: [], blocking: [] }
+): Promise<
+  | { ok: true; dependencies: { blockedBy: IssueDependency[]; blocking: IssueDependency[] } }
+  | { ok: false; error: string }
+> {
   const command = `gh issue list --repo ${target.owner}/${target.repo} --state all --limit 100 --json number,title,state,body`
   let issues: { number: number; title: string; state: string; body: string }[] = []
   try {
-    const spec = ctx.shell.resolve({ command, timeoutMs: 20000 })
-    const result = await ctx.shell.run(spec)
-    if (result.exitCode !== 0) return empty
-    const parsed = JSON.parse(result.stdout.text) as unknown
-    if (!Array.isArray(parsed)) return empty
+    const parsed = JSON.parse(await runCommand(ctx, command, { timeoutMs: 20000 })) as unknown
+    if (!Array.isArray(parsed)) throw new Error('GitHub 依赖列表格式无效')
     issues = parsed as { number: number; title: string; state: string; body: string }[]
-  } catch {
-    return empty
+  } catch (error) {
+    return { ok: false, error: `GitHub 依赖刷新失败: ${String(error instanceof Error ? error.message : error)}` }
   }
 
   const current = Number(target.number)
@@ -1299,7 +1377,7 @@ async function fetchDependencies(
   }
   blockedBy.sort((a, b) => a.number - b.number)
   blocking.sort((a, b) => a.number - b.number)
-  return { blockedBy, blocking }
+  return { ok: true, dependencies: { blockedBy, blocking } }
 }
 
 /** Fetch the issue timeline and keep only the events worth showing. */
@@ -1848,6 +1926,8 @@ async function startDevelop(
   workflow.issueState = 'OPEN'
 
   if (agent === 'dryrun') {
+    // A safety probe is not a new durable development generation: never
+    // rotate the previous real task's disk-backed history here.
     const taskIdValue = taskId('dryrun')
     let live: LiveTask
     try {
@@ -1887,6 +1967,9 @@ async function startDevelop(
   } catch (error) {
     return { ok: false, error: String(error instanceof Error ? error.message : error) }
   }
+  // Rotate only after both worktree preparation and LiveTask creation succeed;
+  // failed start attempts must not destroy the previous authoritative history.
+  await resetLog(workflow.key, 'dev')
   workflow.devAgent = agent
   workflow.devTaskId = taskIdValue
   workflow.devInterrupted = false
@@ -1895,19 +1978,19 @@ async function startDevelop(
 
   void (async () => {
     try {
-      await appendLog(workflow.key, 'dev', `[clickvibe] 使用已确认 Issue 快照(${authorizedSnapshot.updatedAt || '无更新时间'})`)
+      pushTaskLine(live, `[clickvibe] 使用已确认 Issue 快照(${authorizedSnapshot.updatedAt || '无更新时间'})`)
       let prompt = buildPrompt(authorizedSnapshot, workflow.worktree)
       if (extraContext !== '') {
         prompt += '\n\n--- 附加上下文(来自 review 或其他) ---\n' + extraContext
       }
 
-      await appendLog(workflow.key, 'dev', `[clickvibe] 启动 ${agent} 开发…`)
+      pushTaskLine(live, `[clickvibe] 启动 ${agent} 开发…`)
       const agentCommand = agent === 'claude'
         ? 'claude -p --dangerously-skip-permissions --verbose --output-format stream-json'
         : 'codex exec -c approval_policy=never -s danger-full-access --json -'
 
       attachAgentProcess(ctx, live, agentCommand, workflow.worktree, prompt, async (exitCode, sessionId) => {
-        await appendLog(workflow.key, 'dev', `[clickvibe] ${agent} 结束,退出码 ${exitCode}`)
+        pushTaskLine(live, `[clickvibe] ${agent} 结束,退出码 ${exitCode}`)
         const reloaded = await loadWorkflow(workflow.key)
         if (reloaded) {
           const fixedIssues = reloaded.reviewResult?.passed === false ? [...reloaded.reviewResult.issues] : []
@@ -1961,6 +2044,61 @@ async function pollDevelop(
   }
 }
 
+type HistoryKind = 'dev' | 'review'
+
+async function resolveHistoryTarget(taskIdValue: string, requestedKey: string, requestedKind: string): Promise<{
+  taskId: string | null
+  key: string
+  kind: HistoryKind
+  live: LiveTask | null
+} | null> {
+  if (taskIdValue !== '') {
+    const live = liveTasks.get(taskIdValue) ?? null
+    if (live) return { taskId: taskIdValue, key: live.workflowKey, kind: live.kind, live }
+    const workflow = (await loadAllWorkflows()).find((item) =>
+      item.devTaskId === taskIdValue || item.reviewTaskId === taskIdValue)
+    if (!workflow) return null
+    const kind: HistoryKind = workflow.reviewTaskId === taskIdValue ? 'review' : 'dev'
+    return { taskId: taskIdValue, key: workflow.key, kind, live: null }
+  }
+  if (!/^[A-Za-z0-9_.-]+$/.test(requestedKey)) return null
+  if (requestedKind !== 'dev' && requestedKind !== 'review') return null
+  const workflow = await loadWorkflow(requestedKey)
+  if (!workflow) return null
+  const storedTaskId = requestedKind === 'dev' ? workflow.devTaskId : workflow.reviewTaskId
+  const live = storedTaskId ? liveTasks.get(storedTaskId) ?? null : null
+  return { taskId: storedTaskId, key: requestedKey, kind: requestedKind, live }
+}
+
+/** Complete disk history plus the exact cursor where SSE increments begin. */
+async function getTaskHistory(req: IncomingMessage): Promise<
+  | { ok: true; taskId: string | null; key: string; kind: HistoryKind; lines: string[]; cursor: number; active: boolean }
+  | { ok: false; error: string }
+> {
+  const url = new URL(req.url ?? '/', 'http://clickvibe.internal')
+  const target = await resolveHistoryTarget(
+    url.searchParams.get('taskId')?.trim() ?? '',
+    url.searchParams.get('key')?.trim() ?? '',
+    url.searchParams.get('kind')?.trim() ?? '',
+  )
+  if (!target) return { ok: false, error: '找不到对应任务历史' }
+
+  // Capture the live sequence before enqueueing the ordered disk read. No
+  // await may occur between these operations: that is the history/SSE fence.
+  const cursor = target.live?.log.read(Number.MAX_SAFE_INTEGER).cursor ?? 0
+  const historyPromise = readLogHistory(target.key, target.kind)
+  const lines = await historyPromise
+  return {
+    ok: true,
+    taskId: target.taskId,
+    key: target.key,
+    kind: target.kind,
+    lines,
+    cursor,
+    active: target.live !== null && !target.live.closed,
+  }
+}
+
 /** SSE live stream: pushes parsed status lines for a task as they arrive. */
 function handleStream(req: IncomingMessage, res: ServerResponse): void {
   const url = new URL(req.url ?? '/', 'http://clickvibe.internal')
@@ -1975,24 +2113,43 @@ function handleStream(req: IncomingMessage, res: ServerResponse): void {
   res.writeHead(200, {
     'content-type': 'text/event-stream',
     'cache-control': 'no-cache',
+    'x-accel-buffering': 'no',
     connection: 'keep-alive',
   })
 
-  let cursor = Number(url.searchParams.get('cursor') ?? 0)
-  if (!Number.isSafeInteger(cursor) || cursor < 0) cursor = 0
+  const lastEventId = Array.isArray(req.headers['last-event-id'])
+    ? req.headers['last-event-id'][0]
+    : req.headers['last-event-id']
+  const parseCursor = (value: string | undefined | null): number => {
+    const parsed = Number(value ?? 0)
+    return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0
+  }
+  let cursor = Math.max(parseCursor(url.searchParams.get('cursor')), parseCursor(lastEventId))
   let closed = false
+  let heartbeat: ReturnType<typeof setInterval> | undefined
+
+  const close = () => {
+    if (closed) return
+    closed = true
+    if (heartbeat) clearInterval(heartbeat)
+    res.end()
+  }
 
   const flush = () => {
     if (closed) return
-    const read = live.log.read(cursor)
+    const read = live.log.readDetailed(cursor)
+    if (read.truncated) {
+      res.write(`data: ${JSON.stringify({ __historyRequired: true })}\n\n`)
+      close()
+      return
+    }
     cursor = read.cursor
-    for (const line of read.lines) {
-      res.write(`data: ${JSON.stringify(line)}\n\n`)
+    for (const entry of read.entries) {
+      res.write(`id: ${entry.sequence}\ndata: ${JSON.stringify({ line: entry.line, cursor: entry.sequence })}\n\n`)
     }
     if (live.closed) {
       res.write(`data: ${JSON.stringify({ __done: true })}\n\n`)
-      res.end()
-      closed = true
+      close()
     }
   }
 
@@ -2002,9 +2159,15 @@ function handleStream(req: IncomingMessage, res: ServerResponse): void {
     const waiters = liveWaiters.get(taskId) ?? new Set<() => void>()
     waiters.add(wake)
     liveWaiters.set(taskId, waiters)
+    heartbeat = setInterval(() => {
+      if (!closed) res.write(': keep-alive\n\n')
+    }, 15_000)
+    heartbeat.unref?.()
     req.on('close', () => {
       waiters.delete(wake)
       if (waiters.size === 0) liveWaiters.delete(taskId)
+      if (heartbeat) clearInterval(heartbeat)
+      closed = true
     })
   }
 }
@@ -2166,6 +2329,20 @@ async function startReview(
   }
   if (!reservation.created) return { ok: true, taskId: reservation.task.taskId }
   const live = reservation.task
+  await resetLog(workflow.key, 'review')
+
+  // Review must inspect the branch against current remote refs. Keep review
+  // available during an outage, but make the degraded input explicit in its log.
+  try {
+    await runCommand(ctx, 'git fetch origin --prune', {
+      workdir: workflow.worktree,
+      timeoutMs: 60_000,
+      sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: workflow.worktree },
+    })
+    pushTaskLine(live, '[clickvibe] review 前已同步远端(origin)')
+  } catch (error) {
+    pushTaskLine(live, `[clickvibe] review 前 git fetch 失败(继续): ${String(error instanceof Error ? error.message : error)}`)
+  }
 
   let reviewIssue: ReviewIssueContract
   try {
@@ -2186,7 +2363,7 @@ async function startReview(
 
   if (ownedReviewSession.invalid) {
     await saveWorkflow(workflow)
-    await appendLog(workflow.key, 'review', '[clickvibe] review sessionId 归属缺失或与当前 agent 不一致,已清除并启动全新会话')
+    pushTaskLine(live, '[clickvibe] review sessionId 归属缺失或与当前 agent 不一致,已清除并启动全新会话')
   }
 
   // 记录关联 PR(若 review 的是 PR 且未记录)
@@ -2200,7 +2377,7 @@ async function startReview(
     await clearReviewResultFile(workflow.worktree)
   } catch (error) {
     const message = String(error instanceof Error ? error.message : error)
-    await appendLog(workflow.key, 'review', `[clickvibe] 无法清除旧 review 结论文件: ${message}`)
+    pushTaskLine(live, `[clickvibe] 无法清除旧 review 结论文件: ${message}`)
     finishTask(live, 'failed', 1)
     return { ok: false, error: `无法清除旧 review 结论文件: ${message}` }
   }
@@ -2216,9 +2393,9 @@ async function startReview(
     : buildFreshAgentCommand(agent)
   const prompt = await buildReviewPrompt(ctx, workflow, reviewIssue, sessionId !== null)
 
-  await appendLog(workflow.key, 'review', `[clickvibe] 启动 ${agent} review${sessionId ? `(续会话 ${sessionId})` : ''}…`)
+  pushTaskLine(live, `[clickvibe] 启动 ${agent} review${sessionId ? `(续会话 ${sessionId})` : ''}…`)
   attachAgentProcess(ctx, live, agentCommand, workflow.worktree, prompt, async (exitCode, newSessionId) => {
-    await appendLog(workflow.key, 'review', `[clickvibe] review 结束,退出码 ${exitCode}`)
+    pushTaskLine(live, `[clickvibe] review 结束,退出码 ${exitCode}`)
     if (live.status !== 'done' || exitCode !== 0) {
       const interrupted = await loadWorkflow(workflow.key)
       if (interrupted) {
@@ -2231,7 +2408,7 @@ async function startReview(
     const lines = await readLogTail(workflow.key, 'review', 200)
     const resolved = await loadReviewResult(workflow.worktree, lines)
     if (!resolved.result) {
-      await appendLog(workflow.key, 'review', `[clickvibe] review 结论解析异常:${resolved.parseError ?? '原因未知'},需要重新 Review`)
+      pushTaskLine(live, `[clickvibe] review 结论解析异常:${resolved.parseError ?? '原因未知'},需要重新 Review`)
       const invalid = await loadWorkflow(workflow.key)
       if (invalid) {
         recordSessionId(invalid, 'review', newSessionId, agent)
@@ -2242,11 +2419,10 @@ async function startReview(
       return
     }
     if (resolved.source === 'file') {
-      await appendLog(workflow.key, 'review', `[clickvibe] review 结论来源: ${REVIEW_RESULT_RELATIVE_PATH}`)
+      pushTaskLine(live, `[clickvibe] review 结论来源: ${REVIEW_RESULT_RELATIVE_PATH}`)
     } else {
-      await appendLog(
-        workflow.key,
-        'review',
+      pushTaskLine(
+        live,
         `[clickvibe] review 结论文件不可用(${resolved.fileError ?? '原因未知'}),回退 ${resolved.source === 'stdout-json' ? 'stdout JSON' : 'stdout 表情行'}判定`,
       )
     }
@@ -2383,12 +2559,13 @@ export async function resumeDevelop(
   } catch (error) {
     return { ok: false, error: String(error instanceof Error ? error.message : error) }
   }
+  await resetLog(workflow.key, 'dev')
   workflow.devTaskId = taskIdValue
   workflow.devInterrupted = false
   workflow.stage = 'developing'
   await saveWorkflow(workflow)
   if (ownedDevSession.invalid) {
-    await appendLog(workflow.key, 'dev', '[clickvibe] dev sessionId 归属缺失或与当前 agent 不一致,已清除并启动全新会话')
+    pushTaskLine(live, '[clickvibe] dev sessionId 归属缺失或与当前 agent 不一致,已清除并启动全新会话')
   }
 
   // 用精确会话 id 续会话(不能用 --last/--continue:worktree 里可能有多个
@@ -2404,12 +2581,12 @@ export async function resumeDevelop(
       timeoutMs: 30000,
       sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: workflow.worktree },
     })
-    await appendLog(workflow.key, 'dev', `[clickvibe] 已同步远端(origin)`)
+    pushTaskLine(live, `[clickvibe] 已同步远端(origin)`)
   } catch (e) {
-    await appendLog(workflow.key, 'dev', `[clickvibe] git fetch 失败(继续): ${String(e instanceof Error ? e.message : e)}`)
+    pushTaskLine(live, `[clickvibe] git fetch 失败(继续): ${String(e instanceof Error ? e.message : e)}`)
   }
 
-// issue #26:worktree 落后基线或处于冲突合并中时,把「合并 main、解决冲突」
+  // issue #26:worktree 落后基线或处于冲突合并中时,把「合并 main、解决冲突」
   // 作为前置指令交给 agent(danger-full-access 有能力处理),review 意见不再
   // 被同步门禁挡住送不进来。
   const mergePreface = await buildMergePreface(ctx, workflow.worktree, workflowBaseBranch(workflow.baseRef))
@@ -2438,9 +2615,9 @@ export async function resumeDevelop(
     ? `${mergePreface}\n\n${basePrompt}`
     : basePrompt
 
-  await appendLog(workflow.key, 'dev', `[clickvibe] 恢复 ${agent} 会话${sessionId ? `(${sessionId})` : ''}…`)
+  pushTaskLine(live, `[clickvibe] 恢复 ${agent} 会话${sessionId ? `(${sessionId})` : ''}…`)
   attachAgentProcess(ctx, live, command, workflow.worktree, prompt, async (exitCode, newSessionId) => {
-    await appendLog(workflow.key, 'dev', `[clickvibe] ${agent} 恢复结束,退出码 ${exitCode}`)
+    pushTaskLine(live, `[clickvibe] ${agent} 恢复结束,退出码 ${exitCode}`)
     const reloaded = await loadWorkflow(workflow.key)
     if (reloaded) {
       const fixedIssues = reloaded.reviewResult?.passed === false ? [...reloaded.reviewResult.issues] : []
