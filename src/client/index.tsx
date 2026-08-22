@@ -2,13 +2,14 @@
  * clickvibe client half: the right-side issue/PR panel.
  *
  * Registers:
- * - `shell.overlay` (id `clickvibe`) — the right-side floating panel,
+ * - `shell.overlay` (id `clickvibe`) — the mount anchor for the occupied panel,
  * - `sidebar.footer.action` (id `clickvibe`) — the toggle button.
  *
  * Fetching goes through the plugin's own `/clickvibe/api/fetch` route
  * (no harness RPC — this is a formal bundle plugin, not a dynamic one).
  */
 import React from 'react'
+import { createPortal } from 'react-dom'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 // Type references that load the SlotMap augmentations for the slots this
 // bundle registers into (shell.overlay, sidebar.footer.action). Importing
@@ -20,13 +21,18 @@ import type { SidebarFooterActionOwnerProps } from '@deepseek-ai/dsh-client-ui-s
 import { selectHistoryTask } from '../task-history.ts'
 import { githubCompareUrl, workflowStatusLabel } from '../state-view.ts'
 import { deliveryPublicationLabel, type DeliveryPublication } from '../delivery-publication.ts'
+import { resolveDesktopPanelWidth, resolvePanelLayout } from './panel-layout.ts'
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 type _SlotLoaders = [typeof LayoutController, SidebarFooterActionOwnerProps]
 
 const PANEL_ID = 'clickvibe'
 
 /** Panel open state shared between the footer toggle and the overlay. */
-const panelState = { open: false, listeners: new Set<(v: boolean) => void>() }
+const panelState: {
+  open: boolean
+  desktopWidth?: number
+  listeners: Set<(value: boolean) => void>
+} = { open: false, listeners: new Set() }
 
 function setPanelOpen(value: boolean): void {
   panelState.open = value
@@ -46,7 +52,15 @@ function usePanelOpen(): boolean {
 // ---- plugin-owned styles (injected once at activation) ----
 
 const PANEL_CSS = `
-.cv-panel { width: 420px; max-width: 90vw; height: 100%; display: flex; flex-direction: column; background: #ffffff; border-left: 1px solid #d0d7de; box-shadow: -8px 0 24px rgba(0,0,0,0.18); font-size: 13px; color: #1f2328; }
+#root.cv-panel-host-open { margin-right: calc(var(--dsh-sidebar-width, 0px) + var(--cv-sidebar-width, 0px)); width: calc(100% - var(--dsh-sidebar-width, 0px) - var(--cv-sidebar-width, 0px)); transition: margin-right var(--ds-transition-duration-slow) var(--ds-ease-in-out), width var(--ds-transition-duration-slow) var(--ds-ease-in-out); }
+.cv-panel-slot { position: fixed; z-index: 50; top: 0; right: var(--dsh-sidebar-width, 0px); bottom: 0; width: var(--cv-sidebar-width); min-width: 0; overflow: visible; pointer-events: auto; transition: right var(--ds-transition-duration-slow) var(--ds-ease-in-out), width var(--ds-transition-duration-slow) var(--ds-ease-in-out); }
+.cv-panel-slot[data-cv-mobile] { right: 0; width: 100vw; }
+.cv-panel { width: 100%; height: 100%; display: flex; flex-direction: column; background: #ffffff; border-left: 1px solid #d0d7de; box-sizing: border-box; font-size: 13px; color: #1f2328; }
+.cv-panel-resizer { position: absolute; z-index: 2; top: 0; bottom: 0; left: -5px; width: 10px; cursor: col-resize; touch-action: none; }
+.cv-panel-resizer::after { content: ''; position: absolute; top: 50%; left: 50%; width: 4px; height: 36px; border-radius: 3px; background: #8c959f; opacity: 0; transform: translate(-50%, -50%); transition: opacity 120ms ease; }
+.cv-panel-resizer:hover::after, .cv-panel-resizer:focus-visible::after, .cv-panel-resizer[data-dragging]::after { opacity: .75; }
+body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-dragging] .cv-panel-slot { transition: none; }
+@media (prefers-reduced-motion: reduce) { #root.cv-panel-host-open, .cv-panel-slot { transition: none; } }
 .cv-panel-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; font-weight: 600; color: #1f2328; border-bottom: 1px solid #d0d7de; flex-shrink: 0; }
 .cv-panel-header-actions { display: flex; align-items: center; gap: 6px; }
 .cv-close { border: none; background: transparent; cursor: pointer; font-size: 14px; color: #57606a; }
@@ -64,8 +78,10 @@ const PANEL_CSS = `
 .cv-issue-row-title { display: block; color: #0969da; font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .cv-issue-row-meta { color: #57606a; font-size: 10.5px; margin-top: 3px; display: flex; gap: 7px; flex-wrap: wrap; }
 .cv-row-lag { color: #9a6700; font-weight: 600; }
+.cv-row-contract { color: #cf222e; font-weight: 600; }
 .cv-row-action { border: none; border-radius: 6px; padding: 5px 8px; background: #1f883d; color: white; font-size: 11px; white-space: nowrap; cursor: pointer; }
 .cv-row-action.cv-row-none { background: #afb8c1; cursor: default; }
+.cv-row-action.cv-row-running { background: #0969da; cursor: default; }
 .cv-back { border: none; background: transparent; color: #0969da; cursor: pointer; padding: 0; font-size: 12px; }
 .cv-input { flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid #d0d7de; border-radius: 6px; background: #ffffff; color: #1f2328; font-size: 12px; }
 .cv-input::placeholder { color: #8c959f; }
@@ -1289,14 +1305,14 @@ type FetchIssueResponse =
   | { ok: true; data: { kind: 'issue' | 'pr'; item: unknown; timeline?: TimelineEvent[]; dependencies?: Dependencies }; dependencyError?: string }
   | { ok: false; error: string }
 
-async function fetchIssue(url: string, timeoutMs?: number): Promise<FetchIssueResponse> {
+async function fetchIssue(url: string, timeoutMs?: number, forceRefresh = false): Promise<FetchIssueResponse> {
   const controller = timeoutMs === undefined ? null : new AbortController()
   const timeout = controller ? window.setTimeout(() => controller.abort(), timeoutMs) : null
   try {
     const response = await fetch('/clickvibe/api/fetch', {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-clickvibe-request': '1' },
-      body: JSON.stringify({ url }),
+      body: JSON.stringify({ url, forceRefresh }),
       ...(controller ? { signal: controller.signal } : {}),
     })
     return response.json() as Promise<FetchIssueResponse>
@@ -1309,6 +1325,7 @@ interface ProjectOption { repoKey: string; path: string; available: boolean }
 interface RepositoryIssue extends GhIssue {
   blockedBy: Dependency[]
   workflow: Workflow
+  contract?: { ok: boolean; missing: string[] }
 }
 
 interface RepositoryFreshness {
@@ -1398,6 +1415,8 @@ function PanelContent() {
             setDependencyRefreshError(`GitHub 依赖刷新失败: ${String(reason)}`)
           }
         }
+      } else {
+        setStateRefreshError(response.error)
       }
     } catch (reason) {
       // Polling is best-effort. Keep the last usable snapshot when the panel
@@ -1421,7 +1440,7 @@ function PanelContent() {
       const response = await apiCall<
         { ok: true; issues: RepositoryIssue[]; freshness: RepositoryFreshness | null }
         | { ok: false; error: string }
-      >('repo/issues', { repoKey: selected, forceRefresh })
+      >('repo/issues', { repoKey: selected, forceRefresh }, 30_000)
       if (!response.ok) setError(response.error)
       else {
         setIssues(response.issues)
@@ -1473,6 +1492,8 @@ function PanelContent() {
       if (stateResponse?.ok) {
         setFreshness(stateResponse.freshness)
         setStateRefreshError(null)
+      } else if (stateResponse && !stateResponse.ok) {
+        setStateRefreshError(stateResponse.error)
       }
       if (!response.ok) setError(response.error)
       else {
@@ -1500,7 +1521,7 @@ function PanelContent() {
     setError(null)
     try {
       const [issueResponse, stateResponse] = await Promise.all([
-        fetchIssue(url),
+        fetchIssue(url, undefined, true),
         apiCall<WorkflowStateResponse>('state', { url, forceRefresh: true }),
       ])
       if (!issueResponse.ok) setError(issueResponse.error)
@@ -1516,6 +1537,8 @@ function PanelContent() {
         setWorkflow(stateResponse.workflows.find((item) => item.url === url) ?? workflow)
         setFreshness(stateResponse.freshness)
         setStateRefreshError(null)
+      } else {
+        setStateRefreshError(stateResponse.error)
       }
     } catch (reason) {
       setError(`Issue 刷新失败: ${String(reason)}`)
@@ -1566,8 +1589,8 @@ function PanelContent() {
             : '⚠ 状态可能过期 · 远端同步失败，当前使用本地 refs'}
         </div>
       ) : null}
-      {stateRefreshError ? <div className="cv-stale" title={stateRefreshError}>⚠ 状态可能过期 · 自动刷新失败，当前保留上次结果</div> : null}
-      {dependencyRefreshError ? <div className="cv-stale" title={dependencyRefreshError}>⚠ 依赖状态可能过期 · GitHub 刷新失败，当前保留上次结果</div> : null}
+      {stateRefreshError ? <div className="cv-stale" title={stateRefreshError}>{stateRefreshError.startsWith('GitHub 额度已用完,约 ') ? stateRefreshError : '⚠ 状态可能过期 · 自动刷新失败，当前保留上次结果'}</div> : null}
+      {dependencyRefreshError ? <div className="cv-stale" title={dependencyRefreshError}>{dependencyRefreshError.startsWith('GitHub 额度已用完,约 ') ? dependencyRefreshError : '⚠ 依赖状态可能过期 · GitHub 刷新失败，当前保留上次结果'}</div> : null}
       {result ? (
         <IssueView
           issue={result.item}
@@ -1628,6 +1651,12 @@ function PanelContent() {
                     const action = (baseAction.kind === 'develop' || baseAction.kind === 'resume') && blockedByOpen.length > 0
                       ? { kind: 'none' as const, label: `被 #${blockedByOpen.map((dependency) => dependency.number).join('#')} 阻塞`, hint: '依赖未完成,先完成被阻塞的依赖' }
                       : baseAction
+                    // 契约门槛:缺 目标/验收标准/依赖 的 issue 标记『不满足契约』并提示补齐,
+                    // 不硬选(不拦人工开发,按钮保留、hint 提示补全);自动选取(#9)按 contract.ok 排除。
+                    const contract = issue.contract
+                    const shownAction = contract && !contract.ok && (action.kind === 'develop' || action.kind === 'resume')
+                      ? { ...action, hint: `该 issue 缺:${contract.missing.join('、')},建议先在 GitHub 补齐契约(目标/验收标准/依赖);人工仍可开发` }
+                      : action
                     return <div className="cv-issue-row" key={issue.number}>
                       <span className={`cv-stage cv-stage-${status}`}>{stageLabel(status, issue.workflow)}</span>
                       <div className="cv-issue-row-main">
@@ -1637,9 +1666,10 @@ function PanelContent() {
                           {(derived?.behindBase ?? 0) > 0 ? <span className="cv-row-lag">⚠ 落后 {derived?.behindBase}</span> : null}
                           <span>里程碑: {issue.milestone?.title ?? '无'}</span>
                           <span>blockedBy: {issue.blockedBy.length ? issue.blockedBy.map((dependency) => `#${dependency.number}${dependency.state.toUpperCase() === 'OPEN' ? '⏳' : '✓'}`).join(' ') : '无'}</span>
+                          {contract && !contract.ok ? <span className="cv-row-contract">⚠ 不满足契约(缺:{contract.missing.join('、')})</span> : null}
                         </div>
                       </div>
-                      <button className={`cv-row-action${action.kind === 'none' ? ' cv-row-none' : ''}`} disabled={action.kind === 'none'} title={action.hint} onClick={() => rowAction(issue)}>{action.kind === 'none' ? (status === 'passed' ? '已交付' : action.label) : action.label}</button>
+                      <button className={`cv-row-action${shownAction.kind === 'none' ? (shownAction.label === '任务进行中' ? ' cv-row-running' : ' cv-row-none') : ''}`} disabled={shownAction.kind === 'none'} title={shownAction.hint} onClick={() => rowAction(issue)}>{shownAction.kind === 'none' ? (status === 'passed' ? '已交付' : shownAction.label) : shownAction.label}</button>
                     </div>
                   })}
                 </React.Fragment>
@@ -1650,6 +1680,148 @@ function PanelContent() {
         </>
       )}
     </div>
+  )
+}
+
+/**
+ * shell.overlay gives us a stable lifecycle anchor. The visible panel is
+ * portalled to body while #root gives up the same width, matching the proven
+ * better-sidebar layout-push pattern without covering the conversation.
+ */
+function OccupiedPanel() {
+  const [portalHost, setPortalHost] = React.useState<HTMLDivElement | null>(null)
+  const [viewportWidth, setViewportWidth] = React.useState(() => window.innerWidth)
+  const [desktopWidth, setDesktopWidth] = React.useState(
+    () => resolveDesktopPanelWidth(window.innerWidth, panelState.desktopWidth),
+  )
+  const layout = resolvePanelLayout(viewportWidth, desktopWidth)
+  const layoutRef = React.useRef(layout)
+  const dragRef = React.useRef<{ x: number; width: number } | null>(null)
+  const dragFrameRef = React.useRef<number | null>(null)
+  const pendingWidthRef = React.useRef<number | null>(null)
+
+  React.useLayoutEffect(() => {
+    const root = document.getElementById('root')
+    if (!root) return
+
+    const host = document.createElement('div')
+    host.className = 'cv-panel-slot'
+    document.body.appendChild(host)
+    root.classList.add('cv-panel-host-open')
+    setPortalHost(host)
+
+    return () => {
+      if (dragFrameRef.current !== null) cancelAnimationFrame(dragFrameRef.current)
+      document.body.removeAttribute('data-cv-panel-dragging')
+      root.classList.remove('cv-panel-host-open')
+      document.documentElement.style.removeProperty('--cv-sidebar-width')
+      host.remove()
+    }
+  }, [])
+
+  React.useEffect(() => {
+    let frame: number | null = null
+    const measure = () => {
+      frame = null
+      setViewportWidth(window.innerWidth)
+    }
+    const onResize = () => {
+      if (frame === null) frame = requestAnimationFrame(measure)
+    }
+    window.addEventListener('resize', onResize)
+    return () => {
+      window.removeEventListener('resize', onResize)
+      if (frame !== null) cancelAnimationFrame(frame)
+    }
+  }, [])
+
+  React.useLayoutEffect(() => {
+    layoutRef.current = layout
+    if (!portalHost) return
+    portalHost.toggleAttribute('data-cv-mobile', layout.mobile)
+    portalHost.style.width = layout.mobile ? '100vw' : `${layout.panelWidth}px`
+    document.documentElement.style.setProperty('--cv-sidebar-width', `${layout.pushWidth}px`)
+  }, [layout.mobile, layout.panelWidth, layout.pushWidth, portalHost])
+
+  const applyDragWidth = (width: number) => {
+    if (!portalHost) return
+    portalHost.style.width = `${width}px`
+    document.documentElement.style.setProperty('--cv-sidebar-width', `${width}px`)
+  }
+
+  const scheduleDragWidth = (width: number) => {
+    pendingWidthRef.current = width
+    if (dragFrameRef.current !== null) return
+    dragFrameRef.current = requestAnimationFrame(() => {
+      dragFrameRef.current = null
+      const pending = pendingWidthRef.current
+      if (pending !== null) {
+        pendingWidthRef.current = null
+        applyDragWidth(pending)
+      }
+    })
+  }
+
+  const finishDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current
+    if (!drag || !event.currentTarget.hasPointerCapture(event.pointerId)) return
+    const pending = pendingWidthRef.current
+    const width = pending ?? resolveDesktopPanelWidth(
+      window.innerWidth,
+      drag.width - (event.clientX - drag.x),
+    )
+    if (dragFrameRef.current !== null) {
+      cancelAnimationFrame(dragFrameRef.current)
+      dragFrameRef.current = null
+    }
+    pendingWidthRef.current = null
+    applyDragWidth(width)
+    event.currentTarget.releasePointerCapture(event.pointerId)
+    event.currentTarget.removeAttribute('data-dragging')
+    dragRef.current = null
+    document.body.removeAttribute('data-cv-panel-dragging')
+    panelState.desktopWidth = width
+    setDesktopWidth(width)
+  }
+
+  const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    event.currentTarget.setAttribute('data-dragging', '')
+    dragRef.current = { x: event.clientX, width: layoutRef.current.panelWidth }
+    document.body.setAttribute('data-cv-panel-dragging', '')
+  }
+  const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current
+    if (!drag || !event.currentTarget.hasPointerCapture(event.pointerId)) return
+    scheduleDragWidth(resolveDesktopPanelWidth(
+      window.innerWidth,
+      drag.width - (event.clientX - drag.x),
+    ))
+  }
+
+  return (
+    <>
+      {portalHost ? createPortal(
+        <>
+          {!layout.mobile && (
+            <div
+              className="cv-panel-resizer"
+              role="separator"
+              aria-label="调整 ClickVibe 面板宽度"
+              aria-orientation="vertical"
+              aria-valuenow={layout.panelWidth}
+              onPointerDown={onPointerDown}
+              onPointerMove={onPointerMove}
+              onPointerUp={finishDrag}
+              onPointerCancel={finishDrag}
+            />
+          )}
+          <PanelContent />
+        </>,
+        portalHost,
+      ) : null}
+    </>
   )
 }
 
@@ -1669,11 +1841,7 @@ export function apply(ctx: ClientContext): void {
       () => {
         const open = usePanelOpen()
         if (!open) return null
-        return (
-          <div style={{ position: 'fixed', top: 0, right: 0, bottom: 0, zIndex: 9000, pointerEvents: 'auto' }}>
-            <PanelContent />
-          </div>
-        )
+        return <OccupiedPanel />
       },
     )))
 

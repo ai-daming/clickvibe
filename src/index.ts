@@ -43,6 +43,7 @@ import {
   type DevelopAgent,
   type IssuePromptSnapshot,
 } from './develop.ts'
+import { checkIssueContract, type IssueContractCheck } from './issue-contract.ts'
 import {
   deriveNextAction,
   deriveWorkflowStatus,
@@ -96,6 +97,12 @@ import {
   aggregateRepositoryFreshness,
   type RepositoryFreshness,
 } from './repo-freshness.ts'
+import {
+  deriveReviewDecision,
+  githubErrorMessage,
+  githubRest,
+  isGithubRateLimitError,
+} from './github-rest.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -135,22 +142,6 @@ const ROUTE = '/clickvibe/api'
 
 /** Body size bound of one JSON request. */
 const MAX_BODY_BYTES = 64 * 1024
-
-/** Fields the issue fetch requests from gh (verified against rc.8). */
-const ISSUE_FIELDS = [
-  'number', 'title', 'state', 'stateReason', 'author', 'createdAt',
-  'updatedAt', 'closedAt', 'body', 'url', 'labels', 'assignees',
-  'milestone', 'comments', 'reactionGroups', 'isPinned',
-].join(',')
-
-/** Fields the PR fetch requests from gh (verified against rc.8). */
-const PR_FIELDS = [
-  'number', 'title', 'state', 'author', 'createdAt', 'updatedAt',
-  'closedAt', 'mergedAt', 'body', 'url', 'labels', 'assignees',
-  'milestone', 'additions', 'deletions', 'changedFiles', 'commits',
-  'isDraft', 'mergeable', 'mergeStateStatus', 'baseRefName',
-  'headRefName', 'reviews', 'reviewRequests', 'comments',
-].join(',')
 
 interface ClickVibeConfig {
   repos: Record<string, string>
@@ -301,6 +292,11 @@ function writeJson(res: ServerResponse, status: number, value: unknown): void {
   res.end(body)
 }
 
+function githubAwareStatus(result: { ok: boolean; error?: string }, success = 200, failure = 400): number {
+  if (result.ok) return success
+  return result.error?.startsWith('GitHub 额度已用完,约 ') ? 429 : failure
+}
+
 /** Run one foreground command; returns trimmed stdout or throws on non-zero. */
 async function runCommand(
   ctx: Context,
@@ -385,14 +381,11 @@ async function readWorktreeHead(ctx: Context, worktree: string): Promise<string 
  */
 async function detectLinkedPr(ctx: Context, repoKey: string, branch: string): Promise<string | null> {
   try {
-    const spec = ctx.shell.resolve({
-      command: `gh pr list --repo ${repoKey} --head ${shellQuote(branch)} --state open --json number --jq '.[0].number // ""'`,
-      timeoutMs: 15000,
-    })
-    const result = await ctx.shell.run(spec)
-    if (result.exitCode !== 0) return null
-    const num = result.stdout.text.trim()
-    return num === '' ? null : num
+    const owner = repoKey.split('/')[0]
+    const prs = await githubRest(ctx).json<Array<{ number?: number }>>(
+      `repos/${repoKey}/pulls?state=open&head=${encodeURIComponent(`${owner}:${branch}`)}&per_page=1`,
+    )
+    return prs[0]?.number === undefined ? null : String(prs[0].number)
   } catch {
     return null
   }
@@ -446,6 +439,140 @@ interface GithubPrFact {
   reviewDecision: string | null
   headRefOid?: string
   baseRefName?: string
+}
+
+interface GithubUserRest { login?: string }
+interface GithubLabelRest { name?: string; color?: string }
+interface GithubMilestoneRest { title?: string; number?: number }
+interface GithubCommentRest {
+  user?: GithubUserRest | null
+  body?: string | null
+  created_at?: string
+  updated_at?: string
+}
+interface GithubReviewRest {
+  id?: number
+  user?: GithubUserRest | null
+  body?: string | null
+  state?: string
+  submitted_at?: string | null
+}
+interface GithubIssueDetailRest {
+  number: number
+  title: string
+  state: string
+  state_reason?: string | null
+  user?: GithubUserRest | null
+  created_at?: string
+  updated_at?: string
+  closed_at?: string | null
+  body?: string | null
+  html_url: string
+  labels?: GithubLabelRest[]
+  assignees?: GithubUserRest[]
+  milestone?: GithubMilestoneRest | null
+}
+interface GithubPrDetailRest extends GithubIssueDetailRest {
+  merged_at?: string | null
+  additions?: number
+  deletions?: number
+  changed_files?: number
+  commits?: number
+  draft?: boolean
+  mergeable?: boolean | null
+  mergeable_state?: string
+  base?: { ref?: string; sha?: string }
+  head?: { ref?: string; sha?: string }
+}
+
+function mapComments(comments: GithubCommentRest[]): Array<{ author: { login: string }; createdAt: string; updatedAt: string; body: string }> {
+  return comments.map((comment) => ({
+    author: { login: String(comment.user?.login ?? 'unknown') },
+    createdAt: String(comment.created_at ?? ''),
+    updatedAt: String(comment.updated_at ?? ''),
+    body: String(comment.body ?? ''),
+  }))
+}
+
+function mapIssueDetail(issue: GithubIssueDetailRest, comments: GithubCommentRest[]): Record<string, unknown> {
+  return {
+    number: issue.number,
+    title: issue.title,
+    state: String(issue.state).toUpperCase(),
+    stateReason: issue.state_reason ?? null,
+    author: { login: String(issue.user?.login ?? 'unknown') },
+    createdAt: issue.created_at ?? '',
+    updatedAt: issue.updated_at ?? '',
+    closedAt: issue.closed_at ?? null,
+    body: issue.body ?? '',
+    url: issue.html_url,
+    labels: (issue.labels ?? []).map((label) => ({ name: String(label.name ?? ''), color: label.color })),
+    assignees: (issue.assignees ?? []).map((user) => ({ login: String(user.login ?? '') })),
+    milestone: issue.milestone ? { title: String(issue.milestone.title ?? ''), number: issue.milestone.number } : null,
+    comments: mapComments(comments),
+    reactionGroups: [],
+    isPinned: false,
+  }
+}
+
+function mapPrDetail(
+  pr: GithubPrDetailRest,
+  comments: GithubCommentRest[],
+  reviews: GithubReviewRest[],
+  requested: { users?: GithubUserRest[]; teams?: Array<{ name?: string; slug?: string }> },
+): Record<string, unknown> {
+  return {
+    ...mapIssueDetail(pr, comments),
+    state: pr.merged_at ? 'MERGED' : String(pr.state).toUpperCase(),
+    mergedAt: pr.merged_at ?? null,
+    additions: pr.additions ?? 0,
+    deletions: pr.deletions ?? 0,
+    changedFiles: pr.changed_files ?? 0,
+    commits: Array.from({ length: Math.max(0, pr.commits ?? 0) }, () => ({})),
+    isDraft: pr.draft ?? false,
+    mergeable: pr.mergeable === null || pr.mergeable === undefined ? 'UNKNOWN' : pr.mergeable ? 'MERGEABLE' : 'CONFLICTING',
+    mergeStateStatus: String(pr.mergeable_state ?? 'unknown').toUpperCase(),
+    baseRefName: String(pr.base?.ref ?? ''),
+    headRefName: String(pr.head?.ref ?? ''),
+    reviews: reviews.map((review) => ({
+      author: { login: String(review.user?.login ?? 'unknown') },
+      body: String(review.body ?? ''),
+      state: String(review.state ?? '').toUpperCase(),
+      submittedAt: review.submitted_at ?? null,
+    })),
+    reviewRequests: [
+      ...(requested.users ?? []).map((user) => ({ login: String(user.login ?? '') })),
+      ...(requested.teams ?? []).map((team) => ({ name: String(team.name ?? team.slug ?? '') })),
+    ],
+    reviewDecision: deriveReviewDecision(reviews),
+  }
+}
+
+async function fetchPrRestDetail(ctx: Context, repoKey: string, number: string | number, force = false, timeoutMs?: number): Promise<GithubPrDetailRest> {
+  const rest = githubRest(ctx)
+  const key = `${repoKey}/pulls/${number}`
+  return rest.cachedResource(key, rest.resourceVersion(key), () =>
+    rest.json<GithubPrDetailRest>(`repos/${repoKey}/pulls/${number}`, undefined, timeoutMs), {
+      force,
+      versionOf: (pr) => pr.updated_at,
+    })
+}
+
+async function fetchPrRestReviews(ctx: Context, repoKey: string, number: string | number, timeoutMs?: number): Promise<GithubReviewRest[]> {
+  const rest = githubRest(ctx)
+  const resourceKey = `${repoKey}/pulls/${number}`
+  return rest.cachedResource(`${resourceKey}/reviews`, rest.resourceVersion(resourceKey), () =>
+    rest.paginate<GithubReviewRest>(`repos/${repoKey}/pulls/${number}/reviews`, undefined, timeoutMs))
+}
+
+async function fetchIssueRestDetail(ctx: Context, repoKey: string, number: string | number, force = false, timeoutMs?: number): Promise<GithubIssueDetailRest> {
+  const rest = githubRest(ctx)
+  const key = `${repoKey}/issues/${number}`
+  return rest.cachedResource(key, rest.resourceVersion(key), () =>
+    rest.json<GithubIssueDetailRest>(`repos/${repoKey}/issues/${number}`, undefined, timeoutMs), {
+      force,
+      versionOf: (issue) => issue.updated_at,
+    })
 }
 
 interface DeriveOptions {
@@ -783,7 +910,7 @@ export function apply(ctx: Context): void {
 
       if (method === 'fetch') {
         const result = await fetchIssue(ctx, payload)
-        writeJson(res, result.ok ? 200 : 400, result)
+        writeJson(res, githubAwareStatus(result), result)
         return
       }
       if (method === 'projects') {
@@ -793,7 +920,7 @@ export function apply(ctx: Context): void {
       }
       if (method === 'repo/issues') {
         const result = await fetchRepositoryIssues(ctx, payload)
-        writeJson(res, result.ok ? 200 : 400, result)
+        writeJson(res, githubAwareStatus(result), result)
         return
       }
       if (method === 'state') {
@@ -812,15 +939,24 @@ export function apply(ctx: Context): void {
             : parsedRepo ? [`${parsedRepo.owner}/${parsedRepo.repo}`]
               : workflows.map((workflow) => workflow.repoKey),
         )
-        const freshnesses = (await Promise.all([...repoKeys].map((key) =>
-          ensureConfiguredRepoFresh(ctx, config, key, filter?.forceRefresh === true),
-        ))).filter((value): value is RepositoryFreshness => value !== null)
-        const dependenciesRefreshDue = [...repoKeys]
-          .map((key) => dependencyRefreshClock.take(key, fetchTtlMs(config), filter?.forceRefresh === true))
-          .some(Boolean)
-        const enriched = await enrichWorkflowStates(ctx, workflows, config)
-        const freshness = aggregateRepositoryFreshness(freshnesses)
-        writeJson(res, 200, { ok: true, workflows: enriched, freshness, dependenciesRefreshDue })
+        try {
+          for (const key of repoKeys) {
+            const circuitError = githubRest(ctx).rateLimitError()
+            if (circuitError) throw circuitError
+          }
+          const freshnesses = (await Promise.all([...repoKeys].map((key) =>
+            ensureConfiguredRepoFresh(ctx, config, key, filter?.forceRefresh === true),
+          ))).filter((value): value is RepositoryFreshness => value !== null)
+          const dependenciesRefreshDue = [...repoKeys]
+            .map((key) => dependencyRefreshClock.take(key, fetchTtlMs(config), filter?.forceRefresh === true))
+            .some(Boolean)
+          const enriched = await enrichWorkflowStates(ctx, workflows, config)
+          const freshness = aggregateRepositoryFreshness(freshnesses)
+          writeJson(res, 200, { ok: true, workflows: enriched, freshness, dependenciesRefreshDue })
+        } catch (error) {
+          const message = isGithubRateLimitError(error) ? error.message : `状态刷新失败: ${githubErrorMessage(error)}`
+          writeJson(res, isGithubRateLimitError(error) ? 429 : 400, { ok: false, error: message })
+        }
         return
       }
       if (method === 'authorize') {
@@ -970,30 +1106,43 @@ async function fetchGithubPrFact(
   repoKey: string,
   branch: string,
   prNumber: string | number | null,
+  includeReviews = true,
 ): Promise<GithubPrLookup> {
   const hasPrNumber = prNumber !== null && prNumber !== undefined
-  const selector = hasPrNumber ? shellQuote(String(prNumber)) : `--head ${shellQuote(branch)} --state all --limit 1`
-  const command = hasPrNumber
-    ? `gh pr view ${selector} --repo ${shellQuote(repoKey)} --json number,state,mergedAt,headRefName,headRefOid,baseRefName,url,reviewDecision`
-    : `gh pr list --repo ${shellQuote(repoKey)} ${selector} --json number,state,mergedAt,headRefName,headRefOid,baseRefName,url,reviewDecision --jq '.[0] // {}'`
   try {
-    const output = await runCommand(ctx, command, { timeoutMs: 5000 })
-    const raw = JSON.parse(output || '{}') as Partial<GithubPrFact> & { number?: number | string }
-    if (raw.number === undefined) return { known: true, pr: null }
+    const rest = githubRest(ctx)
+    let raw: GithubPrDetailRest | undefined
+    if (hasPrNumber) {
+      raw = await fetchPrRestDetail(ctx, repoKey, String(prNumber), false, 5_000)
+    } else {
+      const owner = repoKey.split('/')[0]
+      raw = await rest.cachedResource(`${repoKey}/pulls/head/${branch}`, null, async () =>
+        (await rest.json<GithubPrDetailRest[]>(
+          `repos/${repoKey}/pulls?state=all&head=${encodeURIComponent(`${owner}:${branch}`)}&per_page=1`,
+          undefined,
+          5_000,
+        ))[0])
+    }
+    if (!raw) return { known: true, pr: null }
+    rest.rememberVersion(`${repoKey}/pulls/${raw.number}`, raw.updated_at)
+    // lists 之外的回源刷新默认带 reviews 推导 reviewDecision;已有本地 verdict 时
+    // 跳过,省掉一轮 pulls/{n}/reviews 请求(列表路径由调用方按需传入)。
+    const reviews = includeReviews ? await fetchPrRestReviews(ctx, repoKey, raw.number, 5_000) : []
     return {
       known: true,
       pr: {
         number: String(raw.number),
-        state: raw.state === 'MERGED' ? 'MERGED' : raw.state === 'CLOSED' ? 'CLOSED' : 'OPEN',
-        mergedAt: raw.mergedAt ?? null,
-        headRefName: String(raw.headRefName ?? branch),
-        url: String(raw.url ?? `https://github.com/${repoKey}/pull/${raw.number}`),
-        reviewDecision: raw.reviewDecision ?? null,
-        headRefOid: raw.headRefOid ? String(raw.headRefOid) : undefined,
-        baseRefName: raw.baseRefName ? String(raw.baseRefName) : undefined,
+        state: raw.merged_at ? 'MERGED' : String(raw.state).toUpperCase() === 'CLOSED' ? 'CLOSED' : 'OPEN',
+        mergedAt: raw.merged_at ?? null,
+        headRefName: String(raw.head?.ref ?? branch),
+        url: String(raw.html_url ?? `https://github.com/${repoKey}/pull/${raw.number}`),
+        reviewDecision: deriveReviewDecision(reviews),
+        headRefOid: raw.head?.sha ? String(raw.head.sha) : undefined,
+        baseRefName: raw.base?.ref ? String(raw.base.ref) : undefined,
       },
     }
-  } catch {
+  } catch (error) {
+    if (isGithubRateLimitError(error)) throw error
     return { known: false, pr: null }
   }
 }
@@ -1003,13 +1152,12 @@ async function fetchGithubIssueState(
   url: string,
 ): Promise<'OPEN' | 'CLOSED' | null> {
   try {
-    const output = await runCommand(
-      ctx,
-      `gh issue view ${shellQuote(url)} --json state --jq '.state'`,
-      { timeoutMs: 5_000 },
-    )
-    return output.trim().toUpperCase() === 'CLOSED' ? 'CLOSED' : 'OPEN'
-  } catch {
+    const parsed = parseUrl(url)
+    if (!parsed || parsed.kind !== 'issue') return null
+    const issue = await fetchIssueRestDetail(ctx, `${parsed.owner}/${parsed.repo}`, parsed.number, false, 5_000)
+    return String(issue.state).toUpperCase() === 'CLOSED' ? 'CLOSED' : 'OPEN'
+  } catch (error) {
+    if (isGithubRateLimitError(error)) throw error
     return null
   }
 }
@@ -1077,6 +1225,7 @@ interface RepositoryIssueItem {
   updatedAt?: string
   labels?: { name: string; color?: string }[]
   milestone?: { title: string; number?: number } | null
+  contract: IssueContractCheck
 }
 
 interface RepositoryIssueRest {
@@ -1095,13 +1244,30 @@ interface RepositoryPrRest {
   number: number
   state: string
   merged_at: string | null
+  updated_at?: string
   html_url: string
   head?: { ref?: string }
 }
 
-function flattenGithubPages<T>(value: unknown): T[] {
-  if (!Array.isArray(value)) throw new Error('GitHub 分页返回格式无效')
-  return value.flatMap((page) => Array.isArray(page) ? page as T[] : [page as T])
+interface RepositoryGithubSnapshot {
+  issues: RepositoryIssueRest[]
+  pulls: RepositoryPrRest[]
+}
+
+async function fetchGithubRepoSnapshot(
+  ctx: Context,
+  repoKey: string,
+  ttlMs: number,
+  force: boolean,
+): Promise<RepositoryGithubSnapshot> {
+  const rest = githubRest(ctx)
+  return rest.cachedAggregate(`repo:${repoKey}`, ttlMs, force, async () => {
+    const [issues, pulls] = await Promise.all([
+      rest.paginate<RepositoryIssueRest>(`repos/${repoKey}/issues?state=all`),
+      rest.paginate<RepositoryPrRest>(`repos/${repoKey}/pulls?state=all`),
+    ])
+    return { issues, pulls }
+  })
 }
 
 export async function fetchRepositoryIssues(
@@ -1119,15 +1285,13 @@ export async function fetchRepositoryIssues(
   const forceRefresh = (payload as { forceRefresh?: unknown } | undefined)?.forceRefresh === true
   const freshness = await ensureConfiguredRepoFresh(ctx, config, repoKey, forceRefresh)
 
-  const issueCommand = `gh api --paginate --slurp ${shellQuote(`repos/${repoKey}/issues?state=all&per_page=100`)}`
-  const prCommand = `gh api --paginate --slurp ${shellQuote(`repos/${repoKey}/pulls?state=all&per_page=100`)}`
   try {
-    const [issueOutput, prOutput, allWorkflows] = await Promise.all([
-      runCommand(ctx, issueCommand, { timeoutMs: 30000 }),
-      runCommand(ctx, prCommand, { timeoutMs: 30000 }),
+    const rest = githubRest(ctx)
+    const [githubSnapshot, allWorkflows] = await Promise.all([
+      fetchGithubRepoSnapshot(ctx, repoKey, fetchTtlMs(config), forceRefresh),
       overrides.workflows ? Promise.resolve(overrides.workflows) : loadAllWorkflows(),
     ])
-    const allIssues = flattenGithubPages<RepositoryIssueRest>(JSON.parse(issueOutput))
+    const allIssues = githubSnapshot.issues
       .filter((issue) => issue.pull_request === undefined)
       .map<RepositoryIssueItem>((issue) => ({
         number: issue.number,
@@ -1138,8 +1302,9 @@ export async function fetchRepositoryIssues(
         updatedAt: issue.updated_at,
         labels: issue.labels,
         milestone: issue.milestone,
+        contract: checkIssueContract(issue.body ?? ''),
       }))
-    const prs = flattenGithubPages<RepositoryPrRest>(JSON.parse(prOutput)).map<GithubPrFact>((pr) => ({
+    const prs = githubSnapshot.pulls.map<GithubPrFact>((pr) => ({
       number: String(pr.number),
       state: pr.merged_at ? 'MERGED' : pr.state.toUpperCase() === 'CLOSED' ? 'CLOSED' : 'OPEN',
       mergedAt: pr.merged_at,
@@ -1147,6 +1312,8 @@ export async function fetchRepositoryIssues(
       url: pr.html_url,
       reviewDecision: null,
     }))
+    for (const issue of allIssues) rest.rememberVersion(`${repoKey}/issues/${issue.number}`, issue.updatedAt)
+    for (const pr of githubSnapshot.pulls) rest.rememberVersion(`${repoKey}/pulls/${pr.number}`, pr.updated_at)
 
     const issueByNumber = new Map(allIssues.map((issue) => [issue.number, issue]))
     const workflowByNumber = new Map(
@@ -1158,6 +1325,10 @@ export async function fetchRepositoryIssues(
     for (const raw of prs) {
       if (!raw.headRefName || prByBranch.has(raw.headRefName)) continue
       prByBranch.set(raw.headRefName, { ...raw, number: String(raw.number) })
+    }
+    const prByNumber = new Map<string, GithubPrFact>()
+    for (const raw of prs) {
+      if (!prByNumber.has(String(raw.number))) prByNumber.set(String(raw.number), { ...raw, number: String(raw.number) })
     }
 
     const repoPath = expandHome(configuredPath)
@@ -1188,10 +1359,19 @@ export async function fetchRepositoryIssues(
       const branch = existing?.branch ?? `${project}-issue-${issue.number}`
       const worktree = existing?.worktree ?? join(config.worktreeRoot, project, branch)
       const branchExists = refs.has(branch) || refs.has(`origin/${branch}`)
+      // 列表页优先消费快照事实:pulls?state=all 已含全部(含已合并/已关闭)PR,
+      // 冷启动不再为每个 workflow 打 pulls/{n}(+reviews) 网络请求,首屏秒开;
+      // 只有快照缺失该编号(分支重命名/新 PR 未入快照)才按编号回源刷新,
+      // 沿用"编号刷新 + 刷新失败关门"的既有语义(tests/routes.test.ts)。
+      // 已有持久化 reviewResult 时跳过 reviews 详情,verdict 以本地为准。
+      const snapshotPr = existing?.prNumber ? prByNumber.get(String(existing.prNumber)) : null
       let pr: GithubPrFact | null
       let prStatusKnown: boolean
-      if (existing?.prNumber) {
-        const lookup = await fetchGithubPrFact(ctx, repoKey, branch, existing.prNumber)
+      if (snapshotPr) {
+        pr = snapshotPr
+        prStatusKnown = true
+      } else if (existing?.prNumber) {
+        const lookup = await fetchGithubPrFact(ctx, repoKey, branch, existing.prNumber, existing.reviewResult === null)
         pr = lookup.pr
         prStatusKnown = lookup.known && lookup.pr !== null
       } else {
@@ -1247,12 +1427,12 @@ export async function fetchRepositoryIssues(
         const dependency = issueByNumber.get(number)
         return { number, title: dependency?.title ?? '', state: String(dependency?.state ?? 'UNKNOWN').toUpperCase() }
       })
-      return { ...issue, blockedBy, workflow: derived }
+      return { ...issue, blockedBy, workflow: derived, contract: checkIssueContract(issue.body ?? '') }
     }))
     dependencyRefreshClock.mark(repoKey)
     return { ok: true, repoKey, issues, freshness }
   } catch (error) {
-    return { ok: false, error: `项目 issue 抓取失败: ${String(error instanceof Error ? error.message : error)}` }
+    return { ok: false, error: isGithubRateLimitError(error) ? error.message : `项目 issue 抓取失败: ${githubErrorMessage(error)}` }
   }
 }
 
@@ -1270,17 +1450,44 @@ async function fetchIssue(
     return { ok: false, error: '请输入形如 https://github.com/owner/repo/issues/123 或 /pull/123 的链接' }
   }
   const isPR = parsed.kind === 'pr'
-  const command = `${isPR ? 'gh pr view' : 'gh issue view'} ${url} --json ${isPR ? PR_FIELDS : ISSUE_FIELDS}`
   try {
-    const parsedJson = JSON.parse(await runCommand(ctx, command, { timeoutMs: 20000 })) as unknown
-    const data: { kind: 'issue' | 'pr'; item: unknown; timeline?: unknown; dependencies?: { blockedBy: IssueDependency[]; blocking: IssueDependency[] } } = { kind: parsed.kind, item: parsedJson }
+    const repoKey = `${parsed.owner}/${parsed.repo}`
+    const rest = githubRest(ctx)
+    const resourceKey = `${repoKey}/${isPR ? 'pulls' : 'issues'}/${parsed.number}`
+    const panelCacheKey = `${resourceKey}/panel`
+    const forceRefresh = (payload as { forceRefresh?: unknown } | undefined)?.forceRefresh === true
+    const detail = await rest.cachedResource(panelCacheKey, rest.resourceVersion(resourceKey), async () => {
+      if (isPR) {
+        const pr = await fetchPrRestDetail(ctx, repoKey, parsed.number, forceRefresh, 20_000)
+        const [comments, reviews, requested] = await Promise.all([
+          rest.paginate<GithubCommentRest>(`repos/${repoKey}/issues/${parsed.number}/comments`, undefined, 20_000),
+          fetchPrRestReviews(ctx, repoKey, parsed.number, 20_000),
+          rest.json<{ users?: GithubUserRest[]; teams?: Array<{ name?: string; slug?: string }> }>(`repos/${repoKey}/pulls/${parsed.number}/requested_reviewers`, undefined, 20_000),
+        ])
+        return { item: mapPrDetail(pr, comments, reviews, requested), updatedAt: pr.updated_at ?? '' }
+      }
+      const issue = await fetchIssueRestDetail(ctx, repoKey, parsed.number, forceRefresh, 20_000)
+      const [comments, timeline] = await Promise.all([
+        rest.paginate<GithubCommentRest>(`repos/${repoKey}/issues/${parsed.number}/comments`, undefined, 20_000),
+        fetchTimeline(ctx, parsed.owner, parsed.repo, parsed.number),
+      ])
+      return { item: mapIssueDetail(issue, comments), timeline, updatedAt: issue.updated_at ?? '' }
+    }, {
+      force: forceRefresh,
+      ttlMs: fetchTtlMs(await loadConfig()),
+      versionOf: (value) => value.updatedAt,
+    })
+    const data: { kind: 'issue' | 'pr'; item: unknown; timeline?: unknown; dependencies?: { blockedBy: IssueDependency[]; blocking: IssueDependency[] } } = {
+      kind: parsed.kind,
+      item: detail.item,
+      ...(detail.timeline ? { timeline: detail.timeline } : {}),
+    }
     let dependencyError: string | undefined
     // issue 额外拉 timeline,提取关联事件(linked PR/commit)——GitHub UI 的
     // "linked a pull request" 就来自 cross-referenced 事件
     if (!isPR) {
-      data.timeline = await fetchTimeline(ctx, parsed.owner, parsed.repo, parsed.number)
       // 依赖图:blockedBy 来自本 issue 正文,blocking 扫描 repo 内其它 issue
-      const dependencyResult = await fetchDependencies(ctx, parsed, parsedJson as { body?: unknown })
+      const dependencyResult = await fetchDependencies(ctx, parsed, detail.item as { body?: unknown }, forceRefresh)
       if (dependencyResult.ok) {
         data.dependencies = dependencyResult.dependencies
         dependencyRefreshClock.mark(`${parsed.owner}/${parsed.repo}`)
@@ -1290,7 +1497,7 @@ async function fetchIssue(
     }
     return { ok: true, data, ...(dependencyError ? { dependencyError } : {}) }
   } catch (error) {
-    return { ok: false, error: `抓取异常: ${String(error instanceof Error ? error.message : error)}` }
+    return { ok: false, error: isGithubRateLimitError(error) ? error.message : `抓取异常: ${githubErrorMessage(error)}` }
   }
 }
 
@@ -1321,15 +1528,10 @@ interface ReviewIssueContract {
 }
 
 /** Read the exact Issue contract that one review run evaluates. */
-async function fetchIssueContract(ctx: Context, url: string): Promise<ReviewIssueContract> {
+async function fetchIssueContract(ctx: Context, url: string, force = false): Promise<ReviewIssueContract> {
   const parsed = parseUrl(url)
   if (!parsed || parsed.kind !== 'issue') throw new Error('review workflow 缺少有效 Issue URL')
-  const output = await runCommand(
-    ctx,
-    `gh issue view ${shellQuote(url)} --json title,body,state,updatedAt`,
-    { timeoutMs: 5_000 },
-  )
-  const item = JSON.parse(output) as Record<string, unknown>
+  const item = await fetchIssueRestDetail(ctx, `${parsed.owner}/${parsed.repo}`, parsed.number, force, 5_000)
   const body = String(item.body ?? '')
   return {
     title: String(item.title ?? ''),
@@ -1337,7 +1539,7 @@ async function fetchIssueContract(ctx: Context, url: string): Promise<ReviewIssu
     state: String(item.state ?? '').toUpperCase(),
     contract: {
       bodyHash: issueBodyHash(body),
-      updatedAt: String(item.updatedAt ?? ''),
+      updatedAt: String(item.updated_at ?? ''),
     },
   }
 }
@@ -1367,7 +1569,7 @@ async function assertReviewContractCurrent(ctx: Context, workflow: IssueWorkflow
   }
   let current: ReviewIssueContract
   try {
-    current = await fetchIssueContract(ctx, workflow.url)
+    current = await fetchIssueContract(ctx, workflow.url, true)
   } catch (error) {
     throw new Error(`合并门禁拒绝:无法读取当前验收契约: ${String(error instanceof Error ? error.message : error)}`)
   }
@@ -1534,6 +1736,8 @@ async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): Promise<
       ].join(' ')
       try {
         await runCommand(ctx, command, { timeoutMs: 120_000 })
+        githubRest(ctx).invalidate(`${repoKey}/pulls/${pr.number}`)
+        githubRest(ctx).invalidate(`repo:${repoKey}`)
       } catch (error) {
         return { ok: false, error: `PR 合并失败: ${String(error instanceof Error ? error.message : error)}` }
       }
@@ -1637,6 +1841,8 @@ async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): Promise<
           `gh issue close ${shellQuote(parsed.number)} --repo ${shellQuote(repoKey)} --comment ${shellQuote(`由 PR #${pr.number} 以 merge commit 合并交付。`)}`,
           { timeoutMs: 30_000 },
         )
+        githubRest(ctx).invalidate(`${repoKey}/issues/${parsed.number}`)
+        githubRest(ctx).invalidate(`repo:${repoKey}`)
       }
       workflow.issueState = 'CLOSED'
       delivery.cleanup.issue = true
@@ -1673,18 +1879,26 @@ async function fetchDependencies(
   ctx: Context,
   target: { owner: string; repo: string; number: string },
   item: { body?: unknown },
+  forceRefresh = false,
 ): Promise<
   | { ok: true; dependencies: { blockedBy: IssueDependency[]; blocking: IssueDependency[] } }
   | { ok: false; error: string }
 > {
-  const command = `gh issue list --repo ${target.owner}/${target.repo} --state all --limit 100 --json number,title,state,body`
   let issues: { number: number; title: string; state: string; body: string }[] = []
   try {
-    const parsed = JSON.parse(await runCommand(ctx, command, { timeoutMs: 20000 })) as unknown
-    if (!Array.isArray(parsed)) throw new Error('GitHub 依赖列表格式无效')
-    issues = parsed as { number: number; title: string; state: string; body: string }[]
+    const config = await loadConfig()
+    const repoKey = `${target.owner}/${target.repo}`
+    const snapshot = await fetchGithubRepoSnapshot(ctx, repoKey, fetchTtlMs(config), forceRefresh)
+    issues = snapshot.issues
+      .filter((issue) => issue.pull_request === undefined)
+      .map((issue) => ({
+        number: issue.number,
+        title: issue.title,
+        state: String(issue.state).toUpperCase(),
+        body: issue.body ?? '',
+      }))
   } catch (error) {
-    return { ok: false, error: `GitHub 依赖刷新失败: ${String(error instanceof Error ? error.message : error)}` }
+    return { ok: false, error: isGithubRateLimitError(error) ? error.message : `GitHub 依赖刷新失败: ${githubErrorMessage(error)}` }
   }
 
   const current = Number(target.number)
@@ -1711,13 +1925,34 @@ async function fetchDependencies(
 
 /** Fetch the issue timeline and keep only the events worth showing. */
 async function fetchTimeline(ctx: Context, owner: string, repo: string, number: string): Promise<unknown[]> {
-  const command = `gh api repos/${owner}/${repo}/issues/${number}/timeline -H "Accept: application/vnd.github+json" --jq '[.[] | select(.event == "cross-referenced" or .event == "referenced" or .event == "connected" or .event == "closed" or .event == "reopened") | {event, created_at, actor: .actor.login, commit_id, source: (if .source then {number: .source.issue.number, title: .source.issue.title, html_url: .source.issue.html_url, state: .source.issue.state, is_pr: (.source.issue.pull_request != null), pr_merged: (.source.issue.pull_request.merged_at != null)} else null end)}]'`
   try {
-    const spec = ctx.shell.resolve({ command, timeoutMs: 15000 })
-    const result = await ctx.shell.run(spec)
-    if (result.exitCode !== 0) return []
-    return JSON.parse(result.stdout.text) as unknown[]
-  } catch {
+    const events = await githubRest(ctx).paginate<{
+      event?: string
+      created_at?: string
+      actor?: GithubUserRest | null
+      commit_id?: string | null
+      source?: { issue?: { number?: number; title?: string; html_url?: string; state?: string; pull_request?: { merged_at?: string | null } | null } } | null
+    }>(`repos/${owner}/${repo}/issues/${number}/timeline`, 'application/vnd.github+json', 15_000)
+    const visible = new Set(['cross-referenced', 'referenced', 'connected', 'closed', 'reopened'])
+    return events.filter((event) => visible.has(String(event.event ?? ''))).map((event) => {
+      const source = event.source?.issue
+      return {
+        event: event.event,
+        created_at: event.created_at,
+        actor: String(event.actor?.login ?? ''),
+        commit_id: event.commit_id ?? null,
+        source: source ? {
+          number: source.number,
+          title: source.title,
+          html_url: source.html_url,
+          state: source.state,
+          is_pr: source.pull_request != null,
+          pr_merged: source.pull_request?.merged_at != null,
+        } : null,
+      }
+    })
+  } catch (error) {
+    if (isGithubRateLimitError(error)) throw error
     return []
   }
 }
@@ -1734,19 +1969,16 @@ async function fetchPrPromptComments(
 ): Promise<{ author: string; body: string }[] | null> {
   if (!workflow.prNumber) return []
   try {
-    const spec = ctx.shell.resolve({
-      command: `gh pr view ${workflow.prNumber} --repo ${workflow.repoKey} --json comments`,
-      timeoutMs: 20000,
-    })
-    const result = await ctx.shell.run(spec)
-    if (result.exitCode !== 0) return null
-    const parsed = JSON.parse(result.stdout.text) as { comments?: unknown }
-    if (!Array.isArray(parsed.comments)) return null
-    return (parsed.comments as { author?: { login?: string } | null; body?: unknown }[]).map((comment) => ({
-      author: String(comment.author?.login ?? 'unknown'),
+    const rest = githubRest(ctx)
+    const key = `${workflow.repoKey}/pulls/${workflow.prNumber}`
+    const comments = await rest.cachedResource(`${key}/comments`, rest.resourceVersion(key), () =>
+      rest.paginate<GithubCommentRest>(`repos/${workflow.repoKey}/issues/${workflow.prNumber}/comments`))
+    return comments.map((comment) => ({
+      author: String(comment.user?.login ?? 'unknown'),
       body: String(comment.body ?? ''),
     }))
-  } catch {
+  } catch (error) {
+    if (isGithubRateLimitError(error)) throw error
     return null
   }
 }
@@ -1756,7 +1988,9 @@ async function resolvePromptSnapshot(
   ctx: Context,
   workflow: IssueWorkflow,
 ): Promise<ResolvedPromptSnapshot | { error: string }> {
-  const fetched = await fetchIssue(ctx, { url: workflow.url })
+  // A privileged stage start must revalidate the frozen authorization snapshot;
+  // this security boundary intentionally bypasses the display cache.
+  const fetched = await fetchIssue(ctx, { url: workflow.url, forceRefresh: true })
   if (fetched.ok) {
     const snapshot = issueSnapshot(fetched.data.item as Record<string, unknown>)
     const prComments = await fetchPrPromptComments(ctx, workflow)
@@ -1897,15 +2131,11 @@ async function buildResumePrompt(
 /** Fetch a PR's base ref name via gh. */
 async function fetchPrBase(ctx: Context, repoKey: string, prNumber: string): Promise<string | null> {
   try {
-    const spec = ctx.shell.resolve({
-      command: `gh pr view ${prNumber} --repo ${repoKey} --json baseRefName --jq '.baseRefName // ""'`,
-      timeoutMs: 15000,
-    })
-    const result = await ctx.shell.run(spec)
-    if (result.exitCode !== 0) return null
-    const name = result.stdout.text.trim()
+    const pr = await fetchPrRestDetail(ctx, repoKey, prNumber)
+    const name = String(pr.base?.ref ?? '').trim()
     return name === '' ? null : name
-  } catch {
+  } catch (error) {
+    if (isGithubRateLimitError(error)) throw error
     return null
   }
 }
@@ -1913,15 +2143,11 @@ async function fetchPrBase(ctx: Context, repoKey: string, prNumber: string): Pro
 /** Fetch a PR's head branch name via gh (to locate its worktree). */
 async function fetchPrHeadBranch(ctx: Context, owner: string, repo: string, prNumber: string): Promise<string | null> {
   try {
-    const spec = ctx.shell.resolve({
-      command: `gh pr view ${prNumber} --repo ${owner}/${repo} --json headRefName --jq '.headRefName // ""'`,
-      timeoutMs: 15000,
-    })
-    const result = await ctx.shell.run(spec)
-    if (result.exitCode !== 0) return null
-    const name = result.stdout.text.trim()
+    const pr = await fetchPrRestDetail(ctx, `${owner}/${repo}`, prNumber)
+    const name = String(pr.head?.ref ?? '').trim()
     return name === '' ? null : name
-  } catch {
+  } catch (error) {
+    if (isGithubRateLimitError(error)) throw error
     return null
   }
 }
@@ -2331,14 +2557,14 @@ async function startDevelop(
 
   let launchSnapshot: ResolvedPromptSnapshot | null = null
   if (agent === 'dryrun') {
-    const fetched = await fetchIssue(ctx, { url })
+    const fetched = await fetchIssue(ctx, { url, forceRefresh: true })
     if (!fetched.ok) return fetched
     const snapshot = issueSnapshot(fetched.data.item as Record<string, unknown>)
     if (snapshot.state !== 'OPEN') return { ok: false, error: '只有 OPEN Issue 可以执行 dryrun' }
   } else if (!authorizedSnapshot || authorizedSnapshot.url !== url || authorizedSnapshot.state !== 'OPEN') {
     return { ok: false, error: '缺少与该 OPEN Issue 绑定的服务端确认快照' }
   } else {
-    const fetched = await fetchIssue(ctx, { url })
+    const fetched = await fetchIssue(ctx, { url, forceRefresh: true })
     if (fetched.ok) {
       const current = issueSnapshot(fetched.data.item as Record<string, unknown>)
       if (!sameSnapshot(current, authorizedSnapshot)) {
@@ -2628,7 +2854,7 @@ function stopTask(payload: unknown): { ok: true; taskId: string; stopped: boolea
   return { ok: true, taskId, stopped }
 }
 
-/** Sync a workflow's worktree with the remote base (git fetch + merge origin/main).
+/** Sync a workflow's worktree with the remote base, then push the PR branch.
  *  Keeps the worktree on the latest base so dev/review never target stale code
  *  (issue #5). The merge result is recorded as a timeline event.
  *  合并冲突时不回滚:现场(MERGE_HEAD + 冲突标记)原样保留,转交返工 agent
@@ -2652,6 +2878,18 @@ export async function syncWorktree(
   }
   const policy = { mode: 'danger-full-access' as const, workspaceRoot: workflow.worktree }
   try {
+    // Do not rely on git merge to reject a dirty tree:Git permits unrelated
+    // local changes, which would otherwise let the merge commit be pushed.
+    // An existing conflicted merge keeps following the conflict-preservation
+    // path below so callers still receive conflict:true and the file list.
+    if (!await hasMergeConflict(ctx, workflow.worktree)) {
+      const changes = await runCommand(ctx, 'git status --porcelain', {
+        workdir: workflow.worktree,
+        timeoutMs: 10_000,
+        sandboxPolicy: { mode: 'read-only', workspaceRoot: workflow.worktree },
+      })
+      if (changes) throw new Error('worktree 有未提交改动,请先提交或清理后再同步')
+    }
     await appendLog(workflow.key, 'dev', '[clickvibe] 同步:git fetch origin…')
     await runCommand(ctx, 'git fetch origin --prune', { workdir: workflow.worktree, timeoutMs: 60_000, sandboxPolicy: policy })
     await appendLog(workflow.key, 'dev', '[clickvibe] 同步:合并 origin/main…')
@@ -2686,7 +2924,13 @@ export async function syncWorktree(
       throw error
     }
     const head = await readWorktreeHead(ctx, workflow.worktree)
-    await appendLog(workflow.key, 'dev', `[clickvibe] 同步完成,HEAD ${head ?? '未知'}`)
+    await appendLog(workflow.key, 'dev', `[clickvibe] 同步:推送 ${workflow.branch} 到 origin…`)
+    await runCommand(ctx, `git push origin ${shellQuote(workflow.branch)}`, {
+      workdir: workflow.worktree,
+      timeoutMs: 60_000,
+      sandboxPolicy: policy,
+    })
+    await appendLog(workflow.key, 'dev', `[clickvibe] 同步并推送完成,HEAD ${head ?? '未知'}`)
     // 记录同步事件到权威时间线(不改变开发/审查语义)
     const reloaded = await loadWorkflow(workflow.key)
     if (reloaded) {
@@ -2966,6 +3210,9 @@ async function publishDeliveryComment(
       status: 'posted',
       ...(commentUrl ? { url: commentUrl } : {}),
     }
+    const number = workflow.prNumber ?? parseUrl(workflow.url)?.number
+    if (number) githubRest(ctx).invalidate(`${workflow.repoKey}/${target === 'pr' ? 'pulls' : 'issues'}/${number}`)
+    githubRest(ctx).invalidate(`repo:${workflow.repoKey}`)
     await appendLog(workflow.key, event.kind === 'review' ? 'review' : 'dev', `[clickvibe] 已发布 GitHub ${target === 'pr' ? 'PR' : 'Issue'} 评论${event.publication.url ? `: ${event.publication.url}` : ''}`)
   } catch (error) {
     const message = String(error instanceof Error ? error.message : error).slice(0, 500)

@@ -15,6 +15,84 @@ import {
   type IssueWorkflow,
 } from '../src/state.ts'
 
+function included(body: unknown, status = 200, headers: Record<string, string> = {}): string {
+  return [
+    `HTTP/2.0 ${status} ${status === 200 ? 'OK' : 'Error'}`,
+    ...Object.entries(headers).map(([name, value]) => `${name}: ${value}`),
+    '',
+    JSON.stringify(body),
+  ].join('\n')
+}
+
+function restIssue(item: Record<string, unknown>): Record<string, unknown> {
+  const url = String(item.url ?? item.html_url ?? '')
+  const number = Number(item.number ?? url.match(/\/(?:issues|pull)\/(\d+)/)?.[1] ?? 0)
+  return {
+    ...item,
+    number,
+    html_url: url,
+    url: undefined,
+    state: String(item.state ?? 'open').toLowerCase(),
+    user: item.author ?? item.user ?? { login: 'owner' },
+    created_at: item.createdAt ?? item.created_at ?? '',
+    updated_at: item.updatedAt ?? item.updated_at ?? '',
+    closed_at: item.closedAt ?? item.closed_at ?? null,
+  }
+}
+
+function restComment(comment: Record<string, unknown>): Record<string, unknown> {
+  return {
+    user: comment.author ?? comment.user ?? { login: 'unknown' },
+    body: comment.body ?? '',
+    created_at: comment.createdAt ?? comment.created_at ?? '',
+    updated_at: comment.updatedAt ?? comment.updated_at ?? '',
+  }
+}
+
+function githubApi(
+  command: string,
+  options: {
+    item?: Record<string, unknown>
+    issues?: Array<Record<string, unknown>>
+    pulls?: Array<Record<string, unknown>>
+    pr?: Record<string, unknown>
+    prComments?: Array<Record<string, unknown>>
+    reviews?: Array<Record<string, unknown>>
+    failRepoIssues?: string
+  } = {},
+): { exitCode: number; stdout: { text: string }; stderr: { text: string } } | null {
+  if (!command.startsWith('gh api ')) return null
+  let body: unknown = []
+  let exitCode = 0
+  let stderr = ''
+  if (/\/issues\?state=all/.test(command)) {
+    if (options.failRepoIssues) {
+      return { exitCode: 1, stdout: { text: included({ message: options.failRepoIssues }, 500) }, stderr: { text: options.failRepoIssues } }
+    }
+    body = (options.issues ?? []).map(restIssue)
+  } else if (/\/pulls\?state=all/.test(command)) {
+    body = options.pulls ?? []
+  } else if (/\/issues\/\d+\/comments/.test(command)) {
+    const commandNumber = command.match(/\/issues\/(\d+)\/comments/)?.[1]
+    const itemNumber = String(options.item?.number ?? String(options.item?.url ?? '').match(/\/issues\/(\d+)/)?.[1] ?? '')
+    const comments = commandNumber === itemNumber
+      ? (Array.isArray(options.item?.comments) ? options.item.comments as Array<Record<string, unknown>> : [])
+      : (options.prComments ?? [])
+    body = comments.map(restComment)
+  } else if (/\/issues\/\d+\/timeline/.test(command)) {
+    body = []
+  } else if (/\/pulls\/\d+\/reviews/.test(command)) {
+    body = options.reviews ?? []
+  } else if (/\/pulls\/\d+\/requested_reviewers/.test(command)) {
+    body = { users: [], teams: [] }
+  } else if (/\/pulls\/\d+/.test(command)) {
+    body = options.pr ?? {}
+  } else if (/\/issues\/\d+/.test(command)) {
+    body = restIssue(options.item ?? {})
+  }
+  return { exitCode, stdout: { text: included(body) }, stderr: { text: stderr } }
+}
+
 function createHandler(
   run?: (spec: { command: string; workdir?: string; stdin?: string; timeoutMs?: number }) => Promise<unknown>,
   start?: (spec: { command: string; workdir?: string; stdin?: string }) => unknown,
@@ -124,10 +202,8 @@ test('authorization route freezes the displayed snapshot and consumes tampered c
     title: 'snapshot title', body: 'snapshot body', state: 'OPEN',
     updatedAt: '2026-08-21T00:00:00Z', comments: [{ author: { login: 'owner' }, body: 'review note' }],
   }
-  const handler = createHandler(async (spec) => ({
-    exitCode: 0,
-    stdout: { text: spec.command.startsWith('gh issue view') ? JSON.stringify(item) : '[]' },
-    stderr: { text: '' },
+  const handler = createHandler(async (spec) => githubApi(spec.command, { item }) ?? ({
+    exitCode: 0, stdout: { text: '' }, stderr: { text: '' },
   }))
   const expectedSnapshot = {
     url: item.url, title: item.title, body: item.body, state: item.state,
@@ -164,13 +240,14 @@ test('development rejects a confirmed snapshot when the issue changes before sta
   }
   let issueReads = 0
   const handler = createHandler(async (spec) => {
-    if (spec.command.startsWith('gh issue view')) {
+    if (/gh api .*\/issues\/20'/.test(spec.command)) {
       issueReads += 1
-      return { exitCode: 0, stdout: { text: JSON.stringify(issueReads === 1 ? oldItem : {
+      const current = issueReads === 1 ? oldItem : {
         ...oldItem, body: 'new acceptance', updatedAt: '2026-08-22T06:00:00Z',
-      }) }, stderr: { text: '' } }
+      }
+      return githubApi(spec.command, { item: current })
     }
-    return { exitCode: 0, stdout: { text: '[]' }, stderr: { text: '' } }
+    return githubApi(spec.command, { item: oldItem }) ?? { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
   })
   const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
   const authorized = await post(handler, '/clickvibe/api/authorize', {
@@ -222,14 +299,19 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
     const commands: string[] = []
     const handler = createHandler(async (spec) => {
       commands.push(spec.command)
-      if (spec.command.startsWith('gh pr view')) return {
-        exitCode: 0,
-        stdout: { text: JSON.stringify({
-          number: 29, state: merged ? 'MERGED' : 'OPEN', mergedAt: merged ? '2026-08-22T01:00:00Z' : null,
-          headRefName: workflow.branch, headRefOid: 'abcdef1234567890', baseRefName: 'main',
-          url: 'https://github.com/o/r/pull/29', reviewDecision: 'APPROVED',
-        }) }, stderr: { text: '' },
-      }
+      const api = githubApi(spec.command, {
+        item: {
+          url: workflow.url, number: 23, title: 'merge issue', body: reviewedBody,
+          state: issueClosed ? 'CLOSED' : 'OPEN', updatedAt: '2026-08-22T00:00:00Z',
+        },
+        pr: {
+          number: 29, state: merged ? 'closed' : 'open', merged_at: merged ? '2026-08-22T01:00:00Z' : null,
+          head: { ref: workflow.branch, sha: 'abcdef1234567890' }, base: { ref: 'main' },
+          html_url: 'https://github.com/o/r/pull/29',
+        },
+        reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
+      })
+      if (api) return api
       if (spec.command.startsWith('gh pr merge')) {
         merged = true
         return { exitCode: 0, stdout: { text: 'merged' }, stderr: { text: '' } }
@@ -237,12 +319,6 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
       if (spec.command === 'git worktree list --porcelain') return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       if (spec.command.startsWith('if git show-ref')) return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       if (spec.command.startsWith('if git ls-remote')) return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-      if (spec.command.startsWith('gh issue view') && spec.command.includes('--json title,body,state,updatedAt')) {
-        return { exitCode: 0, stdout: { text: JSON.stringify({
-          title: 'merge issue', body: reviewedBody, state: issueClosed ? 'CLOSED' : 'OPEN', updatedAt: '2026-08-22T00:00:00Z',
-        }) }, stderr: { text: '' } }
-      }
-      if (spec.command.startsWith('gh issue view')) return { exitCode: 0, stdout: { text: issueClosed ? 'CLOSED' : 'OPEN' }, stderr: { text: '' } }
       if (spec.command.startsWith('gh issue close')) {
         issueClosed = true
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
@@ -326,13 +402,15 @@ test('/merge rejects a stale review hash before invoking gh pr merge', async () 
     const commands: string[] = []
     const handler = createHandler(async (spec) => {
       commands.push(spec.command)
-      if (spec.command.startsWith('gh pr view')) return {
-        exitCode: 0,
-        stdout: { text: JSON.stringify({
-          number: 29, state: 'OPEN', mergedAt: null, headRefName: workflow.branch,
-          headRefOid: '2222222222222222', baseRefName: 'main', url: 'https://github.com/o/r/pull/29', reviewDecision: 'APPROVED',
-        }) }, stderr: { text: '' },
-      }
+      const api = githubApi(spec.command, {
+        pr: {
+          number: 29, state: 'open', merged_at: null,
+          head: { ref: workflow.branch, sha: '2222222222222222' }, base: { ref: 'main' },
+          html_url: 'https://github.com/o/r/pull/29',
+        },
+        reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
+      })
+      if (api) return api
       throw new Error(`unexpected command: ${spec.command}`)
     })
     const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
@@ -368,19 +446,19 @@ test('/merge authorization rejects a changed acceptance contract with the same P
     const commands: string[] = []
     const handler = createHandler(async (spec) => {
       commands.push(spec.command)
-      if (spec.command.startsWith('gh pr view')) return {
-        exitCode: 0,
-        stdout: { text: JSON.stringify({
-          number: 29, state: 'OPEN', mergedAt: null, headRefName: workflow.branch,
-          headRefOid: 'abcdef1234567890', baseRefName: 'main', url: 'https://github.com/o/r/pull/29', reviewDecision: 'APPROVED',
-        }) }, stderr: { text: '' },
-      }
-      if (spec.command.startsWith('gh issue view')) return {
-        exitCode: 0,
-        stdout: { text: JSON.stringify({
-          title: 'changed issue', body: '## 验收标准\n- changed contract', state: 'OPEN', updatedAt: '2026-08-22T01:00:00Z',
-        }) }, stderr: { text: '' },
-      }
+      const api = githubApi(spec.command, {
+        item: {
+          url: workflow.url, number: 23, title: 'changed issue', body: '## 验收标准\n- changed contract',
+          state: 'OPEN', updatedAt: '2026-08-22T01:00:00Z',
+        },
+        pr: {
+          number: 29, state: 'open', merged_at: null,
+          head: { ref: workflow.branch, sha: 'abcdef1234567890' }, base: { ref: 'main' },
+          html_url: 'https://github.com/o/r/pull/29',
+        },
+        reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
+      })
+      if (api) return api
       throw new Error(`unexpected command: ${spec.command}`)
     })
     const result = await post(handler, '/clickvibe/api/authorize', {
@@ -423,14 +501,19 @@ test('cleanup failure keeps merged terminal state and retries without merging ag
     const commands: string[] = []
     const handler = createHandler(async (spec) => {
       commands.push(spec.command)
-      if (spec.command.startsWith('gh pr view')) return {
-        exitCode: 0,
-        stdout: { text: JSON.stringify({
-          number: 29, state: merged ? 'MERGED' : 'OPEN', mergedAt: merged ? '2026-08-22T01:00:00Z' : null,
-          headRefName: workflow.branch, headRefOid: 'abcdef1234567890', baseRefName: 'main',
-          url: 'https://github.com/o/r/pull/29', reviewDecision: 'APPROVED',
-        }) }, stderr: { text: '' },
-      }
+      const api = githubApi(spec.command, {
+        item: {
+          url: workflow.url, number: 23, title: 'merge issue', body: reviewedBody,
+          state: 'CLOSED', updatedAt: '2026-08-22T00:00:00Z',
+        },
+        pr: {
+          number: 29, state: merged ? 'closed' : 'open', merged_at: merged ? '2026-08-22T01:00:00Z' : null,
+          head: { ref: workflow.branch, sha: 'abcdef1234567890' }, base: { ref: 'main' },
+          html_url: 'https://github.com/o/r/pull/29',
+        },
+        reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
+      })
+      if (api) return api
       if (spec.command.startsWith('gh pr merge')) {
         merged = true
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
@@ -445,12 +528,6 @@ test('cleanup failure keeps merged terminal state and retries without merging ag
       if (spec.command.startsWith('if git show-ref') || spec.command.startsWith('if git ls-remote')) {
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       }
-      if (spec.command.startsWith('gh issue view') && spec.command.includes('--json title,body,state,updatedAt')) {
-        return { exitCode: 0, stdout: { text: JSON.stringify({
-          title: 'merge issue', body: reviewedBody, state: 'OPEN', updatedAt: '2026-08-22T00:00:00Z',
-        }) }, stderr: { text: '' } }
-      }
-      if (spec.command.startsWith('gh issue view')) return { exitCode: 0, stdout: { text: 'CLOSED' }, stderr: { text: '' } }
       throw new Error(`unexpected command: ${spec.command}`)
     })
     const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
@@ -497,14 +574,15 @@ test('/state uses the live GitHub issue state instead of the stored issueState',
     workflow.issueState = 'OPEN'
     await saveWorkflow(workflow)
     const handler = createHandler(async (spec) => {
-      if (spec.command.startsWith('gh pr view')) return {
-        exitCode: 0,
-        stdout: { text: JSON.stringify({
-          number: 29, state: 'OPEN', mergedAt: null, headRefName: workflow.branch,
-          headRefOid: 'abcdef1234567890', baseRefName: 'main', url: 'https://github.com/o/r/pull/29', reviewDecision: null,
-        }) }, stderr: { text: '' },
-      }
-      if (spec.command.startsWith('gh issue view')) return { exitCode: 0, stdout: { text: 'CLOSED' }, stderr: { text: '' } }
+      const api = githubApi(spec.command, {
+        item: { url: workflow.url, number: 23, state: 'CLOSED' },
+        pr: {
+          number: 29, state: 'open', merged_at: null,
+          head: { ref: workflow.branch, sha: 'abcdef1234567890' }, base: { ref: 'main' },
+          html_url: 'https://github.com/o/r/pull/29',
+        },
+      })
+      if (api) return api
       throw new Error(`unexpected command: ${spec.command}`)
     })
     const response = await post(handler, '/clickvibe/api/state', { url: workflow.url }) as {
@@ -546,8 +624,8 @@ test('/state and repo/issues share one repository fetch TTL while manual refresh
         fetches++
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       }
-      if (command.includes('/issues?') || command.includes('/pulls?')) {
-        return { exitCode: 0, stdout: { text: '[[]]' }, stderr: { text: '' } }
+      if (command.startsWith('gh api ')) {
+        return githubApi(command)
       }
       if (command.startsWith('git for-each-ref') || command.startsWith('git symbolic-ref')) {
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
@@ -688,8 +766,8 @@ test('a rejected dry-run worktree attempt preserves the previous durable dev his
       state: 'OPEN', updatedAt: 'now', comments: [],
     }
     const handler = createHandler(async ({ command }) => {
-      if (command.startsWith('gh issue view')) return { exitCode: 0, stdout: { text: JSON.stringify(issue) }, stderr: { text: '' } }
-      if (command.startsWith('gh api') || command.startsWith('gh issue list')) return { exitCode: 0, stdout: { text: '[]' }, stderr: { text: '' } }
+      const api = githubApi(command, { item: issue })
+      if (api) return api
       if (command === 'git fetch origin --prune') return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       if (command === 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD') return { exitCode: 0, stdout: { text: 'origin/main' }, stderr: { text: '' } }
       if (command === "git rev-parse --short 'origin/main'") return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
@@ -807,17 +885,14 @@ test('invalid exact dev session falls back once to a fresh session on the same t
     await appendLog(workflow.key, 'dev', 'prior run must be rotated')
     const starts: Array<{ command: string; workdir?: string; prompt: string }> = []
     const comments: Array<{ command: string; body: string }> = []
+    const currentIssue = {
+      url: workflow.url, title: 'resume issue', body: '## 验收标准\n- fallback', state: 'OPEN', updatedAt: 'now',
+      comments: [],
+    }
+    const reviewComments = [{ author: { login: 'review-bot' }, body: '== Review Meta ==\n- event: review\n- passed: false\n\n- 修复竞态\n- 补充失败测试' }]
     const handler = createHandler(async (spec) => {
-      if (spec.command.startsWith('gh issue view')) return { exitCode: 0, stdout: { text: JSON.stringify({
-        url: workflow.url, title: 'resume issue', body: '## 验收标准\n- fallback', state: 'OPEN', updatedAt: 'now',
-        comments: [],
-      }) }, stderr: { text: '' } }
-      if (spec.command === 'gh pr view 29 --repo o/r --json comments') return { exitCode: 0, stdout: { text: JSON.stringify({
-        comments: [{ author: { login: 'review-bot' }, body: '== Review Meta ==\n- event: review\n- passed: false\n\n- 修复竞态\n- 补充失败测试' }],
-      }) }, stderr: { text: '' } }
-      if (spec.command.startsWith('gh api') || spec.command.startsWith('gh issue list')) {
-        return { exitCode: 0, stdout: { text: '[]' }, stderr: { text: '' } }
-      }
+      const api = githubApi(spec.command, { item: currentIssue, prComments: reviewComments })
+      if (api) return api
       if (spec.command === 'git rev-parse --short HEAD') return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
       if (spec.command.startsWith('gh issue comment')) {
         comments.push({ command: spec.command, body: spec.stdin ?? '' })
@@ -895,12 +970,14 @@ test('completed development without a PR appends its Dev Meta comment to the iss
     const comments: Array<{ command: string; body: string }> = []
     const prompts: string[] = []
     const handler = createHandler(async (spec) => {
+      if (/gh api .*\/issues\/920'/.test(spec.command)) {
+        return { exitCode: 1, stdout: { text: included({ message: 'offline' }, 500) }, stderr: { text: 'offline' } }
+      }
       if (spec.command === 'git rev-parse --short HEAD') {
         return { exitCode: 0, stdout: { text: 'def4567' }, stderr: { text: '' } }
       }
-      if (spec.command.startsWith('gh pr list')) {
-        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-      }
+      const api = githubApi(spec.command)
+      if (api) return api
       if (spec.command.startsWith('gh issue comment')) {
         comments.push({ command: spec.command, body: spec.stdin ?? '' })
         return { exitCode: 0, stdout: { text: 'https://github.com/o/r/issues/920#issuecomment-3' }, stderr: { text: '' } }
@@ -963,15 +1040,18 @@ test('concurrent resume requests reserve one workflow task before refreshing the
     await saveWorkflow(workflow)
     let issueReads = 0
     let starts = 0
+    const currentIssue = {
+      url: workflow.url, title: 'resume gate', body: '## 验收标准\n- one task',
+      state: 'OPEN', updatedAt: '2026-08-22T07:00:00Z', comments: [],
+    }
     const handler = createHandler(async (spec) => {
-      if (spec.command.startsWith('gh issue view')) {
+      if (/gh api .*\/issues\/930'/.test(spec.command)) {
         issueReads += 1
         await new Promise((resolve) => setTimeout(resolve, 25))
-        return { exitCode: 0, stdout: { text: JSON.stringify({
-          url: workflow.url, title: 'resume gate', body: '## 验收标准\n- one task',
-          state: 'OPEN', updatedAt: '2026-08-22T07:00:00Z', comments: [],
-        }) }, stderr: { text: '' } }
+        return githubApi(spec.command, { item: currentIssue })
       }
+      const api = githubApi(spec.command, { item: currentIssue })
+      if (api) return api
       if (spec.command.startsWith('gh issue comment')) {
         return { exitCode: 0, stdout: { text: 'https://github.com/o/r/issues/930#issuecomment-1' }, stderr: { text: '' } }
       }
@@ -1091,21 +1171,26 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     const reviewedBody = '## 验收标准\n- frozen review contract'
     const reviewedUpdatedAt = '2026-08-22T01:02:03Z'
     const issueSpill = join(tempHome, 'issue-contract.json')
-    await writeFile(issueSpill, JSON.stringify({
-      url: workflow.url,
+    const currentIssue = {
+      url: workflow.url, number: 918,
       title: 'review issue', body: reviewedBody, state: 'OPEN', updatedAt: reviewedUpdatedAt,
       comments: [{ author: { login: 'bot' }, body: 'related note' }],
-    }))
+    }
+    await writeFile(issueSpill, included(restIssue(currentIssue)))
     let reviewFetches = 0
     const comments: Array<{ command: string; body: string }> = []
     const approvals: string[] = []
     const issueTimeouts: number[] = []
+    const pr = {
+      number: 29, state: 'open', html_url: 'https://github.com/o/r/pull/29', updated_at: reviewedUpdatedAt,
+      base: { ref: 'main' }, head: { ref: workflow.branch },
+    }
     const handler = createHandler(async (spec) => {
       if (spec.command === 'git fetch origin --prune') {
         reviewFetches++
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       }
-      if (spec.command.startsWith('gh issue view')) {
+      if (/gh api .*\/issues\/918'/.test(spec.command)) {
         issueTimeouts.push(spec.timeoutMs ?? 0)
         return {
           exitCode: 0,
@@ -1113,7 +1198,8 @@ test('invalid exact review session clears the stale id and falls back to a fresh
           stderr: { text: '' },
         }
       }
-      if (spec.command.startsWith('gh pr view')) return { exitCode: 0, stdout: { text: 'main' }, stderr: { text: '' } }
+      const api = githubApi(spec.command, { item: currentIssue, pr })
+      if (api) return api
       if (spec.command === 'git rev-parse --short HEAD') return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
       if (spec.command.startsWith('gh issue comment')) {
         comments.push({ command: spec.command, body: spec.stdin ?? '' })
@@ -1213,16 +1299,22 @@ test('duplicate review requests reuse the reserved task before fetching the Issu
     const issueBlocked = new Promise<void>((resolve) => { releaseIssue = resolve })
     let finishProcess!: () => void
     const processDone = new Promise<void>((resolve) => { finishProcess = resolve })
+    const currentIssue = {
+      url: workflow.url, number: 920, title: 'review issue', body: '## 验收标准\n- gate',
+      state: 'OPEN', updatedAt: '2026-08-22T03:04:05Z', comments: [],
+    }
     const handler = createHandler(async (spec) => {
-      if (spec.command.startsWith('gh issue view')) {
+      if (/gh api .*\/issues\/920'/.test(spec.command)) {
         issueCalls += 1
         notifyIssueEntered()
         await issueBlocked
-        return { exitCode: 0, stdout: { text: JSON.stringify({
-          url: workflow.url, title: 'review issue', body: '## 验收标准\n- gate', state: 'OPEN', updatedAt: '2026-08-22T03:04:05Z',
-        }) }, stderr: { text: '' } }
+        return githubApi(spec.command, { item: currentIssue })
       }
-      if (spec.command.startsWith('gh pr view')) return { exitCode: 0, stdout: { text: 'main' }, stderr: { text: '' } }
+      const api = githubApi(spec.command, {
+        item: currentIssue,
+        pr: { number: 29, state: 'open', html_url: 'https://github.com/o/r/pull/29', base: { ref: 'main' }, head: { ref: workflow.branch } },
+      })
+      if (api) return api
       if (spec.command === 'git rev-parse --short HEAD') return { exitCode: 0, stdout: { text: 'gate123' }, stderr: { text: '' } }
       return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
     }, () => ({
@@ -1283,10 +1375,11 @@ test('cross-agent review starts fresh and an empty failed verdict requires re-re
     const starts: string[] = []
     const reviewedBody = '## 验收标准\n- current contract'
     const handler = createHandler(async (spec) => {
-      if (spec.command.startsWith('gh issue view')) return { exitCode: 0, stdout: { text: JSON.stringify({
-        url: workflow.url, title: 'review issue', body: reviewedBody, state: 'OPEN', updatedAt: '2026-08-22T02:03:04Z',
-      }) }, stderr: { text: '' } }
-      if (spec.command.startsWith('gh pr view')) return { exitCode: 0, stdout: { text: 'main' }, stderr: { text: '' } }
+      const api = githubApi(spec.command, {
+        item: { url: workflow.url, number: 919, title: 'review issue', body: reviewedBody, state: 'OPEN', updatedAt: '2026-08-22T02:03:04Z' },
+        pr: { number: 29, base: { ref: 'main' }, head: { ref: workflow.branch } },
+      })
+      if (api) return api
       if (spec.command === 'git rev-parse --short HEAD') return { exitCode: 0, stdout: { text: 'def456' }, stderr: { text: '' } }
       return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
     }, (spec) => {
@@ -1349,13 +1442,7 @@ test('/fetch resolves blockedBy from the body and blocking from a repo scan', as
     { number: 8, title: 'issue 8', state: 'OPEN', body: '## 依赖\n\nBlocked by #7' },
   ]
   const handler = createHandler(async (spec) => {
-    if (spec.command.startsWith('gh issue view')) {
-      return { exitCode: 0, stdout: { text: JSON.stringify(item) }, stderr: { text: '' } }
-    }
-    if (spec.command.startsWith('gh issue list')) {
-      return { exitCode: 0, stdout: { text: JSON.stringify(issues) }, stderr: { text: '' } }
-    }
-    return { exitCode: 0, stdout: { text: '[]' }, stderr: { text: '' } }
+    return githubApi(spec.command, { item, issues }) ?? { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
   })
   const result = await post(handler, '/clickvibe/api/fetch', { url: item.url })
   assert.equal(result.status, 200, JSON.stringify(result.body))
@@ -1376,13 +1463,7 @@ test('/fetch on an issue without a 依赖 section yields no blockedBy (and no bl
     { number: 7, title: 'issue 7', state: 'OPEN', body: '## 依赖\n\nBlocked by #5' },
   ]
   const handler = createHandler(async (spec) => {
-    if (spec.command.startsWith('gh issue view')) {
-      return { exitCode: 0, stdout: { text: JSON.stringify(item) }, stderr: { text: '' } }
-    }
-    if (spec.command.startsWith('gh issue list')) {
-      return { exitCode: 0, stdout: { text: JSON.stringify(issues) }, stderr: { text: '' } }
-    }
-    return { exitCode: 0, stdout: { text: '[]' }, stderr: { text: '' } }
+    return githubApi(spec.command, { item, issues }) ?? { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
   })
   const result = await post(handler, '/clickvibe/api/fetch', { url: item.url })
   assert.equal(result.status, 200)
@@ -1399,15 +1480,8 @@ test('/fetch keeps issue data but reports dependency refresh failure without inv
     body: '## 依赖\n\nBlocked by #4', comments: [],
   }
   const handler = createHandler(async (spec) => {
-    if (spec.command.startsWith('gh issue view')) {
-      return { exitCode: 0, stdout: { text: JSON.stringify(item) }, stderr: { text: '' } }
-    }
-    if (spec.command.startsWith('gh issue list')) {
-      return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'offline' } }
-    }
-    if (spec.command.startsWith('gh api')) {
-      return { exitCode: 0, stdout: { text: '[]' }, stderr: { text: '' } }
-    }
+    const api = githubApi(spec.command, { item, failRepoIssues: 'offline' })
+    if (api) return api
     throw new Error(`unexpected command: ${spec.command}`)
   })
 
@@ -1417,6 +1491,98 @@ test('/fetch keeps issue data but reports dependency refresh failure without inv
   assert.equal(result.body.ok, true)
   assert.match((result.body as { dependencyError?: string }).dependencyError ?? '', /offline/)
   assert.equal((result.body as { data?: { dependencies?: unknown } }).data?.dependencies, undefined)
+})
+
+test('/fetch maps PR REST fields and latest reviews without any GraphQL read command', async () => {
+  const url = 'https://github.com/o/r/pull/41'
+  const commands: string[] = []
+  const pr = {
+    number: 41, title: 'REST PR', state: 'open', body: 'body', html_url: url,
+    user: { login: 'author' }, created_at: '2026-08-22T01:00:00Z', updated_at: '2026-08-22T02:00:00Z',
+    additions: 12, deletions: 3, changed_files: 2, commits: 4, draft: false,
+    mergeable: true, mergeable_state: 'clean', base: { ref: 'main' }, head: { ref: 'feature', sha: 'abc123' },
+  }
+  const reviews = [
+    { id: 1, user: { login: 'alice' }, state: 'CHANGES_REQUESTED', submitted_at: '2026-08-22T02:00:00Z' },
+    { id: 2, user: { login: 'alice' }, state: 'APPROVED', submitted_at: '2026-08-22T03:00:00Z' },
+  ]
+  const handler = createHandler(async (spec) => {
+    commands.push(spec.command)
+    const api = githubApi(spec.command, {
+      pr,
+      reviews,
+      prComments: [{ author: { login: 'commenter' }, body: 'looks good', createdAt: '2026-08-22T03:00:00Z' }],
+    })
+    if (api) return api
+    throw new Error(`unexpected command: ${spec.command}`)
+  })
+
+  const first = await post(handler, '/clickvibe/api/fetch', { url }) as {
+    status: number
+    body: { ok: boolean; data?: { item?: Record<string, unknown> } }
+  }
+  assert.equal(first.status, 200, JSON.stringify(first.body))
+  assert.equal(first.body.data?.item?.reviewDecision, 'APPROVED')
+  assert.equal(first.body.data?.item?.changedFiles, 2)
+  assert.equal(first.body.data?.item?.baseRefName, 'main')
+  assert.equal((first.body.data?.item?.comments as unknown[])?.length, 1)
+  assert.ok(commands.length >= 4)
+  assert.ok(commands.every((command) => command.startsWith('gh api ')))
+
+  const readsAfterFirst = commands.length
+  const second = await post(handler, '/clickvibe/api/fetch', { url })
+  assert.equal(second.status, 200)
+  assert.equal(commands.length, readsAfterFirst, 'unchanged PR detail should be served entirely from cache')
+})
+
+test('rate-limit response opens a circuit and returns the friendly recovery time on later routes', async () => {
+  const reset = Math.floor((Date.now() + 10 * 60_000) / 1000)
+  let requests = 0
+  const handler = createHandler(async () => {
+    requests++
+    return {
+      exitCode: 1,
+      stdout: { text: [
+        'HTTP/2.0 403 Forbidden',
+        'x-ratelimit-remaining: 0',
+        `x-ratelimit-reset: ${reset}`,
+        '',
+        JSON.stringify({ message: 'API rate limit exceeded' }),
+      ].join('\n') },
+      stderr: { text: '' },
+    }
+  })
+
+  const first = await post(handler, '/clickvibe/api/fetch', { url: 'https://github.com/o/r/issues/41' })
+  const second = await post(handler, '/clickvibe/api/state', { repoKey: 'o/r' })
+  assert.equal(first.status, 429)
+  assert.equal(second.status, 429)
+  assert.match(first.body.error ?? '', /^GitHub 额度已用完,约 \d{2}:\d{2} 恢复$/)
+  assert.equal(second.body.error, first.body.error)
+  assert.equal(requests, 1, 'open circuit must reject without another GitHub request')
+})
+
+test('repository GitHub aggregation uses its short TTL cache and force refresh bypasses it', async () => {
+  const issue = { number: 1, title: 'cached', state: 'open', body: '', html_url: 'https://github.com/o/r/issues/1' }
+  const commands: string[] = []
+  const ctx = {
+    shell: {
+      resolve(spec: unknown) { return spec },
+      async run(spec: { command: string }) {
+        commands.push(spec.command)
+        if (spec.command.includes('/issues?')) return { exitCode: 0, stdout: { text: included([issue]) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: included([]) }, stderr: { text: '' } }
+        throw new Error(`unexpected command: ${spec.command}`)
+      },
+    },
+  }
+  const overrides = { config: { repos: { 'o/r': '/remote/r' }, worktreeRoot: '/remote/worktrees' }, workflows: [] }
+
+  assert.equal((await fetchRepositoryIssues(ctx as never, { repoKey: 'o/r' }, overrides)).ok, true)
+  assert.equal((await fetchRepositoryIssues(ctx as never, { repoKey: 'o/r' }, overrides)).ok, true)
+  assert.equal(commands.length, 2)
+  assert.equal((await fetchRepositoryIssues(ctx as never, { repoKey: 'o/r', forceRefresh: true }, overrides)).ok, true)
+  assert.equal(commands.length, 4)
 })
 
 test('repo issue aggregation includes open issues without workflows and honors live merged PR state', async () => {
@@ -1432,8 +1598,8 @@ test('repo issue aggregation includes open issues without workflows and honors l
     shell: {
       resolve(spec: unknown) { return spec },
       async run(spec: { command: string }) {
-        if (spec.command.includes('/issues?')) return { exitCode: 0, stdout: { text: JSON.stringify([allIssues]) }, stderr: { text: '' } }
-        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: JSON.stringify([prs]) }, stderr: { text: '' } }
+        if (spec.command.includes('/issues?')) return { exitCode: 0, stdout: { text: included(allIssues) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: included(prs) }, stderr: { text: '' } }
         throw new Error(`unexpected command: ${spec.command}`)
       },
     },
@@ -1476,15 +1642,18 @@ test('repo aggregation keeps a closed issue visible while merged cleanup is pend
     shell: {
       resolve(spec: unknown) { return spec },
       async run(spec: { command: string }) {
-        if (spec.command.includes('/issues?')) return { exitCode: 0, stdout: { text: JSON.stringify([[issue]]) }, stderr: { text: '' } }
-        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: JSON.stringify([[
+        if (spec.command.includes('/issues?')) return { exitCode: 0, stdout: { text: included([issue]) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: included([
           { number: 29, state: 'closed', merged_at: '2026-08-22T00:00:00Z', head: { ref: workflow.branch }, html_url: 'https://github.com/o/r/pull/29' },
-        ]]) }, stderr: { text: '' } }
-        if (spec.command.startsWith('gh pr view')) return {
+        ]) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls/29/reviews')) return { exitCode: 0, stdout: { text: included([
+          { id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' },
+        ]) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls/29')) return {
           exitCode: 0,
-          stdout: { text: JSON.stringify({
-            number: 29, state: 'MERGED', mergedAt: '2026-08-22T00:00:00Z', headRefName: workflow.branch,
-            headRefOid: 'abcdef1', baseRefName: 'main', url: 'https://github.com/o/r/pull/29', reviewDecision: 'APPROVED',
+          stdout: { text: included({
+            number: 29, state: 'closed', merged_at: '2026-08-22T00:00:00Z',
+            head: { ref: workflow.branch, sha: 'abcdef1' }, base: { ref: 'main' }, html_url: 'https://github.com/o/r/pull/29',
           }) }, stderr: { text: '' },
         }
         throw new Error(`unexpected command: ${spec.command}`)
@@ -1502,6 +1671,51 @@ test('repo aggregation keeps a closed issue visible while merged cleanup is pend
   assert.equal(items[0].workflow.derived.nextAction.kind, 'cleanup')
 })
 
+test('repo aggregation consumes snapshot PR facts and skips per-PR detail network calls', async () => {
+  // 列表页冷启动优化:PR 已在 pulls?state=all 快照里(含已合并/已关闭)时,
+  // 直接消费快照,不再为 workflow 打 pulls/{n}(+reviews) 请求;reviewDecision
+  // 等详情留给 /state 后台轮询。fake shell 对 /pulls/29 抛错即证明无网络调用。
+  const issue = {
+    number: 7, title: 'issue 7', state: 'open', body: '',
+    html_url: 'https://github.com/o/r/issues/7', milestone: null,
+  }
+  const workflow = {
+    key: 'o-r-7', url: issue.html_url, repoKey: 'o/r', worktree: '/remote/worktrees/r/r-issue-7', branch: 'r-issue-7',
+    stage: 'review-ready', devAgent: 'codex', devTaskId: null, devSessionId: null, devSessionAgent: null, devInterrupted: false,
+    reviewAgent: 'codex', reviewTaskId: null, reviewSessionId: null, reviewSessionAgent: null,
+    reviewResult: null, prNumber: 29, issueState: 'OPEN',
+    baseRef: 'origin/main @ abc', updatedAt: 1, events: [],
+  }
+  const commands: string[] = []
+  const ctx = {
+    shell: {
+      resolve(spec: unknown) { return spec },
+      async run(spec: { command: string }) {
+        commands.push(spec.command)
+        if (spec.command.includes('/issues?')) return { exitCode: 0, stdout: { text: included([issue]) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: included([
+          { number: 29, state: 'closed', merged_at: '2026-08-22T00:00:00Z', head: { ref: 'r-issue-7' }, html_url: 'https://github.com/o/r/pull/29' },
+        ]) }, stderr: { text: '' } }
+        throw new Error('snapshot fast path must not run: ' + spec.command)
+      },
+    },
+  }
+  const result = await fetchRepositoryIssues(ctx as never, { repoKey: 'o/r' }, {
+    config: { repos: { 'o/r': '/remote/r' }, worktreeRoot: '/remote/worktrees' },
+    workflows: [workflow as never],
+  })
+  assert.equal(result.ok, true)
+  if (!result.ok) return
+  const item = result.issues[0] as { workflow: { prNumber: string; derived: { status: string; nextAction: { kind: string } } } }
+  assert.equal(item.workflow.prNumber, '29')
+  assert.equal(item.workflow.derived.status, 'passed')
+  assert.equal(item.workflow.derived.nextAction.kind, 'none')
+  assert.equal(commands.filter((command) => command.startsWith('gh api ')).length, 2, 'only the issues+pulls snapshot, no per-PR detail')
+  // #8:列表项携带契约合规字段;空正文 = 缺 目标/验收标准/依赖(选前校验标记,不硬选)
+  const contractItem = result.issues[0] as unknown as { contract: { ok: boolean; missing: string[] } }
+  assert.equal(contractItem.contract.ok, false)
+  assert.deepEqual(contractItem.contract.missing, ['目标', '验收标准', '依赖'])
+})
 test('repo issue aggregation fails closed when a stored PR cannot be refreshed by number', async () => {
   const issue = { number: 7, title: 'issue 7', state: 'open', body: '', html_url: 'https://github.com/o/r/issues/7', milestone: null }
   const workflow = {
@@ -1515,9 +1729,9 @@ test('repo issue aggregation fails closed when a stored PR cannot be refreshed b
     shell: {
       resolve(spec: unknown) { return spec },
       async run(spec: { command: string }) {
-        if (spec.command.includes('/issues?')) return { exitCode: 0, stdout: { text: JSON.stringify([[issue]]) }, stderr: { text: '' } }
-        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: '[[]]' }, stderr: { text: '' } }
-        if (spec.command.startsWith('gh pr view')) return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'offline' } }
+        if (spec.command.includes('/issues?')) return { exitCode: 0, stdout: { text: included([issue]) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: included([]) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls/99')) return { exitCode: 1, stdout: { text: included({ message: 'offline' }, 500) }, stderr: { text: 'offline' } }
         throw new Error(`unexpected command: ${spec.command}`)
       },
     },
@@ -1548,11 +1762,12 @@ test('repo issue aggregation refreshes stored PR by number when its head no long
     shell: {
       resolve(spec: unknown) { return spec },
       async run(spec: { command: string }) {
-        if (spec.command.includes('/issues?')) return { exitCode: 0, stdout: { text: JSON.stringify([[issue]]) }, stderr: { text: '' } }
-        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: '[[]]' }, stderr: { text: '' } }
-        if (spec.command.startsWith("gh pr view '99'")) return {
+        if (spec.command.includes('/issues?')) return { exitCode: 0, stdout: { text: included([issue]) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: included([]) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls/99/reviews')) return { exitCode: 0, stdout: { text: included([{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T01:00:00Z' }]) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls/99')) return {
           exitCode: 0,
-          stdout: { text: JSON.stringify({ number: 99, state: 'MERGED', mergedAt: '2026-08-22T00:00:00Z', headRefName: 'new-branch-name', url: 'https://github.com/o/r/pull/99', reviewDecision: 'APPROVED' }) },
+          stdout: { text: included({ number: 99, state: 'closed', merged_at: '2026-08-22T00:00:00Z', head: { ref: 'new-branch-name' }, html_url: 'https://github.com/o/r/pull/99' }) },
           stderr: { text: '' },
         }
         throw new Error(`unexpected command: ${spec.command}`)
@@ -1582,8 +1797,11 @@ test('repo issue aggregation uses unbounded pagination and keeps issues beyond 1
       resolve(spec: unknown) { return spec },
       async run(spec: { command: string }) {
         commands.push(spec.command)
-        if (spec.command.includes('/issues?')) return { exitCode: 0, stdout: { text: JSON.stringify([allIssues.slice(0, 1000), allIssues.slice(1000)]) }, stderr: { text: '' } }
-        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: '[[]]' }, stderr: { text: '' } }
+        if (spec.command.includes('/issues?')) {
+          const page = Number(spec.command.match(/[?&]page=(\d+)/)?.[1] ?? 1)
+          return { exitCode: 0, stdout: { text: included(allIssues.slice((page - 1) * 100, page * 100)) }, stderr: { text: '' } }
+        }
+        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: included([]) }, stderr: { text: '' } }
         throw new Error(`unexpected command: ${spec.command}`)
       },
     },
@@ -1594,5 +1812,5 @@ test('repo issue aggregation uses unbounded pagination and keeps issues beyond 1
   assert.equal(result.ok, true)
   if (!result.ok) return
   assert.equal(result.issues.length, 1001)
-  assert.equal(commands.filter((command) => command.includes('--paginate --slurp')).length, 2)
+  assert.equal(commands.filter((command) => command.startsWith('gh api ')).length, 12)
 })
