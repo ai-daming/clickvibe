@@ -82,6 +82,22 @@ pnpm test
 
 重启 `dsh web` 后,在侧栏底部点 **ClickVibe** 打开面板,选项目,点「开始开发」即可。client 端改动硬刷新浏览器(⌘⇧R)即可生效。
 
+## 对话触发:动作命令化
+
+面板按钮不是唯一入口——每个操作都有一条纯文本命令,可在对话中触发(为手机端「对话优先」铺路):对话 agent 把「把 #8 下单开发」翻译成严格命令,发给 `POST /clickvibe/api/command`,由**与面板按钮完全相同的后端动作**执行。
+
+```sh
+curl -s http://127.0.0.1:3080/clickvibe/api/command \
+  -H 'content-type: application/json' \
+  -H 'origin: http://127.0.0.1:3080' \
+  -H 'x-clickvibe-request: 1' \
+  -d '{"command":"status #8 ai-daming/clickvibe"}'
+```
+
+- 读命令(`status` / `issues` / `projects` / `help`)直接返回可读文本;
+- 写命令(`develop` / `review` / `rework` / `resume` / `merge`)是两阶段:先返回预览与一次性授权(2 分钟),用户在对话里确认后携带授权重发同一命令才执行——与面板「预览 → 确认」同构,合并门禁不可绕过;
+- 全部命令清单与语法见 [docs/command-reference.md](docs/command-reference.md);对话 agent 侧的 Skill 见 [skills/clickvibe/SKILL.md](skills/clickvibe/SKILL.md)。
+
 ## 在路上的能力(open issues)
 
 | 方向 | 内容 |
@@ -94,6 +110,7 @@ pnpm test
 ## 给维护者
 
 - [架构与状态模型](docs/state-model.md):事实分级、按钮决策表、软事实降级链
+- [命令参考](docs/command-reference.md):全部可命令化操作、两阶段确认协议、安全边界
 - [Issue 契约](docs/issue-contract.md):可自动开发的 issue 怎么写(目标/验收/依赖)
 - [产品蓝图](docs/product-blueprint.md):定位、架构演进、设计约束
 - [设计文档与调研](docs/plans/):布局改造、dry-run 等实施前设计
