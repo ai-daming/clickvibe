@@ -10,24 +10,38 @@ export interface ReviewResult {
 }
 
 export interface ResolvedReviewResult {
-  result: ReviewResult
-  source: 'file' | 'stdout-json' | 'stdout-verdict'
+  result: ReviewResult | null
+  source: 'file' | 'stdout-json' | 'stdout-verdict' | 'parse-error'
   fileError?: string
+  parseError?: string
 }
 
-function parseMaterializedResult(raw: string): ReviewResult | null {
+type ParsedReviewResult =
+  | { result: ReviewResult; error?: never }
+  | { result: null; error: string }
+
+function validateReviewResult(value: unknown): ParsedReviewResult {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { result: null, error: 'schema 非 {passed:boolean,issues:string[]}' }
+  }
+  const record = value as Record<string, unknown>
+  if (typeof record.passed !== 'boolean') return { result: null, error: 'passed 不是 boolean' }
+  if (!Array.isArray(record.issues) || !record.issues.every((issue) => typeof issue === 'string')) {
+    return { result: null, error: 'issues 不是 string[]' }
+  }
+  if (record.passed && record.issues.length > 0) return { result: null, error: '通过结论不能包含问题' }
+  if (!record.passed && record.issues.length === 0) return { result: null, error: '未通过结论必须包含至少一个问题' }
+  return { result: { passed: record.passed, issues: record.issues } }
+}
+
+function parseMaterializedResult(raw: string): ParsedReviewResult {
   let value: unknown
   try {
     value = JSON.parse(raw)
   } catch {
-    return null
+    return { result: null, error: 'JSON 损坏' }
   }
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
-  const record = value as Record<string, unknown>
-  if (typeof record.passed !== 'boolean') return null
-  if (!Array.isArray(record.issues) || !record.issues.every((issue) => typeof issue === 'string')) return null
-  if (record.passed && record.issues.length > 0) return null
-  return { passed: record.passed, issues: record.issues }
+  return validateReviewResult(value)
 }
 
 /** Remove the prior run's verdict before starting another review.
@@ -56,9 +70,7 @@ async function readMaterializedResult(worktree: string): Promise<
     if (info.size > MAX_REVIEW_RESULT_BYTES) {
       return { result: null, error: `文件超过 ${MAX_REVIEW_RESULT_BYTES} 字节上限` }
     }
-    const result = parseMaterializedResult(await readFile(path, 'utf8'))
-    if (!result) return { result: null, error: 'JSON 损坏或 schema 非 {passed:boolean,issues:string[]}' }
-    return { result }
+    return parseMaterializedResult(await readFile(path, 'utf8'))
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { result: null, error: '文件不存在' }
     return { result: null, error: `读取失败: ${String(error instanceof Error ? error.message : error)}` }
@@ -66,17 +78,12 @@ async function readMaterializedResult(worktree: string): Promise<
 }
 
 /** Extract the final JSON verdict object from review display lines. */
-export function extractReviewJson(lines: string[]): ReviewResult | null {
+export function extractReviewJson(lines: string[]): ParsedReviewResult | null {
   for (let i = lines.length - 1; i >= 0; i--) {
     const match = lines[i].match(/\{.*"passed".*\}/)
     if (!match) continue
     try {
-      const obj = JSON.parse(match[0]) as { passed?: unknown; issues?: unknown }
-      if (typeof obj.passed !== 'boolean') continue
-      const issues = Array.isArray(obj.issues)
-        ? obj.issues.filter((issue): issue is string => typeof issue === 'string')
-        : []
-      return { passed: obj.passed, issues }
+      return validateReviewResult(JSON.parse(match[0]))
     } catch {
       // Keep searching older lines to preserve the existing stdout fallback.
     }
@@ -87,12 +94,17 @@ export function extractReviewJson(lines: string[]): ReviewResult | null {
 function reviewVerdict(lines: string[]): { passed: boolean } {
   let sawFail = false
   let sawPass = false
-  for (const line of lines) {
-    const text = line.trim()
+  const evidence = lines
+    .map((line) => line.trim())
+    .filter((text) => text !== '' && !text.startsWith('[clickvibe]'))
+  for (const text of evidence) {
     if (text.includes('❌') && /发现|存在|问题|Review/.test(text)) sawFail = true
     if (text.includes('✅') && !/本轮完成|会话结束/.test(text)) sawPass = true
     if (/Review\s*通过|未发现问题|无问题/.test(text)) sawPass = true
   }
+  // Claude's result event is generic, so accept it only as the current run's
+  // final agent evidence; an older session-end line in the persistent log is stale.
+  if (evidence.at(-1)?.includes('✅ 会话结束')) sawPass = true
   return { passed: !sawFail && sawPass }
 }
 
@@ -125,13 +137,28 @@ function extractIssues(lines: string[]): string[] {
 export async function loadReviewResult(worktree: string, lines: string[]): Promise<ResolvedReviewResult> {
   const materialized = await readMaterializedResult(worktree)
   if (materialized.result) return { result: materialized.result, source: 'file' }
+  if (materialized.error.includes('未通过结论必须')) {
+    return { result: null, source: 'parse-error', parseError: materialized.error, fileError: materialized.error }
+  }
 
   const json = extractReviewJson(lines)
-  if (json) return { result: json, source: 'stdout-json', fileError: materialized.error }
+  if (json?.result) return { result: json.result, source: 'stdout-json', fileError: materialized.error }
+  if (json?.error) {
+    return { result: null, source: 'parse-error', parseError: json.error, fileError: materialized.error }
+  }
 
   const passed = reviewVerdict(lines).passed
+  const issues = passed ? [] : extractIssues(lines)
+  if (!passed && issues.length === 0) {
+    return {
+      result: null,
+      source: 'parse-error',
+      parseError: 'stdout 未通过结论没有可执行的问题列表',
+      fileError: materialized.error,
+    }
+  }
   return {
-    result: { passed, issues: passed ? [] : extractIssues(lines) },
+    result: { passed, issues },
     source: 'stdout-verdict',
     fileError: materialized.error,
   }
