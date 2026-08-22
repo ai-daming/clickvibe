@@ -54,6 +54,23 @@ export interface WorkflowEvent {
   note?: string
 }
 
+/** Apply the durable state shared by initial-development and resumed runs. */
+export function applyDevRunOutcome(
+  workflow: IssueWorkflow,
+  status: 'running' | 'done' | 'failed' | 'stopped' | 'timed_out',
+  exitCode: number | null,
+  sessionId: string | null,
+): boolean {
+  const completed = status === 'done' && exitCode === 0
+  workflow.stage = completed ? 'review-ready' : 'developing'
+  workflow.devInterrupted = !completed
+  // The session starts before the task completes. Keep its id even when the
+  // process is later killed or exits non-zero so recovery resumes this session.
+  if (sessionId) workflow.devSessionId = sessionId
+  if (completed) workflow.reviewResult = null
+  return completed
+}
+
 /** Append one event to a workflow and persist. */
 export async function appendEvent(workflow: IssueWorkflow, event: WorkflowEvent): Promise<void> {
   workflow.events = workflow.events ?? []

@@ -3,6 +3,18 @@ import { createHash, randomBytes } from 'node:crypto'
 export type DevelopAgent = 'codex' | 'claude' | 'dryrun'
 export type AgentAction = 'develop' | 'review' | 'resume'
 
+/** Build the command that continues an existing development session. */
+export function buildResumeAgentCommand(agent: Exclude<DevelopAgent, 'dryrun'>, sessionId: string | null): string {
+  if (agent === 'claude') {
+    return sessionId
+      ? `claude -p --resume ${shellQuote(sessionId)} --dangerously-skip-permissions --verbose --output-format stream-json`
+      : 'claude -p --continue --dangerously-skip-permissions --verbose --output-format stream-json'
+  }
+  return sessionId
+    ? `codex exec resume ${shellQuote(sessionId)} -c approval_policy=never -c 'sandbox_mode="danger-full-access"' --json -`
+    : 'codex exec resume --last -c approval_policy=never -c \'sandbox_mode="danger-full-access"\' --json -'
+}
+
 export interface GithubTarget {
   kind: 'issue' | 'pr'
   owner: string

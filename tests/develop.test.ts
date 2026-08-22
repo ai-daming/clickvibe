@@ -4,6 +4,7 @@ import {
   AuthorizationStore,
   LineLog,
   authorizationDigest,
+  buildResumeAgentCommand,
   buildWorktreeAddCommand,
   decideWorktreeRecovery,
   makeAuthorizationInput,
@@ -33,6 +34,21 @@ test('parseGithubUrl accepts exact issue and PR URLs only', () => {
 test('shellQuote prevents POSIX shell expansion', () => {
   assert.equal(shellQuote('/tmp/simple'), "'/tmp/simple'")
   assert.equal(shellQuote("/tmp/a'b$(touch nope)"), "'/tmp/a'\\''b$(touch nope)'")
+})
+
+test('resume commands continue the exact session and use a valid codex fallback', () => {
+  assert.equal(
+    buildResumeAgentCommand('codex', 'thread-123'),
+    `codex exec resume 'thread-123' -c approval_policy=never -c 'sandbox_mode="danger-full-access"' --json -`,
+  )
+  assert.equal(
+    buildResumeAgentCommand('codex', null),
+    `codex exec resume --last -c approval_policy=never -c 'sandbox_mode="danger-full-access"' --json -`,
+  )
+  assert.equal(
+    buildResumeAgentCommand('claude', 'session-123'),
+    `claude -p --resume 'session-123' --dangerously-skip-permissions --verbose --output-format stream-json`,
+  )
 })
 
 test('LineLog buffers complete lines and flushes a final fragment', () => {

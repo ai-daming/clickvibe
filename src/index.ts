@@ -25,6 +25,7 @@ import { parse as parseYaml } from 'yaml'
 import {
   AuthorizationStore,
   LineLog,
+  buildResumeAgentCommand,
   buildWorktreeAddCommand,
   decideWorktreeRecovery,
   isLoopbackAddress,
@@ -43,6 +44,7 @@ import { deriveNextAction, workflowBaseBranch, type NextAction, type WorkflowFac
 import {
   appendEvent,
   appendLog,
+  applyDevRunOutcome,
   issueKey,
   loadAllWorkflows,
   loadWorkflow,
@@ -1693,14 +1695,9 @@ async function startDevelop(
         await appendLog(workflow.key, 'dev', `[clickvibe] ${agent} 结束,退出码 ${exitCode}`)
         const reloaded = await loadWorkflow(workflow.key)
         if (reloaded) {
-          if (live.status === 'done' && exitCode === 0) {
-            reloaded.stage = 'review-ready'
-            reloaded.devInterrupted = false
+          if (applyDevRunOutcome(reloaded, live.status, exitCode, sessionId)) {
             // 开发完成(含 rework):旧的 review 结论已归档到 events 历史,
             // 当前回到"待 review"——不能继续显示"Review 未通过"
-            reloaded.reviewResult = null
-            // 记录 agent 会话 id(供续会话精确恢复,不用 --last)
-            if (sessionId) reloaded.devSessionId = sessionId
             // 检测关联 PR:开发可能创建了 PR,记录到 workflow(issue 为 key,PR 是产物)
             if (!reloaded.prNumber) {
               const pr = await detectLinkedPr(ctx, workflow.repoKey, workflow.branch)
@@ -1714,8 +1711,6 @@ async function startDevelop(
               hash: head ?? undefined,
               note: `${agent} 完成开发${extraContext !== '' ? '(按 review 意见返工)' : ''}`,
             })
-          } else {
-            reloaded.devInterrupted = true
           }
           await saveWorkflow(reloaded)
         }
@@ -2082,16 +2077,7 @@ async function resumeDevelop(
   // sessionId 缺失时回退 --last/--continue(尽力而为)。
   const agent = workflow.devAgent ?? 'codex'
   const sessionId = workflow.devSessionId
-  let command: string
-  if (agent === 'claude') {
-    command = sessionId
-      ? `claude -p --resume ${shellQuoteId(sessionId)} --dangerously-skip-permissions --verbose --output-format stream-json`
-      : 'claude -p --continue --dangerously-skip-permissions --verbose --output-format stream-json'
-  } else {
-    command = sessionId
-      ? `codex exec resume ${shellQuoteId(sessionId)} -c approval_policy=never -c 'sandbox_mode="danger-full-access"' --json -`
-      : 'codex exec resume --last -c approval_policy=never -c \'sandbox_mode="danger-full-access"\' --json -'
-  }
+  const command = buildResumeAgentCommand(agent, sessionId)
   // 续会话前也同步远端(并行开发时 base 会变化)
   try {
     await runCommand(ctx, 'git fetch origin', {
@@ -2113,13 +2099,9 @@ async function resumeDevelop(
     await appendLog(workflow.key, 'dev', `[clickvibe] ${agent} 恢复结束,退出码 ${exitCode}`)
     const reloaded = await loadWorkflow(workflow.key)
     if (reloaded) {
-      reloaded.stage = live.status === 'done' && exitCode === 0 ? 'review-ready' : 'developing'
-      reloaded.devInterrupted = live.status !== 'done' || exitCode !== 0
-      if (newSessionId) reloaded.devSessionId = newSessionId
-      if (exitCode === 0) {
+      if (applyDevRunOutcome(reloaded, live.status, exitCode, newSessionId)) {
         // rework 完成:旧的 review 结论已归档到 events,回到"待 review",
         // 不能继续显示"Review 未通过"让用户无限重复点
-        reloaded.reviewResult = null
         // 记录 rework 事件(带新 HEAD)
         const head = await readWorktreeHead(ctx, workflow.worktree)
         await appendEvent(reloaded, {
