@@ -79,6 +79,7 @@
 - **会话 id 归属缺失或与当前 agent 不一致** → 清除 id + owner,不得跨 Codex/Claude resume,直接在原 worktree 启动全新会话
 - **精确会话 id 被 agent 快速拒绝** → 清除 stale id,在同一 task/worktree 内仅回退一次全新会话;已完成 session 初始化或长时间运行后的普通失败不得触发回退
 - **review 未通过但问题列表为空** → 视为结论解析异常,清空当前 verdict 并要求重新 Review,不得进入空意见返工
+- **review 验证证据** → 命令实际执行后失败标记为「[验证不通过]」;因权限、环境或外部依赖无法执行标记为「[无法验证]」,问题列表原样展示,不得把后者伪装成前者
 - **验收契约状态** → `current` 才允许沿用 verdict；`changed` 明确要求重新 Review；`unknown/current-contract-unavailable` 暂停合并并要求刷新，不得谎称「验收已变更」
 - **review 结论缺失** → ①本地事件缓存 → ②comment meta → ③GitHub 原生 review(`reviews` 字段)→ ④「人工确认」；GitHub approval 可恢复 verdict，但不含 Issue body 快照，必须标记 `unknown/missing-review-snapshot` 并重新 Review，不自动解锁合并
 - **结论缺契约指纹**(历史旧结论) → 标记 `unknown/missing-review-snapshot`，按 #11 重新 Review；它会阻断合并，但不得伪装成已证实的契约变更

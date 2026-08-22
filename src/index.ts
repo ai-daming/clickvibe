@@ -2074,6 +2074,7 @@ async function buildReviewPrompt(
       `执行 git diff ${base}...HEAD 查看完整改动。`,
       ...(sessionId ? ['先复核之前发现的问题是否已解决,再审查全部新改动。'] : []),
       '严格按当前需求快照中的验收标准逐条审查,同时检查 bug、安全隐患和测试覆盖。',
+      '验证结果必须区分:命令已执行但断言/检查失败的问题以「[验证不通过]」开头;因权限、环境或外部依赖导致命令无法执行的问题以「[无法验证]」开头,不得混淆。',
       `除 ${REVIEW_RESULT_RELATIVE_PATH} 外不要修改任何文件,只做只读 review。`,
       `必须使用写文件工具把最终结论写入 ${REVIEW_RESULT_RELATIVE_PATH},格式:{"passed":true|false,"issues":["问题1(含文件/位置/原因)",...]};passed=true 表示无问题,有任意问题则 false 并列全。`,
       '最后一行再输出同一个 JSON 对象(单独一行,不要代码块),仅作为兼容兜底。',
@@ -2644,9 +2645,7 @@ async function startDevelop(
       const prompt = buildDevelopPrompt(workflow, launchSnapshot, extraContext)
 
       pushTaskLine(live, `[clickvibe] 启动 ${agent} 开发…`)
-      const agentCommand = agent === 'claude'
-        ? 'claude -p --dangerously-skip-permissions --verbose --output-format stream-json'
-        : 'codex exec -c approval_policy=never -s danger-full-access --json -'
+      const agentCommand = buildFreshAgentCommand(agent)
 
       attachAgentProcess(ctx, live, agentCommand, workflow.worktree, prompt, async (exitCode, sessionId) => {
         pushTaskLine(live, `[clickvibe] ${agent} 结束,退出码 ${exitCode}`)

@@ -42,11 +42,11 @@ test('shellQuote prevents POSIX shell expansion', () => {
 test('resume commands continue the exact session and use a valid codex fallback', () => {
   assert.equal(
     buildResumeAgentCommand('codex', 'thread-123'),
-    `codex exec resume 'thread-123' -c approval_policy=never -c 'sandbox_mode="danger-full-access"' --json -`,
+    `codex exec -c 'approval_policy="never"' -s danger-full-access resume 'thread-123' --json -`,
   )
   assert.equal(
     buildResumeAgentCommand('codex', null),
-    `codex exec resume --last -c approval_policy=never -c 'sandbox_mode="danger-full-access"' --json -`,
+    `codex exec -c 'approval_policy="never"' -s danger-full-access resume --last --json -`,
   )
   assert.equal(
     buildResumeAgentCommand('claude', 'session-123'),
@@ -55,7 +55,7 @@ test('resume commands continue the exact session and use a valid codex fallback'
 })
 
 test('fresh commands never retry the stale session', () => {
-  assert.equal(buildFreshAgentCommand('codex'), 'codex exec -c approval_policy=never -s danger-full-access --json -')
+  assert.equal(buildFreshAgentCommand('codex'), `codex exec -c 'approval_policy="never"' -s danger-full-access --json -`)
   assert.equal(buildFreshAgentCommand('claude'), 'claude -p --dangerously-skip-permissions --verbose --output-format stream-json')
 })
 
