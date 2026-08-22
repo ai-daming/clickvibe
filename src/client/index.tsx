@@ -19,6 +19,7 @@ import type { LayoutController } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { SidebarFooterActionOwnerProps } from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import { selectHistoryTask } from '../task-history.ts'
 import { githubCompareUrl, workflowStatusLabel } from '../state-view.ts'
+import { deliveryPublicationLabel, type DeliveryPublication } from '../delivery-publication.ts'
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 type _SlotLoaders = [typeof LayoutController, SidebarFooterActionOwnerProps]
 
@@ -174,6 +175,12 @@ const PANEL_CSS = `
 .cv-tl-pass { color: #1a7f37; }
 .cv-tl-fail { color: #cf222e; }
 .cv-tl-note { color: #57606a; }
+.cv-tl-public { color: #0969da; font-weight: 600; text-decoration: none; }
+.cv-tl-public:hover { text-decoration: underline; }
+.cv-tl-local { color: #8c959f; }
+.cv-tl-publish-fail { color: #cf222e; font-weight: 600; }
+.cv-delivery-summary { font-size: 12px; color: #57606a; background: #f6f8fa; border-radius: 4px; padding: 6px 8px; }
+.cv-review-next { font-size: 12px; font-weight: 600; }
 .cv-state { border: 1px solid #d0d7de; border-radius: 6px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; }
 .cv-state-head { font-size: 12px; font-weight: 600; color: #57606a; }
 .cv-state-table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
@@ -674,6 +681,8 @@ interface WorkflowEvent {
   at: string
   hash?: string
   verdict?: { passed: boolean; issues: string[] }
+  fixed?: number
+  publication?: DeliveryPublication
   note?: string
 }
 
@@ -711,6 +720,8 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
   const derived = workflow?.derived
   const stage = derived?.status ?? workflow?.stage ?? 'idle'
   const nextAction = derived?.nextAction
+  const workflowEvents = workflow?.events ?? []
+  const lastDelivery = [...workflowEvents].reverse().find((event) => event.kind === 'dev' || event.kind === 'rework')
 
   const appendStatusLine = (line: string) => {
     setStatusLines((previous) => [...previous, line])
@@ -1036,6 +1047,13 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
           </a>
         </div>
       ) : null}
+      {lastDelivery?.fixed !== undefined ? (
+        <div className="cv-delivery-summary">
+          {lastDelivery.fixed > 0
+            ? `上次开发完成:修复 ${lastDelivery.fixed} 个 Review 问题,已请求再次 Review`
+            : '上次开发完成:首次交付,已请求 Review'}
+        </div>
+      ) : null}
 
       {/* 权威状态视图:worktree / main / 远端 三方对比(issue #5) */}
       {derived ? (
@@ -1098,6 +1116,11 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
           {workflow.reviewResult.issues.map((issue, i) => <li key={i}>{issue}</li>)}
         </ul>
       ) : null}
+      {workflow?.reviewResult && derived?.verdictCurrent ? (
+        <div className={`cv-review-next ${workflow.reviewResult.passed ? 'cv-tl-pass' : 'cv-tl-fail'}`}>
+          下一步:{workflow.reviewResult.passed ? '可合并' : '请重新开发'}
+        </div>
+      ) : null}
 
       {/* 唯一动作 */}
       <div className="cv-dev-actions">
@@ -1140,11 +1163,11 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
         <pre className="cv-dev-log">等待 agent 输出…{streamState === 'retrying' ? '\n连接中断,正在自动重连…' : ''}</pre>
       ) : null}
 
-      {/* 历史时间线:全部事件,按时间顺序 */}
-      {(workflow?.events ?? []).length > 0 ? (
+      {/* 交付流水:本地事件与其公开 GitHub 评论状态,按时间倒序 */}
+      {workflowEvents.length > 0 ? (
         <div className="cv-timeline">
-          <div className="cv-timeline-head">📜 历史</div>
-          {[...(workflow?.events ?? [])].reverse().map((ev, i) => (
+          <div className="cv-timeline-head">📜 交付流水 · 本地事件 / GitHub 评论</div>
+          {[...workflowEvents].reverse().map((ev, i) => (
             <div key={i} className="cv-tl-row">
               <span className={`cv-tl-kind cv-tl-kind-${ev.kind}`}>
                 {ev.kind === 'dev' ? '开发' : ev.kind === 'rework' ? '返工' : ev.kind === 'review' ? 'Review' : ev.kind === 'resume' ? '恢复' : '备注'}
@@ -1156,7 +1179,19 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
                     {ev.verdict.passed ? '✅ 通过' : `❌ ${ev.verdict.issues.length} 个问题`}
                   </span>
                 : null}
+              {(ev.kind === 'dev' || ev.kind === 'rework') && ev.fixed !== undefined
+                ? <span className="cv-tl-note">修复 {ev.fixed} 个问题</span>
+                : null}
               {ev.note ? <span className="cv-tl-note">{ev.note}</span> : null}
+              {ev.publication?.status === 'posted'
+                ? ev.publication.url
+                  ? <a className="cv-tl-public" href={ev.publication.url} target="_blank" rel="noreferrer">
+                      {deliveryPublicationLabel(ev.publication)}
+                    </a>
+                  : <span className="cv-tl-public">{deliveryPublicationLabel(ev.publication)}</span>
+                : ev.publication?.status === 'failed'
+                  ? <span className="cv-tl-publish-fail" title={ev.publication.error}>{deliveryPublicationLabel(ev.publication)}</span>
+                  : <span className="cv-tl-local">{deliveryPublicationLabel(ev.publication)}</span>}
             </div>
           ))}
         </div>
