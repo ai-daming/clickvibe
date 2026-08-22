@@ -43,6 +43,7 @@ import {
   type DevelopAgent,
   type IssuePromptSnapshot,
 } from './develop.ts'
+import { checkIssueContract, type IssueContractCheck } from './issue-contract.ts'
 import {
   deriveNextAction,
   deriveWorkflowStatus,
@@ -1104,6 +1105,7 @@ async function fetchGithubPrFact(
   repoKey: string,
   branch: string,
   prNumber: string | number | null,
+  includeReviews = true,
 ): Promise<GithubPrLookup> {
   const hasPrNumber = prNumber !== null && prNumber !== undefined
   try {
@@ -1122,7 +1124,9 @@ async function fetchGithubPrFact(
     }
     if (!raw) return { known: true, pr: null }
     rest.rememberVersion(`${repoKey}/pulls/${raw.number}`, raw.updated_at)
-    const reviews = await fetchPrRestReviews(ctx, repoKey, raw.number, 5_000)
+    // lists 之外的回源刷新默认带 reviews 推导 reviewDecision;已有本地 verdict 时
+    // 跳过,省掉一轮 pulls/{n}/reviews 请求(列表路径由调用方按需传入)。
+    const reviews = includeReviews ? await fetchPrRestReviews(ctx, repoKey, raw.number, 5_000) : []
     return {
       known: true,
       pr: {
@@ -1220,6 +1224,7 @@ interface RepositoryIssueItem {
   updatedAt?: string
   labels?: { name: string; color?: string }[]
   milestone?: { title: string; number?: number } | null
+  contract: IssueContractCheck
 }
 
 interface RepositoryIssueRest {
@@ -1296,6 +1301,7 @@ export async function fetchRepositoryIssues(
         updatedAt: issue.updated_at,
         labels: issue.labels,
         milestone: issue.milestone,
+        contract: checkIssueContract(issue.body ?? ''),
       }))
     const prs = githubSnapshot.pulls.map<GithubPrFact>((pr) => ({
       number: String(pr.number),
@@ -1318,6 +1324,10 @@ export async function fetchRepositoryIssues(
     for (const raw of prs) {
       if (!raw.headRefName || prByBranch.has(raw.headRefName)) continue
       prByBranch.set(raw.headRefName, { ...raw, number: String(raw.number) })
+    }
+    const prByNumber = new Map<string, GithubPrFact>()
+    for (const raw of prs) {
+      if (!prByNumber.has(String(raw.number))) prByNumber.set(String(raw.number), { ...raw, number: String(raw.number) })
     }
 
     const repoPath = expandHome(configuredPath)
@@ -1348,10 +1358,19 @@ export async function fetchRepositoryIssues(
       const branch = existing?.branch ?? `${project}-issue-${issue.number}`
       const worktree = existing?.worktree ?? join(config.worktreeRoot, project, branch)
       const branchExists = refs.has(branch) || refs.has(`origin/${branch}`)
+      // 列表页优先消费快照事实:pulls?state=all 已含全部(含已合并/已关闭)PR,
+      // 冷启动不再为每个 workflow 打 pulls/{n}(+reviews) 网络请求,首屏秒开;
+      // 只有快照缺失该编号(分支重命名/新 PR 未入快照)才按编号回源刷新,
+      // 沿用"编号刷新 + 刷新失败关门"的既有语义(tests/routes.test.ts)。
+      // 已有持久化 reviewResult 时跳过 reviews 详情,verdict 以本地为准。
+      const snapshotPr = existing?.prNumber ? prByNumber.get(String(existing.prNumber)) : null
       let pr: GithubPrFact | null
       let prStatusKnown: boolean
-      if (existing?.prNumber) {
-        const lookup = await fetchGithubPrFact(ctx, repoKey, branch, existing.prNumber)
+      if (snapshotPr) {
+        pr = snapshotPr
+        prStatusKnown = true
+      } else if (existing?.prNumber) {
+        const lookup = await fetchGithubPrFact(ctx, repoKey, branch, existing.prNumber, existing.reviewResult === null)
         pr = lookup.pr
         prStatusKnown = lookup.known && lookup.pr !== null
       } else {
@@ -1407,7 +1426,7 @@ export async function fetchRepositoryIssues(
         const dependency = issueByNumber.get(number)
         return { number, title: dependency?.title ?? '', state: String(dependency?.state ?? 'UNKNOWN').toUpperCase() }
       })
-      return { ...issue, blockedBy, workflow: derived }
+      return { ...issue, blockedBy, workflow: derived, contract: checkIssueContract(issue.body ?? '') }
     }))
     dependencyRefreshClock.mark(repoKey)
     return { ok: true, repoKey, issues, freshness }
