@@ -8,7 +8,7 @@ import { apply, fetchRepositoryIssues } from '../src/index.ts'
 import { loadWorkflow, saveWorkflow, type IssueWorkflow } from '../src/state.ts'
 
 function createHandler(
-  run?: (spec: { command: string }) => Promise<unknown>,
+  run?: (spec: { command: string; workdir?: string; stdin?: string }) => Promise<unknown>,
   start?: (spec: { command: string; workdir?: string; stdin?: string }) => unknown,
 ): RequestListener {
   let handler: RequestListener | null = null
@@ -166,8 +166,10 @@ test('invalid exact dev session falls back once to a fresh session on the same t
     const worktree = join(tempHome, 'worktree')
     await mkdir(worktree, { recursive: true })
     const workflow = interruptedWorkflow('o-r-917', 'https://github.com/o/r/issues/917', worktree)
+    workflow.reviewResult = { passed: false, issues: ['修复竞态', '补充失败测试'] }
     await saveWorkflow(workflow)
     const starts: Array<{ command: string; workdir?: string }> = []
+    const comments: Array<{ command: string; body: string }> = []
     const handler = createHandler(async (spec) => {
       if (spec.command.startsWith('gh issue view')) return { exitCode: 0, stdout: { text: JSON.stringify({
         url: workflow.url, title: 'resume issue', body: '## 验收标准\n- fallback', state: 'OPEN', updatedAt: 'now', comments: [],
@@ -176,6 +178,10 @@ test('invalid exact dev session falls back once to a fresh session on the same t
         return { exitCode: 0, stdout: { text: '[]' }, stderr: { text: '' } }
       }
       if (spec.command === 'git rev-parse --short HEAD') return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
+      if (spec.command.startsWith('gh issue comment')) {
+        comments.push({ command: spec.command, body: spec.stdin ?? '' })
+        return { exitCode: 0, stdout: { text: 'https://github.com/o/r/pull/29#issuecomment-1' }, stderr: { text: '' } }
+      }
       return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
     }, (spec) => {
       starts.push({ command: spec.command, workdir: spec.workdir })
@@ -212,6 +218,134 @@ test('invalid exact dev session falls back once to a fresh session on the same t
     const reloaded = await loadWorkflow(workflow.key)
     assert.equal(reloaded?.devSessionId, 'new-session')
     assert.equal(reloaded?.devSessionAgent, 'codex')
+    assert.equal(comments.length, 1)
+    assert.match(comments[0].command, /github\.com\/o\/r\/pull\/29/)
+    assert.match(comments[0].body, /^== Dev Meta ==\n- event: dev\n- commit: abc123\n- issue: #917\n- fixed: 2/m)
+    assert.match(comments[0].body, /- 修复竞态\n- 补充失败测试/)
+    assert.equal(reloaded?.events.at(-1)?.publication?.status, 'posted')
+    assert.equal(reloaded?.events.at(-1)?.publication?.target, 'pr')
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('completed development without a PR appends its Dev Meta comment to the issue', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-dev-comment-fallback-'))
+  process.env.HOME = tempHome
+  try {
+    const worktree = join(tempHome, 'worktree')
+    await mkdir(worktree, { recursive: true })
+    const workflow = interruptedWorkflow('o-r-920', 'https://github.com/o/r/issues/920', worktree)
+    workflow.prNumber = null
+    await saveWorkflow(workflow)
+    const comments: Array<{ command: string; body: string }> = []
+    const handler = createHandler(async (spec) => {
+      if (spec.command === 'git rev-parse --short HEAD') {
+        return { exitCode: 0, stdout: { text: 'def4567' }, stderr: { text: '' } }
+      }
+      if (spec.command.startsWith('gh pr list')) {
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      }
+      if (spec.command.startsWith('gh issue comment')) {
+        comments.push({ command: spec.command, body: spec.stdin ?? '' })
+        return { exitCode: 0, stdout: { text: 'https://github.com/o/r/issues/920#issuecomment-3' }, stderr: { text: '' } }
+      }
+      return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+    }, () => {
+      let read = false
+      return {
+        status: 'running', exitCode: 0,
+        done: new Promise<void>((resolve) => setTimeout(resolve, 5)),
+        readOutput() {
+          if (read) return { delta: '', lossy: false }
+          read = true
+          return { delta: '{"type":"thread.started","thread_id":"continued-session"}\n', lossy: false }
+        },
+        kill() { return true },
+      }
+    })
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+    const authorized = await post(handler, '/clickvibe/api/authorize', {
+      action: 'resume', url: workflow.url, agent: 'codex', context: '',
+    }, headers) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
+    const resumed = await post(handler, '/clickvibe/api/resume', {
+      url: workflow.url, agent: 'codex', context: '',
+      authorizationId: authorized.body.authorizationId,
+      authorizationDigest: authorized.body.authorizationDigest,
+    }, headers) as { status: number; body: { taskId?: string } }
+    assert.equal(resumed.status, 200, JSON.stringify(resumed.body))
+    assert.ok(resumed.body.taskId)
+    await waitForTask(handler, resumed.body.taskId)
+
+    assert.equal(comments.length, 1)
+    assert.match(comments[0].command, /github\.com\/o\/r\/issues\/920/)
+    assert.match(comments[0].body, /^== Dev Meta ==\n- event: dev\n- commit: def4567\n- issue: #920\n- fixed: 0/m)
+    const reloaded = await loadWorkflow(workflow.key)
+    assert.equal(reloaded?.events.at(-1)?.publication?.target, 'issue')
+    assert.equal(reloaded?.events.at(-1)?.publication?.status, 'posted')
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('comment publication failure keeps the delivery event and stores a bounded visible error', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-dev-comment-failure-'))
+  process.env.HOME = tempHome
+  try {
+    const worktree = join(tempHome, 'worktree')
+    await mkdir(worktree, { recursive: true })
+    const workflow = interruptedWorkflow('o-r-921', 'https://github.com/o/r/issues/921', worktree)
+    workflow.reviewResult = { passed: false, issues: ['must remain traceable'] }
+    await saveWorkflow(workflow)
+    const handler = createHandler(async (spec) => {
+      if (spec.command === 'git rev-parse --short HEAD') {
+        return { exitCode: 0, stdout: { text: '987abcd' }, stderr: { text: '' } }
+      }
+      if (spec.command.startsWith('gh issue comment')) {
+        return { exitCode: 1, stdout: { text: '' }, stderr: { text: `offline-${'x'.repeat(700)}` } }
+      }
+      return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+    }, () => {
+      let read = false
+      return {
+        status: 'running', exitCode: 0,
+        done: new Promise<void>((resolve) => setTimeout(resolve, 5)),
+        readOutput() {
+          if (read) return { delta: '', lossy: false }
+          read = true
+          return { delta: '{"type":"thread.started","thread_id":"failure-session"}\n', lossy: false }
+        },
+        kill() { return true },
+      }
+    })
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+    const authorized = await post(handler, '/clickvibe/api/authorize', {
+      action: 'resume', url: workflow.url, agent: 'codex', context: '',
+    }, headers) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
+    const resumed = await post(handler, '/clickvibe/api/resume', {
+      url: workflow.url, agent: 'codex', context: '',
+      authorizationId: authorized.body.authorizationId,
+      authorizationDigest: authorized.body.authorizationDigest,
+    }, headers) as { status: number; body: { taskId?: string } }
+    assert.equal(resumed.status, 200, JSON.stringify(resumed.body))
+    assert.ok(resumed.body.taskId)
+    await waitForTask(handler, resumed.body.taskId)
+
+    const reloaded = await loadWorkflow(workflow.key)
+    assert.equal(reloaded?.stage, 'review-ready')
+    assert.equal(reloaded?.events.length, 1)
+    assert.equal(reloaded?.events[0].hash, '987abcd')
+    assert.equal(reloaded?.events[0].fixed, 1)
+    assert.equal(reloaded?.events[0].publication?.target, 'pr')
+    assert.equal(reloaded?.events[0].publication?.status, 'failed')
+    assert.equal(reloaded?.events[0].publication?.error?.length, 500)
+    assert.match(reloaded?.events[0].publication?.error ?? '', /offline-/)
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
@@ -232,9 +366,14 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     workflow.reviewSessionAgent = 'codex'
     await saveWorkflow(workflow)
     const starts: string[] = []
+    const comments: Array<{ command: string; body: string }> = []
     const handler = createHandler(async (spec) => {
       if (spec.command.startsWith('gh pr view')) return { exitCode: 0, stdout: { text: 'main' }, stderr: { text: '' } }
       if (spec.command === 'git rev-parse --short HEAD') return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
+      if (spec.command.startsWith('gh issue comment')) {
+        comments.push({ command: spec.command, body: spec.stdin ?? '' })
+        return { exitCode: 0, stdout: { text: 'https://github.com/o/r/pull/29#issuecomment-2' }, stderr: { text: '' } }
+      }
       return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
     }, (spec) => {
       starts.push(spec.command)
@@ -276,6 +415,11 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     assert.equal(reloaded?.reviewSessionId, 'new-review')
     assert.equal(reloaded?.reviewSessionAgent, 'codex')
     assert.equal(reloaded?.reviewResult?.passed, true)
+    assert.equal(reloaded?.reviewResult?.commentUrl, 'https://github.com/o/r/pull/29#issuecomment-2')
+    assert.equal(comments.length, 1)
+    assert.match(comments[0].command, /github\.com\/o\/r\/pull\/29/)
+    assert.match(comments[0].body, /^== Review Meta ==\n- event: review\n- commit: abc123\n- issue: #918\n- passed: true\n- next: merge/m)
+    assert.match(comments[0].body, /下一步:可合并当前提交。/)
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome

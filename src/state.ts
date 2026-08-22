@@ -8,6 +8,7 @@
 import { mkdir, readFile, writeFile, appendFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
+import type { DeliveryPublication } from './delivery-publication.ts'
 
 /** The workflow stage of one issue. */
 export type WorkflowStage =
@@ -55,6 +56,10 @@ export interface WorkflowEvent {
   hash?: string
   /** review 结论(仅 review 事件)。 */
   verdict?: { passed: boolean; issues: string[] }
+  /** 本次开发完成前仍待修复的上一轮 review 问题数。 */
+  fixed?: number
+  /** 对应公开 GitHub 流水节点的发布结果;缺失表示旧的本地事件。 */
+  publication?: DeliveryPublication
   note?: string
 }
 
