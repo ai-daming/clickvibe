@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
 import { deriveWorkflowState, enrichWorkflowStates, type IssueWorkflow } from '../src/index.ts'
+import { issueBodyHash } from '../src/state.ts'
 
 const execFileAsync = promisify(execFile)
 
@@ -116,24 +117,81 @@ test('review verdict binds to the reviewed HEAD and goes stale when the head mov
     const headC = (await wt('rev-parse', '--short', 'HEAD')).stdout.trim()
 
     // review 结论绑定 HEAD C(与事件时间线一致)
+    const issueContract = { bodyHash: issueBodyHash('## 验收标准\n- A'), updatedAt: '2026-08-22T00:00:00Z' }
     const wf = workflow({
       worktree,
       prNumber: '9',
       reviewResult: { passed: true, issues: [] },
-      events: [{ kind: 'review', at: new Date().toISOString(), hash: headC, verdict: { passed: true, issues: [] } }],
+      events: [{ kind: 'review', at: new Date().toISOString(), hash: headC, verdict: { passed: true, issues: [] }, issueContract }],
       stage: 'review-ready',
     })
-    const current = (await deriveWorkflowState(ctx, wf)).derived
+    const current = (await deriveWorkflowState(ctx, wf, { issueContract })).derived
     assert.equal(current.reviewedHash, headC)
     assert.equal(current.verdictCurrent, true)
     assert.equal(current.nextAction.kind, 'merge')
 
     // HEAD 前进(如合并远端基线)后,旧结论不再冒充当前状态
     await wt('commit', '--allow-empty', '-m', 'post-review commit')
-    const stale = (await deriveWorkflowState(ctx, wf)).derived
+    const stale = (await deriveWorkflowState(ctx, wf, { issueContract })).derived
     assert.equal(stale.head === headC, false)
     assert.equal(stale.verdictCurrent, false)
     assert.equal(stale.nextAction.kind, 'review')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('review verdict goes stale when the issue acceptance contract changes', async () => {
+  const { root, worktree, wt } = await setupRepo()
+  try {
+    await wt('commit', '--allow-empty', '-m', 'dev work C')
+    const head = (await wt('rev-parse', '--short', 'HEAD')).stdout.trim()
+    const reviewedContract = { bodyHash: issueBodyHash('## 验收标准\n- A'), updatedAt: '2026-08-22T00:00:00Z' }
+    const currentContract = { bodyHash: issueBodyHash('## 验收标准\n- A\n- B'), updatedAt: '2026-08-22T01:00:00Z' }
+    const wf = workflow({
+      worktree,
+      prNumber: '9',
+      reviewResult: { passed: true, issues: [] },
+      events: [{ kind: 'review', at: new Date().toISOString(), hash: head, verdict: { passed: true, issues: [] }, issueContract: reviewedContract }],
+      stage: 'passed',
+    })
+
+    const stale = (await deriveWorkflowState(ctx, wf, { issueContract: currentContract })).derived
+    assert.equal(stale.reviewedHash, head)
+    assert.equal(stale.issueContractCurrent, false)
+    assert.equal(stale.verdictCurrent, false)
+    assert.equal(stale.status, 'review-ready')
+    assert.equal(stale.nextAction.kind, 'review')
+    assert.match(stale.nextAction.hint, /验收已变更/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('metadata-only updatedAt drift does not invalidate an unchanged issue body', async () => {
+  const { root, worktree, wt } = await setupRepo()
+  try {
+    await wt('commit', '--allow-empty', '-m', 'dev work C')
+    const head = (await wt('rev-parse', '--short', 'HEAD')).stdout.trim()
+    const bodyHash = issueBodyHash('## 验收标准\n- A')
+    const wf = workflow({
+      worktree,
+      prNumber: '9',
+      reviewResult: { passed: true, issues: [] },
+      events: [{
+        kind: 'review', at: new Date().toISOString(), hash: head,
+        verdict: { passed: true, issues: [] },
+        issueContract: { bodyHash, updatedAt: '2026-08-22T00:00:00Z' },
+      }],
+      stage: 'passed',
+    })
+
+    const current = (await deriveWorkflowState(ctx, wf, {
+      issueContract: { bodyHash, updatedAt: '2026-08-22T01:00:00Z' },
+    })).derived
+    assert.equal(current.issueContractCurrent, true)
+    assert.equal(current.verdictCurrent, true)
+    assert.equal(current.nextAction.kind, 'merge')
   } finally {
     await rm(root, { recursive: true, force: true })
   }

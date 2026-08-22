@@ -5,6 +5,7 @@
  * files. Survives web restarts and page refreshes so the panel can restore
  * its context (the issue being viewed + its dev/review workflow stage).
  */
+import { createHash } from 'node:crypto'
 import { mkdir, readFile, writeFile, appendFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
@@ -55,7 +56,21 @@ export interface WorkflowEvent {
   hash?: string
   /** review 结论(仅 review 事件)。 */
   verdict?: { passed: boolean; issues: string[] }
+  /** review 启动时冻结的 Issue 验收契约。旧事件缺失时按过期处理。 */
+  issueContract?: IssueContractSnapshot
   note?: string
+}
+
+export interface IssueContractSnapshot {
+  /** GitHub issue body 原文的 SHA-256。 */
+  bodyHash: string
+  /** GitHub 在冻结快照时返回的 updatedAt，保留作审计证据。 */
+  updatedAt: string
+}
+
+/** Hash the exact GitHub issue body; updatedAt is evidence, bodyHash is identity. */
+export function issueBodyHash(body: string): string {
+  return createHash('sha256').update(body, 'utf8').digest('hex')
 }
 
 /** Apply the durable state shared by initial-development and resumed runs. */

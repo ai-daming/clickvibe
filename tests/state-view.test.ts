@@ -13,6 +13,7 @@ function facts(overrides: Partial<WorkflowFacts> = {}): WorkflowFacts {
     head: 'a1b2c3d',
     reviewedHash: null,
     reviewPassed: null,
+    issueContractCurrent: true,
     hasNewCommits: false,
     needsSync: false,
     ...overrides,
@@ -149,8 +150,20 @@ test('a passed verdict bound to an old head must be re-reviewed', () => {
   assert.equal(next.kind, 'review')
 })
 
+test('a passed verdict bound to an old issue contract must be re-reviewed', () => {
+  const next = deriveNextAction(facts({
+    stage: 'review-ready', reviewPassed: true, reviewedHash: 'a1b2c3d', head: 'a1b2c3d',
+    issueContractCurrent: false, prNumber: '9',
+  }))
+  assert.equal(next.kind, 'review')
+  assert.equal(next.label, '重新 Review')
+  assert.match(next.hint, /验收已变更/)
+})
+
 test('passed stage with a PR merges', () => {
-  const next = deriveNextAction(facts({ stage: 'passed', reviewPassed: true, prNumber: '9', head: 'a1b2c3d' }))
+  const next = deriveNextAction(facts({
+    stage: 'passed', reviewPassed: true, prNumber: '9', head: 'a1b2c3d', reviewedHash: 'a1b2c3d',
+  }))
   assert.equal(next.kind, 'merge')
 })
 

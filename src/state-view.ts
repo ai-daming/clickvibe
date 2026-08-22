@@ -65,6 +65,8 @@ export interface WorkflowFacts {
   reviewedHash: string | null
   /** Latest review verdict; null when there is no verdict yet. */
   reviewPassed: boolean | null
+  /** The reviewed issue-body contract still matches the live issue body. */
+  issueContractCurrent: boolean
   /** HEAD moved beyond the last recorded dev/rework event. */
   hasNewCommits: boolean
   /** Worktree is behind its base / remote branch and should be synced. */
@@ -157,11 +159,19 @@ export function deriveNextAction(facts: WorkflowFacts): NextAction {
       if (facts.reviewPassed === null) {
         return action('review', 'Review', '开发完成,审查代码改动')
       }
+      // 契约漂移优先于旧 verdict 的通过/失败语义；旧结论评审的已不是当前需求。
+      if (!facts.issueContractCurrent) {
+        return action(
+          'review',
+          '重新 Review',
+          '验收已变更,需按当前 Issue 正文重新审查',
+        )
+      }
       // 未通过 → 带意见返工(无论 HEAD 是否已变化;agent 会重读当前代码)。
       if (!facts.reviewPassed) {
         return action('rework', '按意见返工', 'Review 未通过,带意见续开发会话')
       }
-      // 通过:结论必须仍针对当前 HEAD 才算数,HEAD 变化后不冒充当前结论。
+      // 通过:结论必须仍针对当前 HEAD 和验收契约,任一变化都重新 review。
       const verdictCurrent = facts.head !== null && facts.head === facts.reviewedHash
       if (!verdictCurrent) {
         return action(
@@ -175,6 +185,12 @@ export function deriveNextAction(facts: WorkflowFacts): NextAction {
         : action('none', '无', 'Review 已通过,但尚未关联 PR')
     }
     case 'passed':
+      if (facts.head === null || facts.head !== facts.reviewedHash) {
+        return action('review', '重新 Review', '上次通过的结论针对旧提交,当前 HEAD 已变化,需重新审查')
+      }
+      if (!facts.issueContractCurrent) {
+        return action('review', '重新 Review', '验收已变更,需按当前 Issue 正文重新审查')
+      }
       return facts.prNumber
         ? action('merge', '合并 PR', 'Review 通过,打开 PR 完成合并')
         : action('none', '无', 'Review 已通过,等待合并')

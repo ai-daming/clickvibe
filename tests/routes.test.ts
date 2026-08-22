@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { apply, fetchRepositoryIssues } from '../src/index.ts'
-import { loadWorkflow, saveWorkflow, type IssueWorkflow } from '../src/state.ts'
+import { issueBodyHash, loadWorkflow, saveWorkflow, type IssueWorkflow } from '../src/state.ts'
 
 function createHandler(
   run?: (spec: { command: string }) => Promise<unknown>,
@@ -232,7 +232,12 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     workflow.reviewSessionAgent = 'codex'
     await saveWorkflow(workflow)
     const starts: string[] = []
+    const reviewedBody = '## 验收标准\n- frozen review contract'
+    const reviewedUpdatedAt = '2026-08-22T01:02:03Z'
     const handler = createHandler(async (spec) => {
+      if (spec.command.startsWith('gh issue view')) return { exitCode: 0, stdout: { text: JSON.stringify({
+        title: 'review issue', body: reviewedBody, state: 'OPEN', updatedAt: reviewedUpdatedAt,
+      }) }, stderr: { text: '' } }
       if (spec.command.startsWith('gh pr view')) return { exitCode: 0, stdout: { text: 'main' }, stderr: { text: '' } }
       if (spec.command === 'git rev-parse --short HEAD') return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
       return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
@@ -276,6 +281,9 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     assert.equal(reloaded?.reviewSessionId, 'new-review')
     assert.equal(reloaded?.reviewSessionAgent, 'codex')
     assert.equal(reloaded?.reviewResult?.passed, true)
+    assert.deepEqual(reloaded?.events.at(-1)?.issueContract, {
+      bodyHash: issueBodyHash(reviewedBody), updatedAt: reviewedUpdatedAt,
+    })
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
@@ -298,8 +306,13 @@ test('cross-agent review starts fresh and an empty failed verdict requires re-re
     workflow.reviewResult = { passed: false, issues: ['old issue'] }
     await saveWorkflow(workflow)
     const starts: string[] = []
+    const reviewedBody = '## 验收标准\n- current contract'
     const handler = createHandler(async (spec) => {
+      if (spec.command.startsWith('gh issue view')) return { exitCode: 0, stdout: { text: JSON.stringify({
+        title: 'review issue', body: reviewedBody, state: 'OPEN', updatedAt: '2026-08-22T02:03:04Z',
+      }) }, stderr: { text: '' } }
       if (spec.command.startsWith('gh pr view')) return { exitCode: 0, stdout: { text: 'main' }, stderr: { text: '' } }
+      if (spec.command === 'git rev-parse --short HEAD') return { exitCode: 0, stdout: { text: 'def456' }, stderr: { text: '' } }
       return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
     }, (spec) => {
       starts.push(spec.command)

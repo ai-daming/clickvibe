@@ -651,6 +651,11 @@ interface Workflow {
     lastDevHash: string | null
     lastReviewHash: string | null
     reviewedHash: string | null
+    reviewedIssueBodyHash: string | null
+    currentIssueBodyHash: string | null
+    reviewedIssueUpdatedAt: string | null
+    currentIssueUpdatedAt: string | null
+    issueContractCurrent: boolean
     hasNewCommits: boolean
     verdictCurrent: boolean
     nextAction: NextAction
@@ -672,6 +677,7 @@ interface WorkflowEvent {
   at: string
   hash?: string
   verdict?: { passed: boolean; issues: string[] }
+  issueContract?: { bodyHash: string; updatedAt: string }
   note?: string
 }
 
@@ -684,7 +690,8 @@ function stageLabel(stage: Workflow['stage'], workflow: Workflow | null): string
     case 'idle': return '未开发'
     case 'developing': return '开发中'
     case 'review-ready':
-      // 已有 review 结果:未通过 → "Review 未通过";否则 → "待 review"
+      if (workflow?.reviewResult && workflow.derived?.verdictCurrent === false) return '待重新 Review'
+      // 已有且仍有效的 review 结果:未通过 → "Review 未通过";否则 → "待 review"
       return workflow?.reviewResult
         ? (workflow.reviewResult.passed ? 'Review 通过' : 'Review 未通过')
         : '待 review'
@@ -995,14 +1002,16 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
         </div>
       ) : null}
 
-      {/* review 结论:标注它审查的 HEAD;HEAD 变化后不冒充当前结论 */}
+      {/* review 结论同时绑定 HEAD 与 Issue 正文契约；任一变化都不冒充当前结论。 */}
       {workflow?.reviewResult ? (
         <div className={derived?.verdictCurrent ? (workflow.reviewResult.passed ? 'cv-dev-done' : 'cv-review-fail') : 'cv-review-stale'}>
           {derived?.verdictCurrent
             ? (workflow.reviewResult.passed
               ? `✅ Review 通过(针对提交 ${derived.reviewedHash ?? '?'})`
               : `❌ Review 发现 ${workflow.reviewResult.issues.length} 个问题(针对提交 ${derived.reviewedHash ?? '?'})`)
-            : `⏳ Review 结论针对旧提交 ${derived?.reviewedHash ?? '?'},当前 HEAD ${derived?.head ?? '?'} 已变化,结论已过期`}
+            : derived && !derived.issueContractCurrent
+              ? `⏳ 验收已变更,需重新 Review(原契约 ${derived.reviewedIssueBodyHash?.slice(0, 12) ?? '?'},当前 ${derived.currentIssueBodyHash?.slice(0, 12) ?? '?'})`
+              : `⏳ Review 结论针对旧提交 ${derived?.reviewedHash ?? '?'},当前 HEAD ${derived?.head ?? '?'} 已变化,结论已过期`}
         </div>
       ) : null}
       {workflow?.reviewResult && !workflow.reviewResult.passed && derived?.verdictCurrent ? (
