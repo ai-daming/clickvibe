@@ -7,6 +7,7 @@ import test from 'node:test'
 import { apply, fetchRepositoryIssues } from '../src/index.ts'
 import {
   appendLog,
+  issueBodyHash,
   loadAllArchivedWorkflows,
   loadWorkflow,
   readLogHistory,
@@ -15,7 +16,7 @@ import {
 } from '../src/state.ts'
 
 function createHandler(
-  run?: (spec: { command: string; workdir?: string; stdin?: string }) => Promise<unknown>,
+  run?: (spec: { command: string; workdir?: string; stdin?: string; timeoutMs?: number }) => Promise<unknown>,
   start?: (spec: { command: string; workdir?: string; stdin?: string }) => unknown,
 ): RequestListener {
   let handler: RequestListener | null = null
@@ -208,9 +209,11 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
     workflow.branch = 'r-issue-23'
     workflow.stage = 'passed'
     workflow.reviewResult = { passed: true, issues: [] }
+    const reviewedBody = '## 验收标准\n- merge contract'
     workflow.events = [{
       kind: 'review', at: '2026-08-22T00:00:00Z', hash: 'abcdef1',
       verdict: { passed: true, issues: [] },
+      issueContract: { bodyHash: issueBodyHash(reviewedBody), updatedAt: '2026-08-22T00:00:00Z' },
     }]
     await saveWorkflow(workflow)
 
@@ -234,6 +237,11 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
       if (spec.command === 'git worktree list --porcelain') return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       if (spec.command.startsWith('if git show-ref')) return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       if (spec.command.startsWith('if git ls-remote')) return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      if (spec.command.startsWith('gh issue view') && spec.command.includes('--json title,body,state,updatedAt')) {
+        return { exitCode: 0, stdout: { text: JSON.stringify({
+          title: 'merge issue', body: reviewedBody, state: issueClosed ? 'CLOSED' : 'OPEN', updatedAt: '2026-08-22T00:00:00Z',
+        }) }, stderr: { text: '' } }
+      }
       if (spec.command.startsWith('gh issue view')) return { exitCode: 0, stdout: { text: issueClosed ? 'CLOSED' : 'OPEN' }, stderr: { text: '' } }
       if (spec.command.startsWith('gh issue close')) {
         issueClosed = true
@@ -340,6 +348,54 @@ test('/merge rejects a stale review hash before invoking gh pr merge', async () 
   }
 })
 
+test('/merge authorization rejects a changed acceptance contract with the same PR HEAD', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-merge-contract-'))
+  process.env.HOME = tempHome
+  try {
+    const workflow = interruptedWorkflow('o-r-23', 'https://github.com/o/r/issues/23', join(tempHome, 'worktree'))
+    workflow.branch = 'r-issue-23'
+    workflow.stage = 'passed'
+    workflow.reviewResult = { passed: true, issues: [] }
+    workflow.events = [{
+      kind: 'review', at: 'now', hash: 'abcdef1', verdict: { passed: true, issues: [] },
+      issueContract: {
+        bodyHash: issueBodyHash('## 验收标准\n- reviewed contract'),
+        updatedAt: '2026-08-22T00:00:00Z',
+      },
+    }]
+    await saveWorkflow(workflow)
+    const commands: string[] = []
+    const handler = createHandler(async (spec) => {
+      commands.push(spec.command)
+      if (spec.command.startsWith('gh pr view')) return {
+        exitCode: 0,
+        stdout: { text: JSON.stringify({
+          number: 29, state: 'OPEN', mergedAt: null, headRefName: workflow.branch,
+          headRefOid: 'abcdef1234567890', baseRefName: 'main', url: 'https://github.com/o/r/pull/29', reviewDecision: 'APPROVED',
+        }) }, stderr: { text: '' },
+      }
+      if (spec.command.startsWith('gh issue view')) return {
+        exitCode: 0,
+        stdout: { text: JSON.stringify({
+          title: 'changed issue', body: '## 验收标准\n- changed contract', state: 'OPEN', updatedAt: '2026-08-22T01:00:00Z',
+        }) }, stderr: { text: '' },
+      }
+      throw new Error(`unexpected command: ${spec.command}`)
+    })
+    const result = await post(handler, '/clickvibe/api/authorize', {
+      action: 'merge', url: workflow.url,
+    }, { origin: 'same-origin', 'x-clickvibe-request': '1' })
+    assert.equal(result.status, 400)
+    assert.match(result.body.error ?? '', /验收契约已变更.*重新 Review/)
+    assert.equal(commands.some((command) => command.startsWith('gh pr merge')), false)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
 test('cleanup failure keeps merged terminal state and retries without merging again', async () => {
   const previousHome = process.env.HOME
   const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-merge-retry-'))
@@ -355,7 +411,11 @@ test('cleanup failure keeps merged terminal state and retries without merging ag
     workflow.branch = 'r-issue-23'
     workflow.stage = 'passed'
     workflow.reviewResult = { passed: true, issues: [] }
-    workflow.events = [{ kind: 'review', at: 'now', hash: 'abcdef1', verdict: { passed: true, issues: [] } }]
+    const reviewedBody = '## 验收标准\n- retry cleanup contract'
+    workflow.events = [{
+      kind: 'review', at: 'now', hash: 'abcdef1', verdict: { passed: true, issues: [] },
+      issueContract: { bodyHash: issueBodyHash(reviewedBody), updatedAt: '2026-08-22T00:00:00Z' },
+    }]
     await saveWorkflow(workflow)
 
     let merged = false
@@ -384,6 +444,11 @@ test('cleanup failure keeps merged terminal state and retries without merging ag
       }
       if (spec.command.startsWith('if git show-ref') || spec.command.startsWith('if git ls-remote')) {
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      }
+      if (spec.command.startsWith('gh issue view') && spec.command.includes('--json title,body,state,updatedAt')) {
+        return { exitCode: 0, stdout: { text: JSON.stringify({
+          title: 'merge issue', body: reviewedBody, state: 'OPEN', updatedAt: '2026-08-22T00:00:00Z',
+        }) }, stderr: { text: '' } }
       }
       if (spec.command.startsWith('gh issue view')) return { exitCode: 0, stdout: { text: 'CLOSED' }, stderr: { text: '' } }
       throw new Error(`unexpected command: ${spec.command}`)
@@ -1023,17 +1088,30 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     workflow.reviewSessionAgent = 'codex'
     await saveWorkflow(workflow)
     const starts: Array<{ command: string; prompt: string }> = []
+    const reviewedBody = '## 验收标准\n- frozen review contract'
+    const reviewedUpdatedAt = '2026-08-22T01:02:03Z'
+    const issueSpill = join(tempHome, 'issue-contract.json')
+    await writeFile(issueSpill, JSON.stringify({
+      url: workflow.url,
+      title: 'review issue', body: reviewedBody, state: 'OPEN', updatedAt: reviewedUpdatedAt,
+      comments: [{ author: { login: 'bot' }, body: 'related note' }],
+    }))
     let reviewFetches = 0
     const comments: Array<{ command: string; body: string }> = []
+    const issueTimeouts: number[] = []
     const handler = createHandler(async (spec) => {
       if (spec.command === 'git fetch origin --prune') {
         reviewFetches++
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       }
-      if (spec.command.startsWith('gh issue view')) return { exitCode: 0, stdout: { text: JSON.stringify({
-        url: workflow.url, title: 'current review issue', body: '## 验收标准\n- review current snapshot',
-        state: 'OPEN', updatedAt: '2026-08-22T06:00:00Z', comments: [{ author: { login: 'bot' }, body: 'related note' }],
-      }) }, stderr: { text: '' } }
+      if (spec.command.startsWith('gh issue view')) {
+        issueTimeouts.push(spec.timeoutMs ?? 0)
+        return {
+          exitCode: 0,
+          stdout: { text: 'truncated tail', truncated: true, spillPath: issueSpill },
+          stderr: { text: '' },
+        }
+      }
       if (spec.command.startsWith('gh pr view')) return { exitCode: 0, stdout: { text: 'main' }, stderr: { text: '' } }
       if (spec.command === 'git rev-parse --short HEAD') return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
       if (spec.command.startsWith('gh issue comment')) {
@@ -1080,16 +1158,21 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     assert.equal(starts[1].command, 'codex exec -c approval_policy=never -s danger-full-access --json -')
     for (const start of starts) {
       assert.match(start.prompt, /=== 需求快照 ===/)
-      assert.match(start.prompt, /updatedAt: 2026-08-22T06:00:00Z/)
-      assert.match(start.prompt, /review current snapshot/)
+      assert.match(start.prompt, /updatedAt: 2026-08-22T01:02:03Z/)
+      assert.match(start.prompt, /frozen review contract/)
+      assert.match(start.prompt, new RegExp(`契约正文 SHA-256: ${issueBodyHash(reviewedBody)}`))
       assert.match(start.prompt, /PR: https:\/\/github\.com\/o\/r\/pull\/29/)
-      assert.match(start.prompt, /当前 commit: abc123/)
+      assert.match(start.prompt, /被审 commit: abc123/)
       assert.match(start.prompt, /=== 信任边界 ===/)
     }
     const reloaded = await loadWorkflow(workflow.key)
     assert.equal(reloaded?.reviewSessionId, 'new-review')
     assert.equal(reloaded?.reviewSessionAgent, 'codex')
     assert.equal(reloaded?.reviewResult?.passed, true)
+    assert.deepEqual(issueTimeouts, [20000])
+    assert.deepEqual(reloaded?.events.at(-1)?.issueContract, {
+      bodyHash: issueBodyHash(reviewedBody), updatedAt: reviewedUpdatedAt,
+    })
     assert.ok(completed.delta.some((line) => line.includes('review 结束,退出码 0')))
     assert.ok(completed.delta.some((line) => line.includes('review 结论来源')))
     assert.equal(reloaded?.reviewResult?.commentUrl, 'https://github.com/o/r/pull/29#issuecomment-2')
@@ -1097,6 +1180,77 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     assert.match(comments[0].command, /github\.com\/o\/r\/pull\/29/)
     assert.match(comments[0].body, /^== Review Meta ==\n- event: review\n- commit: abc123\n- issue: #918\n- passed: true\n- next: merge/m)
     assert.match(comments[0].body, /下一步:可合并当前提交。/)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('duplicate review requests reuse the reserved task before fetching the Issue contract', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-review-gate-'))
+  process.env.HOME = tempHome
+  try {
+    const worktree = join(tempHome, 'worktree')
+    await mkdir(worktree, { recursive: true })
+    const workflow = interruptedWorkflow('o-r-920', 'https://github.com/o/r/issues/920', worktree)
+    workflow.stage = 'review-ready'
+    await saveWorkflow(workflow)
+
+    let issueCalls = 0
+    let notifyIssueEntered!: () => void
+    let releaseIssue!: () => void
+    const issueEntered = new Promise<void>((resolve) => { notifyIssueEntered = resolve })
+    const issueBlocked = new Promise<void>((resolve) => { releaseIssue = resolve })
+    let finishProcess!: () => void
+    const processDone = new Promise<void>((resolve) => { finishProcess = resolve })
+    const handler = createHandler(async (spec) => {
+      if (spec.command.startsWith('gh issue view')) {
+        issueCalls += 1
+        notifyIssueEntered()
+        await issueBlocked
+        return { exitCode: 0, stdout: { text: JSON.stringify({
+          url: workflow.url, title: 'review issue', body: '## 验收标准\n- gate', state: 'OPEN', updatedAt: '2026-08-22T03:04:05Z',
+        }) }, stderr: { text: '' } }
+      }
+      if (spec.command.startsWith('gh pr view')) return { exitCode: 0, stdout: { text: 'main' }, stderr: { text: '' } }
+      if (spec.command === 'git rev-parse --short HEAD') return { exitCode: 0, stdout: { text: 'gate123' }, stderr: { text: '' } }
+      return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+    }, () => ({
+      status: 'running', exitCode: 0, done: processDone,
+      readOutput() { return { delta: '', lossy: false } },
+      kill() { return true },
+    }))
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+    const authorize = async () => post(handler, '/clickvibe/api/authorize', {
+      action: 'review', url: workflow.url, agent: 'codex', context: '',
+    }, headers) as Promise<{ status: number; body: { authorizationId?: string; authorizationDigest?: string } }>
+    const [auth1, auth2] = await Promise.all([authorize(), authorize()])
+    const reviewPayload = (auth: typeof auth1) => ({
+      url: workflow.url, agent: 'codex', context: '',
+      authorizationId: auth.body.authorizationId,
+      authorizationDigest: auth.body.authorizationDigest,
+    })
+
+    const firstPromise = post(handler, '/clickvibe/api/review', reviewPayload(auth1), headers)
+    await issueEntered
+    const second = await Promise.race([
+      post(handler, '/clickvibe/api/review', reviewPayload(auth2), headers),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('duplicate review waited for contract fetch')), 200)),
+    ]) as { status: number; body: { taskId?: string } }
+    assert.equal(second.status, 200)
+    assert.equal(issueCalls, 1)
+
+    releaseIssue()
+    const first = await firstPromise as { status: number; body: { taskId?: string } }
+    assert.equal(first.status, 200)
+    assert.equal(first.body.taskId, second.body.taskId)
+    await mkdir(join(worktree, '.clickvibe'), { recursive: true })
+    await writeFile(join(worktree, '.clickvibe', 'review-result.json'), '{"passed":true,"issues":[]}')
+    finishProcess()
+    assert.ok(first.body.taskId)
+    await waitForTask(handler, first.body.taskId)
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
@@ -1119,8 +1273,13 @@ test('cross-agent review starts fresh and an empty failed verdict requires re-re
     workflow.reviewResult = { passed: false, issues: ['old issue'] }
     await saveWorkflow(workflow)
     const starts: string[] = []
+    const reviewedBody = '## 验收标准\n- current contract'
     const handler = createHandler(async (spec) => {
+      if (spec.command.startsWith('gh issue view')) return { exitCode: 0, stdout: { text: JSON.stringify({
+        url: workflow.url, title: 'review issue', body: reviewedBody, state: 'OPEN', updatedAt: '2026-08-22T02:03:04Z',
+      }) }, stderr: { text: '' } }
       if (spec.command.startsWith('gh pr view')) return { exitCode: 0, stdout: { text: 'main' }, stderr: { text: '' } }
+      if (spec.command === 'git rev-parse --short HEAD') return { exitCode: 0, stdout: { text: 'def456' }, stderr: { text: '' } }
       return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
     }, (spec) => {
       starts.push(spec.command)

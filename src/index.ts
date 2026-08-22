@@ -43,7 +43,15 @@ import {
   type DevelopAgent,
   type IssuePromptSnapshot,
 } from './develop.ts'
-import { deriveNextAction, deriveWorkflowStatus, workflowBaseBranch, type NextAction, type WorkflowFacts } from './state-view.ts'
+import {
+  deriveNextAction,
+  deriveWorkflowStatus,
+  workflowBaseBranch,
+  type IssueContractStatus,
+  type IssueContractUnknownReason,
+  type NextAction,
+  type WorkflowFacts,
+} from './state-view.ts'
 import {
   appendEvent,
   appendLog,
@@ -51,6 +59,7 @@ import {
   archiveWorkflow,
   clearStaleSessionId,
   issueKey,
+  issueBodyHash,
   loadAllArchivedWorkflows,
   loadAllWorkflows,
   loadWorkflow,
@@ -62,6 +71,7 @@ import {
   saveWorkflow,
   saveWorkflowStrict,
   type IssueWorkflow,
+  type IssueContractSnapshot,
   type WorkflowEvent,
 } from './state.ts'
 import { buildDevComment, buildReviewComment } from './delivery-comment.ts'
@@ -412,6 +422,13 @@ interface WorkflowDerived {
   lastDevHash: string | null
   lastReviewHash: string | null
   reviewedHash: string | null
+  reviewedIssueBodyHash: string | null
+  currentIssueBodyHash: string | null
+  reviewedIssueUpdatedAt: string | null
+  currentIssueUpdatedAt: string | null
+  issueContractCurrent: boolean
+  issueContractStatus: IssueContractStatus
+  issueContractUnknownReason: IssueContractUnknownReason
   hasNewCommits: boolean
   verdictCurrent: boolean
   nextAction: NextAction
@@ -436,6 +453,7 @@ interface DeriveOptions {
   branchExists?: boolean
   hasCommits?: boolean
   defaultBranch?: string
+  issueContract?: IssueContractSnapshot | null
 }
 
 /** Short hash of one ref inside the worktree's repo (null when unresolvable). */
@@ -553,9 +571,13 @@ export async function deriveWorkflowState(
   const events = workflow.events ?? []
   let lastDevHash: string | null = null
   let lastReviewHash: string | null = null
+  let lastReviewContract: IssueContractSnapshot | null = null
   for (const ev of events) {
     if (ev.kind === 'dev' || ev.kind === 'rework') lastDevHash = ev.hash ?? lastDevHash
-    if (ev.kind === 'review') lastReviewHash = ev.hash ?? lastReviewHash
+    if (ev.kind === 'review') {
+      lastReviewHash = ev.hash ?? lastReviewHash
+      lastReviewContract = ev.issueContract ?? null
+    }
   }
 
   const head = exists ? await readWorktreeHead(ctx, worktree) : null
@@ -611,8 +633,27 @@ export async function deriveWorkflowState(
       : null
   const reviewPassed = workflow.reviewResult?.passed ?? githubReviewPassed
   const reviewedHash = lastReviewHash ?? (githubReviewPassed !== null ? head : null)
-  // 结论仍针对当前 HEAD 才算数;HEAD 变化后旧结论不冒充当前状态
-  const verdictCurrent = reviewPassed !== null && head !== null && reviewedHash !== null && head === reviewedHash
+  const currentIssueContract = options.issueContract ?? null
+  // updatedAt 是审计证据；正文 hash 才是契约身份，避免评论/标签更新误杀结论。
+  const issueContractStatus: IssueContractStatus = lastReviewContract === null
+    ? 'unknown'
+    : currentIssueContract === null
+      ? 'unknown'
+      : lastReviewContract.bodyHash === currentIssueContract.bodyHash
+        ? 'current'
+        : 'changed'
+  const issueContractUnknownReason: IssueContractUnknownReason = issueContractStatus !== 'unknown'
+    ? null
+    : lastReviewContract === null
+      ? 'missing-review-snapshot'
+      : 'current-contract-unavailable'
+  const issueContractCurrent = issueContractStatus === 'current'
+  // 结论同时绑定当前 HEAD 与验收契约；旧事件缺契约快照时 fail closed。
+  const verdictCurrent = reviewPassed !== null
+    && head !== null
+    && reviewedHash !== null
+    && head === reviewedHash
+    && issueContractCurrent
 
   const devLive = workflow.devTaskId ? liveTasks.get(workflow.devTaskId) : undefined
   const reviewLive = workflow.reviewTaskId ? liveTasks.get(workflow.reviewTaskId) : undefined
@@ -633,6 +674,8 @@ export async function deriveWorkflowState(
     head,
     reviewedHash,
     reviewPassed,
+    issueContractStatus,
+    issueContractUnknownReason,
     hasNewCommits,
     needsSync,
     mergeConflict,
@@ -667,6 +710,13 @@ export async function deriveWorkflowState(
       lastDevHash,
       lastReviewHash,
       reviewedHash,
+      reviewedIssueBodyHash: lastReviewContract?.bodyHash ?? null,
+      currentIssueBodyHash: currentIssueContract?.bodyHash ?? null,
+      reviewedIssueUpdatedAt: lastReviewContract?.updatedAt ?? null,
+      currentIssueUpdatedAt: currentIssueContract?.updatedAt ?? null,
+      issueContractCurrent,
+      issueContractStatus,
+      issueContractUnknownReason,
       hasNewCommits,
       verdictCurrent,
       nextAction,
@@ -990,7 +1040,7 @@ async function readConfiguredBranchFacts(
   return { branchExists: true, hasCommits, defaultBranch: defaultRef.replace(/^origin\//, '') || undefined }
 }
 
-/** Enrich every stored workflow concurrently; one unreachable GitHub call costs at most one 5s window. */
+/** Enrich every stored workflow concurrently; parallel GitHub reads cost at most one 5s window. */
 export async function enrichWorkflowStates(
   ctx: Context,
   workflows: IssueWorkflow[],
@@ -998,17 +1048,20 @@ export async function enrichWorkflowStates(
 ): Promise<Array<IssueWorkflow & { derived: WorkflowDerived }>> {
   const config = configOverride ?? await loadConfig()
   return Promise.all(workflows.map(async (workflow) => {
-    const [prLookup, branchFacts, liveIssueState] = await Promise.all([
+    const [prLookup, branchFacts, currentIssue, liveIssueState] = await Promise.all([
       fetchGithubPrFact(ctx, workflow.repoKey, workflow.branch, workflow.prNumber),
       readConfiguredBranchFacts(ctx, config, workflow),
+      fetchIssueContract(ctx, workflow.url).catch(() => null),
       fetchGithubIssueState(ctx, workflow.url),
     ])
     return deriveWorkflowState(ctx, {
       ...workflow,
-      issueState: liveIssueState ?? workflow.issueState,
+      issueState: liveIssueState
+        ?? (currentIssue?.state === 'OPEN' || currentIssue?.state === 'CLOSED' ? currentIssue.state : workflow.issueState),
     }, {
       pr: prLookup.pr,
       prStatusKnown: workflow.prNumber ? prLookup.known && prLookup.pr !== null : prLookup.known,
+      issueContract: currentIssue?.contract ?? null,
       ...branchFacts,
     })
   }))
@@ -1179,7 +1232,15 @@ export async function fetchRepositoryIssues(
       workflow.branch = branch
       workflow.issueState = String(issue.state).toUpperCase() === 'CLOSED' ? 'CLOSED' : 'OPEN'
       const derived = await deriveWorkflowState(ctx, workflow, {
-        pr, prStatusKnown, branchExists, hasCommits, defaultBranch,
+        pr,
+        prStatusKnown,
+        branchExists,
+        hasCommits,
+        defaultBranch,
+        issueContract: {
+          bodyHash: issueBodyHash(issue.body),
+          updatedAt: issue.updatedAt ?? '',
+        },
       })
       const blockedBy = parseDependencies(issue.body).map((number) => {
         const dependency = issueByNumber.get(number)
@@ -1210,13 +1271,7 @@ async function fetchIssue(
   const isPR = parsed.kind === 'pr'
   const command = `${isPR ? 'gh pr view' : 'gh issue view'} ${url} --json ${isPR ? PR_FIELDS : ISSUE_FIELDS}`
   try {
-    const spec = ctx.shell.resolve({ command, timeoutMs: 20000 })
-    const result = await ctx.shell.run(spec)
-    if (result.exitCode !== 0) {
-      const stderr = result.stderr?.text ?? ''
-      return { ok: false, error: stderr || `gh 执行失败(exit ${result.exitCode})` }
-    }
-    const parsedJson = JSON.parse(result.stdout.text) as unknown
+    const parsedJson = JSON.parse(await runCommand(ctx, command, { timeoutMs: 20000 })) as unknown
     const data: { kind: 'issue' | 'pr'; item: unknown; timeline?: unknown; dependencies?: { blockedBy: IssueDependency[]; blocking: IssueDependency[] } } = { kind: parsed.kind, item: parsedJson }
     let dependencyError: string | undefined
     // issue 额外拉 timeline,提取关联事件(linked PR/commit)——GitHub UI 的
@@ -1257,10 +1312,43 @@ function issueSnapshot(item: Record<string, unknown>): IssuePromptSnapshot {
   }
 }
 
-function latestPassingReviewHash(workflow: IssueWorkflow): string | null {
-  const latestReview = [...(workflow.events ?? [])].reverse().find((event) => event.kind === 'review')
+interface ReviewIssueContract {
+  title: string
+  body: string
+  state: string
+  contract: IssueContractSnapshot
+}
+
+/** Read the exact Issue contract that one review run evaluates. */
+async function fetchIssueContract(ctx: Context, url: string): Promise<ReviewIssueContract> {
+  const parsed = parseUrl(url)
+  if (!parsed || parsed.kind !== 'issue') throw new Error('review workflow 缺少有效 Issue URL')
+  const output = await runCommand(
+    ctx,
+    `gh issue view ${shellQuote(url)} --json title,body,state,updatedAt`,
+    { timeoutMs: 5_000 },
+  )
+  const item = JSON.parse(output) as Record<string, unknown>
+  const body = String(item.body ?? '')
+  return {
+    title: String(item.title ?? ''),
+    body,
+    state: String(item.state ?? '').toUpperCase(),
+    contract: {
+      bodyHash: issueBodyHash(body),
+      updatedAt: String(item.updatedAt ?? ''),
+    },
+  }
+}
+
+function latestPassingReview(workflow: IssueWorkflow): WorkflowEvent | null {
+  const latestReview = [...(workflow.events ?? [])].reverse().find((event) => event.kind === 'review') ?? null
   if (!latestReview?.verdict?.passed || !workflow.reviewResult?.passed) return null
-  return latestReview.hash?.trim() || null
+  return latestReview
+}
+
+function latestPassingReviewHash(workflow: IssueWorkflow): string | null {
+  return latestPassingReview(workflow)?.hash?.trim() || null
 }
 
 function sameCommitHash(reviewedHash: string, prHead: string): boolean {
@@ -1268,6 +1356,23 @@ function sameCommitHash(reviewedHash: string, prHead: string): boolean {
   const head = prHead.trim().toLowerCase()
   return reviewed.length >= 7 && head.length >= 7
     && (reviewed === head || head.startsWith(reviewed) || reviewed.startsWith(head))
+}
+
+/** Server-side merge gate: unknown and changed contracts both fail closed. */
+async function assertReviewContractCurrent(ctx: Context, workflow: IssueWorkflow): Promise<void> {
+  const reviewedContract = latestPassingReview(workflow)?.issueContract
+  if (!reviewedContract) {
+    throw new Error('合并门禁拒绝:最近通过的 review 缺少验收契约快照,需重新 Review')
+  }
+  let current: ReviewIssueContract
+  try {
+    current = await fetchIssueContract(ctx, workflow.url)
+  } catch (error) {
+    throw new Error(`合并门禁拒绝:无法读取当前验收契约: ${String(error instanceof Error ? error.message : error)}`)
+  }
+  if (current.contract.bodyHash !== reviewedContract.bodyHash) {
+    throw new Error('合并门禁拒绝:验收契约已变更,需重新 Review')
+  }
 }
 
 async function mergeAuthorizationPreview(ctx: Context, url: string): Promise<{
@@ -1291,6 +1396,7 @@ async function mergeAuthorizationPreview(ctx: Context, url: string): Promise<{
     if (!lookup.pr.headRefOid || !reviewedHash || !sameCommitHash(reviewedHash, lookup.pr.headRefOid)) {
       throw new Error('合并门禁拒绝:实时 PR HEAD 与最近一次通过的 review 结论哈希不一致')
     }
+    await assertReviewContractCurrent(ctx, workflow)
   }
   return {
     prNumber: lookup.pr.number,
@@ -1413,6 +1519,11 @@ async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): Promise<
     const reviewedHash = latestPassingReviewHash(workflow)
     if (!reviewedHash || !sameCommitHash(reviewedHash, pr.headRefOid)) {
       return { ok: false, error: '合并门禁拒绝:实时 PR HEAD 与最近一次通过的 review 结论哈希不一致' }
+    }
+    try {
+      await assertReviewContractCurrent(ctx, workflow)
+    } catch (error) {
+      return { ok: false, error: String(error instanceof Error ? error.message : error) }
     }
     if (pr.state !== 'MERGED') {
       const command = [
@@ -1700,6 +1811,7 @@ async function buildReviewPrompt(
   ctx: Context,
   workflow: IssueWorkflow,
   resolved: ResolvedPromptSnapshot,
+  reviewedHead: string,
   sessionId: string | null = null,
 ): Promise<string> {
   // 解析 base:PR 有 baseRefName(若记录过),否则尝试 origin/HEAD 主干
@@ -1708,8 +1820,8 @@ async function buildReviewPrompt(
     const baseRef = await fetchPrBase(ctx, workflow.repoKey, workflow.prNumber)
     if (baseRef) base = `origin/${baseRef}`
   }
-  const head = await readWorktreeHead(ctx, workflow.worktree)
   const prUrl = workflow.prNumber ? `https://github.com/${workflow.repoKey}/pull/${workflow.prNumber}` : '未关联'
+  const contractHash = issueBodyHash(resolved.snapshot.body)
   return buildStagePrompt({
     stage: 'review',
     ...resolved,
@@ -1717,8 +1829,9 @@ async function buildReviewPrompt(
     status: [
       `分支: ${workflow.branch}`,
       `PR: ${prUrl}`,
-      `当前 commit: ${head ?? '未知'}`,
+      `被审 commit: ${reviewedHead}`,
       `对比 base: ${base}`,
+      `契约正文 SHA-256: ${contractHash}`,
       `会话模式: ${sessionId ? `续接 review 会话 ${sessionId};保留既有审查记忆` : '全新 review 会话'}`,
     ],
     requirements: [
@@ -2635,9 +2748,8 @@ async function startReview(
   }
   const ownedReviewSession = resolveSessionForAgent(workflow, 'review', agent)
   const sessionId = ownedReviewSession.sessionId
-  // Network reads happen only after this synchronous per-workflow reservation.
-  // Concurrent requests may load the same workflow, but only one can create a
-  // LiveTask; every follower reuses that exact task without refreshing again.
+  // workflow 校验后、冻结契约/HEAD 等任何 await 之前同步占位。重复请求会立即
+  // 复用 taskId,不会重复支付 GitHub 刷新超时,也不会交错清理结论文件并双开 review。
   let reservation: { task: LiveTask; created: boolean }
   try {
     reservation = reviewTaskGate.reserve(workflow.key, () => {
@@ -2654,6 +2766,16 @@ async function startReview(
     finishTask(live, 'failed', 1)
     return { ok: false, error: resolvedSnapshot.error }
   }
+  // Prompt 与 review 事件必须绑定同一份快照，避免两次 GitHub 读取之间的契约漂移。
+  const reviewIssue: ReviewIssueContract = {
+    title: resolvedSnapshot.snapshot.title,
+    body: resolvedSnapshot.snapshot.body,
+    state: resolvedSnapshot.snapshot.state,
+    contract: {
+      bodyHash: issueBodyHash(resolvedSnapshot.snapshot.body),
+      updatedAt: resolvedSnapshot.snapshot.updatedAt,
+    },
+  }
   await resetLog(workflow.key, 'review')
 
   // Review must inspect the branch against current remote refs. Keep review
@@ -2667,6 +2789,16 @@ async function startReview(
     pushTaskLine(live, '[clickvibe] review 前已同步远端(origin)')
   } catch (error) {
     pushTaskLine(live, `[clickvibe] review 前 git fetch 失败(继续): ${String(error instanceof Error ? error.message : error)}`)
+  }
+
+  if (reviewIssue.state !== 'OPEN') {
+    finishTask(live, 'failed', 1)
+    return { ok: false, error: '只有 OPEN Issue 可以启动 review' }
+  }
+  const reviewedHead = await readWorktreeHead(ctx, workflow.worktree)
+  if (!reviewedHead) {
+    finishTask(live, 'failed', 1)
+    return { ok: false, error: '无法冻结被审 HEAD,请检查 worktree 后重试' }
   }
 
   if (ownedReviewSession.invalid) {
@@ -2699,7 +2831,7 @@ async function startReview(
   const agentCommand = sessionId
     ? buildResumeAgentCommand(agent, sessionId)
     : buildFreshAgentCommand(agent)
-  const prompt = await buildReviewPrompt(ctx, workflow, resolvedSnapshot, sessionId)
+  const prompt = await buildReviewPrompt(ctx, workflow, resolvedSnapshot, reviewedHead, sessionId)
 
   pushTaskLine(live, `[clickvibe] 启动 ${agent} review${sessionId ? `(续会话 ${sessionId})` : ''}…`)
   attachAgentProcess(ctx, live, agentCommand, workflow.worktree, prompt, async (exitCode, newSessionId) => {
@@ -2741,12 +2873,12 @@ async function startReview(
       reloaded.stage = passed ? 'passed' : 'review-ready' // 有问题 → 可回开发(rework)
       // 记录 review 会话 id(供下次 review 续会话)
       recordSessionId(reloaded, 'review', newSessionId, agent)
-      const reviewedHead = await readWorktreeHead(ctx, workflow.worktree)
       const event: WorkflowEvent = {
         kind: 'review',
         at: new Date().toISOString(),
-        hash: reviewedHead ?? undefined,
+        hash: reviewedHead,
         verdict: { passed, issues },
+        issueContract: reviewIssue.contract,
         note: `${agent} review${passed ? ' 通过' : ` 发现 ${issues.length} 个问题`}`,
       }
       await appendEvent(reloaded, event)
@@ -2767,7 +2899,7 @@ async function startReview(
       if (reloaded && clearStaleSessionId(reloaded, 'review', sessionId)) await saveWorkflow(reloaded)
       return {
         command: buildFreshAgentCommand(agent),
-        prompt: await buildReviewPrompt(ctx, workflow, resolvedSnapshot),
+        prompt: await buildReviewPrompt(ctx, workflow, resolvedSnapshot, reviewedHead),
       }
     },
   } : undefined)
