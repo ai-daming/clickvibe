@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 
 export type DevelopAgent = 'codex' | 'claude' | 'dryrun'
-export type AgentAction = 'develop' | 'review' | 'resume'
+export type AgentAction = 'develop' | 'review' | 'resume' | 'merge'
 
 export const RESUME_REJECT_WINDOW_MS = 15_000
 
@@ -202,8 +202,14 @@ export interface IssuePromptSnapshot {
 export interface AgentAuthorizationInput {
   action: AgentAction
   url: string
-  agent: 'codex' | 'claude'
+  agent: 'codex' | 'claude' | null
   context: string
+  target?: {
+    prNumber: string
+    branch: string
+    head: string
+    mergeFlag: '--merge'
+  }
 }
 
 export interface AgentAuthorization {
@@ -314,20 +320,33 @@ export function makeAuthorizationInput(value: {
   url?: unknown
   agent?: unknown
   context?: unknown
+  target?: unknown
 }): AgentAuthorizationInput {
   const action = String(value.action ?? '') as AgentAction
-  if (action !== 'develop' && action !== 'review' && action !== 'resume') {
+  if (action !== 'develop' && action !== 'review' && action !== 'resume' && action !== 'merge') {
     throw new Error('不支持的 Agent 操作')
   }
-  const agent = parseAgent(value.agent)
-  if (agent === 'dryrun') throw new Error('dryrun 不需要高权限授权')
+  const parsedAgent = action === 'merge' ? null : parseAgent(value.agent)
+  if (parsedAgent === 'dryrun') throw new Error('dryrun 不需要高权限授权')
   const url = String(value.url ?? '').trim()
   if (!parseGithubUrl(url)) throw new Error('GitHub URL 无效')
+  let target: AgentAuthorizationInput['target']
+  if (action === 'merge' && value.target !== undefined) {
+    const raw = value.target as Record<string, unknown>
+    const prNumber = String(raw?.prNumber ?? '').trim()
+    const branch = String(raw?.branch ?? '').trim()
+    const head = String(raw?.head ?? '').trim()
+    if (!/^\d+$/.test(prNumber) || branch === '' || !/^[0-9a-f]{7,64}$/i.test(head) || raw?.mergeFlag !== '--merge') {
+      throw new Error('合并授权目标无效')
+    }
+    target = { prNumber, branch, head, mergeFlag: '--merge' }
+  }
   return {
     action,
     url,
-    agent,
+    agent: parsedAgent,
     context: typeof value.context === 'string' ? value.context.trim() : '',
+    ...(target ? { target } : {}),
   }
 }
 
