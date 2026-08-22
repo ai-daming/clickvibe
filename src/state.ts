@@ -17,6 +17,8 @@ export type WorkflowStage =
   | 'reviewing'   // review 中
   | 'passed'      // review 通过
 
+export type SessionAgent = 'codex' | 'claude'
+
 export interface IssueWorkflow {
   key: string
   url: string
@@ -27,10 +29,12 @@ export interface IssueWorkflow {
   devAgent: 'codex' | 'claude' | null
   devTaskId: string | null
   devSessionId: string | null
+  devSessionAgent: SessionAgent | null
   devInterrupted: boolean
   reviewAgent: 'codex' | 'claude' | null
   reviewTaskId: string | null
   reviewSessionId: string | null
+  reviewSessionAgent: SessionAgent | null
   reviewResult: { passed: boolean; issues: string[]; commentUrl?: string } | null
   /** 关联的 PR 号(开发分支的代码产物);issue 为 key,PR 记录在这里。 */
   prNumber: string | null
@@ -52,6 +56,85 @@ export interface WorkflowEvent {
   /** review 结论(仅 review 事件)。 */
   verdict?: { passed: boolean; issues: string[] }
   note?: string
+}
+
+/** Apply the durable state shared by initial-development and resumed runs. */
+export function applyDevRunOutcome(
+  workflow: IssueWorkflow,
+  status: 'running' | 'done' | 'failed' | 'stopped' | 'timed_out',
+  exitCode: number | null,
+  sessionId: string | null,
+  agent: SessionAgent,
+): boolean {
+  const completed = status === 'done' && exitCode === 0
+  workflow.stage = completed ? 'review-ready' : 'developing'
+  workflow.devInterrupted = !completed
+  // The session starts before the task completes. Keep its id even when the
+  // process is later killed or exits non-zero so recovery resumes this session.
+  recordSessionId(workflow, 'dev', sessionId, agent)
+  if (completed) workflow.reviewResult = null
+  return completed
+}
+
+/** Persist a session id together with the agent family that emitted it. */
+export function recordSessionId(
+  workflow: IssueWorkflow,
+  kind: 'dev' | 'review',
+  sessionId: string | null,
+  agent: SessionAgent,
+): void {
+  if (!sessionId) return
+  if (kind === 'dev') {
+    workflow.devSessionId = sessionId
+    workflow.devSessionAgent = agent
+  } else {
+    workflow.reviewSessionId = sessionId
+    workflow.reviewSessionAgent = agent
+  }
+}
+
+/** Validate ownership before resume; legacy/unknown/mismatched owners are stale. */
+export function resolveSessionForAgent(
+  workflow: IssueWorkflow,
+  kind: 'dev' | 'review',
+  agent: SessionAgent,
+): { sessionId: string | null; invalid: boolean } {
+  const idField = kind === 'dev' ? 'devSessionId' : 'reviewSessionId'
+  const agentField = kind === 'dev' ? 'devSessionAgent' : 'reviewSessionAgent'
+  const sessionId = workflow[idField]
+  if (!sessionId) {
+    workflow[agentField] = null
+    return { sessionId: null, invalid: false }
+  }
+  if (workflow[agentField] !== agent) {
+    workflow[idField] = null
+    workflow[agentField] = null
+    return { sessionId: null, invalid: true }
+  }
+  return { sessionId, invalid: false }
+}
+
+/** Clear only the rejected id, never a newer session captured concurrently. */
+export function clearStaleSessionId(
+  workflow: IssueWorkflow,
+  kind: 'dev' | 'review',
+  rejectedSessionId: string,
+): boolean {
+  const field = kind === 'dev' ? 'devSessionId' : 'reviewSessionId'
+  const agentField = kind === 'dev' ? 'devSessionAgent' : 'reviewSessionAgent'
+  if (workflow[field] !== rejectedSessionId) return false
+  workflow[field] = null
+  workflow[agentField] = null
+  return true
+}
+
+function normalizeWorkflow(workflow: IssueWorkflow): IssueWorkflow {
+  const raw = workflow as IssueWorkflow & Record<string, unknown>
+  if (raw.devSessionAgent !== 'codex' && raw.devSessionAgent !== 'claude') workflow.devSessionAgent = null
+  if (raw.reviewSessionAgent !== 'codex' && raw.reviewSessionAgent !== 'claude') workflow.reviewSessionAgent = null
+  if (!workflow.devSessionId) workflow.devSessionAgent = null
+  if (!workflow.reviewSessionId) workflow.reviewSessionAgent = null
+  return workflow
 }
 
 /** Append one event to a workflow and persist. */
@@ -80,7 +163,7 @@ export function logPath(key: string, kind: 'dev' | 'review'): string {
 export async function loadWorkflow(key: string): Promise<IssueWorkflow | null> {
   try {
     const raw = await readFile(statePath(key), 'utf8')
-    return JSON.parse(raw) as IssueWorkflow
+    return normalizeWorkflow(JSON.parse(raw) as IssueWorkflow)
   } catch {
     return null
   }
@@ -96,7 +179,7 @@ export async function loadAllWorkflows(): Promise<IssueWorkflow[]> {
       if (!entry.endsWith('.json')) continue
       try {
         const raw = await readFile(join(stateDir(), entry), 'utf8')
-        workflows.push(JSON.parse(raw) as IssueWorkflow)
+        workflows.push(normalizeWorkflow(JSON.parse(raw) as IssueWorkflow))
       } catch {
         // corrupt state file: skip
       }

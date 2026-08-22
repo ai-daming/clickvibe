@@ -23,7 +23,7 @@
 | **硬** | GitHub 原生 review(APPROVED/CHANGES_REQUESTED/COMMENTED) | GitHub | `gh pr view --json reviews`(受控词表,字段保证存在) |
 | **软** | review 结论(通过 + 问题列表) | 本地事件 / comment meta | 见降级链 |
 | **软** | 结论绑定的 HEAD | 本地事件 / comment meta | 同上 |
-| **软** | 会话 id(续会话用) | 本地(进程/文件) | 缺失 → resume 降级为重新开发 |
+| **软** | 会话 id + agent 归属(续会话用) | 本地(进程/文件) | 缺失/归属未知/跨 agent → 降级为全新会话 |
 | **软** | 任务是否在跑 | 进程本地 | 唯一非 git/GitHub 事实,天然临时;可推导出"中断"结论 |
 | **软** | comment meta(事件流水) | GitHub 评论 | 只影响时间线展示,不影响判断 |
 
@@ -68,6 +68,9 @@
 ### 软事实降级链(贯穿)
 
 - **会话 id 缺失** → resume 降级为「重新开发」(新会话)
+- **会话 id 归属缺失或与当前 agent 不一致** → 清除 id + owner,不得跨 Codex/Claude resume,直接在原 worktree 启动全新会话
+- **精确会话 id 被 agent 快速拒绝** → 清除 stale id,在同一 task/worktree 内仅回退一次全新会话;已完成 session 初始化或长时间运行后的普通失败不得触发回退
+- **review 未通过但问题列表为空** → 视为结论解析异常,清空当前 verdict 并要求重新 Review,不得进入空意见返工
 - **review 结论缺失** → ①本地事件缓存 → ②comment meta → ③GitHub 原生 review(`reviews` 字段)→ ④「人工确认」(不自动合并、不自动返工)
 - **comment meta 缺失** → 只影响时间线展示,不影响判断
 

@@ -623,10 +623,12 @@ interface Workflow {
   devAgent: 'codex' | 'claude' | null
   devTaskId: string | null
   devSessionId: string | null
+  devSessionAgent: 'codex' | 'claude' | null
   devInterrupted: boolean
   reviewAgent: 'codex' | 'claude' | null
   reviewTaskId: string | null
   reviewSessionId: string | null
+  reviewSessionAgent: 'codex' | 'claude' | null
   reviewResult: { passed: boolean; issues: string[]; commentUrl?: string } | null
   prNumber: string | null
   issueState?: 'OPEN' | 'CLOSED'
