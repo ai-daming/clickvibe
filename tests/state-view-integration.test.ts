@@ -254,13 +254,13 @@ test('/state enrichment checks configured branches and runs GitHub lookups concu
     shell: {
       resolve(spec: unknown) { return spec },
       async run(spec: { command: string; timeoutMs?: number }) {
-        if (spec.command.startsWith('gh pr list')) {
+        if (spec.command.startsWith('gh api ') && spec.command.includes('/pulls?state=all')) {
           githubTimeouts.push(spec.timeoutMs ?? 0)
           activeGithub += 1
           maxGithub = Math.max(maxGithub, activeGithub)
           await new Promise((resolve) => setTimeout(resolve, 40))
           activeGithub -= 1
-          return { exitCode: 0, stdout: { text: '{}' }, stderr: { text: '' } }
+          return { exitCode: 0, stdout: { text: 'HTTP/2.0 200 OK\n\n[]' }, stderr: { text: '' } }
         }
         if (spec.command.startsWith('if git show-ref')) {
           const branch = spec.command.includes('issue-6') ? 'clickvibe-issue-6' : 'clickvibe-issue-5'

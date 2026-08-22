@@ -41,6 +41,7 @@ async function setupConflictedRepo() {
   const worktree = join(root, 'issue')
   const git = (...args: string[]) => execFileAsync('git', ['-C', repo, ...args])
   const wt = (...args: string[]) => execFileAsync('git', ['-C', worktree, ...args])
+  const remoteGit = (...args: string[]) => execFileAsync('git', [`--git-dir=${remote}`, ...args])
   await execFileAsync('git', ['init', '--bare', remote])
   await execFileAsync('git', ['clone', remote, repo])
   await git('config', 'user.name', 'clickvibe-test')
@@ -62,7 +63,42 @@ async function setupConflictedRepo() {
   await git('add', '.')
   await git('commit', '-m', 'parallel base B')
   await git('push', 'origin', 'main')
-  return { root, repo, worktree, git, wt }
+  return { root, repo, worktree, git, wt, remoteGit }
+}
+
+/** Set up an existing remote PR branch that can merge the advanced main cleanly. */
+async function setupSyncableRepo() {
+  const root = await mkdtemp(join(tmpdir(), 'clickvibe-sync-push-'))
+  const remote = join(root, 'remote.git')
+  const repo = join(root, 'repo')
+  const worktree = join(root, 'issue')
+  const branch = 'clickvibe-issue-45'
+  const git = (...args: string[]) => execFileAsync('git', ['-C', repo, ...args])
+  const wt = (...args: string[]) => execFileAsync('git', ['-C', worktree, ...args])
+  const remoteGit = (...args: string[]) => execFileAsync('git', [`--git-dir=${remote}`, ...args])
+  await execFileAsync('git', ['init', '--bare', remote])
+  await execFileAsync('git', ['clone', remote, repo])
+  await git('config', 'user.name', 'clickvibe-test')
+  await git('config', 'user.email', 'clickvibe-test@example.invalid')
+  await writeFile(join(repo, 'base.md'), 'base A\n')
+  await git('add', '.')
+  await git('commit', '-m', 'base A')
+  await git('branch', '-M', 'main')
+  await git('push', '-u', 'origin', 'main')
+  await remoteGit('symbolic-ref', 'HEAD', 'refs/heads/main')
+  await git('fetch', 'origin', '--prune')
+  await git('worktree', 'add', '-b', branch, worktree, 'origin/main')
+  await writeFile(join(worktree, 'feature.md'), 'development\n')
+  await wt('add', '.')
+  await wt('commit', '-m', 'dev work')
+  await wt('push', '-u', 'origin', branch)
+  const remoteHeadBeforeSync = (await remoteGit('rev-parse', `refs/heads/${branch}`)).stdout.trim()
+  await git('switch', 'main')
+  await writeFile(join(repo, 'base.md'), 'base B\n')
+  await git('add', '.')
+  await git('commit', '-m', 'parallel base B')
+  await git('push', 'origin', 'main')
+  return { root, remote, worktree, branch, wt, remoteGit, remoteHeadBeforeSync }
 }
 
 function conflictedWorkflow(worktree: string): IssueWorkflow {
@@ -78,6 +114,21 @@ function conflictedWorkflow(worktree: string): IssueWorkflow {
       body: '## 验收标准\n- resolve conflicts', state: 'OPEN', updatedAt: '2026-08-21T00:00:00Z', comments: [],
     },
     updatedAt: Date.now(), events: [],
+  }
+}
+
+function syncableWorkflow(worktree: string, branch: string): IssueWorkflow {
+  return {
+    ...conflictedWorkflow(worktree),
+    key: 'o-r-45',
+    url: 'https://github.com/o/r/issues/45',
+    branch,
+    reviewResult: { passed: true, issues: [] },
+    prNumber: '24',
+    issueSnapshot: {
+      url: 'https://github.com/o/r/issues/45', title: 'sync then push',
+      body: '## 验收标准\n- push synced branch', state: 'OPEN', updatedAt: '2026-08-22T00:00:00Z', comments: [],
+    },
   }
 }
 
@@ -97,8 +148,48 @@ async function withTempHome<T>(root: string, run: () => Promise<T>): Promise<T> 
   }
 }
 
+test('sync pushes the clean merge commit to the existing PR branch (issue #45)', async () => {
+  const { root, worktree, branch, wt, remoteGit, remoteHeadBeforeSync } = await setupSyncableRepo()
+  try {
+    await withTempHome(root, async () => {
+      await saveWorkflow(syncableWorkflow(worktree, branch))
+
+      const result = await syncWorktree(ctx, { url: 'https://github.com/o/r/issues/45' })
+      assert.equal(result.ok, true)
+      const localHead = (await wt('rev-parse', 'HEAD')).stdout.trim()
+      const localShortHead = (await wt('rev-parse', '--short', 'HEAD')).stdout.trim()
+      const remoteHead = (await remoteGit('rev-parse', `refs/heads/${branch}`)).stdout.trim()
+      assert.notEqual(localHead, remoteHeadBeforeSync)
+      assert.equal(remoteHead, localHead)
+      assert.equal(result.head, localShortHead)
+    })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('sync does not merge or push when the worktree has unrelated local changes (issue #45)', async () => {
+  const { root, worktree, branch, wt, remoteGit, remoteHeadBeforeSync } = await setupSyncableRepo()
+  try {
+    await withTempHome(root, async () => {
+      await saveWorkflow(syncableWorkflow(worktree, branch))
+      await writeFile(join(worktree, 'local-notes.md'), 'uncommitted local change\n')
+
+      const result = await syncWorktree(ctx, { url: 'https://github.com/o/r/issues/45' })
+      assert.equal(result.ok, false)
+      assert.equal((result as { conflict?: boolean }).conflict, undefined)
+      assert.match(result.error, /未提交改动/)
+      const remoteHead = (await remoteGit('rev-parse', `refs/heads/${branch}`)).stdout.trim()
+      assert.equal(remoteHead, remoteHeadBeforeSync)
+      assert.match((await wt('status', '--short')).stdout, /local-notes\.md/)
+    })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('sync keeps the conflicted merge scene and rework stays reachable (issue #26)', async () => {
-  const { root, worktree, git } = await setupConflictedRepo()
+  const { root, worktree, git, remoteGit } = await setupConflictedRepo()
   try {
     await withTempHome(root, async () => {
       await saveWorkflow(conflictedWorkflow(worktree))
@@ -119,6 +210,7 @@ test('sync keeps the conflicted merge scene and rework stays reachable (issue #2
       assert.match(mergeHead.stdout, /^[0-9a-f]+/)
       const content = await readFile(join(worktree, 'readme.md'), 'utf8')
       assert.match(content, /<<<<<<< HEAD/)
+      await assert.rejects(remoteGit('rev-parse', 'refs/heads/clickvibe-issue-26'))
 
       // 冲突已记录到权威时间线(含文件清单)
       const reloaded = await loadWorkflow('o-r-26')
