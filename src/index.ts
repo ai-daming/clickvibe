@@ -1703,11 +1703,6 @@ async function startDevelop(
     return { ok: false, error: '缺少与该 OPEN Issue 绑定的服务端确认快照' }
   }
 
-  const workflowKey = issueKey(`${parsed.owner}/${parsed.repo}`, parsed.number)
-  const existingLive = [...liveTasks.values()].find((task) =>
-    task.workflowKey === workflowKey && task.kind === 'dev' && !task.closed)
-  if (!existingLive) await resetLog(workflowKey, 'dev')
-
   const ensured = await ensureWorktree(ctx, parsed)
   if (!ensured.ok) return ensured
   const { workflow } = ensured
@@ -1715,6 +1710,8 @@ async function startDevelop(
   workflow.issueState = 'OPEN'
 
   if (agent === 'dryrun') {
+    // A safety probe is not a new durable development generation: never
+    // rotate the previous real task's disk-backed history here.
     const taskIdValue = taskId('dryrun')
     let live: LiveTask
     try {
@@ -1754,6 +1751,9 @@ async function startDevelop(
   } catch (error) {
     return { ok: false, error: String(error instanceof Error ? error.message : error) }
   }
+  // Rotate only after both worktree preparation and LiveTask creation succeed;
+  // failed start attempts must not destroy the previous authoritative history.
+  await resetLog(workflow.key, 'dev')
   workflow.devAgent = agent
   workflow.devTaskId = taskIdValue
   workflow.devInterrupted = false

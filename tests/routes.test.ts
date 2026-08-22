@@ -162,6 +162,54 @@ test('/projects route returns the configured-project envelope without invoking s
   assert.equal(Array.isArray((result.body as { projects?: unknown[] }).projects), true)
 })
 
+test('a rejected dry-run worktree attempt preserves the previous durable dev history', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-history-conflict-'))
+  process.env.HOME = tempHome
+  try {
+    const repo = join(tempHome, 'repo')
+    const worktreeRoot = join(tempHome, 'worktrees')
+    const target = join(worktreeRoot, 'repo', 'repo-issue-905')
+    await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
+    await mkdir(repo, { recursive: true })
+    await mkdir(target, { recursive: true })
+    await writeFile(join(target, 'unregistered.txt'), 'must not be removed')
+    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), [
+      'repos:',
+      `  o/r: ${repo}`,
+      `worktreeRoot: ${worktreeRoot}`,
+      '',
+    ].join('\n'))
+    await appendLog('o-r-905', 'dev', 'previous completed task history')
+
+    const issue = {
+      url: 'https://github.com/o/r/issues/905', title: 'conflicting worktree', body: '',
+      state: 'OPEN', updatedAt: 'now', comments: [],
+    }
+    const handler = createHandler(async ({ command }) => {
+      if (command.startsWith('gh issue view')) return { exitCode: 0, stdout: { text: JSON.stringify(issue) }, stderr: { text: '' } }
+      if (command.startsWith('gh api') || command.startsWith('gh issue list')) return { exitCode: 0, stdout: { text: '[]' }, stderr: { text: '' } }
+      if (command === 'git fetch origin --prune') return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      if (command === 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD') return { exitCode: 0, stdout: { text: 'origin/main' }, stderr: { text: '' } }
+      if (command === "git rev-parse --short 'origin/main'") return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
+      if (command === 'git worktree list --porcelain') return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      if (command.includes("git show-ref --verify --quiet 'refs/heads/repo-issue-905'")) return { exitCode: 0, stdout: { text: '1' }, stderr: { text: '' } }
+      throw new Error(`unexpected command: ${command}`)
+    })
+
+    const result = await post(handler, '/clickvibe/api/develop', { url: issue.url, agent: 'dryrun' })
+    assert.equal(result.status, 400)
+    assert.match(result.body.error ?? '', /worktree 冲突/)
+    const history = await readLogHistory('o-r-905', 'dev')
+    assert.equal(history[0], 'previous completed task history')
+    assert.ok(history.some((line) => line.includes('worktree 冲突')))
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
 test('/history restores the complete disk log by task id after Host restart', async () => {
   const previousHome = process.env.HOME
   const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-history-restart-'))
