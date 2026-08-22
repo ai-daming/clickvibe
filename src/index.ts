@@ -45,6 +45,15 @@ import {
 } from './develop.ts'
 import { checkIssueContract, type IssueContractCheck } from './issue-contract.ts'
 import {
+  DependencyLedgerRetryGate,
+  buildDependencyUnlockComment,
+  dependencyUnlockMarker,
+  deriveAutoDevelopment,
+  hasWorkflowDevelopmentHistory,
+  isFirstDevelopment,
+  rewriteCompletedDependencySection,
+} from './auto-development.ts'
+import {
   deriveNextAction,
   deriveWorkflowStatus,
   workflowBaseBranch,
@@ -154,6 +163,8 @@ const DEFAULT_FETCH_TTL_SECONDS = 45
 const READ_FETCH_WAIT_MS = 2_000
 const repositoryFreshness = new RepositoryFreshnessGate()
 const dependencyRefreshClock = new RepositoryRefreshClock()
+/** Coalesce one batch's dependency validation into one live repository snapshot. */
+const automaticDependencyValidationClock = new RepositoryRefreshClock()
 
 /** In-memory live task handle: the running process + a status-line buffer. */
 interface LiveTask {
@@ -413,6 +424,11 @@ interface WorkflowDerived {
   needsSync: boolean
   /** Worktree sits in an unresolved conflicted merge (MERGE_HEAD exists). */
   mergeConflict: boolean
+  branchExists: boolean
+  worktreeExists: boolean
+  worktreeValid: boolean
+  hasUncommittedChanges: boolean
+  hasCommits: boolean
   lastDevHash: string | null
   lastReviewHash: string | null
   reviewedHash: string | null
@@ -787,6 +803,9 @@ export async function deriveWorkflowState(
   const reviewLive = workflow.reviewTaskId ? liveTasks.get(workflow.reviewTaskId) : undefined
   const taskRunning = (devLive !== undefined && !devLive.closed) || (reviewLive !== undefined && !reviewLive.closed)
 
+  const branchExists = options.branchExists ?? branch !== null
+  const worktreeValid = !exists || branch === workflow.branch
+  const hasCommits = options.hasCommits ?? aheadOfBase > 0
   const facts: WorkflowFacts = {
     issueOpen: (workflow.issueState ?? 'OPEN') !== 'CLOSED',
     prMerged: workflow.delivery !== undefined
@@ -807,11 +826,11 @@ export async function deriveWorkflowState(
     hasNewCommits,
     needsSync,
     mergeConflict,
-    branchExists: options.branchExists ?? branch !== null,
+    branchExists,
     worktreeExists: exists,
-    worktreeValid: !exists || branch === workflow.branch,
+    worktreeValid,
     hasUncommittedChanges,
-    hasCommits: options.hasCommits ?? aheadOfBase > 0,
+    hasCommits,
     hasResumeSession: workflow.devSessionId !== null,
   }
   const nextAction = deriveNextAction(facts)
@@ -835,6 +854,11 @@ export async function deriveWorkflowState(
       behindUpstream,
       needsSync,
       mergeConflict,
+      branchExists,
+      worktreeExists: exists,
+      worktreeValid,
+      hasUncommittedChanges,
+      hasCommits,
       lastDevHash,
       lastReviewHash,
       reviewedHash,
@@ -1254,6 +1278,83 @@ interface RepositoryGithubSnapshot {
   pulls: RepositoryPrRest[]
 }
 
+interface IssueCommentRest {
+  body?: string | null
+}
+
+const dependencyLedgerRetryGate = new DependencyLedgerRetryGate()
+
+function firstDevelopmentFor(
+  persisted: IssueWorkflow | null | undefined,
+  current: IssueWorkflow & { derived: WorkflowDerived },
+): boolean {
+  return isFirstDevelopment({
+    workflowHasDevelopmentHistory: hasWorkflowDevelopmentHistory(persisted),
+    hasCommits: current.derived.hasCommits,
+    hasUncommittedChanges: current.derived.hasUncommittedChanges,
+    hasPr: current.prNumber !== null,
+    worktreeNeedsRepair: current.derived.worktreeExists && !current.derived.worktreeValid,
+  })
+}
+
+async function maintainCompletedDependencyLedger(
+  ctx: Context,
+  repoKey: string,
+  issue: RepositoryIssueItem,
+  dependencyNumbers: number[],
+): Promise<{ issue: RepositoryIssueItem; updated: boolean; error?: string }> {
+  if (dependencyNumbers.length === 0) return { issue, updated: false }
+  const retryKey = `${repoKey}#${issue.number}`
+  const blocked = dependencyLedgerRetryGate.blocked(retryKey)
+  if (blocked) {
+    return {
+      issue,
+      updated: false,
+      error: `依赖账本更新冷却至 ${new Date(blocked.retryAt).toISOString()}: ${blocked.error}`,
+    }
+  }
+  const rest = githubRest(ctx)
+  const marker = dependencyUnlockMarker(dependencyNumbers)
+  try {
+    const comments = await rest.paginate<IssueCommentRest>(`repos/${repoKey}/issues/${issue.number}/comments`)
+    if (!comments.some((comment) => String(comment.body ?? '').includes(marker))) {
+      await rest.mutate(`repos/${repoKey}/issues/${issue.number}/comments`, 'POST', {
+        body: buildDependencyUnlockComment({
+          issueNumber: issue.number,
+          dependencyNumbers,
+          at: new Date().toISOString(),
+        }),
+      })
+    }
+    const body = rewriteCompletedDependencySection(issue.body, dependencyNumbers)
+    if (body === issue.body) {
+      dependencyLedgerRetryGate.succeed(retryKey)
+      return { issue, updated: false }
+    }
+    const updated = await rest.mutate<RepositoryIssueRest>(`repos/${repoKey}/issues/${issue.number}`, 'PATCH', { body })
+    rest.invalidate(`repo:${repoKey}`)
+    rest.invalidate(`${repoKey}/issues/${issue.number}`)
+    dependencyLedgerRetryGate.succeed(retryKey)
+    return {
+      issue: {
+        ...issue,
+        body,
+        updatedAt: updated.updated_at ?? issue.updatedAt,
+        contract: checkIssueContract(body),
+      },
+      updated: true,
+    }
+  } catch (error) {
+    const detail = githubErrorMessage(error).slice(0, 500)
+    const failure = dependencyLedgerRetryGate.fail(retryKey, detail)
+    return {
+      issue,
+      updated: false,
+      error: `依赖账本更新失败;冷却至 ${new Date(failure.retryAt).toISOString()}: ${detail}`,
+    }
+  }
+}
+
 async function fetchGithubRepoSnapshot(
   ctx: Context,
   repoKey: string,
@@ -1354,7 +1455,17 @@ export async function fetchRepositoryIssues(
       const workflow = workflowByNumber.get(issue.number)
       return workflow?.delivery !== undefined && workflow.delivery.status !== 'archived'
     })
-    const issues = await Promise.all(activeIssues.map(async (issue) => {
+    const issues = await Promise.all(activeIssues.map(async (rawIssue) => {
+      const originalDependencies = parseDependencies(rawIssue.body)
+      const originalDependencyStates = originalDependencies.map((number) =>
+        String(issueByNumber.get(number)?.state ?? 'UNKNOWN').toUpperCase(),
+      )
+      const unlockable = originalDependencies.length > 0
+        && originalDependencyStates.every((state) => state === 'CLOSED')
+      const ledger = unlockable
+        ? await maintainCompletedDependencyLedger(ctx, repoKey, rawIssue, originalDependencies)
+        : { issue: rawIssue, updated: false }
+      const issue = ledger.issue
       const existing = workflowByNumber.get(issue.number)
       const branch = existing?.branch ?? `${project}-issue-${issue.number}`
       const worktree = existing?.worktree ?? join(config.worktreeRoot, project, branch)
@@ -1427,7 +1538,24 @@ export async function fetchRepositoryIssues(
         const dependency = issueByNumber.get(number)
         return { number, title: dependency?.title ?? '', state: String(dependency?.state ?? 'UNKNOWN').toUpperCase() }
       })
-      return { ...issue, blockedBy, workflow: derived, contract: checkIssueContract(issue.body ?? '') }
+      const contract = checkIssueContract(issue.body ?? '')
+      const autoDevelopment = deriveAutoDevelopment({
+        issueState: issue.state,
+        dependencyStates: blockedBy.map((dependency) => dependency.state),
+        contract,
+        firstDevelopment: firstDevelopmentFor(existing, derived),
+      })
+      return {
+        ...issue,
+        blockedBy,
+        workflow: derived,
+        contract,
+        autoDevelopment,
+        dependencyLedger: {
+          updated: ledger.updated,
+          ...(ledger.error ? { error: ledger.error } : {}),
+        },
+      }
     }))
     dependencyRefreshClock.mark(repoKey)
     return { ok: true, repoKey, issues, freshness }
@@ -1455,7 +1583,11 @@ async function fetchIssue(
     const rest = githubRest(ctx)
     const resourceKey = `${repoKey}/${isPR ? 'pulls' : 'issues'}/${parsed.number}`
     const panelCacheKey = `${resourceKey}/panel`
-    const forceRefresh = (payload as { forceRefresh?: unknown } | undefined)?.forceRefresh === true
+    const fetchOptions = payload as { forceRefresh?: unknown; forceDependencyRefresh?: unknown } | undefined
+    const forceRefresh = fetchOptions?.forceRefresh === true
+    const forceDependencyRefresh = fetchOptions?.forceDependencyRefresh === undefined
+      ? forceRefresh
+      : fetchOptions.forceDependencyRefresh === true
     const detail = await rest.cachedResource(panelCacheKey, rest.resourceVersion(resourceKey), async () => {
       if (isPR) {
         const pr = await fetchPrRestDetail(ctx, repoKey, parsed.number, forceRefresh, 20_000)
@@ -1487,7 +1619,7 @@ async function fetchIssue(
     // "linked a pull request" 就来自 cross-referenced 事件
     if (!isPR) {
       // 依赖图:blockedBy 来自本 issue 正文,blocking 扫描 repo 内其它 issue
-      const dependencyResult = await fetchDependencies(ctx, parsed, detail.item as { body?: unknown }, forceRefresh)
+      const dependencyResult = await fetchDependencies(ctx, parsed, detail.item as { body?: unknown }, forceDependencyRefresh)
       if (dependencyResult.ok) {
         data.dependencies = dependencyResult.dependencies
         dependencyRefreshClock.mark(`${parsed.owner}/${parsed.repo}`)
@@ -2594,6 +2726,54 @@ function attachAgentProcess(
   launch(command, prompt, resumeFallback)
 }
 
+async function resolveAutomaticFirstDevelopment(
+  ctx: Context,
+  parsed: { owner: string; repo: string; number: string },
+): Promise<{ ok: true; firstDevelopment: boolean } | { ok: false; error: string }> {
+  const config = await loadConfig()
+  const repoKey = `${parsed.owner}/${parsed.repo}`
+  const configuredPath = config.repos[repoKey]
+  if (!configuredPath) return { ok: false, error: `未配置项目 ${repoKey}` }
+  const project = basename(expandHome(configuredPath))
+  const existing = await loadWorkflow(issueKey(repoKey, parsed.number))
+  const branch = existing?.branch ?? `${project}-issue-${parsed.number}`
+  const worktree = existing?.worktree ?? join(config.worktreeRoot, project, branch)
+  const workflow: IssueWorkflow = existing ?? {
+    key: issueKey(repoKey, parsed.number),
+    url: `https://github.com/${repoKey}/issues/${parsed.number}`,
+    repoKey,
+    worktree,
+    branch,
+    stage: 'idle',
+    devAgent: null,
+    devTaskId: null,
+    devSessionId: null,
+    devSessionAgent: null,
+    devInterrupted: false,
+    reviewAgent: null,
+    reviewTaskId: null,
+    reviewSessionId: null,
+    reviewSessionAgent: null,
+    reviewResult: null,
+    prNumber: null,
+    issueState: 'OPEN',
+    baseRef: null,
+    updatedAt: 0,
+    events: [],
+  }
+  const [branchFacts, prLookup] = await Promise.all([
+    readConfiguredBranchFacts(ctx, config, workflow),
+    fetchGithubPrFact(ctx, repoKey, branch, existing?.prNumber ?? null),
+  ])
+  if (!prLookup.known) return { ok: false, error: '无法确认开发分支是否已有 PR，自动开发已关门' }
+  const derived = await deriveWorkflowState(ctx, workflow, {
+    pr: prLookup.pr,
+    prStatusKnown: true,
+    ...branchFacts,
+  })
+  return { ok: true, firstDevelopment: firstDevelopmentFor(existing, derived) }
+}
+
 /** Start a development task: worktree + branch + background agent run. */
 async function startDevelop(
   ctx: Context,
@@ -2603,7 +2783,7 @@ async function startDevelop(
   | { ok: true; taskId: string; worktree: string; branch: string }
   | { ok: false; error: string }
 > {
-  const body = (payload ?? {}) as { url?: unknown; agent?: unknown; context?: unknown }
+  const body = (payload ?? {}) as { url?: unknown; agent?: unknown; context?: unknown; automatic?: unknown }
   const url = String(body.url ?? '').trim()
   let agent: DevelopAgent
   try {
@@ -2612,6 +2792,7 @@ async function startDevelop(
     return { ok: false, error: String(error instanceof Error ? error.message : error) }
   }
   const extraContext = typeof body.context === 'string' ? body.context.trim() : ''
+  const automatic = body.automatic === true
   const parsed = parseUrl(url)
   if (!parsed) {
     return { ok: false, error: '请输入形如 https://github.com/owner/repo/issues/123 的链接' }
@@ -2621,16 +2802,22 @@ async function startDevelop(
   }
 
   let launchSnapshot: ResolvedPromptSnapshot | null = null
+  let automaticSnapshot: Awaited<ReturnType<typeof fetchIssue>> | null = null
+  const automaticDependencyRefresh = automatic
+    ? automaticDependencyValidationClock.take(`${parsed.owner}/${parsed.repo}`, 30_000)
+    : true
   if (agent === 'dryrun') {
-    const fetched = await fetchIssue(ctx, { url, forceRefresh: true })
+    const fetched = await fetchIssue(ctx, { url, forceRefresh: true, forceDependencyRefresh: automaticDependencyRefresh })
     if (!fetched.ok) return fetched
+    automaticSnapshot = fetched
     const snapshot = issueSnapshot(fetched.data.item as Record<string, unknown>)
     if (snapshot.state !== 'OPEN') return { ok: false, error: '只有 OPEN Issue 可以执行 dryrun' }
   } else if (!authorizedSnapshot || authorizedSnapshot.url !== url || authorizedSnapshot.state !== 'OPEN') {
     return { ok: false, error: '缺少与该 OPEN Issue 绑定的服务端确认快照' }
   } else {
-    const fetched = await fetchIssue(ctx, { url, forceRefresh: true })
+    const fetched = await fetchIssue(ctx, { url, forceRefresh: true, forceDependencyRefresh: automaticDependencyRefresh })
     if (fetched.ok) {
+      automaticSnapshot = fetched
       const current = issueSnapshot(fetched.data.item as Record<string, unknown>)
       if (!sameSnapshot(current, authorizedSnapshot)) {
         return { ok: false, error: 'Issue 内容在确认后已变化,旧授权已失效;请刷新面板并按当前快照重新确认' }
@@ -2643,6 +2830,32 @@ async function startDevelop(
         fetchError: fetched.error.slice(0, 500),
       }
     }
+  }
+
+  if (automatic) {
+    if (!automaticSnapshot?.ok) return { ok: false, error: '自动开发必须取得当前 GitHub 依赖快照' }
+    const current = issueSnapshot(automaticSnapshot.data.item as Record<string, unknown>)
+    const contract = checkIssueContract(current.body)
+    const dependencies = automaticSnapshot.data.dependencies?.blockedBy
+    if (!dependencies) return { ok: false, error: '依赖状态不可用，自动开发已关门' }
+    const prerequisiteDecision = deriveAutoDevelopment({
+      issueState: current.state,
+      dependencyStates: dependencies.map((dependency) => dependency.state),
+      contract,
+      firstDevelopment: true,
+    })
+    if (!prerequisiteDecision.ready) {
+      return { ok: false, error: `自动开发跳过: ${prerequisiteDecision.reason}` }
+    }
+    const firstDevelopment = await resolveAutomaticFirstDevelopment(ctx, parsed)
+    if (!firstDevelopment.ok) return firstDevelopment
+    const decision = deriveAutoDevelopment({
+      issueState: current.state,
+      dependencyStates: dependencies.map((dependency) => dependency.state),
+      contract,
+      firstDevelopment: firstDevelopment.firstDevelopment,
+    })
+    if (!decision.ready) return { ok: false, error: `自动开发跳过: ${decision.reason}` }
   }
 
   const ensured = await ensureWorktree(ctx, parsed)
