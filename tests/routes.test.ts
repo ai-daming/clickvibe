@@ -1098,6 +1098,7 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     }))
     let reviewFetches = 0
     const comments: Array<{ command: string; body: string }> = []
+    const approvals: string[] = []
     const issueTimeouts: number[] = []
     const handler = createHandler(async (spec) => {
       if (spec.command === 'git fetch origin --prune') {
@@ -1117,6 +1118,10 @@ test('invalid exact review session clears the stale id and falls back to a fresh
       if (spec.command.startsWith('gh issue comment')) {
         comments.push({ command: spec.command, body: spec.stdin ?? '' })
         return { exitCode: 0, stdout: { text: 'https://github.com/o/r/pull/29#issuecomment-2' }, stderr: { text: '' } }
+      }
+      if (spec.command.startsWith('gh pr review')) {
+        approvals.push(spec.command)
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       }
       return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
     }, (spec) => {
@@ -1180,6 +1185,9 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     assert.match(comments[0].command, /github\.com\/o\/r\/pull\/29/)
     assert.match(comments[0].body, /^== Review Meta ==\n- event: review\n- commit: abc123\n- issue: #918\n- passed: true\n- next: merge/m)
     assert.match(comments[0].body, /下一步:可合并当前提交。/)
+    assert.deepEqual(approvals, [
+      "gh pr review 'https://github.com/o/r/pull/29' --approve --body 'LGTM'",
+    ])
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome

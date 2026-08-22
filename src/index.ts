@@ -76,6 +76,7 @@ import {
 } from './state.ts'
 import { buildDevComment, buildReviewComment } from './delivery-comment.ts'
 import { extractGithubCommentUrl } from './delivery-publication.ts'
+import { approvePassedReview } from './review-approval.ts'
 import { parseAgentChunk, type AgentKind } from './agent-stream.ts'
 import {
   clearReviewResultFile,
@@ -2890,6 +2891,16 @@ async function startReview(
       if (event.publication?.status === 'posted' && event.publication.url && reloaded.reviewResult) {
         reloaded.reviewResult.commentUrl = event.publication.url
         await saveWorkflow(reloaded)
+      }
+      const approval = await approvePassedReview({
+        repoKey: reloaded.repoKey,
+        prNumber: reloaded.prNumber,
+        passed,
+      }, (command) => runCommand(ctx, command, { timeoutMs: 30000 }))
+      if (approval === 'approved') {
+        pushTaskLine(live, '[clickvibe] 已提交 GitHub 原生 Approve (LGTM)')
+      } else if (approval === 'failed') {
+        pushTaskLine(live, '[clickvibe] GitHub 原生 Approve 失败(继续,不影响 Review 结论与评论)')
       }
     }
   }, sessionId ? {
