@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto'
+import type { PromptSnapshot } from './prompt.ts'
 
 export type DevelopAgent = 'codex' | 'claude' | 'dryrun'
 export type AgentAction = 'develop' | 'review' | 'resume'
@@ -203,14 +204,7 @@ export class LineLog {
   }
 }
 
-export interface IssuePromptSnapshot {
-  url: string
-  title: string
-  body: string
-  state: string
-  updatedAt: string
-  comments: { author: string; body: string }[]
-}
+export type IssuePromptSnapshot = PromptSnapshot
 
 export interface AgentAuthorizationInput {
   action: AgentAction
