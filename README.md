@@ -71,6 +71,7 @@ repos:
   ai-daming/clickvibe: /Users/me/work/clickvibe   # owner/repo → 本机路径
 
 worktreeRoot: ~/.clickvibe/worktrees
+fetchTtlSeconds: 45  # 查看状态时自动 fetch 的 TTL，可配置为 30–60 秒
 ```
 
 ```sh
