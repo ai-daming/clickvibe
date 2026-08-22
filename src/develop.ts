@@ -82,6 +82,8 @@ export function parseDependencies(body: string | null | undefined): number[] {
   const lines = String(body ?? '').split('\n')
   const depIndex = lines.findIndex((line) => /^##\s*依赖/.test(line.trim()))
   if (depIndex === -1) return []
+  const section = lines.slice(depIndex + 1).find((line) => line.trim() !== '')?.trim() ?? ''
+  if (/^(?:依赖\s*:\s*)?无(?:\s|\(|（|$)/.test(section)) return []
   const numbers: number[] = []
   for (let i = depIndex + 1; i < lines.length; i++) {
     const line = lines[i].trim()

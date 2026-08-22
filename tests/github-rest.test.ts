@@ -5,6 +5,7 @@ import {
   GithubRateLimitError,
   GithubRestReader,
   deriveReviewDecision,
+  githubRest,
 } from '../src/github-rest.ts'
 
 function shellWith(responses: Array<{ exitCode: number; stdout: string; stderr?: string }>) {
@@ -86,4 +87,21 @@ test('review decision uses each reviewer latest decisive review', () => {
     { id: 5, user: { login: 'bob' }, state: 'CHANGES_REQUESTED', submitted_at: '2026-08-22T02:00:00Z' },
   ]), 'CHANGES_REQUESTED')
   assert.equal(deriveReviewDecision([]), null)
+})
+
+test('REST mutation sends JSON on stdin instead of interpolating issue content into the shell command', async () => {
+  let resolved: { command: string; stdin?: string } | null = null
+  const ctx = {
+    shell: {
+      resolve(spec: { command: string; stdin?: string }) { resolved = spec; return spec },
+      async run() {
+        return { exitCode: 0, stdout: { text: included({ updated_at: 'now' }) }, stderr: { text: '' } }
+      },
+    },
+  }
+  const result = await githubRest(ctx).mutate<{ updated_at: string }>('repos/o/r/issues/9', 'PATCH', { body: '$(do-not-expand)' })
+  assert.equal(result.updated_at, 'now')
+  assert.match(resolved?.command ?? '', /--method PATCH --input -/)
+  assert.doesNotMatch(resolved?.command ?? '', /do-not-expand/)
+  assert.equal(resolved?.stdin, JSON.stringify({ body: '$(do-not-expand)' }))
 })

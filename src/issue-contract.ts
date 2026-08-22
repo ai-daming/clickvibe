@@ -34,6 +34,6 @@ export function checkIssueContract(body: string): IssueContractCheck {
   const deps = sectionOf(body, '依赖')
   if (!goal) missing.push('目标')
   if (!acceptance || !CHECKLIST_RE.test(acceptance)) missing.push('验收标准')
-  if (!deps || !(/^无\s*$/m.test(deps) || /Blocked by\s*#\d+/i.test(deps))) missing.push('依赖')
+  if (!deps || !(/^(?:依赖\s*:\s*)?无(?:\s|\(|（|$)/m.test(deps) || /Blocked by\s*#\d+/i.test(deps))) missing.push('依赖')
   return { ok: missing.length === 0, missing }
 }

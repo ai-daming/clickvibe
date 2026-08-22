@@ -1474,6 +1474,41 @@ test('/fetch on an issue without a 依赖 section yields no blockedBy (and no bl
   assert.deepEqual(deps.blocking.map((d) => (d as { number: number }).number), [7])
 })
 
+test('/develop automatic mode fails closed before worktree creation for invalid or blocked issues', async () => {
+  const url = 'https://github.com/o/r/issues/77'
+  const invalid = {
+    url, number: 77, title: 'invalid', state: 'OPEN', updatedAt: '2026-08-22T00:00:00Z',
+    body: '## 目标\n做事\n\n## 依赖\n无', comments: [],
+  }
+  const invalidHandler = createHandler(async (spec) => {
+    const api = githubApi(spec.command, { item: invalid, issues: [invalid] })
+    if (api) return api
+    throw new Error(`worktree command must not run: ${spec.command}`)
+  })
+  const invalidResult = await post(invalidHandler, '/clickvibe/api/develop', {
+    url, agent: 'dryrun', automatic: true,
+  })
+  assert.equal(invalidResult.status, 400)
+  assert.match(invalidResult.body.error ?? '', /契约缺失: 验收标准/)
+
+  const blocked = {
+    ...invalid,
+    title: 'blocked',
+    body: '## 目标\n做事\n\n## 验收标准\n- [ ] 完成\n\n## 依赖\nBlocked by #8',
+  }
+  const dependency = { number: 8, title: 'dependency', state: 'OPEN', body: '' }
+  const blockedHandler = createHandler(async (spec) => {
+    const api = githubApi(spec.command, { item: blocked, issues: [blocked, dependency] })
+    if (api) return api
+    throw new Error(`worktree command must not run: ${spec.command}`)
+  })
+  const blockedResult = await post(blockedHandler, '/clickvibe/api/develop', {
+    url, agent: 'dryrun', automatic: true,
+  })
+  assert.equal(blockedResult.status, 400)
+  assert.match(blockedResult.body.error ?? '', /存在未完成的直接依赖/)
+})
+
 test('/fetch keeps issue data but reports dependency refresh failure without inventing an empty graph', async () => {
   const item = {
     url: 'https://github.com/ai-daming/clickvibe/issues/938',
@@ -1625,6 +1660,52 @@ test('repo issue aggregation includes open issues without workflows and honors l
   assert.equal(issues[0].workflow.derived.nextAction.kind, 'none')
   assert.equal(issues[1].workflow.derived.status, 'idle')
   assert.equal(issues[1].workflow.derived.nextAction.label, '开始开发')
+})
+
+test('repo aggregation unlocks closed dependencies with an idempotent comment before rewriting the ledger', async () => {
+  const body = '## 目标\n自动开发\n\n## 验收标准\n- [ ] 可启动\n\n## 依赖\nBlocked by #8'
+  const issue = { number: 9, title: 'ready after dependency', state: 'open', body, html_url: 'https://github.com/o/r/issues/9', milestone: null }
+  const dependency = { number: 8, title: 'done', state: 'closed', body: '', html_url: 'https://github.com/o/r/issues/8', milestone: null }
+  const writes: Array<{ command: string; stdin?: string }> = []
+  const ctx = {
+    shell: {
+      resolve(spec: unknown) { return spec },
+      async run(spec: { command: string; stdin?: string }) {
+        if (spec.command.includes('/issues?')) return { exitCode: 0, stdout: { text: included([issue, dependency]) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: included([]) }, stderr: { text: '' } }
+        if (spec.command.includes('/issues/9/comments') && !spec.command.includes('--method')) {
+          return { exitCode: 0, stdout: { text: included([]) }, stderr: { text: '' } }
+        }
+        if (spec.command.includes('--method POST')) {
+          writes.push(spec)
+          return { exitCode: 0, stdout: { text: included({ id: 1 }) }, stderr: { text: '' } }
+        }
+        if (spec.command.includes('--method PATCH')) {
+          writes.push(spec)
+          return { exitCode: 0, stdout: { text: included({ updated_at: '2026-08-22T08:00:00Z' }) }, stderr: { text: '' } }
+        }
+        throw new Error(`unexpected command: ${spec.command}`)
+      },
+    },
+  }
+  const result = await fetchRepositoryIssues(ctx as never, { repoKey: 'o/r' }, {
+    config: { repos: { 'o/r': '/remote/r' }, worktreeRoot: '/remote/worktrees' }, workflows: [],
+  })
+  assert.equal(result.ok, true)
+  if (!result.ok) return
+  assert.equal(writes.length, 2)
+  assert.match(writes[0].command, /--method POST/)
+  assert.match(writes[0].stdin ?? '', /clickvibe:dependency-unlock:8/)
+  assert.match(writes[1].command, /--method PATCH/)
+  assert.match(writes[1].stdin ?? '', /依赖: 无\(原 Blocked by #8 已完成，自动更新\)/)
+  const unlocked = result.issues.find((candidate) => (candidate as { number: number }).number === 9) as {
+    blockedBy: unknown[]
+    autoDevelopment: { ready: boolean }
+    dependencyLedger: { updated: boolean }
+  }
+  assert.deepEqual(unlocked.blockedBy, [])
+  assert.equal(unlocked.autoDevelopment.ready, true)
+  assert.equal(unlocked.dependencyLedger.updated, true)
 })
 
 test('repo aggregation keeps a closed issue visible while merged cleanup is pending', async () => {
