@@ -66,9 +66,12 @@
 | 4 | 有提交,无 PR | 「创建 PR」(开发完成,推送建 PR 后 Review) |
 | 5 | PR open,无 review 结论 | 「Review」 |
 | 6 | review 未通过 | 「按意见返工」 |
-| 7 | review 通过 + HEAD == 结论哈希 + 契约指纹 == 结论指纹 | 「合并 PR」 |
-| 8 | review 通过 + (HEAD ≠ 结论哈希 或 契约指纹 ≠ 结论指纹) | 「重新 Review」(结论过期) |
-| 9 | PR closed 未合并 | 「查看原因 / 重新开发」(异常,需人) |
+| 7 | review 通过 + HEAD == 结论哈希 + 验收契约 current | 「合并 PR」 |
+| 8 | review 通过 + HEAD ≠ 结论哈希 | 「重新 Review」(结论过期) |
+| 9 | review 通过 + 验收契约 changed | 「重新 Review」(验收已变更) |
+| 10 | review 通过 + 当前验收契约读取失败(unknown) | 无合并动作,显示「刷新验收状态」 |
+| 11 | 仅有 GitHub approval、无 ClickVibe review 契约快照 | 「重新 Review」以建立可审计快照 |
+| 12 | PR closed 未合并 | 「查看原因 / 重新开发」(异常,需人) |
 
 ### 软事实降级链(贯穿)
 
@@ -76,8 +79,9 @@
 - **会话 id 归属缺失或与当前 agent 不一致** → 清除 id + owner,不得跨 Codex/Claude resume,直接在原 worktree 启动全新会话
 - **精确会话 id 被 agent 快速拒绝** → 清除 stale id,在同一 task/worktree 内仅回退一次全新会话;已完成 session 初始化或长时间运行后的普通失败不得触发回退
 - **review 未通过但问题列表为空** → 视为结论解析异常,清空当前 verdict 并要求重新 Review,不得进入空意见返工
-- **review 结论缺失** → ①本地事件缓存 → ②comment meta → ③GitHub 原生 review(`reviews` 字段)→ ④「人工确认」(不自动合并、不自动返工)
-- **结论缺契约指纹**(历史旧结论) → 视为 ≠ 当前指纹,结论过期,按 #8「重新 Review」(宁重审不盲合)
+- **验收契约状态** → `current` 才允许沿用 verdict；`changed` 明确要求重新 Review；`unknown/current-contract-unavailable` 暂停合并并要求刷新，不得谎称「验收已变更」
+- **review 结论缺失** → ①本地事件缓存 → ②comment meta → ③GitHub 原生 review(`reviews` 字段)→ ④「人工确认」；GitHub approval 可恢复 verdict，但不含 Issue body 快照，必须标记 `unknown/missing-review-snapshot` 并重新 Review，不自动解锁合并
+- **结论缺契约指纹**(历史旧结论) → 标记 `unknown/missing-review-snapshot`，按 #11 重新 Review；它会阻断合并，但不得伪装成已证实的契约变更
 - **comment meta 缺失** → 只影响时间线展示,不影响判断
 
 ## 四、与现状的差异(落地清单)
