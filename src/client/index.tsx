@@ -801,18 +801,19 @@ function stageLabel(stage: Workflow['stage'], workflow: Workflow | null): string
   )
 }
 
-function LiveTerminal({ events, taskId, active, streamState }: {
+function LiveTerminal({ events, taskId, active, streamState, agent: fallbackAgent }: {
   events: LiveLogEvent[]
   taskId: string | null
   active: boolean
   streamState: 'idle' | 'history' | 'connecting' | 'streaming' | 'retrying' | 'ended'
+  agent?: 'codex' | 'claude' | null
 }) {
   const [detached, setDetached] = React.useState(false)
   const [now, setNow] = React.useState(() => Date.now())
   const logRef = React.useRef<HTMLDivElement | null>(null)
   const startedAt = taskStartedAt(taskId)
   const usage = latestTokenUsage(events)
-  const agent = [...events].reverse().find((event) => event.agent)?.agent
+  const agent = [...events].reverse().find((event) => event.agent)?.agent ?? fallbackAgent ?? undefined
 
   React.useEffect(() => {
     if (!active) return
@@ -897,6 +898,7 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
   /** 合并门禁失败清单:非空时在错误旁展示「人工放行」入口(issue #49)。 */
   const [overrideGates, setOverrideGates] = React.useState<MergeGateFailure[] | null>(null)
   const [logEvents, setLogEvents] = React.useState<LiveLogEvent[]>([])
+  const [historyKind, setHistoryKind] = React.useState<'dev' | 'review' | null>(null)
   const [activeTaskId, setActiveTaskId] = React.useState<string | null>(null)
   const [streamState, setStreamState] = React.useState<'idle' | 'history' | 'connecting' | 'streaming' | 'retrying' | 'ended'>('idle')
   const [streamNotice, setStreamNotice] = React.useState<string | null>(null)
@@ -932,6 +934,7 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
     setStreamNotice(null)
     esRef.current?.close()
     setLogEvents([])
+    setHistoryKind(null)
 
     let history: HistoryResponse
     try {
@@ -954,6 +957,7 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
       return
     }
 
+    setHistoryKind(history.kind)
     setLogEvents(history.events ?? history.lines.map(decodeLiveLogLine))
     if (!history.active) {
       setActiveTaskId(null)
@@ -1090,6 +1094,7 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
     setBusy('developing')
     setError(null)
     setLogEvents([])
+    setHistoryKind(null)
     try {
       const authorization = agent === 'dryrun' ? {} : await authorize('develop', agent, context ?? '')
       if (agent !== 'dryrun' && !authorization) { setBusy(null); return }
@@ -1107,6 +1112,7 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
     setBusy('resuming')
     setError(null)
     setLogEvents([])
+    setHistoryKind(null)
     try {
       const agent = workflow?.devAgent ?? 'codex'
       const authorization = await authorize('resume', agent, context ?? '')
@@ -1125,6 +1131,7 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
     setBusy('reviewing')
     setError(null)
     setLogEvents([])
+    setHistoryKind(null)
     try {
       const authorization = await authorize('review', agent)
       if (!authorization) { setBusy(null); return }
@@ -1491,11 +1498,23 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
       {streamNotice ? <div className="cv-dev-error">{streamNotice}</div> : null}
 
       {activeTaskId || streamState === 'history' ? (
-        <LiveTerminal events={logEvents} taskId={activeTaskId} active={activeTaskId !== null} streamState={streamState} />
+        <LiveTerminal
+          events={logEvents}
+          taskId={activeTaskId}
+          active={activeTaskId !== null}
+          streamState={streamState}
+          agent={historyKind === 'review' ? workflow?.reviewAgent : historyKind === 'dev' ? workflow?.devAgent : agentChoice}
+        />
       ) : logEvents.length > 0 ? (
         <details className="cv-log-history">
           <summary>📜 历史输出 · {logEvents.filter((event) => event.kind !== 'usage').length} 行</summary>
-          <LiveTerminal events={logEvents} taskId={null} active={false} streamState="ended" />
+          <LiveTerminal
+            events={logEvents}
+            taskId={null}
+            active={false}
+            streamState="ended"
+            agent={historyKind === 'review' ? workflow?.reviewAgent : historyKind === 'dev' ? workflow?.devAgent : null}
+          />
         </details>
       ) : null}
 
