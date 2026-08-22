@@ -104,9 +104,13 @@ export function buildWorktreeAddCommand(options: {
     : `git worktree add -b ${shellQuote(options.branch)} ${shellQuote(options.path)} ${shellQuote(options.remoteBase)}`
 }
 
-interface LogEntry {
+export interface LogEntry {
   sequence: number
   line: string
+}
+
+export interface DetailedLogRead extends LogRead {
+  entries: LogEntry[]
 }
 
 export interface LogRead {
@@ -180,14 +184,23 @@ export class LineLog {
   }
 
   read(cursor: number): LogRead {
+    const detailed = this.readDetailed(cursor)
+    const lines = detailed.entries.map((entry) => entry.line)
+    if (detailed.truncated) lines.unshift('[clickvibe] 较早日志已截断')
+    return {
+      cursor: detailed.cursor,
+      lines,
+      truncated: detailed.truncated,
+    }
+  }
+
+  readDetailed(cursor: number): DetailedLogRead {
     const safeCursor = Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0
     const oldest = this.#entries[0]?.sequence ?? this.#sequence + 1
     const truncated = safeCursor < oldest - 1
-    const lines = this.#entries
+    const entries = this.#entries
       .filter((entry) => entry.sequence > safeCursor)
-      .map((entry) => entry.line)
-    if (truncated) lines.unshift('[clickvibe] 较早日志已截断')
-    return { cursor: this.#sequence, lines, truncated }
+    return { cursor: this.#sequence, lines: entries.map((entry) => entry.line), entries, truncated }
   }
 }
 
