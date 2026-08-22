@@ -45,6 +45,8 @@ ClickVibe 想成为的最终样子,是一个**随身携带的交付平台**:不�
 **2. 一键下单,无人值守开发**
 点「开始开发」,ClickVibe 自动做好一切:从远端默认分支创建独立 worktree 和分支、启动 Codex/Claude 非交互开发。最长可跑 24 小时,随时可停;超时/断线后点「恢复开发」优先续上同一个会话,会话已失效时自动在原 worktree 降级为一次全新会话,未提交改动不会丢。
 
+运行中的输出按 Codex/Claude 各自事件格式渲染成 TUI:命令、输出、思考、工具调用与 ClickVibe 系统提示分层显示,并展示运行时长和流中可得的 token 用量。输出可以 detach 到桌面浮窗或手机全屏,连接恢复后继续接收同一条事件流;任务结束后收进历史输出。
+
 **3. 自动 review,按意见一键返工**
 开发完成 → 自动进入待 review → 你点 Review,agent 对照验收标准审查代码;**结论自动发到 PR/issue 评论**,并标注它审查的是哪个 commit。没过 → 点「按意见返工」,带着全部问题续会话改;过了 → 你确认合并。
 
@@ -88,7 +90,7 @@ pnpm test
 |---|---|
 | 手机端 | [#14](https://github.com/ai-daming/clickvibe/issues/14) 手机对话优先界面(碎片时间看状态/下单/验收)、[#13](https://github.com/ai-daming/clickvibe/issues/13) 所有操作命令化、可被对话触发 |
 | 规模化 | [#11](https://github.com/ai-daming/clickvibe/issues/11) 跨机器执行、[#9](https://github.com/ai-daming/clickvibe/issues/9)/[#10](https://github.com/ai-daming/clickvibe/issues/10) 按依赖图自动选取、并行多工位调度 |
-| 更跟手 | [#16](https://github.com/ai-daming/clickvibe/issues/16) TUI 实时输出 + 放大 detach + 运行时长/token、[#12](https://github.com/ai-daming/clickvibe/issues/12) 右侧占位式布局(PR #24)、[#8](https://github.com/ai-daming/clickvibe/issues/8) 提 issue 模板引导 |
+| 更跟手 | [#12](https://github.com/ai-daming/clickvibe/issues/12) 右侧占位式布局(PR #24)、[#8](https://github.com/ai-daming/clickvibe/issues/8) 提 issue 模板引导 |
 | 更可靠 | [#3](https://github.com/ai-daming/clickvibe/issues/3)/[#17](https://github.com/ai-daming/clickvibe/issues/17) 长任务断线/中断恢复、[#18](https://github.com/ai-daming/clickvibe/issues/18) 超时上限可配置、[#20](https://github.com/ai-daming/clickvibe/issues/20) 提示词自带需求快照、[#22](https://github.com/ai-daming/clickvibe/issues/22) review 结论文件化不被截断、[#4](https://github.com/ai-daming/clickvibe/issues/4) 交付/审查评论流水、[#23](https://github.com/ai-daming/clickvibe/issues/23) 合并后自动清理 |
 
 ## 给维护者
