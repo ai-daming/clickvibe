@@ -2256,3 +2256,242 @@ test('repo issue aggregation uses unbounded pagination and keeps issues beyond 1
   assert.equal(result.issues.length, 1001)
   assert.equal(commands.filter((command) => command.startsWith('gh api ')).length, 12)
 })
+
+test('develop with user context stays a first development and records the note in the timeline', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-develop-context-'))
+  process.env.HOME = tempHome
+  try {
+    const repo = join(tempHome, 'repo')
+    const worktreeRoot = join(tempHome, 'worktrees')
+    await mkdir(repo, { recursive: true })
+    await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
+    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), [
+      'repos:',
+      `  o/r: ${repo}`,
+      `worktreeRoot: ${worktreeRoot}`,
+      '',
+    ].join('\n'))
+    const url = 'https://github.com/o/r/issues/54'
+    const item = {
+      url, title: 'context issue', body: '## 验收标准\n- context', state: 'OPEN',
+      updatedAt: '2026-08-22T00:00:00Z', comments: [],
+    }
+    const expectedSnapshot = {
+      url: item.url, title: item.title, body: item.body, state: item.state,
+      updatedAt: item.updatedAt, comments: [],
+    }
+    const prompts: string[] = []
+    const comments: Array<{ command: string; body: string }> = []
+    const handler = createHandler(async (spec) => {
+      const api = githubApi(spec.command, { item })
+      if (api) return api
+      if (spec.command === 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD') return { exitCode: 0, stdout: { text: 'origin/main' }, stderr: { text: '' } }
+      if (spec.command === 'git rev-parse --short HEAD') return { exitCode: 0, stdout: { text: 'f00d123' }, stderr: { text: '' } }
+      if (spec.command.startsWith('gh issue comment')) {
+        comments.push({ command: spec.command, body: spec.stdin ?? '' })
+        return { exitCode: 0, stdout: { text: 'https://github.com/o/r/issues/54#issuecomment-9' }, stderr: { text: '' } }
+      }
+      return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+    }, (spec) => {
+      prompts.push(spec.stdin ?? '')
+      let read = false
+      return {
+        status: 'running', exitCode: 0,
+        done: new Promise<void>((resolve) => setTimeout(resolve, 5)),
+        readOutput() {
+          if (read) return { delta: '', lossy: false }
+          read = true
+          return { delta: `{"type":"thread.started","thread_id":"dev-session-${prompts.length}"}\n`, lossy: false }
+        },
+        kill() { return true },
+      }
+    })
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+
+    // 首次开工:附加说明非空也必须是「开发」,不得沿用 context!==''→rework 的判定。
+    const firstContext = '优先补齐边界测试,注意向后兼容'
+    const firstAuthorized = await post(handler, '/clickvibe/api/authorize', {
+      action: 'develop', url, agent: 'codex', context: firstContext, expectedSnapshot,
+    }, headers) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
+    const first = await post(handler, '/clickvibe/api/develop', {
+      url, agent: 'codex', context: firstContext,
+      authorizationId: firstAuthorized.body.authorizationId,
+      authorizationDigest: firstAuthorized.body.authorizationDigest,
+    }, headers) as { status: number; body: { ok: boolean; taskId?: string } }
+    assert.equal(first.status, 200, JSON.stringify(first.body))
+    await waitForTask(handler, first.body.taskId ?? '')
+
+    assert.match(prompts[0], /请执行 ClickVibe 开发阶段。/)
+    assert.doesNotMatch(prompts[0], /返工阶段/)
+    assert.match(prompts[0], /附加上下文:\n优先补齐边界测试,注意向后兼容/)
+    let reloaded = await loadWorkflow('o-r-54')
+    assert.equal(reloaded?.events.at(-1)?.kind, 'dev')
+    assert.equal(reloaded?.events.at(-1)?.userContext, firstContext)
+    // 附加说明只进本地时间线,不进 GitHub 评论。
+    assert.equal(comments[0].body.includes(firstContext), false)
+
+    // 非首次 develop 带附加说明:保留既有「升级为返工」语义。
+    const secondContext = '第二轮:按新约束调整实现'
+    const secondAuthorized = await post(handler, '/clickvibe/api/authorize', {
+      action: 'develop', url, agent: 'codex', context: secondContext, expectedSnapshot,
+    }, headers) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
+    const second = await post(handler, '/clickvibe/api/develop', {
+      url, agent: 'codex', context: secondContext,
+      authorizationId: secondAuthorized.body.authorizationId,
+      authorizationDigest: secondAuthorized.body.authorizationDigest,
+    }, headers) as { status: number; body: { ok: boolean; taskId?: string } }
+    assert.equal(second.status, 200, JSON.stringify(second.body))
+    await waitForTask(handler, second.body.taskId ?? '')
+
+    assert.match(prompts[1], /请执行 ClickVibe 按 Review 意见返工阶段。/)
+    assert.match(prompts[1], /附加上下文:\n第二轮:按新约束调整实现/)
+    reloaded = await loadWorkflow('o-r-54')
+    assert.equal(reloaded?.events.at(-1)?.kind, 'rework')
+    assert.equal(reloaded?.events.at(-1)?.userContext, secondContext)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('resume (rework) carries the user context next to the review feedback and audits it locally', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-resume-context-'))
+  process.env.HOME = tempHome
+  try {
+    const worktree = join(tempHome, 'worktree')
+    await mkdir(worktree, { recursive: true })
+    const workflow = interruptedWorkflow('o-r-921', 'https://github.com/o/r/issues/921', worktree)
+    workflow.reviewResult = { passed: false, issues: ['修复竞态', '补充失败测试'] }
+    await saveWorkflow(workflow)
+    const prompts: string[] = []
+    const currentIssue = {
+      url: workflow.url, title: 'resume issue', body: '## 验收标准\n- context', state: 'OPEN',
+      updatedAt: 'now', comments: [],
+    }
+    const handler = createHandler(async (spec) => {
+      const api = githubApi(spec.command, { item: currentIssue })
+      if (api) return api
+      if (spec.command === 'git rev-parse --short HEAD') return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
+      if (spec.command.startsWith('gh issue comment')) {
+        return { exitCode: 0, stdout: { text: 'https://github.com/o/r/pull/29#issuecomment-4' }, stderr: { text: '' } }
+      }
+      return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+    }, (spec) => {
+      prompts.push(spec.stdin ?? '')
+      let read = false
+      return {
+        status: 'running', exitCode: 0,
+        done: new Promise<void>((resolve) => setTimeout(resolve, 5)),
+        readOutput() {
+          if (read) return { delta: '', lossy: false }
+          read = true
+          return { delta: '{"type":"thread.started","thread_id":"resumed-session"}\n', lossy: false }
+        },
+        kill() { return true },
+      }
+    })
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+    const userContext = '重点先修竞态,再补并发测试'
+    const authorized = await post(handler, '/clickvibe/api/authorize', {
+      action: 'resume', url: workflow.url, agent: 'codex', context: userContext,
+    }, headers) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
+    const resumed = await post(handler, '/clickvibe/api/resume', {
+      url: workflow.url, agent: 'codex', context: userContext,
+      authorizationId: authorized.body.authorizationId,
+      authorizationDigest: authorized.body.authorizationDigest,
+    }, headers) as { status: number; body: { ok: boolean; taskId?: string } }
+    assert.equal(resumed.status, 200, JSON.stringify(resumed.body))
+    await waitForTask(handler, resumed.body.taskId ?? '')
+
+    // 服务端既有 review 意见注入与用户附加说明同时出现在 prompt。
+    assert.match(prompts[0], /请执行 ClickVibe 按 Review 意见返工阶段。/)
+    assert.match(prompts[0], /修复竞态/)
+    assert.match(prompts[0], /重点先修竞态,再补并发测试/)
+    const reloaded = await loadWorkflow(workflow.key)
+    assert.equal(reloaded?.events.at(-1)?.kind, 'rework')
+    assert.equal(reloaded?.events.at(-1)?.userContext, userContext)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('review with user context appends it to the prompt and audits it in the review event', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-review-context-'))
+  process.env.HOME = tempHome
+  try {
+    const worktree = join(tempHome, 'worktree')
+    await mkdir(worktree, { recursive: true })
+    const workflow = interruptedWorkflow('o-r-922', 'https://github.com/o/r/issues/922', worktree)
+    workflow.stage = 'review-ready'
+    await saveWorkflow(workflow)
+    const starts: Array<{ command: string; prompt: string }> = []
+    const reviewedBody = '## 验收标准\n- review context'
+    const currentIssue = {
+      url: workflow.url, number: 922,
+      title: 'review issue', body: reviewedBody, state: 'OPEN', updatedAt: '2026-08-22T02:00:00Z',
+      comments: [],
+    }
+    const pr = {
+      number: 29, state: 'open', html_url: 'https://github.com/o/r/pull/29', updated_at: '2026-08-22T02:00:00Z',
+      base: { ref: 'main' }, head: { ref: workflow.branch },
+    }
+    const handler = createHandler(async (spec) => {
+      const api = githubApi(spec.command, { item: currentIssue, pr })
+      if (api) return api
+      if (spec.command === 'git rev-parse --short HEAD') return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
+      if (spec.command.startsWith('gh issue comment')) {
+        return { exitCode: 0, stdout: { text: 'https://github.com/o/r/pull/29#issuecomment-5' }, stderr: { text: '' } }
+      }
+      return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+    }, (spec) => {
+      starts.push({ command: spec.command, prompt: spec.stdin ?? '' })
+      let read = false
+      return {
+        status: 'running', exitCode: 0,
+        done: (async () => {
+          await mkdir(join(worktree, '.clickvibe'), { recursive: true })
+          await writeFile(join(worktree, '.clickvibe', 'review-result.json'), '{"passed":true,"issues":[]}')
+          await new Promise((resolve) => setTimeout(resolve, 5))
+        })(),
+        readOutput() {
+          if (read) return { delta: '', lossy: false }
+          read = true
+          return { delta: '{"type":"thread.started","thread_id":"review-session"}\n', lossy: false }
+        },
+        kill() { return true },
+      }
+    })
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+    const userContext = '额外关注并发安全与错误处理路径'
+    const authorized = await post(handler, '/clickvibe/api/authorize', {
+      action: 'review', url: workflow.url, agent: 'codex', context: userContext,
+    }, headers) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
+    const reviewed = await post(handler, '/clickvibe/api/review', {
+      url: workflow.url, agent: 'codex', context: userContext,
+      authorizationId: authorized.body.authorizationId,
+      authorizationDigest: authorized.body.authorizationDigest,
+    }, headers) as { status: number; body: { ok: boolean; taskId?: string } }
+    assert.equal(reviewed.status, 200, JSON.stringify(reviewed.body))
+    await waitForTask(handler, reviewed.body.taskId ?? '')
+
+    assert.equal(starts.length, 1)
+    assert.match(starts[0].prompt, /请执行 ClickVibe Review阶段。/)
+    assert.match(starts[0].prompt, /附加上下文:\n额外关注并发安全与错误处理路径/)
+    const reloaded = await loadWorkflow(workflow.key)
+    assert.equal(reloaded?.events.at(-1)?.kind, 'review')
+    assert.equal(reloaded?.events.at(-1)?.userContext, userContext)
+    // 附加说明不自动发布为 GitHub 评论。
+    const comments = await readLogHistory(workflow.key, 'review')
+    assert.equal(comments.some((line) => line.includes('额外关注并发安全')), false)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})

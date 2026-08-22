@@ -83,6 +83,8 @@ export interface WorkflowEvent {
   issueContract?: IssueContractSnapshot
   /** 本次开发完成前仍待修复的上一轮 review 问题数。 */
   fixed?: number
+  /** 用户在动作触发时填写的附加说明(issue #54);只进 prompt 与本地时间线,不发布到 GitHub。 */
+  userContext?: string
   /** 对应公开 GitHub 流水节点的发布结果;缺失表示旧的本地事件。 */
   publication?: DeliveryPublication
   note?: string

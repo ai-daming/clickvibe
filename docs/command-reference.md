@@ -12,9 +12,9 @@ ClickVibe 的每个操作都有一条**纯文本命令形式**,可在对话中�
 | `projects` | 项目 | 列出 `~/.clickvibe/config.yaml` 配置的项目 | 否 |
 | `issues [repoKey]` | 列表 / 工单 | 列出项目 issue、依赖阻塞与下一步动作 | 否 |
 | `status <目标>` | 状态 / 看状态 / 进度 | 某 issue 的权威状态(分支/PR/review 结论/下一步) | 否 |
-| `develop <目标> [repoKey] [codex\|claude]` | 下单开发 / 开始开发 / 开发 | 下单开发,创建 worktree 并启动 agent | 是 |
+| `develop <目标> [repoKey] [codex\|claude] [context=…]` | 下单开发 / 开始开发 / 开发 | 下单开发,创建 worktree 并启动 agent;附加说明拼入 prompt(首次开工仍记「开发」) | 是 |
 | `develop <目标> dryrun`(或 `安全演练 <目标>`) | 安全演练 | 走完整流程但零代码副作用 | 否(仅回环校验) |
-| `review <目标> [repoKey] [codex\|claude]` | 审查 | 启动 review,结论发 PR/issue 评论 | 是 |
+| `review <目标> [repoKey] [codex\|claude] [context=…]` | 审查 | 启动 review,结论发 PR/issue 评论;附加说明拼入 review prompt | 是 |
 | `rework <目标> [context=…]` | 返工 / 按意见返工 | 按 review 意见返工(自动带上意见) | 是 |
 | `resume <目标> [context=…]` | 恢复 / 恢复开发 | 恢复中断的开发会话 | 是 |
 | `sync <目标>` | 同步 / 同步基线 | worktree 同步远端基线并推送 | 是(免授权,仍校验来源) |
