@@ -2,13 +2,14 @@
  * clickvibe client half: the right-side issue/PR panel.
  *
  * Registers:
- * - `shell.overlay` (id `clickvibe`) — the right-side floating panel,
+ * - `shell.overlay` (id `clickvibe`) — the mount anchor for the occupied panel,
  * - `sidebar.footer.action` (id `clickvibe`) — the toggle button.
  *
  * Fetching goes through the plugin's own `/clickvibe/api/fetch` route
  * (no harness RPC — this is a formal bundle plugin, not a dynamic one).
  */
 import React from 'react'
+import { createPortal } from 'react-dom'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 // Type references that load the SlotMap augmentations for the slots this
 // bundle registers into (shell.overlay, sidebar.footer.action). Importing
@@ -20,13 +21,18 @@ import type { SidebarFooterActionOwnerProps } from '@deepseek-ai/dsh-client-ui-s
 import { selectHistoryTask } from '../task-history.ts'
 import { githubCompareUrl, workflowStatusLabel } from '../state-view.ts'
 import { deliveryPublicationLabel, type DeliveryPublication } from '../delivery-publication.ts'
+import { resolveDesktopPanelWidth, resolvePanelLayout } from './panel-layout.ts'
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 type _SlotLoaders = [typeof LayoutController, SidebarFooterActionOwnerProps]
 
 const PANEL_ID = 'clickvibe'
 
 /** Panel open state shared between the footer toggle and the overlay. */
-const panelState = { open: false, listeners: new Set<(v: boolean) => void>() }
+const panelState: {
+  open: boolean
+  desktopWidth?: number
+  listeners: Set<(value: boolean) => void>
+} = { open: false, listeners: new Set() }
 
 function setPanelOpen(value: boolean): void {
   panelState.open = value
@@ -46,7 +52,15 @@ function usePanelOpen(): boolean {
 // ---- plugin-owned styles (injected once at activation) ----
 
 const PANEL_CSS = `
-.cv-panel { width: 420px; max-width: 90vw; height: 100%; display: flex; flex-direction: column; background: #ffffff; border-left: 1px solid #d0d7de; box-shadow: -8px 0 24px rgba(0,0,0,0.18); font-size: 13px; color: #1f2328; }
+#root.cv-panel-host-open { margin-right: calc(var(--dsh-sidebar-width, 0px) + var(--cv-sidebar-width, 0px)); width: calc(100% - var(--dsh-sidebar-width, 0px) - var(--cv-sidebar-width, 0px)); transition: margin-right var(--ds-transition-duration-slow) var(--ds-ease-in-out), width var(--ds-transition-duration-slow) var(--ds-ease-in-out); }
+.cv-panel-slot { position: fixed; z-index: 50; top: 0; right: var(--dsh-sidebar-width, 0px); bottom: 0; width: var(--cv-sidebar-width); min-width: 0; overflow: visible; pointer-events: auto; transition: right var(--ds-transition-duration-slow) var(--ds-ease-in-out), width var(--ds-transition-duration-slow) var(--ds-ease-in-out); }
+.cv-panel-slot[data-cv-mobile] { right: 0; width: 100vw; }
+.cv-panel { width: 100%; height: 100%; display: flex; flex-direction: column; background: #ffffff; border-left: 1px solid #d0d7de; box-sizing: border-box; font-size: 13px; color: #1f2328; }
+.cv-panel-resizer { position: absolute; z-index: 2; top: 0; bottom: 0; left: -5px; width: 10px; cursor: col-resize; touch-action: none; }
+.cv-panel-resizer::after { content: ''; position: absolute; top: 50%; left: 50%; width: 4px; height: 36px; border-radius: 3px; background: #8c959f; opacity: 0; transform: translate(-50%, -50%); transition: opacity 120ms ease; }
+.cv-panel-resizer:hover::after, .cv-panel-resizer:focus-visible::after, .cv-panel-resizer[data-dragging]::after { opacity: .75; }
+body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-dragging] .cv-panel-slot { transition: none; }
+@media (prefers-reduced-motion: reduce) { #root.cv-panel-host-open, .cv-panel-slot { transition: none; } }
 .cv-panel-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; font-weight: 600; color: #1f2328; border-bottom: 1px solid #d0d7de; flex-shrink: 0; }
 .cv-panel-header-actions { display: flex; align-items: center; gap: 6px; }
 .cv-close { border: none; background: transparent; cursor: pointer; font-size: 14px; color: #57606a; }
@@ -1669,6 +1683,148 @@ function PanelContent() {
   )
 }
 
+/**
+ * shell.overlay gives us a stable lifecycle anchor. The visible panel is
+ * portalled to body while #root gives up the same width, matching the proven
+ * better-sidebar layout-push pattern without covering the conversation.
+ */
+function OccupiedPanel() {
+  const [portalHost, setPortalHost] = React.useState<HTMLDivElement | null>(null)
+  const [viewportWidth, setViewportWidth] = React.useState(() => window.innerWidth)
+  const [desktopWidth, setDesktopWidth] = React.useState(
+    () => resolveDesktopPanelWidth(window.innerWidth, panelState.desktopWidth),
+  )
+  const layout = resolvePanelLayout(viewportWidth, desktopWidth)
+  const layoutRef = React.useRef(layout)
+  const dragRef = React.useRef<{ x: number; width: number } | null>(null)
+  const dragFrameRef = React.useRef<number | null>(null)
+  const pendingWidthRef = React.useRef<number | null>(null)
+
+  React.useLayoutEffect(() => {
+    const root = document.getElementById('root')
+    if (!root) return
+
+    const host = document.createElement('div')
+    host.className = 'cv-panel-slot'
+    document.body.appendChild(host)
+    root.classList.add('cv-panel-host-open')
+    setPortalHost(host)
+
+    return () => {
+      if (dragFrameRef.current !== null) cancelAnimationFrame(dragFrameRef.current)
+      document.body.removeAttribute('data-cv-panel-dragging')
+      root.classList.remove('cv-panel-host-open')
+      document.documentElement.style.removeProperty('--cv-sidebar-width')
+      host.remove()
+    }
+  }, [])
+
+  React.useEffect(() => {
+    let frame: number | null = null
+    const measure = () => {
+      frame = null
+      setViewportWidth(window.innerWidth)
+    }
+    const onResize = () => {
+      if (frame === null) frame = requestAnimationFrame(measure)
+    }
+    window.addEventListener('resize', onResize)
+    return () => {
+      window.removeEventListener('resize', onResize)
+      if (frame !== null) cancelAnimationFrame(frame)
+    }
+  }, [])
+
+  React.useLayoutEffect(() => {
+    layoutRef.current = layout
+    if (!portalHost) return
+    portalHost.toggleAttribute('data-cv-mobile', layout.mobile)
+    portalHost.style.width = layout.mobile ? '100vw' : `${layout.panelWidth}px`
+    document.documentElement.style.setProperty('--cv-sidebar-width', `${layout.pushWidth}px`)
+  }, [layout.mobile, layout.panelWidth, layout.pushWidth, portalHost])
+
+  const applyDragWidth = (width: number) => {
+    if (!portalHost) return
+    portalHost.style.width = `${width}px`
+    document.documentElement.style.setProperty('--cv-sidebar-width', `${width}px`)
+  }
+
+  const scheduleDragWidth = (width: number) => {
+    pendingWidthRef.current = width
+    if (dragFrameRef.current !== null) return
+    dragFrameRef.current = requestAnimationFrame(() => {
+      dragFrameRef.current = null
+      const pending = pendingWidthRef.current
+      if (pending !== null) {
+        pendingWidthRef.current = null
+        applyDragWidth(pending)
+      }
+    })
+  }
+
+  const finishDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current
+    if (!drag || !event.currentTarget.hasPointerCapture(event.pointerId)) return
+    const pending = pendingWidthRef.current
+    const width = pending ?? resolveDesktopPanelWidth(
+      window.innerWidth,
+      drag.width - (event.clientX - drag.x),
+    )
+    if (dragFrameRef.current !== null) {
+      cancelAnimationFrame(dragFrameRef.current)
+      dragFrameRef.current = null
+    }
+    pendingWidthRef.current = null
+    applyDragWidth(width)
+    event.currentTarget.releasePointerCapture(event.pointerId)
+    event.currentTarget.removeAttribute('data-dragging')
+    dragRef.current = null
+    document.body.removeAttribute('data-cv-panel-dragging')
+    panelState.desktopWidth = width
+    setDesktopWidth(width)
+  }
+
+  const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    event.currentTarget.setAttribute('data-dragging', '')
+    dragRef.current = { x: event.clientX, width: layoutRef.current.panelWidth }
+    document.body.setAttribute('data-cv-panel-dragging', '')
+  }
+  const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current
+    if (!drag || !event.currentTarget.hasPointerCapture(event.pointerId)) return
+    scheduleDragWidth(resolveDesktopPanelWidth(
+      window.innerWidth,
+      drag.width - (event.clientX - drag.x),
+    ))
+  }
+
+  return (
+    <>
+      {portalHost ? createPortal(
+        <>
+          {!layout.mobile && (
+            <div
+              className="cv-panel-resizer"
+              role="separator"
+              aria-label="调整 ClickVibe 面板宽度"
+              aria-orientation="vertical"
+              aria-valuenow={layout.panelWidth}
+              onPointerDown={onPointerDown}
+              onPointerMove={onPointerMove}
+              onPointerUp={finishDrag}
+              onPointerCancel={finishDrag}
+            />
+          )}
+          <PanelContent />
+        </>,
+        portalHost,
+      ) : null}
+    </>
+  )
+}
+
 export const name = 'clickvibe-client'
 
 export const inject = ['slots']
@@ -1685,11 +1841,7 @@ export function apply(ctx: ClientContext): void {
       () => {
         const open = usePanelOpen()
         if (!open) return null
-        return (
-          <div style={{ position: 'fixed', top: 0, right: 0, bottom: 0, zIndex: 9000, pointerEvents: 'auto' }}>
-            <PanelContent />
-          </div>
-        )
+        return <OccupiedPanel />
       },
     )))
 
