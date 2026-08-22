@@ -3,7 +3,9 @@ import test from 'node:test'
 import {
   AuthorizationStore,
   LineLog,
+  RESUME_REJECT_WINDOW_MS,
   authorizationDigest,
+  buildFreshAgentCommand,
   buildResumeAgentCommand,
   buildWorktreeAddCommand,
   decideWorktreeRecovery,
@@ -11,6 +13,7 @@ import {
   parseAgent,
   parseGithubUrl,
   shellQuote,
+  shouldFallbackFromExactResume,
   parseDependencies,
   validatePrivilegedRequest,
 } from '../src/develop.ts'
@@ -49,6 +52,27 @@ test('resume commands continue the exact session and use a valid codex fallback'
     buildResumeAgentCommand('claude', 'session-123'),
     `claude -p --resume 'session-123' --dangerously-skip-permissions --verbose --output-format stream-json`,
   )
+})
+
+test('fresh commands never retry the stale session', () => {
+  assert.equal(buildFreshAgentCommand('codex'), 'codex exec -c approval_policy=never -s danger-full-access --json -')
+  assert.equal(buildFreshAgentCommand('claude'), 'claude -p --dangerously-skip-permissions --verbose --output-format stream-json')
+})
+
+test('only a quick exact-resume failure before session initialization falls back', () => {
+  const rejected = {
+    hadExactSessionId: true,
+    status: 'failed' as const,
+    exitCode: 1,
+    elapsedMs: RESUME_REJECT_WINDOW_MS,
+    sawSessionId: false,
+  }
+  assert.equal(shouldFallbackFromExactResume(rejected), true)
+  assert.equal(shouldFallbackFromExactResume({ ...rejected, hadExactSessionId: false }), false, 'fresh retry cannot recurse')
+  assert.equal(shouldFallbackFromExactResume({ ...rejected, sawSessionId: true }), false, 'initialized session failed later')
+  assert.equal(shouldFallbackFromExactResume({ ...rejected, elapsedMs: RESUME_REJECT_WINDOW_MS + 1 }), false, 'long task failure')
+  assert.equal(shouldFallbackFromExactResume({ ...rejected, status: 'stopped' }), false, 'user stop')
+  assert.equal(shouldFallbackFromExactResume({ ...rejected, exitCode: 0 }), false, 'successful resume')
 })
 
 test('LineLog buffers complete lines and flushes a final fragment', () => {

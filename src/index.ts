@@ -25,6 +25,7 @@ import { parse as parseYaml } from 'yaml'
 import {
   AuthorizationStore,
   LineLog,
+  buildFreshAgentCommand,
   buildResumeAgentCommand,
   buildWorktreeAddCommand,
   decideWorktreeRecovery,
@@ -34,6 +35,7 @@ import {
   parseDependencies,
   parseGithubUrl,
   shellQuote,
+  shouldFallbackFromExactResume,
   validatePrivilegedRequest,
   type AgentAuthorization,
   type AgentAuthorizationInput,
@@ -45,6 +47,7 @@ import {
   appendEvent,
   appendLog,
   applyDevRunOutcome,
+  clearStaleSessionId,
   issueKey,
   loadAllWorkflows,
   loadWorkflow,
@@ -1197,6 +1200,22 @@ function buildPrompt(item: IssuePromptSnapshot, worktreePath: string): string {
   ].join('\n')
 }
 
+/** Rebuild full issue context when an exact resume id is stale and a new dev session is required. */
+async function buildFreshResumePrompt(ctx: Context, workflow: IssueWorkflow, extraContext: string): Promise<string> {
+  const fetched = await fetchIssue(ctx, { url: workflow.url })
+  let prompt = fetched.ok
+    ? buildPrompt(issueSnapshot(fetched.data.item as Record<string, unknown>), workflow.worktree)
+    : [
+        `请在现有 worktree 中继续完成 GitHub issue: ${workflow.url}`,
+        `工作区(worktree): ${workflow.worktree}`,
+        '原会话已失效。请先读取 issue 当前内容和 git diff,保留未提交改动并继续开发。',
+      ].join('\n')
+  if (extraContext !== '') {
+    prompt += '\n\n--- 附加上下文(来自 review 或其他) ---\n' + extraContext
+  }
+  return prompt
+}
+
 /** Build the review prompt: review `git diff base...HEAD` against the issue.
  *  base 取远端主干(origin/main 或 PR base),让 agent 用真实 diff 审查。 */
 async function buildReviewPrompt(ctx: Context, workflow: IssueWorkflow): Promise<string> {
@@ -1509,86 +1528,123 @@ function attachAgentProcess(
   command: string,
   workdir: string,
   prompt: string,
-  onExit: (exitCode: number | null, sessionId: string | null) => void,
+  onExit: (exitCode: number | null, sessionId: string | null) => void | Promise<void>,
+  resumeFallback?: {
+    staleSessionId: string
+    prepare: () => Promise<{ command: string; prompt: string }>
+  },
 ): void {
-  let process: ReturnType<Context['shell']['start']>
-  try {
-    const spec = ctx.shell.resolve({
-      command,
-      workdir,
-      stdin: prompt,
-      timeoutMs: TASK_TIMEOUT_MS,
-      sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: workdir },
-    })
-    process = ctx.shell.start(spec)
-  } catch (error) {
-    pushTaskLine(task, `[clickvibe] Agent 启动失败: ${String(error instanceof Error ? error.message : error)}`)
-    task.status = 'failed'
-    task.exitCode = 1
-    void Promise.resolve()
-      .then(() => onExit(1, task.sessionId))
-      .catch((exitError: unknown) => pushTaskLine(task, `[clickvibe] 启动失败收尾异常: ${String(exitError)}`))
-      .finally(() => finishTask(task, 'failed', 1))
-    return
-  }
-  task.process = process
-
-  // 轮询读取 agent 输出,解析为状态行,写入内存缓冲 + 落盘日志
-  const drain = (flush = false) => {
-    const read = process.readOutput()
-    if (read.delta !== '') task.rawLog.appendChunk(read.delta)
-    if (flush) task.rawLog.flush()
-    const raw = task.rawLog.read(task.rawCursor)
-    task.rawCursor = raw.cursor
-    if (raw.lines.length > 0) {
-      const parsed = parseAgentChunk(task.agent as AgentKind, raw.lines.join('\n'))
-      for (const line of parsed.lines) {
-        pushTaskLine(task, line.text)
-      }
-      if (parsed.sessionId) task.sessionId = parsed.sessionId
-    }
-    if (raw.truncated || read.lossy) {
-      pushTaskLine(task, '[clickvibe] Agent 原始输出被截断(日志过长)')
-    }
-  }
-  const pump = setInterval(() => drain(), 250)
-
   task.timeout = setTimeout(() => {
     if (task.closed) return
     pushTaskLine(task, `[clickvibe] Agent 超过 ${TASK_TIMEOUT_MS / 3_600_000} 小时,已终止`)
     task.status = 'timed_out'
-    process.kill()
+    task.process?.kill()
   }, TASK_TIMEOUT_MS)
   task.timeout.unref?.()
 
-  void process.done.then(async () => {
-    clearInterval(pump)
-    drain(true)
-    const status = task.status === 'timed_out' || task.status === 'stopped'
-      ? task.status
-      : process.exitCode === 0 ? 'done' : 'failed'
-    task.status = status
-    task.exitCode = process.exitCode
+  const launch = (
+    attemptCommand: string,
+    attemptPrompt: string,
+    fallback: typeof resumeFallback,
+  ): void => {
+    let process: ReturnType<Context['shell']['start']>
     try {
-      await onExit(process.exitCode, task.sessionId)
-    } finally {
-      finishTask(task, status, process.exitCode)
+      const spec = ctx.shell.resolve({
+        command: attemptCommand,
+        workdir,
+        stdin: attemptPrompt,
+        timeoutMs: TASK_TIMEOUT_MS,
+        sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: workdir },
+      })
+      process = ctx.shell.start(spec)
+    } catch (error) {
+      pushTaskLine(task, `[clickvibe] Agent 启动失败: ${String(error instanceof Error ? error.message : error)}`)
+      task.status = 'failed'
+      task.exitCode = 1
+      void Promise.resolve()
+        .then(() => onExit(1, task.sessionId))
+        .catch((exitError: unknown) => pushTaskLine(task, `[clickvibe] 启动失败收尾异常: ${String(exitError)}`))
+        .finally(() => finishTask(task, 'failed', 1))
+      return
     }
-  }, async (error: unknown) => {
-    clearInterval(pump)
-    pushTaskLine(task, `[clickvibe] Agent 进程异常: ${String(error instanceof Error ? error.message : error)}`)
-    const status = task.status === 'timed_out' || task.status === 'stopped' ? task.status : 'failed'
-    task.status = status
-    task.exitCode = process.exitCode
-    try {
-      await onExit(process.exitCode, task.sessionId)
-    } finally {
-      finishTask(task, status, process.exitCode)
+    task.process = process
+    const startedAt = Date.now()
+    let sawSessionId = false
+
+    // 轮询读取 agent 输出,解析为状态行,写入内存缓冲 + 落盘日志
+    const drain = (flush = false) => {
+      const read = process.readOutput()
+      if (read.delta !== '') task.rawLog.appendChunk(read.delta)
+      if (flush) task.rawLog.flush()
+      const raw = task.rawLog.read(task.rawCursor)
+      task.rawCursor = raw.cursor
+      if (raw.lines.length > 0) {
+        const parsed = parseAgentChunk(task.agent as AgentKind, raw.lines.join('\n'))
+        for (const line of parsed.lines) {
+          pushTaskLine(task, line.text)
+        }
+        if (parsed.sessionId) {
+          sawSessionId = true
+          task.sessionId = parsed.sessionId
+        }
+      }
+      if (raw.truncated || read.lossy) {
+        pushTaskLine(task, '[clickvibe] Agent 原始输出被截断(日志过长)')
+      }
     }
-  }).catch((error: unknown) => {
-    pushTaskLine(task, `[clickvibe] 任务收尾失败: ${String(error instanceof Error ? error.message : error)}`)
-    if (!task.closed) finishTask(task, task.status === 'running' ? 'failed' : task.status, task.exitCode)
-  })
+    const pump = setInterval(() => drain(), 250)
+
+    const settle = async (processError?: unknown): Promise<void> => {
+      clearInterval(pump)
+      drain(true)
+      if (processError !== undefined) {
+        pushTaskLine(task, `[clickvibe] Agent 进程异常: ${String(processError instanceof Error ? processError.message : processError)}`)
+      }
+      const status = task.status === 'timed_out' || task.status === 'stopped'
+        ? task.status
+        : process.exitCode === 0 ? 'done' : 'failed'
+      if (processError === undefined && fallback && shouldFallbackFromExactResume({
+        hadExactSessionId: fallback.staleSessionId !== '',
+        status,
+        exitCode: process.exitCode,
+        elapsedMs: Date.now() - startedAt,
+        sawSessionId,
+      })) {
+        task.sessionId = null
+        pushTaskLine(task, '[clickvibe] 精确会话已失效,清除 stale sessionId 并回退全新会话…')
+        try {
+          const next = await fallback.prepare()
+          if (task.status === 'stopped' || task.status === 'timed_out') {
+            await onExit(process.exitCode, null)
+            finishTask(task, task.status, process.exitCode)
+            return
+          }
+          task.exitCode = null
+          launch(next.command, next.prompt, undefined)
+          return
+        } catch (error) {
+          pushTaskLine(task, `[clickvibe] 全新会话回退准备失败: ${String(error instanceof Error ? error.message : error)}`)
+        }
+      }
+      task.status = status
+      task.exitCode = process.exitCode
+      try {
+        await onExit(process.exitCode, task.sessionId)
+      } finally {
+        finishTask(task, status, process.exitCode)
+      }
+    }
+
+    void process.done.then(
+      () => settle(),
+      (error: unknown) => settle(error),
+    ).catch((error: unknown) => {
+      pushTaskLine(task, `[clickvibe] 任务收尾失败: ${String(error instanceof Error ? error.message : error)}`)
+      if (!task.closed) finishTask(task, task.status === 'running' ? 'failed' : task.status, task.exitCode)
+    })
+  }
+
+  launch(command, prompt, resumeFallback)
 }
 
 /** Start a development task: worktree + branch + background agent run. */
@@ -1956,16 +2012,9 @@ async function startReview(
   // review 与 dev 同规则:有上次会话 id 就续会话(精确 id,不用 --last)。
   // UI 已保证按钮只显示上次 review 的 agent,所以这里不需要再判断 agent 一致。
   const sessionId = workflow.reviewSessionId
-  let agentCommand: string
-  if (agent === 'claude') {
-    agentCommand = sessionId
-      ? `claude -p --resume ${shellQuoteId(sessionId)} --dangerously-skip-permissions --verbose --output-format stream-json`
-      : 'claude -p --dangerously-skip-permissions --verbose --output-format stream-json'
-  } else {
-    agentCommand = sessionId
-      ? `codex exec resume ${shellQuoteId(sessionId)} -c approval_policy=never -c 'sandbox_mode="danger-full-access"' --json -`
-      : 'codex exec -c approval_policy=never -s danger-full-access --json -'
-  }
+  const agentCommand = sessionId
+    ? buildResumeAgentCommand(agent, sessionId)
+    : buildFreshAgentCommand(agent)
   const prompt = sessionId
     ? `请继续 review。代码已更新,请先确认之前发现的问题是否已解决,再审查新改动。除 ${REVIEW_RESULT_RELATIVE_PATH} 外不要修改任何文件;必须使用写文件工具把最终结论写入该路径,格式为 {"passed":true|false,"issues":[...]};最后一行再输出同一个 JSON 作为兼容兜底。`
     : await buildReviewPrompt(ctx, workflow)
@@ -2016,7 +2065,17 @@ async function startReview(
         void postReviewComment(ctx, workflow.url, passed, issues)
       }
     }
-  })
+  }, sessionId ? {
+    staleSessionId: sessionId,
+    prepare: async () => {
+      const reloaded = await loadWorkflow(workflow.key)
+      if (reloaded && clearStaleSessionId(reloaded, 'review', sessionId)) await saveWorkflow(reloaded)
+      return {
+        command: buildFreshAgentCommand(agent),
+        prompt: await buildReviewPrompt(ctx, workflow),
+      }
+    },
+  } : undefined)
 
   return { ok: true, taskId: live.taskId }
 }
@@ -2113,12 +2172,17 @@ async function resumeDevelop(
       }
       await saveWorkflow(reloaded)
     }
-  })
+  }, sessionId ? {
+    staleSessionId: sessionId,
+    prepare: async () => {
+      const reloaded = await loadWorkflow(workflow.key)
+      if (reloaded && clearStaleSessionId(reloaded, 'dev', sessionId)) await saveWorkflow(reloaded)
+      return {
+        command: buildFreshAgentCommand(agent),
+        prompt: await buildFreshResumePrompt(ctx, workflow, extraContext),
+      }
+    },
+  } : undefined)
 
   return { ok: true, taskId: taskIdValue }
-}
-
-/** Quote an opaque id for a shell command (single-quote safe). */
-function shellQuoteId(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`
 }

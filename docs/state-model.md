@@ -68,6 +68,7 @@
 ### 软事实降级链(贯穿)
 
 - **会话 id 缺失** → resume 降级为「重新开发」(新会话)
+- **精确会话 id 被 agent 快速拒绝** → 清除 stale id,在同一 task/worktree 内仅回退一次全新会话;已完成 session 初始化或长时间运行后的普通失败不得触发回退
 - **review 结论缺失** → ①本地事件缓存 → ②comment meta → ③GitHub 原生 review(`reviews` 字段)→ ④「人工确认」(不自动合并、不自动返工)
 - **comment meta 缺失** → 只影响时间线展示,不影响判断
 

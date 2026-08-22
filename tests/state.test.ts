@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { applyDevRunOutcome, type IssueWorkflow } from '../src/state.ts'
+import { applyDevRunOutcome, clearStaleSessionId, type IssueWorkflow } from '../src/state.ts'
 
 function workflow(): IssueWorkflow {
   return {
@@ -42,4 +42,18 @@ test('successful development becomes review-ready without changing its worktree'
   assert.equal(state.devSessionId, 'thread-123')
   assert.equal(state.reviewResult, null)
   assert.equal(state.worktree, '/worktrees/r-issue-17')
+})
+
+test('stale session cleanup covers dev and review without erasing a newer id', () => {
+  const state = workflow()
+  state.devSessionId = 'dead-dev'
+  state.reviewSessionId = 'dead-review'
+  assert.equal(clearStaleSessionId(state, 'dev', 'dead-dev'), true)
+  assert.equal(state.devSessionId, null)
+  assert.equal(clearStaleSessionId(state, 'review', 'dead-review'), true)
+  assert.equal(state.reviewSessionId, null)
+
+  state.reviewSessionId = 'new-review'
+  assert.equal(clearStaleSessionId(state, 'review', 'dead-review'), false)
+  assert.equal(state.reviewSessionId, 'new-review')
 })

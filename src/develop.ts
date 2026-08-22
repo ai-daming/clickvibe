@@ -3,6 +3,15 @@ import { createHash, randomBytes } from 'node:crypto'
 export type DevelopAgent = 'codex' | 'claude' | 'dryrun'
 export type AgentAction = 'develop' | 'review' | 'resume'
 
+export const RESUME_REJECT_WINDOW_MS = 15_000
+
+/** Build a brand-new agent command; used after an exact resume id is rejected. */
+export function buildFreshAgentCommand(agent: Exclude<DevelopAgent, 'dryrun'>): string {
+  return agent === 'claude'
+    ? 'claude -p --dangerously-skip-permissions --verbose --output-format stream-json'
+    : 'codex exec -c approval_policy=never -s danger-full-access --json -'
+}
+
 /** Build the command that continues an existing development session. */
 export function buildResumeAgentCommand(agent: Exclude<DevelopAgent, 'dryrun'>, sessionId: string | null): string {
   if (agent === 'claude') {
@@ -13,6 +22,22 @@ export function buildResumeAgentCommand(agent: Exclude<DevelopAgent, 'dryrun'>, 
   return sessionId
     ? `codex exec resume ${shellQuote(sessionId)} -c approval_policy=never -c 'sandbox_mode="danger-full-access"' --json -`
     : 'codex exec resume --last -c approval_policy=never -c \'sandbox_mode="danger-full-access"\' --json -'
+}
+
+/** Only a quick failure before session initialization proves an exact id is stale. */
+export function shouldFallbackFromExactResume(facts: {
+  hadExactSessionId: boolean
+  status: 'running' | 'done' | 'failed' | 'stopped' | 'timed_out'
+  exitCode: number | null
+  elapsedMs: number
+  sawSessionId: boolean
+}): boolean {
+  return facts.hadExactSessionId
+    && facts.status === 'failed'
+    && facts.exitCode !== null
+    && facts.exitCode !== 0
+    && facts.elapsedMs <= RESUME_REJECT_WINDOW_MS
+    && !facts.sawSessionId
 }
 
 export interface GithubTarget {

@@ -1,9 +1,16 @@
 import assert from 'node:assert/strict'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer, request, type RequestListener } from 'node:http'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 import { apply, fetchRepositoryIssues } from '../src/index.ts'
+import { loadWorkflow, saveWorkflow, type IssueWorkflow } from '../src/state.ts'
 
-function createHandler(run?: (spec: { command: string }) => Promise<unknown>): RequestListener {
+function createHandler(
+  run?: (spec: { command: string }) => Promise<unknown>,
+  start?: (spec: { command: string; workdir?: string; stdin?: string }) => unknown,
+): RequestListener {
   let handler: RequestListener | null = null
   const ctx = {
     webServer: {
@@ -15,7 +22,7 @@ function createHandler(run?: (spec: { command: string }) => Promise<unknown>): R
     shell: {
       resolve(spec: unknown) { return spec },
       run: run ?? (() => { throw new Error('shell must not run for rejected requests') }),
-      start() { throw new Error('shell must not run for rejected requests') },
+      start: start ?? (() => { throw new Error('shell must not run for rejected requests') }),
     },
   }
   apply(ctx as never)
@@ -129,6 +136,147 @@ test('/projects route returns the configured-project envelope without invoking s
   const result = await post(createHandler(), '/clickvibe/api/projects', {})
   assert.equal(result.status, 200)
   assert.equal(Array.isArray((result.body as { projects?: unknown[] }).projects), true)
+})
+
+function interruptedWorkflow(key: string, url: string, worktree: string): IssueWorkflow {
+  return {
+    key, url, repoKey: 'o/r', worktree, branch: 'r-issue-17', stage: 'developing',
+    devAgent: 'codex', devTaskId: 'old-dev', devSessionId: 'dead-session', devInterrupted: true,
+    reviewAgent: 'codex', reviewTaskId: null, reviewSessionId: null,
+    reviewResult: null, prNumber: '29', issueState: 'OPEN', baseRef: 'origin/main @ abc',
+    updatedAt: 1, events: [],
+  }
+}
+
+async function waitForTask(listener: RequestListener, taskId: string): Promise<{ delta: string[] }> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const polled = await post(listener, '/clickvibe/api/develop/poll', { taskId, cursor: 0 })
+    const body = polled.body as { ok: boolean; done?: boolean; delta?: string[] }
+    if (body.done) return { delta: body.delta ?? [] }
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  throw new Error(`task ${taskId} did not finish`)
+}
+
+test('invalid exact dev session falls back once to a fresh session on the same task', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-dev-fallback-'))
+  process.env.HOME = tempHome
+  try {
+    const worktree = join(tempHome, 'worktree')
+    await mkdir(worktree, { recursive: true })
+    const workflow = interruptedWorkflow('o-r-917', 'https://github.com/o/r/issues/917', worktree)
+    await saveWorkflow(workflow)
+    const starts: Array<{ command: string; workdir?: string }> = []
+    const handler = createHandler(async (spec) => {
+      if (spec.command.startsWith('gh issue view')) return { exitCode: 0, stdout: { text: JSON.stringify({
+        url: workflow.url, title: 'resume issue', body: '## 验收标准\n- fallback', state: 'OPEN', updatedAt: 'now', comments: [],
+      }) }, stderr: { text: '' } }
+      if (spec.command.startsWith('gh api') || spec.command.startsWith('gh issue list')) {
+        return { exitCode: 0, stdout: { text: '[]' }, stderr: { text: '' } }
+      }
+      if (spec.command === 'git rev-parse --short HEAD') return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
+      return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+    }, (spec) => {
+      starts.push({ command: spec.command, workdir: spec.workdir })
+      const fresh = starts.length === 2
+      let read = false
+      return {
+        status: 'running', exitCode: fresh ? 0 : 1,
+        done: new Promise<void>((resolve) => setTimeout(resolve, 5)),
+        readOutput() {
+          if (read) return { delta: '', lossy: false }
+          read = true
+          return { delta: fresh ? '{"type":"thread.started","thread_id":"new-session"}\n' : 'no rollout found\n', lossy: false }
+        },
+        kill() { return true },
+      }
+    })
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+    const authorized = await post(handler, '/clickvibe/api/authorize', {
+      action: 'resume', url: workflow.url, agent: 'codex', context: '',
+    }, headers) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
+    const resumed = await post(handler, '/clickvibe/api/resume', {
+      url: workflow.url, agent: 'codex', context: '',
+      authorizationId: authorized.body.authorizationId,
+      authorizationDigest: authorized.body.authorizationDigest,
+    }, headers) as { status: number; body: { ok: boolean; taskId?: string } }
+    assert.equal(resumed.status, 200, JSON.stringify(resumed.body))
+    assert.ok(resumed.body.taskId)
+    const completed = await waitForTask(handler, resumed.body.taskId)
+    assert.equal(starts.length, 2)
+    assert.match(starts[0].command, /exec resume 'dead-session'/)
+    assert.equal(starts[1].command, 'codex exec -c approval_policy=never -s danger-full-access --json -')
+    assert.deepEqual(starts.map((start) => start.workdir), [worktree, worktree])
+    assert.ok(completed.delta.some((line) => line.includes('回退全新会话')))
+    assert.equal((await loadWorkflow(workflow.key))?.devSessionId, 'new-session')
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('invalid exact review session clears the stale id and falls back to a fresh review', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-review-fallback-'))
+  process.env.HOME = tempHome
+  try {
+    const worktree = join(tempHome, 'worktree')
+    await mkdir(worktree, { recursive: true })
+    const workflow = interruptedWorkflow('o-r-918', 'https://github.com/o/r/issues/918', worktree)
+    workflow.stage = 'review-ready'
+    workflow.reviewSessionId = 'dead-review'
+    await saveWorkflow(workflow)
+    const starts: string[] = []
+    const handler = createHandler(async (spec) => {
+      if (spec.command.startsWith('gh pr view')) return { exitCode: 0, stdout: { text: 'main' }, stderr: { text: '' } }
+      if (spec.command === 'git rev-parse --short HEAD') return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
+      return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+    }, (spec) => {
+      starts.push(spec.command)
+      const fresh = starts.length === 2
+      let read = false
+      return {
+        status: 'running', exitCode: fresh ? 0 : 1,
+        done: (async () => {
+          if (fresh) {
+            await mkdir(join(worktree, '.clickvibe'), { recursive: true })
+            await writeFile(join(worktree, '.clickvibe', 'review-result.json'), '{"passed":true,"issues":[]}')
+          }
+          await new Promise((resolve) => setTimeout(resolve, 5))
+        })(),
+        readOutput() {
+          if (read) return { delta: '', lossy: false }
+          read = true
+          return { delta: fresh ? '{"type":"thread.started","thread_id":"new-review"}\n' : 'no rollout found\n', lossy: false }
+        },
+        kill() { return true },
+      }
+    })
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+    const authorized = await post(handler, '/clickvibe/api/authorize', {
+      action: 'review', url: workflow.url, agent: 'codex', context: '',
+    }, headers) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
+    const reviewed = await post(handler, '/clickvibe/api/review', {
+      url: workflow.url, agent: 'codex', context: '',
+      authorizationId: authorized.body.authorizationId,
+      authorizationDigest: authorized.body.authorizationDigest,
+    }, headers) as { status: number; body: { ok: boolean; taskId?: string } }
+    assert.equal(reviewed.status, 200, JSON.stringify(reviewed.body))
+    assert.ok(reviewed.body.taskId)
+    await waitForTask(handler, reviewed.body.taskId)
+    assert.equal(starts.length, 2)
+    assert.match(starts[0], /exec resume 'dead-review'/)
+    assert.equal(starts[1], 'codex exec -c approval_policy=never -s danger-full-access --json -')
+    const reloaded = await loadWorkflow(workflow.key)
+    assert.equal(reloaded?.reviewSessionId, 'new-review')
+    assert.equal(reloaded?.reviewResult?.passed, true)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
 })
 
 

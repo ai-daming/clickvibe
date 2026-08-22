@@ -71,6 +71,18 @@ export function applyDevRunOutcome(
   return completed
 }
 
+/** Clear only the rejected id, never a newer session captured concurrently. */
+export function clearStaleSessionId(
+  workflow: IssueWorkflow,
+  kind: 'dev' | 'review',
+  rejectedSessionId: string,
+): boolean {
+  const field = kind === 'dev' ? 'devSessionId' : 'reviewSessionId'
+  if (workflow[field] !== rejectedSessionId) return false
+  workflow[field] = null
+  return true
+}
+
 /** Append one event to a workflow and persist. */
 export async function appendEvent(workflow: IssueWorkflow, event: WorkflowEvent): Promise<void> {
   workflow.events = workflow.events ?? []
