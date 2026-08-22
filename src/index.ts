@@ -70,6 +70,7 @@ import {
   REVIEW_RESULT_RELATIVE_PATH,
 } from './review-result.ts'
 import { ExclusiveTaskGate } from './task-gate.ts'
+import { RepositoryFreshnessGate, type RepositoryFreshness } from './repo-freshness.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -129,7 +130,12 @@ const PR_FIELDS = [
 interface ClickVibeConfig {
   repos: Record<string, string>
   worktreeRoot: string
+  /** Remote-ref refresh interval for read paths. Clamped to 30-60 seconds. */
+  fetchTtlSeconds?: number
 }
+
+const DEFAULT_FETCH_TTL_SECONDS = 45
+const repositoryFreshness = new RepositoryFreshnessGate()
 
 /** In-memory live task handle: the running process + a status-line buffer. */
 interface LiveTask {
@@ -184,11 +190,13 @@ async function loadConfig(): Promise<ClickVibeConfig> {
     return {
       repos: parsed?.repos ?? {},
       worktreeRoot: parsed?.worktreeRoot ? expandHome(parsed.worktreeRoot) : join(homedir(), '.clickvibe', 'worktrees'),
+      fetchTtlSeconds: parsed?.fetchTtlSeconds,
     }
   } catch {
     return {
       repos: {},
       worktreeRoot: join(homedir(), '.clickvibe', 'worktrees'),
+      fetchTtlSeconds: DEFAULT_FETCH_TTL_SECONDS,
     }
   }
 }
@@ -300,6 +308,30 @@ async function runCommand(
     throw new Error(`命令输出超过上限且无 spill 文件,无法获取完整输出`)
   }
   return out.text.trim()
+}
+
+function fetchTtlMs(config: ClickVibeConfig): number {
+  const seconds = Number(config.fetchTtlSeconds ?? DEFAULT_FETCH_TTL_SECONDS)
+  return Math.min(60, Math.max(30, Number.isFinite(seconds) ? seconds : DEFAULT_FETCH_TTL_SECONDS)) * 1000
+}
+
+async function ensureConfiguredRepoFresh(
+  ctx: Context,
+  config: ClickVibeConfig,
+  repoKey: string,
+  force = false,
+): Promise<RepositoryFreshness | null> {
+  const configuredPath = config.repos[repoKey]
+  if (!configuredPath) return null
+  const repoPath = resolve(expandHome(configuredPath))
+  if (!existsSync(repoPath)) return null
+  return repositoryFreshness.ensure(repoPath, fetchTtlMs(config), async () => {
+    await runCommand(ctx, 'git fetch origin --prune', {
+      workdir: repoPath,
+      timeoutMs: 60_000,
+      sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: repoPath },
+    })
+  }, force)
 }
 
 /** Read the current HEAD short-hash of a worktree (empty string on failure). */
@@ -691,14 +723,33 @@ export function apply(ctx: Context): void {
         return
       }
       if (method === 'state') {
-        const filter = payload as { url?: unknown; repoKey?: unknown } | undefined
+        const filter = payload as { url?: unknown; repoKey?: unknown; forceRefresh?: unknown } | undefined
         const url = String(filter?.url ?? '')
         const repoKey = String(filter?.repoKey ?? '')
+        const config = await loadConfig()
         const workflows = (await loadAllWorkflows()).filter((workflow) =>
           (url === '' || workflow.url === url) && (repoKey === '' || workflow.repoKey === repoKey),
         )
-        const enriched = await enrichWorkflowStates(ctx, workflows)
-        writeJson(res, 200, { ok: true, workflows: enriched })
+        const parsedRepo = parseUrl(url)
+        const repoKeys = new Set(
+          repoKey ? [repoKey]
+            : parsedRepo ? [`${parsedRepo.owner}/${parsedRepo.repo}`]
+              : workflows.map((workflow) => workflow.repoKey),
+        )
+        const freshnesses = (await Promise.all([...repoKeys].map((key) =>
+          ensureConfiguredRepoFresh(ctx, config, key, filter?.forceRefresh === true),
+        ))).filter((value): value is RepositoryFreshness => value !== null)
+        const enriched = await enrichWorkflowStates(ctx, workflows, config)
+        const freshness = freshnesses.length === 0 ? null : {
+          stale: freshnesses.some((value) => value.stale),
+          refreshed: freshnesses.some((value) => value.refreshed),
+          lastAttemptAt: Math.max(...freshnesses.map((value) => value.lastAttemptAt)),
+          lastSuccessAt: freshnesses.every((value) => value.lastSuccessAt !== null)
+            ? Math.min(...freshnesses.map((value) => value.lastSuccessAt as number))
+            : null,
+          error: freshnesses.find((value) => value.error)?.error,
+        }
+        writeJson(res, 200, { ok: true, workflows: enriched, freshness })
         return
       }
       if (method === 'authorize') {
@@ -943,13 +994,15 @@ export async function fetchRepositoryIssues(
   payload: unknown,
   overrides: { config?: ClickVibeConfig; workflows?: IssueWorkflow[] } = {},
 ): Promise<
-  | { ok: true; repoKey: string; issues: unknown[] }
+  | { ok: true; repoKey: string; issues: unknown[]; freshness: RepositoryFreshness | null }
   | { ok: false; error: string }
 > {
   const repoKey = String((payload as { repoKey?: unknown } | undefined)?.repoKey ?? '').trim()
   const config = overrides.config ?? await loadConfig()
   const configuredPath = config.repos[repoKey]
   if (!configuredPath) return { ok: false, error: `未配置项目 ${repoKey}` }
+  const forceRefresh = (payload as { forceRefresh?: unknown } | undefined)?.forceRefresh === true
+  const freshness = await ensureConfiguredRepoFresh(ctx, config, repoKey, forceRefresh)
 
   const issueCommand = `gh api --paginate --slurp ${shellQuote(`repos/${repoKey}/issues?state=all&per_page=100`)}`
   const prCommand = `gh api --paginate --slurp ${shellQuote(`repos/${repoKey}/pulls?state=all&per_page=100`)}`
@@ -1069,7 +1122,7 @@ export async function fetchRepositoryIssues(
       })
       return { ...issue, blockedBy, workflow: derived }
     }))
-    return { ok: true, repoKey, issues }
+    return { ok: true, repoKey, issues, freshness }
   } catch (error) {
     return { ok: false, error: `项目 issue 抓取失败: ${String(error instanceof Error ? error.message : error)}` }
   }
@@ -2163,6 +2216,19 @@ async function startReview(
   if (!reservation.created) return { ok: true, taskId: reservation.task.taskId }
   const live = reservation.task
   await resetLog(workflow.key, 'review')
+
+  // Review must inspect the branch against current remote refs. Keep review
+  // available during an outage, but make the degraded input explicit in its log.
+  try {
+    await runCommand(ctx, 'git fetch origin --prune', {
+      workdir: workflow.worktree,
+      timeoutMs: 60_000,
+      sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: workflow.worktree },
+    })
+    pushTaskLine(live, '[clickvibe] review 前已同步远端(origin)')
+  } catch (error) {
+    pushTaskLine(live, `[clickvibe] review 前 git fetch 失败(继续): ${String(error instanceof Error ? error.message : error)}`)
+  }
 
   if (ownedReviewSession.invalid) {
     await saveWorkflow(workflow)
