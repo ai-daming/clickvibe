@@ -42,7 +42,15 @@ import {
   type DevelopAgent,
   type IssuePromptSnapshot,
 } from './develop.ts'
-import { deriveNextAction, deriveWorkflowStatus, workflowBaseBranch, type NextAction, type WorkflowFacts } from './state-view.ts'
+import {
+  deriveNextAction,
+  deriveWorkflowStatus,
+  workflowBaseBranch,
+  type IssueContractStatus,
+  type IssueContractUnknownReason,
+  type NextAction,
+  type WorkflowFacts,
+} from './state-view.ts'
 import {
   appendEvent,
   appendLog,
@@ -363,6 +371,8 @@ interface WorkflowDerived {
   reviewedIssueUpdatedAt: string | null
   currentIssueUpdatedAt: string | null
   issueContractCurrent: boolean
+  issueContractStatus: IssueContractStatus
+  issueContractUnknownReason: IssueContractUnknownReason
   hasNewCommits: boolean
   verdictCurrent: boolean
   nextAction: NextAction
@@ -567,9 +577,19 @@ export async function deriveWorkflowState(
   const reviewedHash = lastReviewHash ?? (githubReviewPassed !== null ? head : null)
   const currentIssueContract = options.issueContract ?? null
   // updatedAt 是审计证据；正文 hash 才是契约身份，避免评论/标签更新误杀结论。
-  const issueContractCurrent = lastReviewContract !== null
-    && currentIssueContract !== null
-    && lastReviewContract.bodyHash === currentIssueContract.bodyHash
+  const issueContractStatus: IssueContractStatus = lastReviewContract === null
+    ? 'unknown'
+    : currentIssueContract === null
+      ? 'unknown'
+      : lastReviewContract.bodyHash === currentIssueContract.bodyHash
+        ? 'current'
+        : 'changed'
+  const issueContractUnknownReason: IssueContractUnknownReason = issueContractStatus !== 'unknown'
+    ? null
+    : lastReviewContract === null
+      ? 'missing-review-snapshot'
+      : 'current-contract-unavailable'
+  const issueContractCurrent = issueContractStatus === 'current'
   // 结论同时绑定当前 HEAD 与验收契约；旧事件缺契约快照时 fail closed。
   const verdictCurrent = reviewPassed !== null
     && head !== null
@@ -593,7 +613,8 @@ export async function deriveWorkflowState(
     head,
     reviewedHash,
     reviewPassed,
-    issueContractCurrent,
+    issueContractStatus,
+    issueContractUnknownReason,
     hasNewCommits,
     needsSync,
     mergeConflict,
@@ -633,6 +654,8 @@ export async function deriveWorkflowState(
       reviewedIssueUpdatedAt: lastReviewContract?.updatedAt ?? null,
       currentIssueUpdatedAt: currentIssueContract?.updatedAt ?? null,
       issueContractCurrent,
+      issueContractStatus,
+      issueContractUnknownReason,
       hasNewCommits,
       verdictCurrent,
       nextAction,
@@ -1160,15 +1183,12 @@ interface ReviewIssueContract {
 async function fetchIssueContract(ctx: Context, url: string): Promise<ReviewIssueContract> {
   const parsed = parseUrl(url)
   if (!parsed || parsed.kind !== 'issue') throw new Error('review workflow 缺少有效 Issue URL')
-  const spec = ctx.shell.resolve({
-    command: `gh issue view ${shellQuote(url)} --json title,body,state,updatedAt`,
-    timeoutMs: 20_000,
-  })
-  const result = await ctx.shell.run(spec)
-  if (result.exitCode !== 0) {
-    throw new Error(result.stderr?.text?.trim() || `读取 Issue 验收契约失败(exit ${result.exitCode})`)
-  }
-  const item = JSON.parse(result.stdout.text) as Record<string, unknown>
+  const output = await runCommand(
+    ctx,
+    `gh issue view ${shellQuote(url)} --json title,body,state,updatedAt`,
+    { timeoutMs: 5_000 },
+  )
+  const item = JSON.parse(output) as Record<string, unknown>
   const body = String(item.body ?? '')
   return {
     title: String(item.title ?? ''),
@@ -2138,19 +2158,10 @@ async function startReview(
   if (!existsSync(workflow.worktree)) {
     return { ok: false, error: `worktree 不存在: ${workflow.worktree}` }
   }
-  let reviewIssue: ReviewIssueContract
-  try {
-    reviewIssue = await fetchIssueContract(ctx, workflow.url)
-  } catch (error) {
-    return { ok: false, error: `无法冻结 Issue 验收契约: ${String(error instanceof Error ? error.message : error)}` }
-  }
-  if (reviewIssue.state !== 'OPEN') return { ok: false, error: '只有 OPEN Issue 可以启动 review' }
-  const reviewedHead = await readWorktreeHead(ctx, workflow.worktree)
-  if (!reviewedHead) return { ok: false, error: '无法冻结被审 HEAD,请检查 worktree 后重试' }
   const ownedReviewSession = resolveSessionForAgent(workflow, 'review', agent)
   const sessionId = ownedReviewSession.sessionId
-  // 必须在第一个 await 之前同步占位。只检查持久化 reviewTaskId 会有 TOCTOU:
-  // 两个请求可同时读到旧 workflow,再在清理结果文件时交错并双开 review。
+  // workflow 校验后、冻结契约/HEAD 等任何 await 之前同步占位。重复请求会立即
+  // 复用 taskId,不会重复支付 GitHub 超时,也不会交错清理结论文件并双开 review。
   let reservation: { task: LiveTask; created: boolean }
   try {
     reservation = reviewTaskGate.reserve(workflow.key, () => {
@@ -2162,6 +2173,23 @@ async function startReview(
   }
   if (!reservation.created) return { ok: true, taskId: reservation.task.taskId }
   const live = reservation.task
+
+  let reviewIssue: ReviewIssueContract
+  try {
+    reviewIssue = await fetchIssueContract(ctx, workflow.url)
+  } catch (error) {
+    finishTask(live, 'failed', 1)
+    return { ok: false, error: `无法冻结 Issue 验收契约: ${String(error instanceof Error ? error.message : error)}` }
+  }
+  if (reviewIssue.state !== 'OPEN') {
+    finishTask(live, 'failed', 1)
+    return { ok: false, error: '只有 OPEN Issue 可以启动 review' }
+  }
+  const reviewedHead = await readWorktreeHead(ctx, workflow.worktree)
+  if (!reviewedHead) {
+    finishTask(live, 'failed', 1)
+    return { ok: false, error: '无法冻结被审 HEAD,请检查 worktree 后重试' }
+  }
 
   if (ownedReviewSession.invalid) {
     await saveWorkflow(workflow)

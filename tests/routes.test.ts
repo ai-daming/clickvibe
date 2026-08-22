@@ -234,10 +234,16 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     const starts: string[] = []
     const reviewedBody = '## 验收标准\n- frozen review contract'
     const reviewedUpdatedAt = '2026-08-22T01:02:03Z'
+    const issueSpill = join(tempHome, 'issue-contract.json')
+    await writeFile(issueSpill, JSON.stringify({
+      title: 'review issue', body: reviewedBody, state: 'OPEN', updatedAt: reviewedUpdatedAt,
+    }))
     const handler = createHandler(async (spec) => {
-      if (spec.command.startsWith('gh issue view')) return { exitCode: 0, stdout: { text: JSON.stringify({
-        title: 'review issue', body: reviewedBody, state: 'OPEN', updatedAt: reviewedUpdatedAt,
-      }) }, stderr: { text: '' } }
+      if (spec.command.startsWith('gh issue view')) return {
+        exitCode: 0,
+        stdout: { text: 'truncated tail', truncated: true, spillPath: issueSpill },
+        stderr: { text: '' },
+      }
       if (spec.command.startsWith('gh pr view')) return { exitCode: 0, stdout: { text: 'main' }, stderr: { text: '' } }
       if (spec.command === 'git rev-parse --short HEAD') return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
       return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
@@ -284,6 +290,77 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     assert.deepEqual(reloaded?.events.at(-1)?.issueContract, {
       bodyHash: issueBodyHash(reviewedBody), updatedAt: reviewedUpdatedAt,
     })
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('duplicate review requests reuse the reserved task before fetching the Issue contract', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-review-gate-'))
+  process.env.HOME = tempHome
+  try {
+    const worktree = join(tempHome, 'worktree')
+    await mkdir(worktree, { recursive: true })
+    const workflow = interruptedWorkflow('o-r-920', 'https://github.com/o/r/issues/920', worktree)
+    workflow.stage = 'review-ready'
+    await saveWorkflow(workflow)
+
+    let issueCalls = 0
+    let notifyIssueEntered!: () => void
+    let releaseIssue!: () => void
+    const issueEntered = new Promise<void>((resolve) => { notifyIssueEntered = resolve })
+    const issueBlocked = new Promise<void>((resolve) => { releaseIssue = resolve })
+    let finishProcess!: () => void
+    const processDone = new Promise<void>((resolve) => { finishProcess = resolve })
+    const handler = createHandler(async (spec) => {
+      if (spec.command.startsWith('gh issue view')) {
+        issueCalls += 1
+        notifyIssueEntered()
+        await issueBlocked
+        return { exitCode: 0, stdout: { text: JSON.stringify({
+          title: 'review issue', body: '## 验收标准\n- gate', state: 'OPEN', updatedAt: '2026-08-22T03:04:05Z',
+        }) }, stderr: { text: '' } }
+      }
+      if (spec.command.startsWith('gh pr view')) return { exitCode: 0, stdout: { text: 'main' }, stderr: { text: '' } }
+      if (spec.command === 'git rev-parse --short HEAD') return { exitCode: 0, stdout: { text: 'gate123' }, stderr: { text: '' } }
+      return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+    }, () => ({
+      status: 'running', exitCode: 0, done: processDone,
+      readOutput() { return { delta: '', lossy: false } },
+      kill() { return true },
+    }))
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+    const authorize = async () => post(handler, '/clickvibe/api/authorize', {
+      action: 'review', url: workflow.url, agent: 'codex', context: '',
+    }, headers) as Promise<{ status: number; body: { authorizationId?: string; authorizationDigest?: string } }>
+    const [auth1, auth2] = await Promise.all([authorize(), authorize()])
+    const reviewPayload = (auth: typeof auth1) => ({
+      url: workflow.url, agent: 'codex', context: '',
+      authorizationId: auth.body.authorizationId,
+      authorizationDigest: auth.body.authorizationDigest,
+    })
+
+    const firstPromise = post(handler, '/clickvibe/api/review', reviewPayload(auth1), headers)
+    await issueEntered
+    const second = await Promise.race([
+      post(handler, '/clickvibe/api/review', reviewPayload(auth2), headers),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('duplicate review waited for contract fetch')), 200)),
+    ]) as { status: number; body: { taskId?: string } }
+    assert.equal(second.status, 200)
+    assert.equal(issueCalls, 1)
+
+    releaseIssue()
+    const first = await firstPromise as { status: number; body: { taskId?: string } }
+    assert.equal(first.status, 200)
+    assert.equal(first.body.taskId, second.body.taskId)
+    await mkdir(join(worktree, '.clickvibe'), { recursive: true })
+    await writeFile(join(worktree, '.clickvibe', 'review-result.json'), '{"passed":true,"issues":[]}')
+    finishProcess()
+    assert.ok(first.body.taskId)
+    await waitForTask(handler, first.body.taskId)
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome

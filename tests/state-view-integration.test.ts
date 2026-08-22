@@ -158,11 +158,57 @@ test('review verdict goes stale when the issue acceptance contract changes', asy
 
     const stale = (await deriveWorkflowState(ctx, wf, { issueContract: currentContract })).derived
     assert.equal(stale.reviewedHash, head)
+    assert.equal(stale.issueContractStatus, 'changed')
     assert.equal(stale.issueContractCurrent, false)
     assert.equal(stale.verdictCurrent, false)
     assert.equal(stale.status, 'review-ready')
     assert.equal(stale.nextAction.kind, 'review')
     assert.match(stale.nextAction.hint, /验收已变更/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('GitHub-only approval is fail-closed with an explicit missing-snapshot reason', async () => {
+  const { root, worktree, wt } = await setupRepo()
+  try {
+    await wt('commit', '--allow-empty', '-m', 'dev work C')
+    const currentContract = { bodyHash: issueBodyHash('## 验收标准\n- A'), updatedAt: '2026-08-22T01:00:00Z' }
+    const derived = (await deriveWorkflowState(ctx, workflow({ worktree, prNumber: '9' }), {
+      pr: {
+        number: '9', state: 'OPEN', mergedAt: null, headRefName: 'clickvibe-issue-5',
+        url: 'https://github.com/o/r/pull/9', reviewDecision: 'APPROVED',
+      },
+      issueContract: currentContract,
+    })).derived
+    assert.equal(derived.issueContractStatus, 'unknown')
+    assert.equal(derived.issueContractUnknownReason, 'missing-review-snapshot')
+    assert.equal(derived.verdictCurrent, false)
+    assert.equal(derived.status, 'review-ready')
+    assert.equal(derived.nextAction.kind, 'review')
+    assert.match(derived.nextAction.hint, /缺少验收契约快照/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('an unavailable live issue contract blocks merge as unknown instead of changed', async () => {
+  const { root, worktree, wt } = await setupRepo()
+  try {
+    await wt('commit', '--allow-empty', '-m', 'dev work C')
+    const head = (await wt('rev-parse', '--short', 'HEAD')).stdout.trim()
+    const reviewedContract = { bodyHash: issueBodyHash('## 验收标准\n- A'), updatedAt: '2026-08-22T00:00:00Z' }
+    const wf = workflow({
+      worktree, prNumber: '9', stage: 'passed', reviewResult: { passed: true, issues: [] },
+      events: [{ kind: 'review', at: new Date().toISOString(), hash: head, verdict: { passed: true, issues: [] }, issueContract: reviewedContract }],
+    })
+    const derived = (await deriveWorkflowState(ctx, wf, { issueContract: null })).derived
+    assert.equal(derived.issueContractStatus, 'unknown')
+    assert.equal(derived.issueContractUnknownReason, 'current-contract-unavailable')
+    assert.equal(derived.verdictCurrent, false)
+    assert.equal(derived.nextAction.kind, 'none')
+    assert.equal(derived.nextAction.label, '刷新验收状态')
+    assert.doesNotMatch(derived.nextAction.hint, /已变更/)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

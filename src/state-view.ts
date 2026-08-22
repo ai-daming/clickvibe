@@ -43,6 +43,8 @@ export function githubCompareUrl(
 
 export type WorkflowStageInput = 'idle' | 'developing' | 'review-ready' | 'reviewing' | 'passed'
 export type WorkflowStatus = WorkflowStageInput
+export type IssueContractStatus = 'current' | 'changed' | 'unknown'
+export type IssueContractUnknownReason = 'missing-review-snapshot' | 'current-contract-unavailable' | null
 
 export interface WorkflowFacts {
   /** The issue itself is still open (closed issues have no next action). */
@@ -66,8 +68,10 @@ export interface WorkflowFacts {
   reviewedHash: string | null
   /** Latest review verdict; null when there is no verdict yet. */
   reviewPassed: boolean | null
-  /** The reviewed issue-body contract still matches the live issue body. */
-  issueContractCurrent: boolean
+  /** Comparison of the reviewed Issue body snapshot with the live Issue body. */
+  issueContractStatus: IssueContractStatus
+  /** Why the contract comparison is unknown; null for current/changed. */
+  issueContractUnknownReason: IssueContractUnknownReason
   /** HEAD moved beyond the last recorded dev/rework event. */
   hasNewCommits: boolean
   /** Worktree is behind its base / remote branch and should be synced. */
@@ -93,6 +97,7 @@ export function deriveWorkflowStatus(facts: WorkflowFacts): WorkflowStatus {
     && facts.head !== null
     && facts.reviewedHash !== null
     && facts.head === facts.reviewedHash
+    && facts.issueContractStatus === 'current'
 
   if (facts.prMerged) return 'passed'
   // A live task outranks the linked PR and any verdict bound to an older HEAD.
@@ -101,6 +106,7 @@ export function deriveWorkflowStatus(facts: WorkflowFacts): WorkflowStatus {
   // unless there is positive evidence of a newer commit. This matches the
   // pre-derived-state behavior without treating a known changed HEAD as current.
   const passedWithoutContradictingHead = facts.reviewPassed === true
+    && facts.issueContractStatus === 'current'
     && (verdictCurrent || (facts.head === null && !facts.hasNewCommits))
   if (passedWithoutContradictingHead) return 'passed'
   if (facts.reviewPassed !== null || facts.prNumber || facts.stage === 'review-ready') return 'review-ready'
@@ -113,12 +119,19 @@ export function workflowStatusLabel(
   status: WorkflowStatus,
   reviewPassed: boolean | null,
   verdictCurrent: boolean | undefined,
+  issueContractStatus?: IssueContractStatus,
+  issueContractUnknownReason?: IssueContractUnknownReason,
 ): string {
   switch (status) {
     case 'idle': return '未开发'
     case 'developing': return '开发中'
     case 'review-ready':
-      if (reviewPassed !== null && verdictCurrent === false) return '待重新 Review'
+      if (reviewPassed !== null && verdictCurrent === false) {
+        if (issueContractStatus === 'unknown' && issueContractUnknownReason === 'current-contract-unavailable') {
+          return '验收状态未知'
+        }
+        return '待重新 Review'
+      }
       if (reviewPassed === true) return 'Review 通过'
       if (reviewPassed === false) return 'Review 未通过'
       return '待 review'
@@ -221,13 +234,18 @@ export function deriveNextAction(facts: WorkflowFacts): NextAction {
       if (facts.reviewPassed === null) {
         return action('review', 'Review', '开发完成,审查代码改动')
       }
-      // 契约漂移优先于旧 verdict 的通过/失败语义；旧结论评审的已不是当前需求。
-      if (!facts.issueContractCurrent) {
+      // 契约证据优先于旧 verdict 的通过/失败语义。
+      if (facts.issueContractStatus === 'changed') {
         return action(
           'review',
           '重新 Review',
           '验收已变更,需按当前 Issue 正文重新审查',
         )
+      }
+      if (facts.issueContractStatus === 'unknown') {
+        return facts.issueContractUnknownReason === 'missing-review-snapshot'
+          ? action('review', '重新 Review', '现有 GitHub approval 缺少验收契约快照,需由 ClickVibe 重新 Review')
+          : action('none', '刷新验收状态', '暂时无法读取当前验收契约,已暂停合并;请刷新后重试')
       }
       // 未通过 → 带意见返工(无论 HEAD 是否已变化;agent 会重读当前代码)。
       if (!facts.reviewPassed) {
@@ -250,8 +268,13 @@ export function deriveNextAction(facts: WorkflowFacts): NextAction {
       if (facts.head === null || facts.head !== facts.reviewedHash) {
         return action('review', '重新 Review', '上次通过的结论针对旧提交,当前 HEAD 已变化,需重新审查')
       }
-      if (!facts.issueContractCurrent) {
+      if (facts.issueContractStatus === 'changed') {
         return action('review', '重新 Review', '验收已变更,需按当前 Issue 正文重新审查')
+      }
+      if (facts.issueContractStatus === 'unknown') {
+        return facts.issueContractUnknownReason === 'missing-review-snapshot'
+          ? action('review', '重新 Review', '现有 GitHub approval 缺少验收契约快照,需由 ClickVibe 重新 Review')
+          : action('none', '刷新验收状态', '暂时无法读取当前验收契约,已暂停合并;请刷新后重试')
       }
       return facts.prNumber
         ? action('merge', '合并 PR', 'Review 通过,打开 PR 完成合并')

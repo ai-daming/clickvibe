@@ -20,7 +20,8 @@ function facts(overrides: Partial<WorkflowFacts> = {}): WorkflowFacts {
     head: 'a1b2c3d',
     reviewedHash: null,
     reviewPassed: null,
-    issueContractCurrent: true,
+    issueContractStatus: 'current',
+    issueContractUnknownReason: null,
     hasNewCommits: false,
     needsSync: false,
     ...overrides,
@@ -92,7 +93,7 @@ test('a current passed verdict passes while a known changed head requires review
   })), 'passed')
   assert.equal(deriveWorkflowStatus(facts({
     stage: 'review-ready', prNumber: '9', reviewPassed: true,
-    reviewedHash: 'a1b2c3d', head: 'e5f6g7',
+    reviewedHash: 'a1b2c3d', head: 'e5f6g7', issueContractStatus: 'changed',
   })), 'review-ready')
   assert.equal(deriveWorkflowStatus(facts({
     stage: 'review-ready', prNumber: null, reviewPassed: false,
@@ -207,11 +208,35 @@ test('a passed verdict bound to an old head must be re-reviewed', () => {
 test('a passed verdict bound to an old issue contract must be re-reviewed', () => {
   const next = deriveNextAction(facts({
     stage: 'review-ready', reviewPassed: true, reviewedHash: 'a1b2c3d', head: 'a1b2c3d',
-    issueContractCurrent: false, prNumber: '9',
+    issueContractStatus: 'changed', prNumber: '9',
   }))
   assert.equal(next.kind, 'review')
   assert.equal(next.label, '重新 Review')
   assert.match(next.hint, /验收已变更/)
+})
+
+test('a temporarily unavailable current contract blocks merge without claiming it changed', () => {
+  const next = deriveNextAction(facts({
+    stage: 'passed', reviewPassed: true, reviewedHash: 'a1b2c3d', head: 'a1b2c3d',
+    issueContractStatus: 'unknown', issueContractUnknownReason: 'current-contract-unavailable', prNumber: '9',
+  }))
+  assert.equal(next.kind, 'none')
+  assert.equal(next.label, '刷新验收状态')
+  assert.match(next.hint, /暂时无法读取/)
+  assert.doesNotMatch(next.hint, /已变更/)
+  assert.equal(deriveWorkflowStatus(facts({
+    stage: 'passed', reviewPassed: true, reviewedHash: 'a1b2c3d', head: 'a1b2c3d',
+    issueContractStatus: 'unknown', issueContractUnknownReason: 'current-contract-unavailable', prNumber: '9',
+  })), 'review-ready')
+})
+
+test('a GitHub-only approval without a review snapshot explicitly requires ClickVibe review', () => {
+  const next = deriveNextAction(facts({
+    stage: 'review-ready', reviewPassed: true, reviewedHash: 'a1b2c3d', head: 'a1b2c3d',
+    issueContractStatus: 'unknown', issueContractUnknownReason: 'missing-review-snapshot', prNumber: '9',
+  }))
+  assert.equal(next.kind, 'review')
+  assert.match(next.hint, /缺少验收契约快照/)
 })
 
 test('passed stage with a PR merges', () => {

@@ -657,6 +657,8 @@ interface Workflow {
     reviewedIssueUpdatedAt: string | null
     currentIssueUpdatedAt: string | null
     issueContractCurrent: boolean
+    issueContractStatus: 'current' | 'changed' | 'unknown'
+    issueContractUnknownReason: 'missing-review-snapshot' | 'current-contract-unavailable' | null
     hasNewCommits: boolean
     verdictCurrent: boolean
     nextAction: NextAction
@@ -691,6 +693,8 @@ function stageLabel(stage: Workflow['stage'], workflow: Workflow | null): string
     stage,
     workflow?.reviewResult?.passed ?? null,
     workflow?.derived?.verdictCurrent,
+    workflow?.derived?.issueContractStatus,
+    workflow?.derived?.issueContractUnknownReason,
   )
 }
 
@@ -1009,8 +1013,12 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
             ? (workflow.reviewResult.passed
               ? `✅ Review 通过(针对提交 ${derived.reviewedHash ?? '?'})`
               : `❌ Review 发现 ${workflow.reviewResult.issues.length} 个问题(针对提交 ${derived.reviewedHash ?? '?'})`)
-            : derived && !derived.issueContractCurrent
+            : derived?.issueContractStatus === 'changed'
               ? `⏳ 验收已变更,需重新 Review(原契约 ${derived.reviewedIssueBodyHash?.slice(0, 12) ?? '?'},当前 ${derived.currentIssueBodyHash?.slice(0, 12) ?? '?'})`
+              : derived?.issueContractUnknownReason === 'missing-review-snapshot'
+                ? '⏳ 现有 Review 结论缺少验收契约快照,需重新 Review'
+                : derived?.issueContractUnknownReason === 'current-contract-unavailable'
+                  ? '⏸ 暂时无法读取当前验收契约,合并已暂停;请刷新后重试'
               : `⏳ Review 结论针对旧提交 ${derived?.reviewedHash ?? '?'},当前 HEAD ${derived?.head ?? '?'} 已变化,结论已过期`}
         </div>
       ) : null}
