@@ -39,6 +39,8 @@
 | issue CLOSED(无论其他) | 无(展示"已关闭") |
 | PR merged | 无(展示"✅ 已交付") |
 
+例外：PR 已 merged 但已确认的清理链尚未完成时，保留「重试清理」；workflow 归档完成后才进入上表的无动作终态。
+
 ### P1 任务在跑(进程活着)
 
 | 状态事实 | 按钮 |
@@ -85,7 +87,7 @@
 ## 四、与现状的差异(落地清单)
 
 1. **去掉 workflow 门槛**:状态推导入口从"已持久化 workflow"改为"GitHub 枚举的每个 open issue"。对无 workflow 的 issue,用约定算候选 worktree/分支,直接查 git 填事实(worktree 无 → head=null;分支无 → 无内容;PR 用 `gh pr list --head <branch>` 查)。`deriveNextAction` 纯函数已支持 idle 分支,缺的只是入口。**回归示例**:本次 "#5 后从未开发过的 issue 不显示开发按钮" 就是 workflow 门槛的症状。
-2. **补 PR 状态查询**:当前 `/state` 里 `prMerged` 写死 `false`(注释:需要网络查询,/state 不做网络 IO)。合并状态应实时查 GitHub(或按需 + 短缓存),否则已合并的 PR 还显示"合并 PR"按钮。
+2. **PR / Issue 实时状态与合并执行**:`/state` 实时读取 GitHub PR / Issue 状态；「合并 PR」经单次特权授权后执行 `gh pr merge --merge --match-head-commit <HEAD>`，确认 MERGED 后进入可重入清理链并归档 workflow。清理未完成的 closed Issue 仍保留在活跃列表，避免失去重试入口。
 3. **comment 流水带 meta**(关联 #4):开发完成 / review 完成 / 合并都要发评论,meta 至少含:事件类型、绑定的 HEAD、结论(passed + 问题列表)、issue 号。写入是尽力而为,失败时本地事件照记,状态不倒退。
 4. **结论绑定契约指纹**:review 结论的 meta 增加 issue 契约指纹(目标/验收正文 hash);保存结论与合并前都校验。issue 正文目标/验收被改 → 旧结论自动过期,按钮回到「重新 Review」,与 HEAD 过期走同一条路径。
 5. **自动写动作回读验证**:建 PR / 发评论 / 更新 issue 状态后,立即用 `gh pr view` / `gh api` 回读确认落盘;回读失败只记录,不得把写动作当成功(原则同"写死状态实时查")。

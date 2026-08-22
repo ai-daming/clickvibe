@@ -38,6 +38,21 @@ test('merged PR is terminal', () => {
   assert.equal(next.kind, 'none')
 })
 
+test('merged delivery with unfinished cleanup offers only cleanup retry', () => {
+  const next = deriveNextAction(facts({
+    issueOpen: false,
+    prMerged: true,
+    cleanupPending: true,
+    stage: 'passed',
+    prNumber: '9',
+  }))
+  assert.deepEqual(next, {
+    kind: 'cleanup',
+    label: '重试清理',
+    hint: 'PR 已合并,继续完成已确认的合并后清理',
+  })
+})
+
 test('closed unmerged PR offers the explicit recovery action', () => {
   const next = deriveNextAction(facts({ prNumber: '9', prState: 'CLOSED', prStatusKnown: true }))
   assert.equal(next.kind, 'develop')
