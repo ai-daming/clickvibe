@@ -59,8 +59,8 @@ function workflow(overrides: Partial<IssueWorkflow> = {}): IssueWorkflow {
   return {
     key: 'repo-5', url: 'https://github.com/o/r/issues/5', repoKey: 'o/r',
     worktree: '', branch: 'clickvibe-issue-5', stage: 'review-ready',
-    devAgent: 'codex', devTaskId: null, devSessionId: null, devInterrupted: false,
-    reviewAgent: null, reviewTaskId: null, reviewSessionId: null, reviewResult: null,
+    devAgent: 'codex', devTaskId: null, devSessionId: null, devSessionAgent: null, devInterrupted: false,
+    reviewAgent: null, reviewTaskId: null, reviewSessionId: null, reviewSessionAgent: null, reviewResult: null,
     prNumber: null, issueState: 'OPEN', baseRef: null, updatedAt: Date.now(), events: [],
     ...overrides,
   }

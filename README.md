@@ -43,7 +43,7 @@ ClickVibe 想成为的最终样子,是一个**随身携带的交付平台**:不�
 选一个 repo,所有 open issue 按里程碑或依赖分组,按依赖就绪/阻塞过滤。每一行自带:状态徽章、约定分支、落后提示、blockedBy 和唯一动作按钮。组内「就绪 → 开发中 → 被阻塞 → 已交付」排序,**永远先看到现在能下什么单**。
 
 **2. 一键下单,无人值守开发**
-点「开始开发」,ClickVibe 自动做好一切:从远端默认分支创建独立 worktree 和分支、启动 Codex/Claude 非交互开发。最长可跑 24 小时,随时可停;超时/断线后点「恢复开发」续上同一个会话,worktree 里的改动不会丢。
+点「开始开发」,ClickVibe 自动做好一切:从远端默认分支创建独立 worktree 和分支、启动 Codex/Claude 非交互开发。最长可跑 24 小时,随时可停;超时/断线后点「恢复开发」优先续上同一个会话,会话已失效时自动在原 worktree 降级为一次全新会话,未提交改动不会丢。
 
 **3. 自动 review,按意见一键返工**
 开发完成 → 自动进入待 review → 你点 Review,agent 对照验收标准审查代码;**结论自动发到 PR/issue 评论**,并标注它审查的是哪个 commit。没过 → 点「按意见返工」,带着全部问题续会话改;过了 → 你确认合并。
@@ -101,7 +101,7 @@ pnpm test
 
 Review agent 会把结构化结论写到 worktree 的 `.clickvibe/review-result.json`。完成回调优先读取并严格校验这个文件；文件缺失、过大、不是普通文件、JSON 损坏或 schema 不符时，会在 `~/.clickvibe/state/<issue-key>/review.log` 记录原因，再依次回退 stdout JSON 和表情结论。该文件已被 git 忽略，且每次 review 启动前都会删除，避免上一次结论污染新一轮 review；因此不要手工预置它。
 
-对 #19/#12 这类旧版本已截断的结论，先从 `~/.clickvibe/state/<issue-key>.json` 读取 `reviewAgent` 与 `reviewSessionId`，必要时用该 id 在 Claude 的 `~/.claude/projects/**/*.jsonl` 或 Codex 的 `~/.codex/sessions/**/*.jsonl` 中定位原会话。不要直接篡改 workflow JSON：旧结论必须绑定它实际审查的 commit。将 worktree 恢复到需要审查的 HEAD 后，在面板使用同一 reviewer 执行「重新 Review」；ClickVibe 会续接精确 session、要求 agent 从原会话上下文复核问题并物化新结论，新的 review 事件会记录本次实际 HEAD。若原 session 已不存在，只能发起一次全新 review，不能把无法验证 commit 的旧文本冒充当前结论。
+对 #19/#12 这类旧版本已截断的结论，先从 `~/.clickvibe/state/<issue-key>.json` 读取 `reviewAgent`、`reviewSessionId` 与 `reviewSessionAgent`，必要时只在归属匹配的 Claude `~/.claude/projects/**/*.jsonl` 或 Codex `~/.codex/sessions/**/*.jsonl` 中定位原会话。不要直接篡改 workflow JSON：旧结论必须绑定它实际审查的 commit。将 worktree 恢复到需要审查的 HEAD 后，在面板使用同一 reviewer 执行「重新 Review」；ClickVibe 会续接归属匹配的精确 session、要求 agent 从原会话上下文复核问题并物化新结论，新的 review 事件会记录本次实际 HEAD。若归属未知、不匹配或原 session 已不存在，只能发起一次全新 review，不能跨 agent 续会话，也不能把无法验证 commit 的旧文本冒充当前结论。
 
 ## 安全说明
 

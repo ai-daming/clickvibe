@@ -25,6 +25,8 @@ import { parse as parseYaml } from 'yaml'
 import {
   AuthorizationStore,
   LineLog,
+  buildFreshAgentCommand,
+  buildResumeAgentCommand,
   buildWorktreeAddCommand,
   decideWorktreeRecovery,
   isLoopbackAddress,
@@ -33,6 +35,7 @@ import {
   parseDependencies,
   parseGithubUrl,
   shellQuote,
+  shouldFallbackFromExactResume,
   validatePrivilegedRequest,
   type AgentAuthorization,
   type AgentAuthorizationInput,
@@ -43,10 +46,14 @@ import { deriveNextAction, deriveWorkflowStatus, workflowBaseBranch, type NextAc
 import {
   appendEvent,
   appendLog,
+  applyDevRunOutcome,
+  clearStaleSessionId,
   issueKey,
   loadAllWorkflows,
   loadWorkflow,
   readLogTail,
+  recordSessionId,
+  resolveSessionForAgent,
   saveWorkflow,
   type IssueWorkflow,
 } from './state.ts'
@@ -972,10 +979,12 @@ export async function fetchRepositoryIssues(
         devAgent: null,
         devTaskId: null,
         devSessionId: null,
+        devSessionAgent: null,
         devInterrupted: false,
         reviewAgent: null,
         reviewTaskId: null,
         reviewSessionId: null,
+        reviewSessionAgent: null,
         reviewResult: null,
         prNumber: pr?.number ?? null,
         issueState: 'OPEN',
@@ -1192,6 +1201,22 @@ function buildPrompt(item: IssuePromptSnapshot, worktreePath: string): string {
   ].join('\n')
 }
 
+/** Rebuild full issue context when an exact resume id is stale and a new dev session is required. */
+async function buildFreshResumePrompt(ctx: Context, workflow: IssueWorkflow, extraContext: string): Promise<string> {
+  const fetched = await fetchIssue(ctx, { url: workflow.url })
+  let prompt = fetched.ok
+    ? buildPrompt(issueSnapshot(fetched.data.item as Record<string, unknown>), workflow.worktree)
+    : [
+        `请在现有 worktree 中继续完成 GitHub issue: ${workflow.url}`,
+        `工作区(worktree): ${workflow.worktree}`,
+        '原会话已失效。请先读取 issue 当前内容和 git diff,保留未提交改动并继续开发。',
+      ].join('\n')
+  if (extraContext !== '') {
+    prompt += '\n\n--- 附加上下文(来自 review 或其他) ---\n' + extraContext
+  }
+  return prompt
+}
+
 /** Build the review prompt: review `git diff base...HEAD` against the issue.
  *  base 取远端主干(origin/main 或 PR base),让 agent 用真实 diff 审查。 */
 async function buildReviewPrompt(ctx: Context, workflow: IssueWorkflow): Promise<string> {
@@ -1284,10 +1309,12 @@ async function ensureWorktree(ctx: Context, parsed: { owner: string; repo: strin
       devAgent: null,
       devTaskId: null,
       devSessionId: null,
+      devSessionAgent: null,
       devInterrupted: false,
       reviewAgent: null,
       reviewTaskId: null,
       reviewSessionId: null,
+      reviewSessionAgent: null,
       reviewResult: null,
       prNumber: null,
       issueState: 'OPEN',
@@ -1296,9 +1323,11 @@ async function ensureWorktree(ctx: Context, parsed: { owner: string; repo: strin
       events: [],
     }
   }
-  // 旧状态文件兜底:补 events / reviewSessionId / prNumber / baseRef 字段
+  // 旧状态文件兜底:裸 session id 不猜 agent 归属,后续 resume 会按无效处理。
   if (!Array.isArray(workflow.events)) workflow.events = []
   if (workflow.reviewSessionId === undefined) workflow.reviewSessionId = null
+  if (workflow.devSessionAgent === undefined) workflow.devSessionAgent = null
+  if (workflow.reviewSessionAgent === undefined) workflow.reviewSessionAgent = null
   if (workflow.prNumber === undefined) workflow.prNumber = null
   if (workflow.issueState === undefined) workflow.issueState = 'OPEN'
   if (workflow.baseRef === undefined) workflow.baseRef = null
@@ -1504,86 +1533,123 @@ function attachAgentProcess(
   command: string,
   workdir: string,
   prompt: string,
-  onExit: (exitCode: number | null, sessionId: string | null) => void,
+  onExit: (exitCode: number | null, sessionId: string | null) => void | Promise<void>,
+  resumeFallback?: {
+    staleSessionId: string
+    prepare: () => Promise<{ command: string; prompt: string }>
+  },
 ): void {
-  let process: ReturnType<Context['shell']['start']>
-  try {
-    const spec = ctx.shell.resolve({
-      command,
-      workdir,
-      stdin: prompt,
-      timeoutMs: TASK_TIMEOUT_MS,
-      sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: workdir },
-    })
-    process = ctx.shell.start(spec)
-  } catch (error) {
-    pushTaskLine(task, `[clickvibe] Agent 启动失败: ${String(error instanceof Error ? error.message : error)}`)
-    task.status = 'failed'
-    task.exitCode = 1
-    void Promise.resolve()
-      .then(() => onExit(1, task.sessionId))
-      .catch((exitError: unknown) => pushTaskLine(task, `[clickvibe] 启动失败收尾异常: ${String(exitError)}`))
-      .finally(() => finishTask(task, 'failed', 1))
-    return
-  }
-  task.process = process
-
-  // 轮询读取 agent 输出,解析为状态行,写入内存缓冲 + 落盘日志
-  const drain = (flush = false) => {
-    const read = process.readOutput()
-    if (read.delta !== '') task.rawLog.appendChunk(read.delta)
-    if (flush) task.rawLog.flush()
-    const raw = task.rawLog.read(task.rawCursor)
-    task.rawCursor = raw.cursor
-    if (raw.lines.length > 0) {
-      const parsed = parseAgentChunk(task.agent as AgentKind, raw.lines.join('\n'))
-      for (const line of parsed.lines) {
-        pushTaskLine(task, line.text)
-      }
-      if (parsed.sessionId) task.sessionId = parsed.sessionId
-    }
-    if (raw.truncated || read.lossy) {
-      pushTaskLine(task, '[clickvibe] Agent 原始输出被截断(日志过长)')
-    }
-  }
-  const pump = setInterval(() => drain(), 250)
-
   task.timeout = setTimeout(() => {
     if (task.closed) return
     pushTaskLine(task, `[clickvibe] Agent 超过 ${TASK_TIMEOUT_MS / 3_600_000} 小时,已终止`)
     task.status = 'timed_out'
-    process.kill()
+    task.process?.kill()
   }, TASK_TIMEOUT_MS)
   task.timeout.unref?.()
 
-  void process.done.then(async () => {
-    clearInterval(pump)
-    drain(true)
-    const status = task.status === 'timed_out' || task.status === 'stopped'
-      ? task.status
-      : process.exitCode === 0 ? 'done' : 'failed'
-    task.status = status
-    task.exitCode = process.exitCode
+  const launch = (
+    attemptCommand: string,
+    attemptPrompt: string,
+    fallback: typeof resumeFallback,
+  ): void => {
+    let process: ReturnType<Context['shell']['start']>
     try {
-      await onExit(process.exitCode, task.sessionId)
-    } finally {
-      finishTask(task, status, process.exitCode)
+      const spec = ctx.shell.resolve({
+        command: attemptCommand,
+        workdir,
+        stdin: attemptPrompt,
+        timeoutMs: TASK_TIMEOUT_MS,
+        sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: workdir },
+      })
+      process = ctx.shell.start(spec)
+    } catch (error) {
+      pushTaskLine(task, `[clickvibe] Agent 启动失败: ${String(error instanceof Error ? error.message : error)}`)
+      task.status = 'failed'
+      task.exitCode = 1
+      void Promise.resolve()
+        .then(() => onExit(1, task.sessionId))
+        .catch((exitError: unknown) => pushTaskLine(task, `[clickvibe] 启动失败收尾异常: ${String(exitError)}`))
+        .finally(() => finishTask(task, 'failed', 1))
+      return
     }
-  }, async (error: unknown) => {
-    clearInterval(pump)
-    pushTaskLine(task, `[clickvibe] Agent 进程异常: ${String(error instanceof Error ? error.message : error)}`)
-    const status = task.status === 'timed_out' || task.status === 'stopped' ? task.status : 'failed'
-    task.status = status
-    task.exitCode = process.exitCode
-    try {
-      await onExit(process.exitCode, task.sessionId)
-    } finally {
-      finishTask(task, status, process.exitCode)
+    task.process = process
+    const startedAt = Date.now()
+    let sawSessionId = false
+
+    // 轮询读取 agent 输出,解析为状态行,写入内存缓冲 + 落盘日志
+    const drain = (flush = false) => {
+      const read = process.readOutput()
+      if (read.delta !== '') task.rawLog.appendChunk(read.delta)
+      if (flush) task.rawLog.flush()
+      const raw = task.rawLog.read(task.rawCursor)
+      task.rawCursor = raw.cursor
+      if (raw.lines.length > 0) {
+        const parsed = parseAgentChunk(task.agent as AgentKind, raw.lines.join('\n'))
+        for (const line of parsed.lines) {
+          pushTaskLine(task, line.text)
+        }
+        if (parsed.sessionId) {
+          sawSessionId = true
+          task.sessionId = parsed.sessionId
+        }
+      }
+      if (raw.truncated || read.lossy) {
+        pushTaskLine(task, '[clickvibe] Agent 原始输出被截断(日志过长)')
+      }
     }
-  }).catch((error: unknown) => {
-    pushTaskLine(task, `[clickvibe] 任务收尾失败: ${String(error instanceof Error ? error.message : error)}`)
-    if (!task.closed) finishTask(task, task.status === 'running' ? 'failed' : task.status, task.exitCode)
-  })
+    const pump = setInterval(() => drain(), 250)
+
+    const settle = async (processError?: unknown): Promise<void> => {
+      clearInterval(pump)
+      drain(true)
+      if (processError !== undefined) {
+        pushTaskLine(task, `[clickvibe] Agent 进程异常: ${String(processError instanceof Error ? processError.message : processError)}`)
+      }
+      const status = task.status === 'timed_out' || task.status === 'stopped'
+        ? task.status
+        : process.exitCode === 0 ? 'done' : 'failed'
+      if (processError === undefined && fallback && shouldFallbackFromExactResume({
+        hadExactSessionId: fallback.staleSessionId !== '',
+        status,
+        exitCode: process.exitCode,
+        elapsedMs: Date.now() - startedAt,
+        sawSessionId,
+      })) {
+        task.sessionId = null
+        pushTaskLine(task, '[clickvibe] 精确会话已失效,清除 stale sessionId 并回退全新会话…')
+        try {
+          const next = await fallback.prepare()
+          if (task.status === 'stopped' || task.status === 'timed_out') {
+            await onExit(process.exitCode, null)
+            finishTask(task, task.status, process.exitCode)
+            return
+          }
+          task.exitCode = null
+          launch(next.command, next.prompt, undefined)
+          return
+        } catch (error) {
+          pushTaskLine(task, `[clickvibe] 全新会话回退准备失败: ${String(error instanceof Error ? error.message : error)}`)
+        }
+      }
+      task.status = status
+      task.exitCode = process.exitCode
+      try {
+        await onExit(process.exitCode, task.sessionId)
+      } finally {
+        finishTask(task, status, process.exitCode)
+      }
+    }
+
+    void process.done.then(
+      () => settle(),
+      (error: unknown) => settle(error),
+    ).catch((error: unknown) => {
+      pushTaskLine(task, `[clickvibe] 任务收尾失败: ${String(error instanceof Error ? error.message : error)}`)
+      if (!task.closed) finishTask(task, task.status === 'running' ? 'failed' : task.status, task.exitCode)
+    })
+  }
+
+  launch(command, prompt, resumeFallback)
 }
 
 /** Start a development task: worktree + branch + background agent run. */
@@ -1690,14 +1756,9 @@ async function startDevelop(
         await appendLog(workflow.key, 'dev', `[clickvibe] ${agent} 结束,退出码 ${exitCode}`)
         const reloaded = await loadWorkflow(workflow.key)
         if (reloaded) {
-          if (live.status === 'done' && exitCode === 0) {
-            reloaded.stage = 'review-ready'
-            reloaded.devInterrupted = false
+          if (applyDevRunOutcome(reloaded, live.status, exitCode, sessionId, agent)) {
             // 开发完成(含 rework):旧的 review 结论已归档到 events 历史,
             // 当前回到"待 review"——不能继续显示"Review 未通过"
-            reloaded.reviewResult = null
-            // 记录 agent 会话 id(供续会话精确恢复,不用 --last)
-            if (sessionId) reloaded.devSessionId = sessionId
             // 检测关联 PR:开发可能创建了 PR,记录到 workflow(issue 为 key,PR 是产物)
             if (!reloaded.prNumber) {
               const pr = await detectLinkedPr(ctx, workflow.repoKey, workflow.branch)
@@ -1711,8 +1772,6 @@ async function startDevelop(
               hash: head ?? undefined,
               note: `${agent} 完成开发${extraContext !== '' ? '(按 review 意见返工)' : ''}`,
             })
-          } else {
-            reloaded.devInterrupted = true
           }
           await saveWorkflow(reloaded)
         }
@@ -1920,19 +1979,26 @@ async function startReview(
   if (!existsSync(workflow.worktree)) {
     return { ok: false, error: `worktree 不存在: ${workflow.worktree}` }
   }
+  const ownedReviewSession = resolveSessionForAgent(workflow, 'review', agent)
+  const sessionId = ownedReviewSession.sessionId
   // 必须在第一个 await 之前同步占位。只检查持久化 reviewTaskId 会有 TOCTOU:
   // 两个请求可同时读到旧 workflow,再在清理结果文件时交错并双开 review。
   let reservation: { task: LiveTask; created: boolean }
   try {
     reservation = reviewTaskGate.reserve(workflow.key, () => {
       const id = taskId('review')
-      return createLiveTask(id, workflow.key, 'review', agent, workflow.reviewSessionId)
+      return createLiveTask(id, workflow.key, 'review', agent, sessionId)
     })
   } catch (error) {
     return { ok: false, error: String(error instanceof Error ? error.message : error) }
   }
   if (!reservation.created) return { ok: true, taskId: reservation.task.taskId }
   const live = reservation.task
+
+  if (ownedReviewSession.invalid) {
+    await saveWorkflow(workflow)
+    await appendLog(workflow.key, 'review', '[clickvibe] review sessionId 归属缺失或与当前 agent 不一致,已清除并启动全新会话')
+  }
 
   // 记录关联 PR(若 review 的是 PR 且未记录)
   if (parsed.kind === 'pr' && !workflow.prNumber) {
@@ -1955,19 +2021,10 @@ async function startReview(
   workflow.stage = 'reviewing'
   await saveWorkflow(workflow)
 
-  // review 与 dev 同规则:有上次会话 id 就续会话(精确 id,不用 --last)。
-  // UI 已保证按钮只显示上次 review 的 agent,所以这里不需要再判断 agent 一致。
-  const sessionId = workflow.reviewSessionId
-  let agentCommand: string
-  if (agent === 'claude') {
-    agentCommand = sessionId
-      ? `claude -p --resume ${shellQuoteId(sessionId)} --dangerously-skip-permissions --verbose --output-format stream-json`
-      : 'claude -p --dangerously-skip-permissions --verbose --output-format stream-json'
-  } else {
-    agentCommand = sessionId
-      ? `codex exec resume ${shellQuoteId(sessionId)} -c approval_policy=never -c 'sandbox_mode="danger-full-access"' --json -`
-      : 'codex exec -c approval_policy=never -s danger-full-access --json -'
-  }
+  // 仅续接归属匹配的精确会话;旧状态无 owner 或跨 agent 时直接全新 review。
+  const agentCommand = sessionId
+    ? buildResumeAgentCommand(agent, sessionId)
+    : buildFreshAgentCommand(agent)
   const prompt = sessionId
     ? `请继续 review。代码已更新,请先确认之前发现的问题是否已解决,再审查新改动。除 ${REVIEW_RESULT_RELATIVE_PATH} 外不要修改任何文件;必须使用写文件工具把最终结论写入该路径,格式为 {"passed":true|false,"issues":[...]};最后一行再输出同一个 JSON 作为兼容兜底。`
     : await buildReviewPrompt(ctx, workflow)
@@ -1978,6 +2035,7 @@ async function startReview(
     if (live.status !== 'done' || exitCode !== 0) {
       const interrupted = await loadWorkflow(workflow.key)
       if (interrupted) {
+        recordSessionId(interrupted, 'review', newSessionId, agent)
         interrupted.stage = 'review-ready'
         await saveWorkflow(interrupted)
       }
@@ -1985,6 +2043,17 @@ async function startReview(
     }
     const lines = await readLogTail(workflow.key, 'review', 200)
     const resolved = await loadReviewResult(workflow.worktree, lines)
+    if (!resolved.result) {
+      await appendLog(workflow.key, 'review', `[clickvibe] review 结论解析异常:${resolved.parseError ?? '原因未知'},需要重新 Review`)
+      const invalid = await loadWorkflow(workflow.key)
+      if (invalid) {
+        recordSessionId(invalid, 'review', newSessionId, agent)
+        invalid.reviewResult = null
+        invalid.stage = 'review-ready'
+        await saveWorkflow(invalid)
+      }
+      return
+    }
     if (resolved.source === 'file') {
       await appendLog(workflow.key, 'review', `[clickvibe] review 结论来源: ${REVIEW_RESULT_RELATIVE_PATH}`)
     } else {
@@ -2000,7 +2069,7 @@ async function startReview(
       reloaded.reviewResult = { passed, issues }
       reloaded.stage = passed ? 'passed' : 'review-ready' // 有问题 → 可回开发(rework)
       // 记录 review 会话 id(供下次 review 续会话)
-      if (newSessionId) reloaded.reviewSessionId = newSessionId
+      recordSessionId(reloaded, 'review', newSessionId, agent)
       // 记录 review 历史事件:锚定被 review 的 HEAD
       const reviewedHead = await readWorktreeHead(ctx, workflow.worktree)
       await appendEvent(reloaded, {
@@ -2018,7 +2087,17 @@ async function startReview(
         void postReviewComment(ctx, workflow.url, passed, issues)
       }
     }
-  })
+  }, sessionId ? {
+    staleSessionId: sessionId,
+    prepare: async () => {
+      const reloaded = await loadWorkflow(workflow.key)
+      if (reloaded && clearStaleSessionId(reloaded, 'review', sessionId)) await saveWorkflow(reloaded)
+      return {
+        command: buildFreshAgentCommand(agent),
+        prompt: await buildReviewPrompt(ctx, workflow),
+      }
+    },
+  } : undefined)
 
   return { ok: true, taskId: live.taskId }
 }
@@ -2062,10 +2141,13 @@ async function resumeDevelop(
     return { ok: true, taskId: oldLive.taskId }
   }
 
+  const agent = workflow.devAgent ?? 'codex'
+  const ownedDevSession = resolveSessionForAgent(workflow, 'dev', agent)
+  const sessionId = ownedDevSession.sessionId
   const taskIdValue = taskId('dev')
   let live: LiveTask
   try {
-    live = createLiveTask(taskIdValue, workflow.key, 'dev', workflow.devAgent ?? 'codex', workflow.devSessionId)
+    live = createLiveTask(taskIdValue, workflow.key, 'dev', agent, sessionId)
   } catch (error) {
     return { ok: false, error: String(error instanceof Error ? error.message : error) }
   }
@@ -2073,22 +2155,16 @@ async function resumeDevelop(
   workflow.devInterrupted = false
   workflow.stage = 'developing'
   await saveWorkflow(workflow)
+  if (ownedDevSession.invalid) {
+    await appendLog(workflow.key, 'dev', '[clickvibe] dev sessionId 归属缺失或与当前 agent 不一致,已清除并启动全新会话')
+  }
 
   // 用精确会话 id 续会话(不能用 --last/--continue:worktree 里可能有多个
   // agent 会话,--last 续的是"最近那个",不一定是我们这个)。
   // sessionId 缺失时回退 --last/--continue(尽力而为)。
-  const agent = workflow.devAgent ?? 'codex'
-  const sessionId = workflow.devSessionId
-  let command: string
-  if (agent === 'claude') {
-    command = sessionId
-      ? `claude -p --resume ${shellQuoteId(sessionId)} --dangerously-skip-permissions --verbose --output-format stream-json`
-      : 'claude -p --continue --dangerously-skip-permissions --verbose --output-format stream-json'
-  } else {
-    command = sessionId
-      ? `codex exec resume ${shellQuoteId(sessionId)} -c approval_policy=never -c 'sandbox_mode="danger-full-access"' --json -`
-      : 'codex exec resume --last -c approval_policy=never -c \'sandbox_mode="danger-full-access"\' --json -'
-  }
+  const command = ownedDevSession.invalid
+    ? buildFreshAgentCommand(agent)
+    : buildResumeAgentCommand(agent, sessionId)
   // 续会话前也同步远端(并行开发时 base 会变化)
   try {
     await runCommand(ctx, 'git fetch origin', {
@@ -2101,22 +2177,20 @@ async function resumeDevelop(
     await appendLog(workflow.key, 'dev', `[clickvibe] git fetch 失败(继续): ${String(e instanceof Error ? e.message : e)}`)
   }
 
-  const prompt = extraContext !== ''
-    ? `请继续完成开发任务,并处理以下 review 意见:\n${extraContext}`
-    : '请继续完成刚才的开发任务。'
+  const prompt = ownedDevSession.invalid
+    ? await buildFreshResumePrompt(ctx, workflow, extraContext)
+    : extraContext !== ''
+      ? `请继续完成开发任务,并处理以下 review 意见:\n${extraContext}`
+      : '请继续完成刚才的开发任务。'
 
   await appendLog(workflow.key, 'dev', `[clickvibe] 恢复 ${agent} 会话${sessionId ? `(${sessionId})` : ''}…`)
   attachAgentProcess(ctx, live, command, workflow.worktree, prompt, async (exitCode, newSessionId) => {
     await appendLog(workflow.key, 'dev', `[clickvibe] ${agent} 恢复结束,退出码 ${exitCode}`)
     const reloaded = await loadWorkflow(workflow.key)
     if (reloaded) {
-      reloaded.stage = live.status === 'done' && exitCode === 0 ? 'review-ready' : 'developing'
-      reloaded.devInterrupted = live.status !== 'done' || exitCode !== 0
-      if (newSessionId) reloaded.devSessionId = newSessionId
-      if (exitCode === 0) {
+      if (applyDevRunOutcome(reloaded, live.status, exitCode, newSessionId, agent)) {
         // rework 完成:旧的 review 结论已归档到 events,回到"待 review",
         // 不能继续显示"Review 未通过"让用户无限重复点
-        reloaded.reviewResult = null
         // 记录 rework 事件(带新 HEAD)
         const head = await readWorktreeHead(ctx, workflow.worktree)
         await appendEvent(reloaded, {
@@ -2128,12 +2202,17 @@ async function resumeDevelop(
       }
       await saveWorkflow(reloaded)
     }
-  })
+  }, sessionId ? {
+    staleSessionId: sessionId,
+    prepare: async () => {
+      const reloaded = await loadWorkflow(workflow.key)
+      if (reloaded && clearStaleSessionId(reloaded, 'dev', sessionId)) await saveWorkflow(reloaded)
+      return {
+        command: buildFreshAgentCommand(agent),
+        prompt: await buildFreshResumePrompt(ctx, workflow, extraContext),
+      }
+    },
+  } : undefined)
 
   return { ok: true, taskId: taskIdValue }
-}
-
-/** Quote an opaque id for a shell command (single-quote safe). */
-function shellQuoteId(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`
 }

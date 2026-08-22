@@ -80,9 +80,10 @@ test('a passing materialized verdict cannot carry contradictory issues', async (
     await mkdir(join(worktree, '.clickvibe'))
     await writeFile(join(worktree, REVIEW_RESULT_RELATIVE_PATH), '{"passed":true,"issues":["still broken"]}')
     const resolved = await loadReviewResult(worktree, ['💬 ❌ Review 发现问题'])
-    assert.equal(resolved.source, 'stdout-verdict')
-    assert.match(resolved.fileError ?? '', /schema/)
-    assert.deepEqual(resolved.result, { passed: false, issues: [] })
+    assert.equal(resolved.source, 'parse-error')
+    assert.match(resolved.fileError ?? '', /通过结论不能包含问题/)
+    assert.equal(resolved.result, null)
+    assert.match(resolved.parseError ?? '', /问题列表/)
   })
 })
 
@@ -93,8 +94,40 @@ test('clearing the materialized result prevents a stale review from being reused
     await writeFile(path, '{"passed":true,"issues":[]}')
     await clearReviewResultFile(worktree)
     const resolved = await loadReviewResult(worktree, ['💬 ❌ Review 发现问题'])
+    assert.equal(resolved.source, 'parse-error')
+    assert.equal(resolved.result, null)
+  })
+})
+
+test('the final session-completed line is stdout pass evidence', async () => {
+  await withWorktree(async (worktree) => {
+    const resolved = await loadReviewResult(worktree, ['✅ 会话结束', '[clickvibe] review 结束,退出码 0'])
     assert.equal(resolved.source, 'stdout-verdict')
-    assert.deepEqual(resolved.result, { passed: false, issues: [] })
+    assert.deepEqual(resolved.result, { passed: true, issues: [] })
+
+    const stale = await loadReviewResult(worktree, ['✅ 会话结束', '💬 新一轮没有结论'])
+    assert.equal(stale.source, 'parse-error')
+    assert.equal(stale.result, null)
+  })
+})
+
+test('failed verdicts without issues are parse errors for file, JSON, and emoji fallbacks', async () => {
+  await withWorktree(async (worktree) => {
+    await mkdir(join(worktree, '.clickvibe'))
+    await writeFile(join(worktree, REVIEW_RESULT_RELATIVE_PATH), '{"passed":false,"issues":[]}')
+    const file = await loadReviewResult(worktree, ['✅ 会话结束'])
+    assert.equal(file.source, 'parse-error')
+    assert.equal(file.result, null)
+    assert.match(file.parseError ?? '', /至少一个问题/)
+
+    await clearReviewResultFile(worktree)
+    const json = await loadReviewResult(worktree, ['💬 {"passed":false,"issues":[]}'])
+    assert.equal(json.source, 'parse-error')
+    assert.equal(json.result, null)
+
+    const emoji = await loadReviewResult(worktree, ['💬 ❌ Review 发现问题'])
+    assert.equal(emoji.source, 'parse-error')
+    assert.equal(emoji.result, null)
   })
 })
 
