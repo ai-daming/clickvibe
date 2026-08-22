@@ -4,6 +4,34 @@ import type { PromptSnapshot } from './prompt.ts'
 export type DevelopAgent = 'codex' | 'claude' | 'dryrun'
 export type AgentAction = 'develop' | 'review' | 'resume' | 'merge'
 
+/**
+ * ClickVibe 自身合并门禁项(issue #49)。门禁拒绝时可由用户人工放行逐项跳过;
+ * GitHub 侧保护(protected branch / required reviews)不在其中,永远不可跳过。
+ */
+export const MERGE_OVERRIDE_GATES = [
+  'review-hash',               // 实时 PR HEAD 与最近一次通过的 review 结论哈希不一致
+  'review-contract-missing',   // 最近通过的 review 缺少验收契约快照
+  'contract-unreadable',       // 无法读取当前验收契约
+  'contract-changed',          // 验收契约已变更
+] as const
+
+export type MergeOverrideGate = typeof MERGE_OVERRIDE_GATES[number]
+
+/** 人工放行原因的长度上限(与面板本地校验保持一致)。 */
+export const MERGE_OVERRIDE_REASON_MAX = 500
+
+/** 门禁 key → 面板/审计展示文案的唯一来源;服务端下发,客户端不再自行维护映射。 */
+export const MERGE_GATE_LABELS: Record<MergeOverrideGate, string> = {
+  'review-hash': 'PR HEAD 与 review 结论哈希不一致',
+  'review-contract-missing': 'review 缺少验收契约快照',
+  'contract-unreadable': '无法读取当前验收契约',
+  'contract-changed': '验收契约已变更',
+}
+
+export function mergeGateLabel(key: MergeOverrideGate | string): string {
+  return MERGE_GATE_LABELS[key as MergeOverrideGate] ?? key
+}
+
 export const RESUME_REJECT_WINDOW_MS = 15_000
 
 const CODEX_PERMISSION_FLAGS = `-c 'approval_policy="never"' -s danger-full-access`
@@ -223,6 +251,11 @@ export interface AgentAuthorizationInput {
     head: string
     mergeFlag: '--merge'
   }
+  /** 人工放行(仅 merge):被用户二次确认跳过的门禁项与放行原因;计入授权摘要,不可篡改。 */
+  override?: {
+    skipped: MergeOverrideGate[]
+    reason: string
+  }
 }
 
 export interface AgentAuthorization {
@@ -334,6 +367,7 @@ export function makeAuthorizationInput(value: {
   agent?: unknown
   context?: unknown
   target?: unknown
+  override?: unknown
 }): AgentAuthorizationInput {
   const action = String(value.action ?? '') as AgentAction
   if (action !== 'develop' && action !== 'review' && action !== 'resume' && action !== 'merge') {
@@ -354,12 +388,29 @@ export function makeAuthorizationInput(value: {
     }
     target = { prNumber, branch, head, mergeFlag: '--merge' }
   }
+  let override: AgentAuthorizationInput['override']
+  if (action === 'merge' && typeof value.override === 'object' && value.override !== null && !Array.isArray(value.override)) {
+    const raw = value.override as { skipped?: unknown; reason?: unknown }
+    const skipped = Array.isArray(raw.skipped)
+      ? [...new Set(raw.skipped.map((item) => String(item)))]
+      : []
+    const known = MERGE_OVERRIDE_GATES as readonly string[]
+    if (skipped.length === 0 || skipped.some((key) => !known.includes(key))) {
+      throw new Error('人工放行的门禁项无效')
+    }
+    const reason = String(raw.reason ?? '').trim()
+    if (reason === '' || reason.length > MERGE_OVERRIDE_REASON_MAX) {
+      throw new Error(`人工放行的放行原因无效(需 1-${MERGE_OVERRIDE_REASON_MAX} 字)`)
+    }
+    override = { skipped: skipped as MergeOverrideGate[], reason }
+  }
   return {
     action,
     url,
     agent: parsedAgent,
     context: typeof value.context === 'string' ? value.context.trim() : '',
     ...(target ? { target } : {}),
+    ...(override ? { override } : {}),
   }
 }
 

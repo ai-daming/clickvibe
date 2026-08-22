@@ -209,6 +209,34 @@ test('server authorization is one-use, bounded, expiring and bound to the frozen
   assert.equal(store.size, 2)
 })
 
+test('merge authorization input accepts only a well-formed manual override', () => {
+  const base = {
+    action: 'merge',
+    url: 'https://github.com/ai-daming/clickvibe/issues/49',
+    target: { prNumber: '29', branch: 'r-issue-49', head: 'abcdef1234567890', mergeFlag: '--merge' },
+  }
+  assert.deepEqual(makeAuthorizationInput({
+    ...base,
+    override: { skipped: ['review-hash', 'contract-changed', 'review-hash'], reason: ' 人工确认可合并 ' },
+  }).override, { skipped: ['review-hash', 'contract-changed'], reason: '人工确认可合并' })
+  // 非对象(授权请求阶段的布尔开关)与其它 action 不产生 override 绑定
+  assert.equal(makeAuthorizationInput({ ...base, override: true }).override, undefined)
+  assert.equal(makeAuthorizationInput({
+    action: 'review', agent: 'codex',
+    url: 'https://github.com/ai-daming/clickvibe/issues/49',
+    override: { skipped: ['review-hash'], reason: 'x' },
+  }).override, undefined)
+  assert.throws(() => makeAuthorizationInput({
+    ...base, override: { skipped: ['github-protection'], reason: 'x' },
+  }), /门禁项无效/)
+  assert.throws(() => makeAuthorizationInput({
+    ...base, override: { skipped: [], reason: 'x' },
+  }), /门禁项无效/)
+  assert.throws(() => makeAuthorizationInput({
+    ...base, override: { skipped: ['review-hash'], reason: '   ' },
+  }), /放行原因无效/)
+})
+
 test('LineLog bounds a never-terminated line and handles CRLF split across chunks', () => {
   const log = new LineLog(4)
   log.appendChunk('x'.repeat(LineLog.MAX_LINE_CHARS + 10))
