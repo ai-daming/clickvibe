@@ -5,7 +5,7 @@
  * files. Survives web restarts and page refreshes so the panel can restore
  * its context (the issue being viewed + its dev/review workflow stage).
  */
-import { mkdir, readFile, writeFile, appendFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile, appendFile, rename } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import type { DeliveryPublication } from './delivery-publication.ts'
@@ -20,6 +20,23 @@ export type WorkflowStage =
   | 'passed'      // review 通过
 
 export type SessionAgent = 'codex' | 'claude'
+
+export interface DeliveryCleanup {
+  worktree: boolean
+  localBranch: boolean
+  remoteBranch: boolean
+  issue: boolean
+}
+
+/** Durable, irreversible delivery fact plus the retryable cleanup cursor. */
+export interface WorkflowDelivery {
+  status: 'merged' | 'cleanup-pending' | 'archived'
+  mergedAt: string
+  prHead: string
+  mergeStrategy: 'merge'
+  cleanup: DeliveryCleanup
+  lastError?: string
+}
 
 export interface IssueWorkflow {
   key: string
@@ -44,6 +61,8 @@ export interface IssueWorkflow {
   issueState: 'OPEN' | 'CLOSED'
   /** 开发基线:开 worktree 时基于的分支与提交(如 origin/main @ a8a7b5f)。 */
   baseRef: string | null
+  /** GitHub merge 已确认后的不可逆事实与幂等清理进度。 */
+  delivery?: WorkflowDelivery
   /** 最近一次成功抓取或启动授权确认的完整 Issue 需求快照。 */
   issueSnapshot?: PromptSnapshot
   updatedAt: number
@@ -162,6 +181,10 @@ export function statePath(key: string): string {
   return join(stateDir(), `${key}.json`)
 }
 
+export function archiveStatePath(key: string): string {
+  return join(stateDir(), 'archive', `${key}.json`)
+}
+
 /** Derive the log file path for one issue's dev/review log. */
 export function logPath(key: string, kind: 'dev' | 'review'): string {
   return join(stateDir(), key, `${kind}.log`)
@@ -214,15 +237,49 @@ export async function loadAllWorkflows(): Promise<IssueWorkflow[]> {
   }
 }
 
+/** Load archived terminal workflows for direct URL restoration only. */
+export async function loadAllArchivedWorkflows(): Promise<IssueWorkflow[]> {
+  try {
+    const { readdir } = await import('node:fs/promises')
+    const dir = join(stateDir(), 'archive')
+    const entries = await readdir(dir)
+    const workflows: IssueWorkflow[] = []
+    for (const entry of entries) {
+      if (!entry.endsWith('.json')) continue
+      try {
+        const raw = await readFile(join(dir, entry), 'utf8')
+        workflows.push(normalizeWorkflow(JSON.parse(raw) as IssueWorkflow))
+      } catch {
+        // corrupt archived file: skip
+      }
+    }
+    return workflows.sort((a, b) => b.updatedAt - a.updatedAt)
+  } catch {
+    return []
+  }
+}
+
 /** Persist one issue's workflow state (atomic-ish: write then ignore errors). */
 export async function saveWorkflow(workflow: IssueWorkflow): Promise<void> {
   try {
-    await mkdir(stateDir(), { recursive: true })
-    workflow.updatedAt = Date.now()
-    await writeFile(statePath(workflow.key), JSON.stringify(workflow, null, 2), 'utf8')
+    await saveWorkflowStrict(workflow)
   } catch {
     // state persistence must never break the request path
   }
+}
+
+/** Persist workflow state or surface the failure to transactional callers. */
+export async function saveWorkflowStrict(workflow: IssueWorkflow): Promise<void> {
+  await mkdir(stateDir(), { recursive: true })
+  workflow.updatedAt = Date.now()
+  await writeFile(statePath(workflow.key), JSON.stringify(workflow, null, 2), 'utf8')
+}
+
+/** Persist the final workflow and atomically remove it from the active set. */
+export async function archiveWorkflow(workflow: IssueWorkflow): Promise<void> {
+  await mkdir(join(stateDir(), 'archive'), { recursive: true })
+  await saveWorkflowStrict(workflow)
+  await rename(statePath(workflow.key), archiveStatePath(workflow.key))
 }
 
 /** Append one line to an issue's log file (creating the directory). */

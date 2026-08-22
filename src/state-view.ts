@@ -14,6 +14,7 @@ export type NextActionKind =
   | 'review'
   | 'rework'
   | 'merge'
+  | 'cleanup'
   | 'none'
 
 export interface NextAction {
@@ -49,6 +50,8 @@ export interface WorkflowFacts {
   issueOpen: boolean
   /** A linked PR has been merged: terminal state. */
   prMerged: boolean
+  /** Merge is irreversible, but one or more confirmed cleanup steps remain. */
+  cleanupPending?: boolean
   /** Current GitHub PR state, queried live. */
   prState?: 'OPEN' | 'MERGED' | 'CLOSED' | null
   /** False means a linked PR exists in cache but its live GitHub state could not be read. */
@@ -137,6 +140,9 @@ export function workflowStatusLabel(
  *   → stage-specific verdict (develop / review / rework / merge)
  */
 export function deriveNextAction(facts: WorkflowFacts): NextAction {
+  if (facts.cleanupPending) {
+    return action('cleanup', '重试清理', 'PR 已合并,继续完成已确认的合并后清理')
+  }
   // Terminal states first: nothing actionable.
   if (!facts.issueOpen) return action('none', '无', 'issue 已关闭,无待办动作')
   if (facts.prMerged) return action('none', '无', 'PR 已合并,交付完成')

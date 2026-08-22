@@ -5,7 +5,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { apply, fetchRepositoryIssues } from '../src/index.ts'
-import { appendLog, loadWorkflow, readLogHistory, saveWorkflow, type IssueWorkflow } from '../src/state.ts'
+import {
+  appendLog,
+  loadAllArchivedWorkflows,
+  loadWorkflow,
+  readLogHistory,
+  saveWorkflow,
+  type IssueWorkflow,
+} from '../src/state.ts'
 
 function createHandler(
   run?: (spec: { command: string; workdir?: string; stdin?: string }) => Promise<unknown>,
@@ -184,6 +191,268 @@ test('/sync rejects worktree mutation without the same-origin privileged headers
   })
   assert.equal(result.status, 403)
   assert.match(result.body.error ?? '', /授权请求头/)
+})
+
+test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, cleanup and archive', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-merge-'))
+  process.env.HOME = tempHome
+  try {
+    const repo = join(tempHome, 'repo')
+    const worktreeRoot = join(tempHome, 'worktrees')
+    const worktree = join(worktreeRoot, 'r-issue-23')
+    await mkdir(repo, { recursive: true })
+    await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
+    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), `repos:\n  o/r: ${repo}\nworktreeRoot: ${worktreeRoot}\n`)
+    const workflow = interruptedWorkflow('o-r-23', 'https://github.com/o/r/issues/23', worktree)
+    workflow.branch = 'r-issue-23'
+    workflow.stage = 'passed'
+    workflow.reviewResult = { passed: true, issues: [] }
+    workflow.events = [{
+      kind: 'review', at: '2026-08-22T00:00:00Z', hash: 'abcdef1',
+      verdict: { passed: true, issues: [] },
+    }]
+    await saveWorkflow(workflow)
+
+    let merged = false
+    let issueClosed = false
+    const commands: string[] = []
+    const handler = createHandler(async (spec) => {
+      commands.push(spec.command)
+      if (spec.command.startsWith('gh pr view')) return {
+        exitCode: 0,
+        stdout: { text: JSON.stringify({
+          number: 29, state: merged ? 'MERGED' : 'OPEN', mergedAt: merged ? '2026-08-22T01:00:00Z' : null,
+          headRefName: workflow.branch, headRefOid: 'abcdef1234567890', baseRefName: 'main',
+          url: 'https://github.com/o/r/pull/29', reviewDecision: 'APPROVED',
+        }) }, stderr: { text: '' },
+      }
+      if (spec.command.startsWith('gh pr merge')) {
+        merged = true
+        return { exitCode: 0, stdout: { text: 'merged' }, stderr: { text: '' } }
+      }
+      if (spec.command === 'git worktree list --porcelain') return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      if (spec.command.startsWith('if git show-ref')) return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      if (spec.command.startsWith('if git ls-remote')) return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      if (spec.command.startsWith('gh issue view')) return { exitCode: 0, stdout: { text: issueClosed ? 'CLOSED' : 'OPEN' }, stderr: { text: '' } }
+      if (spec.command.startsWith('gh issue close')) {
+        issueClosed = true
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      }
+      throw new Error(`unexpected command: ${spec.command}`)
+    })
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+    const authorized = await post(handler, '/clickvibe/api/authorize', {
+      action: 'merge', url: workflow.url,
+    }, headers) as { status: number; body: { ok: boolean; authorizationId?: string; authorizationDigest?: string; target?: { prNumber: string; branch: string; head: string; mergeFlag: string }; preview?: { prNumber: string; branch: string; head: string; mergeFlag: string; cleanup: string[] } } }
+    assert.equal(authorized.status, 200, JSON.stringify(authorized.body))
+    assert.deepEqual(authorized.body.preview, {
+      prNumber: '29', branch: workflow.branch, head: 'abcdef1234567890', mergeFlag: '--merge',
+      cleanup: ['worktree', '本地分支', '远端分支', 'Issue #23', 'workflow 归档'],
+    })
+
+    const tampered = await post(handler, '/clickvibe/api/merge', {
+      url: workflow.url,
+      authorizationId: authorized.body.authorizationId,
+      authorizationDigest: authorized.body.authorizationDigest,
+      target: { ...authorized.body.target, head: 'fffffffffffffff' },
+    }, headers)
+    assert.equal(tampered.status, 403)
+    assert.equal(commands.some((command) => command.startsWith('gh pr merge')), false)
+    const executionAuthorization = await post(handler, '/clickvibe/api/authorize', {
+      action: 'merge', url: workflow.url,
+    }, headers) as typeof authorized
+    assert.equal(executionAuthorization.status, 200)
+
+    const response = await post(handler, '/clickvibe/api/merge', {
+      url: workflow.url,
+      authorizationId: executionAuthorization.body.authorizationId,
+      authorizationDigest: executionAuthorization.body.authorizationDigest,
+      target: executionAuthorization.body.target,
+    }, headers) as { status: number; body: { ok: boolean; archived?: boolean } }
+    assert.equal(response.status, 200, JSON.stringify(response.body))
+    assert.equal(response.body.archived, true)
+    const mergeCommand = commands.find((command) => command.startsWith('gh pr merge')) ?? ''
+    assert.match(mergeCommand, / --merge /)
+    assert.match(mergeCommand, /--match-head-commit 'abcdef1234567890'/)
+    assert.match(mergeCommand, /--body 'Closes #23'/)
+    assert.doesNotMatch(mergeCommand, /--squash|--rebase|--delete-branch/)
+    assert.equal(await loadWorkflow(workflow.key), null)
+    const archived = await loadAllArchivedWorkflows()
+    assert.equal(archived.length, 1)
+    assert.equal(archived[0].delivery?.status, 'archived')
+    assert.deepEqual(archived[0].delivery?.cleanup, {
+      worktree: true, localBranch: true, remoteBranch: true, issue: true,
+    })
+
+    const replay = await post(handler, '/clickvibe/api/merge', {
+      url: workflow.url,
+      authorizationId: executionAuthorization.body.authorizationId,
+      authorizationDigest: executionAuthorization.body.authorizationDigest,
+      target: executionAuthorization.body.target,
+    }, headers)
+    assert.equal(replay.status, 403)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('/merge rejects a stale review hash before invoking gh pr merge', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-merge-stale-'))
+  process.env.HOME = tempHome
+  try {
+    const repo = join(tempHome, 'repo')
+    const worktreeRoot = join(tempHome, 'worktrees')
+    await mkdir(repo, { recursive: true })
+    await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
+    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), `repos:\n  o/r: ${repo}\nworktreeRoot: ${worktreeRoot}\n`)
+    const workflow = interruptedWorkflow('o-r-23', 'https://github.com/o/r/issues/23', join(worktreeRoot, 'r-issue-23'))
+    workflow.branch = 'r-issue-23'
+    workflow.stage = 'passed'
+    workflow.reviewResult = { passed: true, issues: [] }
+    workflow.events = [{ kind: 'review', at: 'now', hash: '1111111', verdict: { passed: true, issues: [] } }]
+    await saveWorkflow(workflow)
+    const commands: string[] = []
+    const handler = createHandler(async (spec) => {
+      commands.push(spec.command)
+      if (spec.command.startsWith('gh pr view')) return {
+        exitCode: 0,
+        stdout: { text: JSON.stringify({
+          number: 29, state: 'OPEN', mergedAt: null, headRefName: workflow.branch,
+          headRefOid: '2222222222222222', baseRefName: 'main', url: 'https://github.com/o/r/pull/29', reviewDecision: 'APPROVED',
+        }) }, stderr: { text: '' },
+      }
+      throw new Error(`unexpected command: ${spec.command}`)
+    })
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+    const authorized = await post(handler, '/clickvibe/api/authorize', { action: 'merge', url: workflow.url }, headers)
+    assert.equal(authorized.status, 400)
+    assert.match(authorized.body.error ?? '', /review.*哈希不一致/)
+    assert.equal(commands.some((command) => command.startsWith('gh pr merge')), false)
+    assert.equal((await loadWorkflow(workflow.key))?.delivery, undefined)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('cleanup failure keeps merged terminal state and retries without merging again', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-merge-retry-'))
+  process.env.HOME = tempHome
+  try {
+    const repo = join(tempHome, 'repo')
+    const worktreeRoot = join(tempHome, 'worktrees')
+    const worktree = join(worktreeRoot, 'r-issue-23')
+    await mkdir(repo, { recursive: true })
+    await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
+    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), `repos:\n  o/r: ${repo}\nworktreeRoot: ${worktreeRoot}\n`)
+    const workflow = interruptedWorkflow('o-r-23', 'https://github.com/o/r/issues/23', worktree)
+    workflow.branch = 'r-issue-23'
+    workflow.stage = 'passed'
+    workflow.reviewResult = { passed: true, issues: [] }
+    workflow.events = [{ kind: 'review', at: 'now', hash: 'abcdef1', verdict: { passed: true, issues: [] } }]
+    await saveWorkflow(workflow)
+
+    let merged = false
+    let removeAttempts = 0
+    const commands: string[] = []
+    const handler = createHandler(async (spec) => {
+      commands.push(spec.command)
+      if (spec.command.startsWith('gh pr view')) return {
+        exitCode: 0,
+        stdout: { text: JSON.stringify({
+          number: 29, state: merged ? 'MERGED' : 'OPEN', mergedAt: merged ? '2026-08-22T01:00:00Z' : null,
+          headRefName: workflow.branch, headRefOid: 'abcdef1234567890', baseRefName: 'main',
+          url: 'https://github.com/o/r/pull/29', reviewDecision: 'APPROVED',
+        }) }, stderr: { text: '' },
+      }
+      if (spec.command.startsWith('gh pr merge')) {
+        merged = true
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      }
+      if (spec.command === 'git worktree list --porcelain') return {
+        exitCode: 0, stdout: { text: removeAttempts === 0 ? `worktree ${worktree}\nbranch refs/heads/${workflow.branch}\n` : '' }, stderr: { text: '' },
+      }
+      if (spec.command.startsWith('git worktree remove')) {
+        removeAttempts++
+        return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'worktree contains changes' } }
+      }
+      if (spec.command.startsWith('if git show-ref') || spec.command.startsWith('if git ls-remote')) {
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      }
+      if (spec.command.startsWith('gh issue view')) return { exitCode: 0, stdout: { text: 'CLOSED' }, stderr: { text: '' } }
+      throw new Error(`unexpected command: ${spec.command}`)
+    })
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+    const authorize = () => post(handler, '/clickvibe/api/authorize', { action: 'merge', url: workflow.url }, headers) as Promise<{
+      status: number; body: { authorizationId?: string; authorizationDigest?: string; target?: { prNumber: string; branch: string; head: string; mergeFlag: string } }
+    }>
+    const firstAuthorization = await authorize()
+    const first = await post(handler, '/clickvibe/api/merge', {
+      url: workflow.url,
+      authorizationId: firstAuthorization.body.authorizationId,
+      authorizationDigest: firstAuthorization.body.authorizationDigest,
+      target: firstAuthorization.body.target,
+    }, headers)
+    assert.equal(first.status, 400)
+    assert.match(first.body.error ?? '', /PR 已合并;移除 worktree失败,可重试/)
+    const pending = await loadWorkflow(workflow.key)
+    assert.equal(pending?.delivery?.status, 'cleanup-pending')
+    assert.equal(pending?.delivery?.cleanup.worktree, false)
+
+    const secondAuthorization = await authorize()
+    assert.equal(secondAuthorization.status, 200)
+    const second = await post(handler, '/clickvibe/api/merge', {
+      url: workflow.url,
+      authorizationId: secondAuthorization.body.authorizationId,
+      authorizationDigest: secondAuthorization.body.authorizationDigest,
+      target: secondAuthorization.body.target,
+    }, headers)
+    assert.equal(second.status, 200, JSON.stringify(second.body))
+    assert.equal(commands.filter((command) => command.startsWith('gh pr merge')).length, 1)
+    assert.equal((await loadAllArchivedWorkflows())[0]?.delivery?.status, 'archived')
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('/state uses the live GitHub issue state instead of the stored issueState', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-live-issue-'))
+  process.env.HOME = tempHome
+  try {
+    const workflow = interruptedWorkflow('o-r-23', 'https://github.com/o/r/issues/23', join(tempHome, 'missing-worktree'))
+    workflow.issueState = 'OPEN'
+    await saveWorkflow(workflow)
+    const handler = createHandler(async (spec) => {
+      if (spec.command.startsWith('gh pr view')) return {
+        exitCode: 0,
+        stdout: { text: JSON.stringify({
+          number: 29, state: 'OPEN', mergedAt: null, headRefName: workflow.branch,
+          headRefOid: 'abcdef1234567890', baseRefName: 'main', url: 'https://github.com/o/r/pull/29', reviewDecision: null,
+        }) }, stderr: { text: '' },
+      }
+      if (spec.command.startsWith('gh issue view')) return { exitCode: 0, stdout: { text: 'CLOSED' }, stderr: { text: '' } }
+      throw new Error(`unexpected command: ${spec.command}`)
+    })
+    const response = await post(handler, '/clickvibe/api/state', { url: workflow.url }) as {
+      status: number; body: { workflows?: Array<{ issueState: string; derived: { nextAction: { kind: string } } }> }
+    }
+    assert.equal(response.status, 200)
+    assert.equal(response.body.workflows?.[0].issueState, 'CLOSED')
+    assert.equal(response.body.workflows?.[0].derived.nextAction.kind, 'none')
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
 })
 
 test('/projects route returns the configured-project envelope without invoking shell', async () => {
@@ -1022,6 +1291,48 @@ test('repo issue aggregation includes open issues without workflows and honors l
   assert.equal(issues[0].workflow.derived.nextAction.kind, 'none')
   assert.equal(issues[1].workflow.derived.status, 'idle')
   assert.equal(issues[1].workflow.derived.nextAction.label, '开始开发')
+})
+
+test('repo aggregation keeps a closed issue visible while merged cleanup is pending', async () => {
+  const issue = {
+    number: 23, title: 'cleanup pending', state: 'closed', body: '',
+    html_url: 'https://github.com/o/r/issues/23', milestone: null,
+  }
+  const workflow = interruptedWorkflow('o-r-23', issue.html_url, '/remote/worktrees/r-issue-23')
+  workflow.branch = 'r-issue-23'
+  workflow.stage = 'passed'
+  workflow.delivery = {
+    status: 'cleanup-pending', mergedAt: '2026-08-22T00:00:00Z', prHead: 'abcdef1', mergeStrategy: 'merge',
+    cleanup: { worktree: false, localBranch: false, remoteBranch: false, issue: false },
+  }
+  const ctx = {
+    shell: {
+      resolve(spec: unknown) { return spec },
+      async run(spec: { command: string }) {
+        if (spec.command.includes('/issues?')) return { exitCode: 0, stdout: { text: JSON.stringify([[issue]]) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: JSON.stringify([[
+          { number: 29, state: 'closed', merged_at: '2026-08-22T00:00:00Z', head: { ref: workflow.branch }, html_url: 'https://github.com/o/r/pull/29' },
+        ]]) }, stderr: { text: '' } }
+        if (spec.command.startsWith('gh pr view')) return {
+          exitCode: 0,
+          stdout: { text: JSON.stringify({
+            number: 29, state: 'MERGED', mergedAt: '2026-08-22T00:00:00Z', headRefName: workflow.branch,
+            headRefOid: 'abcdef1', baseRefName: 'main', url: 'https://github.com/o/r/pull/29', reviewDecision: 'APPROVED',
+          }) }, stderr: { text: '' },
+        }
+        throw new Error(`unexpected command: ${spec.command}`)
+      },
+    },
+  }
+  const result = await fetchRepositoryIssues(ctx as never, { repoKey: 'o/r' }, {
+    config: { repos: { 'o/r': '/remote/r' }, worktreeRoot: '/remote/worktrees' }, workflows: [workflow],
+  })
+  assert.equal(result.ok, true)
+  if (!result.ok) return
+  const items = result.issues as Array<{ state: string; workflow: { derived: { nextAction: { kind: string } } } }>
+  assert.equal(items.length, 1)
+  assert.equal(items[0].state, 'CLOSED')
+  assert.equal(items[0].workflow.derived.nextAction.kind, 'cleanup')
 })
 
 test('repo issue aggregation fails closed when a stored PR cannot be refreshed by number', async () => {

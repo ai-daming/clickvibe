@@ -465,7 +465,7 @@ function repoOf(url: string | undefined): string {
   return match ? match[1] : ''
 }
 
-function IssueView({ issue, kind, workflow, onWorkflow, timeline, dependencies, autoAction, onAutoActionHandled }: {
+function IssueView({ issue, kind, workflow, onWorkflow, timeline, dependencies, autoAction, onAutoActionHandled, onDelivered }: {
   issue: GhIssue
   kind: 'issue' | 'pr'
   workflow: Workflow | null
@@ -474,6 +474,7 @@ function IssueView({ issue, kind, workflow, onWorkflow, timeline, dependencies, 
   dependencies?: Dependencies
   autoAction?: boolean
   onAutoActionHandled?: () => void
+  onDelivered?: () => void
 }) {
   const isPR = kind === 'pr'
   const state = String(issue.state || '').toUpperCase()
@@ -608,8 +609,8 @@ function IssueView({ issue, kind, workflow, onWorkflow, timeline, dependencies, 
       <div className="cv-issue-body">
         <div className="cv-md">{renderMarkdown(issue.body ?? '')}</div>
       </div>
-      {issue.url && kind === 'issue' && state === 'OPEN'
-        ? <DevSection key={issue.url} url={issue.url} issue={issue} workflow={workflow} onWorkflow={onWorkflow} autoAction={autoAction} onAutoActionHandled={onAutoActionHandled} />
+      {issue.url && kind === 'issue' && (state === 'OPEN' || workflow?.derived?.nextAction.kind === 'cleanup')
+        ? <DevSection key={issue.url} url={issue.url} issue={issue} workflow={workflow} onWorkflow={onWorkflow} autoAction={autoAction} onAutoActionHandled={onAutoActionHandled} onDelivered={onDelivered} />
         : null}
       <CommentsSection comments={issue.comments ?? []} />
     </div>
@@ -652,6 +653,14 @@ interface Workflow {
   prNumber: string | null
   issueState?: 'OPEN' | 'CLOSED'
   baseRef: string | null
+  delivery?: {
+    status: 'merged' | 'cleanup-pending' | 'archived'
+    mergedAt: string
+    prHead: string
+    mergeStrategy: 'merge'
+    cleanup: { worktree: boolean; localBranch: boolean; remoteBranch: boolean; issue: boolean }
+    lastError?: string
+  }
   updatedAt: number
   events?: WorkflowEvent[]
   derived?: {
@@ -679,7 +688,7 @@ interface Workflow {
   }
 }
 
-type NextActionKind = 'develop' | 'resume' | 'sync' | 'create-pr' | 'review' | 'rework' | 'merge' | 'none'
+type NextActionKind = 'develop' | 'resume' | 'sync' | 'create-pr' | 'review' | 'rework' | 'merge' | 'cleanup' | 'none'
 
 interface NextAction {
   kind: NextActionKind
@@ -709,13 +718,14 @@ function stageLabel(stage: Workflow['stage'], workflow: Workflow | null): string
   )
 }
 
-function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoActionHandled }: {
+function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoActionHandled, onDelivered }: {
   url: string
   issue: GhIssue
   workflow: Workflow | null
   onWorkflow: (w: Workflow | null) => void
   autoAction?: boolean
   onAutoActionHandled?: () => void
+  onDelivered?: () => void
 }) {
   const [busy, setBusy] = React.useState<string | null>(null)
   const [error, setError] = React.useState<string | null>(null)
@@ -871,10 +881,10 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
   }
 
   const authorize = async (
-    action: 'develop' | 'review' | 'resume',
-    agent: 'codex' | 'claude',
+    action: 'develop' | 'review' | 'resume' | 'merge',
+    agent: 'codex' | 'claude' | null,
     context = '',
-  ): Promise<{ authorizationId: string; authorizationDigest: string } | null> => {
+  ): Promise<{ authorizationId: string; authorizationDigest: string; target?: { prNumber: string; branch: string; head: string; mergeFlag: '--merge' } } | null> => {
     const expectedSnapshot = {
       url,
       title: String(issue.title ?? ''),
@@ -887,16 +897,19 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
       })),
     }
     const res = await apiCall<
-      | { ok: true; authorizationId: string; authorizationDigest: string; preview: { title?: string; updatedAt?: string; commentCount?: number; digest: string } }
+      | { ok: true; authorizationId: string; authorizationDigest: string; target?: { prNumber: string; branch: string; head: string; mergeFlag: '--merge' }; preview: { title?: string; updatedAt?: string; commentCount?: number; digest: string } }
       | { ok: false; error: string }
-    >('authorize', { action, url, agent, context, ...(action === 'develop' ? { expectedSnapshot } : {}) })
+    >('authorize', { action, url, ...(agent ? { agent } : {}), context, ...(action === 'develop' ? { expectedSnapshot } : {}) })
     if (!res.ok) { setError(res.error); return null }
     const preview = res.preview
+    const mergePreview = preview as typeof preview & { prNumber?: string; branch?: string; mergeFlag?: string; cleanup?: string[] }
     const summary = action === 'develop'
       ? `${agent} 将以高权限开发以下已冻结快照:\n\n${preview.title ?? url}\n更新时间: ${preview.updatedAt || '未知'}\n评论: ${preview.commentCount ?? 0} 条\n快照: ${preview.digest.slice(0, 12)}\n\n确认启动?`
+      : action === 'merge'
+        ? `ClickVibe 将执行不可逆的合并与清理:\n\nPR: #${mergePreview.prNumber ?? '?'}\n分支: ${mergePreview.branch ?? '?'}\n策略: ${mergePreview.mergeFlag ?? '--merge'} (merge commit，禁止 squash/rebase)\n清理: ${(mergePreview.cleanup ?? []).join('、')}\n授权: ${res.authorizationDigest.slice(0, 12)}\n\n确认合并并清理?`
       : `${agent} 将以高权限执行 ${action}。\n目标: ${url}\n授权: ${preview.digest.slice(0, 12)}\n\n确认启动?`
     if (!window.confirm(summary)) return null
-    return { authorizationId: res.authorizationId, authorizationDigest: res.authorizationDigest }
+    return { authorizationId: res.authorizationId, authorizationDigest: res.authorizationDigest, ...(res.target ? { target: res.target } : {}) }
   }
 
   const startDev = async (agent: 'codex' | 'claude' | 'dryrun', context?: string) => {
@@ -979,6 +992,30 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
     }
   }
 
+  const mergeAndCleanup = async () => {
+    setBusy('merging')
+    setError(null)
+    try {
+      const authorization = await authorize('merge', null)
+      if (!authorization) { setBusy(null); return }
+      const res = await apiCall<
+        | { ok: true; merged: true; archived: true; prNumber: string }
+        | { ok: false; error: string; merged?: boolean; cleanupPending?: boolean }
+      >('merge', { url, ...authorization })
+      if (!res.ok) {
+        setError(res.error)
+        if (res.merged) await refresh()
+        setBusy(null)
+        return
+      }
+      await refresh()
+      setBusy(null)
+      onDelivered?.()
+    } catch (e) {
+      setError(String(e)); setBusy(null)
+    }
+  }
+
   // 唯一动作:服务端由 git 事实推导;issue 已关闭时本地覆盖为无动作
   const issueClosed = String(issue.state ?? '').toUpperCase() === 'CLOSED'
   // #5 回归修复:从未开发过(无 workflow 记录)的 OPEN issue,服务端 /api/state
@@ -986,7 +1023,7 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
   // 缺失。这里按 deriveNextAction 的 idle 分支本地兜底为『开始开发』;
   // 有 workflow 记录时仍以服务端推导为准。
   const idleDevelop: NextAction = { kind: 'develop', label: '开始开发', hint: '创建 worktree 并启动 agent 开发' }
-  const effectiveAction: NextAction = issueClosed
+  const effectiveAction: NextAction = issueClosed && nextAction?.kind !== 'cleanup'
     ? { kind: 'none', label: '无', hint: 'issue 已关闭,无待办动作' }
     : (nextAction ?? (workflow === null
       ? idleDevelop
@@ -1005,10 +1042,7 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
         }
         break
       case 'merge':
-        if (workflow?.prNumber) {
-          window.open(`https://github.com/${workflow.repoKey}/pull/${workflow.prNumber}`, '_blank', 'noopener')
-        }
-        break
+      case 'cleanup': void mergeAndCleanup(); break
       case 'none': break
     }
   }
@@ -1030,7 +1064,7 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
   const lockedAgent = effectiveAction.kind === 'review' ? workflow?.reviewAgent ?? null : null
   const showAgentToggle = effectiveAction.kind === 'develop' || effectiveAction.kind === 'review'
 
-  const actionButtonClass = effectiveAction.kind === 'merge'
+  const actionButtonClass = effectiveAction.kind === 'merge' || effectiveAction.kind === 'cleanup'
     ? 'cv-dev-btn cv-dev-merge'
     : effectiveAction.kind === 'sync'
       ? 'cv-dev-btn cv-dev-sync'
@@ -1040,7 +1074,7 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
           ? 'cv-dev-btn cv-dev-warn'
           : 'cv-dev-btn cv-dev-codex'
 
-  const busyLabel = busy === 'syncing' ? '同步中…' : busy === 'resuming' ? '恢复中…' : busy === 'reviewing' ? 'Review 中…' : busy === 'developing' ? '启动中…' : null
+  const busyLabel = busy === 'merging' ? '合并并清理中…' : busy === 'syncing' ? '同步中…' : busy === 'resuming' ? '恢复中…' : busy === 'reviewing' ? 'Review 中…' : busy === 'developing' ? '启动中…' : null
 
   return (
     <div className="cv-dev">
@@ -1488,10 +1522,6 @@ function PanelContent() {
   const rowAction = (issue: RepositoryIssue) => {
     const action = issue.workflow.derived?.nextAction
     if (!action || action.kind === 'none') return
-    if (action.kind === 'merge' && issue.workflow.prNumber) {
-      window.open(`https://github.com/${issue.workflow.repoKey}/pull/${issue.workflow.prNumber}`, '_blank', 'noopener')
-      return
-    }
     if (action.kind === 'create-pr') {
       window.open(githubCompareUrl(
         issue.workflow.repoKey,
@@ -1532,6 +1562,12 @@ function PanelContent() {
           dependencies={result.dependencies}
           autoAction={autoAction}
           onAutoActionHandled={() => setAutoAction(false)}
+          onDelivered={() => {
+            setResult(null)
+            setWorkflow(null)
+            setAutoAction(false)
+            void loadRepo(repoKey)
+          }}
         />
       ) : (
         <>

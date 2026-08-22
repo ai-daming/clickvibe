@@ -21,7 +21,7 @@ import { randomBytes } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, basename, dirname, resolve } from 'node:path'
+import { join, basename, dirname, resolve, relative, isAbsolute } from 'node:path'
 import { parse as parseYaml } from 'yaml'
 import {
   AuthorizationStore,
@@ -48,8 +48,10 @@ import {
   appendEvent,
   appendLog,
   applyDevRunOutcome,
+  archiveWorkflow,
   clearStaleSessionId,
   issueKey,
+  loadAllArchivedWorkflows,
   loadAllWorkflows,
   loadWorkflow,
   readLogHistory,
@@ -58,6 +60,7 @@ import {
   resetLog,
   resolveSessionForAgent,
   saveWorkflow,
+  saveWorkflowStrict,
   type IssueWorkflow,
   type WorkflowEvent,
 } from './state.ts'
@@ -170,6 +173,7 @@ interface LiveTask {
 
 const liveTasks = new Map<string, LiveTask>()
 const reviewTaskGate = new ExclusiveTaskGate<LiveTask>()
+const mergingWorkflows = new Set<string>()
 const resumeTaskGate = new ExclusiveTaskGate<LiveTask>()
 const liveWaiters = new Map<string, Set<() => void>>()
 const authorizations = new AuthorizationStore()
@@ -233,7 +237,7 @@ function authorizationInputFromPayload(
   action: AgentAuthorizationInput['action'],
   payload: unknown,
 ): AgentAuthorizationInput {
-  const body = (payload ?? {}) as { url?: unknown; agent?: unknown; context?: unknown }
+  const body = (payload ?? {}) as { url?: unknown; agent?: unknown; context?: unknown; target?: unknown }
   return makeAuthorizationInput({ ...body, action })
 }
 
@@ -422,6 +426,8 @@ interface GithubPrFact {
   headRefName: string
   url: string
   reviewDecision: string | null
+  headRefOid?: string
+  baseRefName?: string
 }
 
 interface DeriveOptions {
@@ -614,7 +620,10 @@ export async function deriveWorkflowState(
 
   const facts: WorkflowFacts = {
     issueOpen: (workflow.issueState ?? 'OPEN') !== 'CLOSED',
-    prMerged: options.pr?.state === 'MERGED' || options.pr?.mergedAt !== null && options.pr?.mergedAt !== undefined,
+    prMerged: workflow.delivery !== undefined
+      || options.pr?.state === 'MERGED'
+      || options.pr?.mergedAt !== null && options.pr?.mergedAt !== undefined,
+    cleanupPending: workflow.delivery !== undefined && workflow.delivery.status !== 'archived',
     prState: options.pr?.state ?? null,
     prStatusKnown: options.prStatusKnown,
     prNumber: options.pr?.number ?? workflowPrNumber,
@@ -681,7 +690,7 @@ export function apply(ctx: Context): void {
       }
       const pathname = new URL(req.url ?? '/', 'http://clickvibe.internal').pathname
       const method = pathname.startsWith(`${ROUTE}/`) ? pathname.slice(`${ROUTE}/`.length) : undefined
-      const knownMethods = new Set(['fetch', 'projects', 'repo/issues', 'state', 'authorize', 'develop', 'develop/poll', 'history', 'stream', 'review', 'resume', 'stop', 'sync'])
+      const knownMethods = new Set(['fetch', 'projects', 'repo/issues', 'state', 'authorize', 'develop', 'develop/poll', 'history', 'stream', 'review', 'resume', 'stop', 'sync', 'merge'])
       if (method === undefined || !knownMethods.has(method)) {
         writeJson(res, 404, { ok: false, error: 'unknown method' })
         return
@@ -741,7 +750,9 @@ export function apply(ctx: Context): void {
         const url = String(filter?.url ?? '')
         const repoKey = String(filter?.repoKey ?? '')
         const config = await loadConfig()
-        const workflows = (await loadAllWorkflows()).filter((workflow) =>
+        const active = await loadAllWorkflows()
+        const archived = url === '' ? [] : await loadAllArchivedWorkflows()
+        const workflows = [...active, ...archived].filter((workflow) =>
           (url === '' || workflow.url === url) && (repoKey === '' || workflow.repoKey === repoKey),
         )
         const parsedRepo = parseUrl(url)
@@ -863,6 +874,25 @@ export function apply(ctx: Context): void {
         writeJson(res, result.ok ? 200 : 400, result)
         return
       }
+      if (method === 'merge') {
+        const securityError = privilegedRequestError(req)
+        if (securityError) {
+          writeJson(res, 403, { ok: false, error: securityError })
+          return
+        }
+        try {
+          if (!consumeAuthorization('merge', payload)) {
+            writeJson(res, 403, { ok: false, error: '合并授权无效、已使用或已过期,请重新预览确认' })
+            return
+          }
+        } catch (error) {
+          writeJson(res, 400, { ok: false, error: String(error instanceof Error ? error.message : error) })
+          return
+        }
+        const result = await mergeAndCleanup(ctx, payload)
+        writeJson(res, result.ok ? 200 : 400, result)
+        return
+      }
 
       writeJson(res, 404, { ok: false, error: `unknown method "${method}"` })
     },
@@ -893,8 +923,8 @@ async function fetchGithubPrFact(
   const hasPrNumber = prNumber !== null && prNumber !== undefined
   const selector = hasPrNumber ? shellQuote(String(prNumber)) : `--head ${shellQuote(branch)} --state all --limit 1`
   const command = hasPrNumber
-    ? `gh pr view ${selector} --repo ${shellQuote(repoKey)} --json number,state,mergedAt,headRefName,url,reviewDecision`
-    : `gh pr list --repo ${shellQuote(repoKey)} ${selector} --json number,state,mergedAt,headRefName,url,reviewDecision --jq '.[0] // {}'`
+    ? `gh pr view ${selector} --repo ${shellQuote(repoKey)} --json number,state,mergedAt,headRefName,headRefOid,baseRefName,url,reviewDecision`
+    : `gh pr list --repo ${shellQuote(repoKey)} ${selector} --json number,state,mergedAt,headRefName,headRefOid,baseRefName,url,reviewDecision --jq '.[0] // {}'`
   try {
     const output = await runCommand(ctx, command, { timeoutMs: 5000 })
     const raw = JSON.parse(output || '{}') as Partial<GithubPrFact> & { number?: number | string }
@@ -908,10 +938,28 @@ async function fetchGithubPrFact(
         headRefName: String(raw.headRefName ?? branch),
         url: String(raw.url ?? `https://github.com/${repoKey}/pull/${raw.number}`),
         reviewDecision: raw.reviewDecision ?? null,
+        headRefOid: raw.headRefOid ? String(raw.headRefOid) : undefined,
+        baseRefName: raw.baseRefName ? String(raw.baseRefName) : undefined,
       },
     }
   } catch {
     return { known: false, pr: null }
+  }
+}
+
+async function fetchGithubIssueState(
+  ctx: Context,
+  url: string,
+): Promise<'OPEN' | 'CLOSED' | null> {
+  try {
+    const output = await runCommand(
+      ctx,
+      `gh issue view ${shellQuote(url)} --json state --jq '.state'`,
+      { timeoutMs: 5_000 },
+    )
+    return output.trim().toUpperCase() === 'CLOSED' ? 'CLOSED' : 'OPEN'
+  } catch {
+    return null
   }
 }
 
@@ -950,11 +998,15 @@ export async function enrichWorkflowStates(
 ): Promise<Array<IssueWorkflow & { derived: WorkflowDerived }>> {
   const config = configOverride ?? await loadConfig()
   return Promise.all(workflows.map(async (workflow) => {
-    const [prLookup, branchFacts] = await Promise.all([
+    const [prLookup, branchFacts, liveIssueState] = await Promise.all([
       fetchGithubPrFact(ctx, workflow.repoKey, workflow.branch, workflow.prNumber),
       readConfiguredBranchFacts(ctx, config, workflow),
+      fetchGithubIssueState(ctx, workflow.url),
     ])
-    return deriveWorkflowState(ctx, workflow, {
+    return deriveWorkflowState(ctx, {
+      ...workflow,
+      issueState: liveIssueState ?? workflow.issueState,
+    }, {
       pr: prLookup.pr,
       prStatusKnown: workflow.prNumber ? prLookup.known && prLookup.pr !== null : prLookup.known,
       ...branchFacts,
@@ -1072,8 +1124,12 @@ export async function fetchRepositoryIssues(
       defaultBranch = defaultRef.replace(/^origin\//, '') || defaultBranch
     }
 
-    const openIssues = allIssues.filter((issue) => String(issue.state).toUpperCase() === 'OPEN')
-    const issues = await Promise.all(openIssues.map(async (issue) => {
+    const activeIssues = allIssues.filter((issue) => {
+      if (String(issue.state).toUpperCase() === 'OPEN') return true
+      const workflow = workflowByNumber.get(issue.number)
+      return workflow?.delivery !== undefined && workflow.delivery.status !== 'archived'
+    })
+    const issues = await Promise.all(activeIssues.map(async (issue) => {
       const existing = workflowByNumber.get(issue.number)
       const branch = existing?.branch ?? `${project}-issue-${issue.number}`
       const worktree = existing?.worktree ?? join(config.worktreeRoot, project, branch)
@@ -1121,7 +1177,7 @@ export async function fetchRepositoryIssues(
       }
       workflow.worktree = worktree
       workflow.branch = branch
-      workflow.issueState = 'OPEN'
+      workflow.issueState = String(issue.state).toUpperCase() === 'CLOSED' ? 'CLOSED' : 'OPEN'
       const derived = await deriveWorkflowState(ctx, workflow, {
         pr, prStatusKnown, branchExists, hasCommits, defaultBranch,
       })
@@ -1201,6 +1257,50 @@ function issueSnapshot(item: Record<string, unknown>): IssuePromptSnapshot {
   }
 }
 
+function latestPassingReviewHash(workflow: IssueWorkflow): string | null {
+  const latestReview = [...(workflow.events ?? [])].reverse().find((event) => event.kind === 'review')
+  if (!latestReview?.verdict?.passed || !workflow.reviewResult?.passed) return null
+  return latestReview.hash?.trim() || null
+}
+
+function sameCommitHash(reviewedHash: string, prHead: string): boolean {
+  const reviewed = reviewedHash.trim().toLowerCase()
+  const head = prHead.trim().toLowerCase()
+  return reviewed.length >= 7 && head.length >= 7
+    && (reviewed === head || head.startsWith(reviewed) || reviewed.startsWith(head))
+}
+
+async function mergeAuthorizationPreview(ctx: Context, url: string): Promise<{
+  prNumber: string
+  branch: string
+  head: string
+  mergeFlag: '--merge'
+  cleanup: string[]
+}> {
+  const parsed = parseUrl(url)
+  if (!parsed || parsed.kind !== 'issue') throw new Error('合并目标必须是 GitHub Issue URL')
+  const repoKey = `${parsed.owner}/${parsed.repo}`
+  const workflow = await loadWorkflow(issueKey(repoKey, parsed.number))
+  if (!workflow || !workflow.prNumber) throw new Error('未找到可合并的 workflow 或关联 PR')
+  const lookup = await fetchGithubPrFact(ctx, repoKey, workflow.branch, workflow.prNumber)
+  if (!lookup.known || !lookup.pr) throw new Error('无法读取实时 PR 状态,请稍后重试')
+  if (lookup.pr.state === 'CLOSED') throw new Error('PR 已关闭且未合并,不能执行合并')
+  if (lookup.pr.headRefName !== workflow.branch) throw new Error('实时 PR 分支与 workflow 不一致,拒绝合并')
+  if (!workflow.delivery) {
+    const reviewedHash = latestPassingReviewHash(workflow)
+    if (!lookup.pr.headRefOid || !reviewedHash || !sameCommitHash(reviewedHash, lookup.pr.headRefOid)) {
+      throw new Error('合并门禁拒绝:实时 PR HEAD 与最近一次通过的 review 结论哈希不一致')
+    }
+  }
+  return {
+    prNumber: lookup.pr.number,
+    branch: workflow.branch,
+    head: lookup.pr.headRefOid ?? workflow.delivery?.prHead ?? '',
+    mergeFlag: '--merge',
+    cleanup: ['worktree', '本地分支', '远端分支', `Issue #${parsed.number}`, 'workflow 归档'],
+  }
+}
+
 async function authorizeAgent(
   ctx: Context,
   payload: unknown,
@@ -1213,6 +1313,7 @@ async function authorizeAgent(
     const action = String(body.action ?? '') as AgentAuthorizationInput['action']
     const input = authorizationInputFromPayload(action, payload)
     let snapshot: IssuePromptSnapshot | null = null
+    let mergePreview: Awaited<ReturnType<typeof mergeAuthorizationPreview>> | null = null
     if (input.action === 'develop') {
       const fetched = await fetchIssue(ctx, { url: input.url })
       if (!fetched.ok) return fetched
@@ -1221,14 +1322,27 @@ async function authorizeAgent(
       if (JSON.stringify(body.expectedSnapshot) !== JSON.stringify(snapshot)) {
         return { ok: false, error: 'Issue 内容已变化或未提供完整预览快照,请刷新面板并重新确认' }
       }
+    } else if (input.action === 'merge') {
+      mergePreview = await mergeAuthorizationPreview(ctx, input.url)
     }
-    const authorization = authorizations.issue(input, snapshot)
+    const authorizationInput: AgentAuthorizationInput = mergePreview
+      ? {
+          ...input,
+          target: {
+            prNumber: mergePreview.prNumber,
+            branch: mergePreview.branch,
+            head: mergePreview.head,
+            mergeFlag: mergePreview.mergeFlag,
+          },
+        }
+      : input
+    const authorization = authorizations.issue(authorizationInput, snapshot)
     return {
       ok: true,
       authorizationId: authorization.id,
       authorizationDigest: authorization.digest,
       expiresAt: authorization.expiresAt,
-      preview: snapshot
+      preview: mergePreview ?? (snapshot
         ? {
             action: input.action,
             agent: input.agent,
@@ -1238,11 +1352,196 @@ async function authorizeAgent(
             commentCount: snapshot.comments.length,
             digest: authorization.digest,
           }
-        : { action: input.action, agent: input.agent, url: input.url, digest: authorization.digest },
+        : { action: input.action, agent: input.agent, url: input.url, digest: authorization.digest }),
+      ...(mergePreview ? { target: authorizationInput.target } : {}),
     }
   } catch (error) {
     return { ok: false, error: String(error instanceof Error ? error.message : error) }
   }
+}
+
+type MergeResult =
+  | { ok: true; merged: true; archived: true; prNumber: string }
+  | { ok: false; error: string; merged?: boolean; cleanupPending?: boolean }
+
+async function mergeAndCleanup(ctx: Context, payload: unknown): Promise<MergeResult> {
+  const url = String((payload as { url?: unknown } | undefined)?.url ?? '').trim()
+  const parsed = parseUrl(url)
+  if (!parsed || parsed.kind !== 'issue') return { ok: false, error: '合并目标必须是 GitHub Issue URL' }
+  const repoKey = `${parsed.owner}/${parsed.repo}`
+  const key = issueKey(repoKey, parsed.number)
+  if (mergingWorkflows.has(key)) return { ok: false, error: '该 PR 正在合并或清理,请等待当前请求完成' }
+  mergingWorkflows.add(key)
+  try {
+    return await mergeAndCleanupUnlocked(ctx, payload)
+  } finally {
+    mergingWorkflows.delete(key)
+  }
+}
+
+async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): Promise<MergeResult> {
+  const url = String((payload as { url?: unknown } | undefined)?.url ?? '').trim()
+  const parsed = parseUrl(url)
+  if (!parsed || parsed.kind !== 'issue') return { ok: false, error: '合并目标必须是 GitHub Issue URL' }
+  const repoKey = `${parsed.owner}/${parsed.repo}`
+  const workflow = await loadWorkflow(issueKey(repoKey, parsed.number))
+  if (!workflow || !workflow.prNumber) return { ok: false, error: '未找到可合并的 workflow 或关联 PR' }
+
+  const config = await loadConfig()
+  const configuredRepo = config.repos[repoKey]
+  if (!configuredRepo) return { ok: false, error: `未配置项目 ${repoKey}` }
+  const repoPath = resolve(expandHome(configuredRepo))
+  const worktree = resolve(workflow.worktree)
+  const worktreeRoot = resolve(config.worktreeRoot)
+  const relativeWorktree = relative(worktreeRoot, worktree)
+  if (relativeWorktree === '' || relativeWorktree.startsWith('..') || isAbsolute(relativeWorktree)) {
+    return { ok: false, error: 'workflow worktree 不在已配置 worktreeRoot 内,拒绝清理' }
+  }
+  if (workflow.branch.trim() === '') return { ok: false, error: 'workflow 分支无效,拒绝清理' }
+
+  let lookup = await fetchGithubPrFact(ctx, repoKey, workflow.branch, workflow.prNumber)
+  if (!lookup.known || !lookup.pr) return { ok: false, error: '无法读取实时 PR 状态,状态未改变' }
+  let pr = lookup.pr
+  if (pr.state === 'CLOSED') return { ok: false, error: 'PR 已关闭且未合并,状态未改变' }
+  if (pr.headRefName !== workflow.branch) return { ok: false, error: '实时 PR 分支与 workflow 不一致,拒绝合并' }
+  if (workflow.branch === (pr.baseRefName ?? workflowBaseBranch(workflow.baseRef))) {
+    return { ok: false, error: 'workflow 分支等于 PR 基线分支,拒绝清理' }
+  }
+  if (!pr.headRefOid) return { ok: false, error: '实时 PR HEAD 缺失,拒绝合并' }
+
+  if (!workflow.delivery) {
+    const reviewedHash = latestPassingReviewHash(workflow)
+    if (!reviewedHash || !sameCommitHash(reviewedHash, pr.headRefOid)) {
+      return { ok: false, error: '合并门禁拒绝:实时 PR HEAD 与最近一次通过的 review 结论哈希不一致' }
+    }
+    if (pr.state !== 'MERGED') {
+      const command = [
+        'gh pr merge', shellQuote(pr.number), '--repo', shellQuote(repoKey),
+        '--merge', '--match-head-commit', shellQuote(pr.headRefOid),
+        '--body', shellQuote(`Closes #${parsed.number}`),
+      ].join(' ')
+      try {
+        await runCommand(ctx, command, { timeoutMs: 120_000 })
+      } catch (error) {
+        return { ok: false, error: `PR 合并失败: ${String(error instanceof Error ? error.message : error)}` }
+      }
+      lookup = await fetchGithubPrFact(ctx, repoKey, workflow.branch, workflow.prNumber)
+      if (!lookup.known || !lookup.pr || lookup.pr.state !== 'MERGED') {
+        return { ok: false, error: 'gh pr merge 已返回,但实时 PR 状态尚未确认 MERGED;未开始清理' }
+      }
+      pr = lookup.pr
+    }
+    const confirmedHead = pr.headRefOid
+    if (!confirmedHead) return { ok: false, error: 'PR 已合并,但无法读取被合并的 HEAD;未开始清理' }
+    workflow.delivery = {
+      status: 'merged',
+      mergedAt: pr.mergedAt ?? new Date().toISOString(),
+      prHead: confirmedHead,
+      mergeStrategy: 'merge',
+      cleanup: { worktree: false, localBranch: false, remoteBranch: false, issue: false },
+    }
+    try {
+      await saveWorkflowStrict(workflow)
+    } catch (error) {
+      return {
+        ok: false,
+        merged: true,
+        cleanupPending: true,
+        error: `PR 已合并,但无法持久化清理状态: ${String(error instanceof Error ? error.message : error)}`,
+      }
+    }
+  } else if (pr.state !== 'MERGED') {
+    return { ok: false, error: '本地记录为已合并,但 GitHub 实时状态不一致;拒绝继续清理' }
+  }
+
+  const delivery = workflow.delivery
+  if (!delivery) return { ok: false, error: 'delivery 状态丢失,拒绝清理' }
+  const policy = { mode: 'danger-full-access' as const, workspaceRoot: repoPath }
+  const persistStep = async (): Promise<void> => {
+    delivery.status = 'cleanup-pending'
+    delete delivery.lastError
+    await saveWorkflowStrict(workflow)
+  }
+  const failCleanup = async (label: string, error: unknown): Promise<MergeResult> => {
+    const detail = String(error instanceof Error ? error.message : error)
+    delivery.status = 'cleanup-pending'
+    delivery.lastError = `${label}: ${detail}`
+    await saveWorkflowStrict(workflow).catch(() => {})
+    return { ok: false, merged: true, cleanupPending: true, error: `PR 已合并;${label}失败,可重试: ${detail}` }
+  }
+
+  if (!delivery.cleanup.worktree) {
+    try {
+      const records = parseWorktreeList(await runCommand(ctx, 'git worktree list --porcelain', {
+        workdir: repoPath, timeoutMs: 15_000, sandboxPolicy: policy,
+      }))
+      const registered = records.some((record) => record.path === worktree)
+      if (registered) {
+        await runCommand(ctx, `git worktree remove ${shellQuote(worktree)}`, {
+          workdir: repoPath, timeoutMs: 60_000, sandboxPolicy: policy,
+        })
+      } else if (existsSync(worktree)) {
+        throw new Error('路径仍存在但不是已注册 worktree,拒绝删除')
+      }
+      delivery.cleanup.worktree = true
+      await persistStep()
+    } catch (error) {
+      return failCleanup('移除 worktree', error)
+    }
+  }
+
+  if (!delivery.cleanup.localBranch) {
+    try {
+      await runCommand(ctx,
+        `if git show-ref --verify --quiet ${shellQuote(`refs/heads/${workflow.branch}`)}; then git branch -D -- ${shellQuote(workflow.branch)}; fi`,
+        { workdir: repoPath, timeoutMs: 30_000, sandboxPolicy: policy },
+      )
+      delivery.cleanup.localBranch = true
+      await persistStep()
+    } catch (error) {
+      return failCleanup('删除本地分支', error)
+    }
+  }
+
+  if (!delivery.cleanup.remoteBranch) {
+    try {
+      await runCommand(ctx,
+        `if git ls-remote --exit-code --heads origin ${shellQuote(`refs/heads/${workflow.branch}`)} >/dev/null 2>&1; then git push origin --delete ${shellQuote(workflow.branch)}; fi`,
+        { workdir: repoPath, timeoutMs: 60_000, sandboxPolicy: policy },
+      )
+      delivery.cleanup.remoteBranch = true
+      await persistStep()
+    } catch (error) {
+      return failCleanup('删除远端分支', error)
+    }
+  }
+
+  if (!delivery.cleanup.issue) {
+    try {
+      const issueState = await fetchGithubIssueState(ctx, url)
+      if (issueState === null) throw new Error('无法读取实时 Issue 状态')
+      if (issueState === 'OPEN') {
+        await runCommand(ctx,
+          `gh issue close ${shellQuote(parsed.number)} --repo ${shellQuote(repoKey)} --comment ${shellQuote(`由 PR #${pr.number} 以 merge commit 合并交付。`)}`,
+          { timeoutMs: 30_000 },
+        )
+      }
+      workflow.issueState = 'CLOSED'
+      delivery.cleanup.issue = true
+      await persistStep()
+    } catch (error) {
+      return failCleanup('关闭 Issue', error)
+    }
+  }
+
+  try {
+    delivery.status = 'archived'
+    delete delivery.lastError
+    await archiveWorkflow(workflow)
+  } catch (error) {
+    return failCleanup('归档 workflow', error)
+  }
+  return { ok: true, merged: true, archived: true, prNumber: pr.number }
 }
 
 /** One resolved dependency entry (number + title + state). */
