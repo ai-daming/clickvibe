@@ -18,16 +18,12 @@ test('structured live records round-trip while old log lines remain readable', (
     text: '[clickvibe] reconnecting',
   })
   assert.equal(decodeLiveLogLine('legacy agent line').text, 'legacy agent line')
-  assert.match(
-    decodeLiveLogLine(
-      encodeLiveLogEvent({
-        source: 'agent',
-        kind: 'command_output',
-        text: 'x'.repeat(7000),
-      }),
-    ).text,
-    /单条事件已截断$/,
-  )
+  const longEvent = {
+    source: 'agent',
+    kind: 'command_output',
+    text: `/Users/example/project\n  ${'x'.repeat(7000)}\n/tmp/clickvibe`,
+  } as const
+  assert.deepEqual(decodeLiveLogLine(encodeLiveLogEvent(longEvent)), longEvent)
 })
 
 test('token usage accepts both agent field conventions and stays optional', () => {

@@ -157,13 +157,11 @@ export interface LogRead {
   truncated: boolean
 }
 
-/** Bounded, non-destructive line log with independent cursor readers. */
+/** Line-count-bounded, non-destructive log with independent cursor readers. */
 export class LineLog {
-  static readonly MAX_LINE_CHARS = 64 * 1024
   readonly #limit: number
   #entries: LogEntry[] = []
   #partial = ''
-  #discardPartial = false
   #pendingCr = false
   #sequence = 0
 
@@ -173,12 +171,8 @@ export class LineLog {
   }
 
   appendLine(line: string): number {
-    const bounded =
-      line.length > LineLog.MAX_LINE_CHARS
-        ? `${line.slice(0, LineLog.MAX_LINE_CHARS)}… [clickvibe] 单行日志已截断`
-        : line
     this.#sequence += 1
-    this.#entries.push({ sequence: this.#sequence, line: bounded })
+    this.#entries.push({ sequence: this.#sequence, line })
     if (this.#entries.length > this.#limit) {
       this.#entries.splice(0, this.#entries.length - this.#limit)
     }
@@ -187,9 +181,8 @@ export class LineLog {
 
   appendChunk(chunk: string): void {
     const endLine = () => {
-      if (!this.#discardPartial) this.appendLine(this.#partial)
+      this.appendLine(this.#partial)
       this.#partial = ''
-      this.#discardPartial = false
     }
     for (const character of chunk) {
       if (this.#pendingCr) {
@@ -201,13 +194,8 @@ export class LineLog {
         this.#pendingCr = true
       } else if (character === '\n') {
         endLine()
-      } else if (!this.#discardPartial) {
+      } else {
         this.#partial += character
-        if (this.#partial.length > LineLog.MAX_LINE_CHARS) {
-          this.appendLine(this.#partial)
-          this.#partial = ''
-          this.#discardPartial = true
-        }
       }
     }
   }
@@ -215,12 +203,11 @@ export class LineLog {
   flush(): void {
     if (this.#pendingCr) {
       this.#pendingCr = false
-      if (!this.#discardPartial) this.appendLine(this.#partial)
-    } else if (this.#partial !== '' && !this.#discardPartial) {
+      this.appendLine(this.#partial)
+    } else if (this.#partial !== '') {
       this.appendLine(this.#partial)
     }
     this.#partial = ''
-    this.#discardPartial = false
   }
 
   read(cursor: number): LogRead {
