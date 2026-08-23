@@ -58,6 +58,7 @@ export function createLiveTask(
     workflow,
     kind,
     agent,
+    startedAt: Date.now(),
     log: new LineLog(TASK_LOG_LINES),
     rawLog: new LineLog(TASK_LOG_LINES),
     rawCursor: 0,

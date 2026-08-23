@@ -83,7 +83,7 @@ export async function deriveWorkflowState(
   ctx: Context,
   workflow: IssueWorkflow,
   options: DeriveOptions = {},
-): Promise<IssueWorkflow & { derived: WorkflowDerived }> {
+): Promise<IssueWorkflow & { runStartedAt: number | null; derived: WorkflowDerived }> {
   const workflowPrNumber = workflow.prNumber == null ? null : String(workflow.prNumber)
   const worktree = workflow.worktree
   const exists = existsSync(worktree)
@@ -183,7 +183,13 @@ export async function deriveWorkflowState(
 
   const devLive = workflow.devTaskId ? liveTasks.get(workflow.devTaskId) : undefined
   const reviewLive = workflow.reviewTaskId ? liveTasks.get(workflow.reviewTaskId) : undefined
-  const taskRunning = (devLive !== undefined && !devLive.closed) || (reviewLive !== undefined && !reviewLive.closed)
+  const runningTask =
+    reviewLive !== undefined && !reviewLive.closed
+      ? reviewLive
+      : devLive !== undefined && !devLive.closed
+        ? devLive
+        : null
+  const taskRunning = runningTask !== null
 
   const branchExists = options.branchExists ?? branch !== null
   const worktreeValid = !exists || branch === workflow.branch
@@ -223,6 +229,7 @@ export async function deriveWorkflowState(
   return {
     ...workflow,
     prNumber: options.pr?.number ?? workflowPrNumber,
+    runStartedAt: runningTask?.startedAt ?? null,
     derived: {
       head,
       branch,
