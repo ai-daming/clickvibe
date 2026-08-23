@@ -44,6 +44,15 @@ test('authorization confirmation copy preserves develop, review and merge detail
     }),
     /PR: #65.*issue-61.*worktree/s,
   )
+  assert.match(
+    authorizationSummary({
+      ...common,
+      action: 'restore-base',
+      agent: null,
+      preview: { ...common.preview, baseline: 'origin/release/deleted', baselineRef: 'abc1234' },
+    }),
+    /恢复远端基线.*origin\/release\/deleted.*abc1234/s,
+  )
 })
 
 test('develop authorization copy and selector labels expose the exact baseline', () => {

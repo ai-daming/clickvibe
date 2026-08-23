@@ -14,7 +14,7 @@
  *   develop <target> [repoKey] [codex|claude|dryrun] [context=<rest>]
  *   review <target> [repoKey] [codex|claude]
  *   rework|resume <target> [repoKey] [context=<rest>]
- *   merge|sync|stop <target> [repoKey]
+ *   merge|sync|restore-base|stop <target> [repoKey]
  * 动词支持中文别名(下单开发/开始开发/审查/返工/恢复/合并/同步/停止/状态/
  * 列表/项目/帮助/安全演练),允许「把/请/帮我/用/一下」等语气词;自然语言
  * 由对话 agent 翻译成这里的严格语法,服务端不做模糊猜测。
@@ -32,6 +32,7 @@ export type CommandAction =
   | 'resume'
   | 'merge'
   | 'sync'
+  | 'restore-base'
   | 'stop'
 
 /** One parsed command; target number/repoKey stay raw strings until the route resolves them. */
@@ -63,6 +64,7 @@ const VERB_ALIASES: Array<[RegExp, CommandAction | 'dryrun']> = [
   [/按意见返工|^返工$|\brework\b/, 'rework'],
   [/恢复开发|^恢复$|\bresume\b/, 'resume'],
   [/^合并$|\bmerge\b/, 'merge'],
+  [/恢复基线|\brestore-base\b/, 'restore-base'],
   [/同步基线|^同步$|\bsync\b/, 'sync'],
   [/^停止$|^停下$|\bstop\b/, 'stop'],
   [/^审查$|^review一下$|\breview\b/, 'review'],
@@ -79,6 +81,7 @@ const ACTIONS_REQUIRING_TARGET: readonly CommandAction[] = [
   'resume',
   'merge',
   'sync',
+  'restore-base',
   'stop',
 ]
 
@@ -192,6 +195,7 @@ export const COMMAND_HELP_TEXT = [
   '  rework <目标> [context=…]           按 review 意见返工',
   '  resume <目标> [context=…]           恢复中断的开发会话',
   '  sync <目标>                         同步 worktree 到远端基线',
+  '  restore-base <目标>                 按冻结提交恢复已删除的远端基线(需二次确认)',
   '  stop <目标>                         停止运行中的任务',
   '  merge <目标>                        合并 PR 并清理(需二次确认)',
   '  merge <目标> override=<放行原因>    门禁拒绝后的人工放行(跳过项与原因写入审计)',
@@ -308,6 +312,8 @@ export interface CommandAuthorizationPreview {
   head?: string
   mergeFlag?: string
   cleanup?: string[]
+  baseline?: string
+  baselineRef?: string | null
   override?: {
     skipped?: string[]
     reason?: string
@@ -350,6 +356,17 @@ export function formatConfirmationPreview(
         : []),
       '',
       '合并是人的决策,必须由用户明确确认后携带授权重发命令。',
+      expireNote,
+    ].join('\n')
+  }
+  if (action === 'restore-base') {
+    return [
+      '即将恢复远端基线后继续创建 PR:',
+      `- 基线:${preview.baseline ?? '?'}`,
+      `- 冻结提交:${preview.baselineRef ?? '?'}`,
+      '- 安全条件:仅当远端同名分支仍不存在时创建;若已恢复到不同提交则拒绝覆盖。',
+      '',
+      '请用户明确确认后携带授权原样重发命令。',
       expireNote,
     ].join('\n')
   }

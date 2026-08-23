@@ -31,6 +31,6 @@ test('client runtime derives stable task, status, publication and compare labels
   )
   assert.equal(
     githubCompareUrl('owner/repo', 'feature/x', 'origin/release/deleted @ abc123', 'main', false),
-    'https://github.com/owner/repo/compare/abc123...feature%2Fx?expand=1',
+    'https://github.com/owner/repo/compare/release%2Fdeleted...feature%2Fx?expand=1',
   )
 })

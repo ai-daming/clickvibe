@@ -13,6 +13,7 @@ export type NextActionKind =
   | 'develop'
   | 'resume'
   | 'sync'
+  | 'restore-base'
   | 'create-pr'
   | 'review'
   | 'rework'
@@ -42,10 +43,9 @@ export function githubCompareUrl(
   branch: string,
   baseRef: string | null | undefined,
   defaultBranch = 'main',
-  baseRefAvailable = true,
+  _baseRefAvailable = true,
 ): string {
-  const frozenHash = String(baseRef ?? '').match(/\s+@\s+([0-9a-f]{4,64})\s*$/i)?.[1]
-  const base = !baseRefAvailable && frozenHash ? frozenHash : workflowBaseBranch(baseRef, defaultBranch)
+  const base = workflowBaseBranch(baseRef, defaultBranch)
   return `https://github.com/${repoKey}/compare/${encodeURIComponent(base)}...${encodeURIComponent(branch)}?expand=1`
 }
 
@@ -97,6 +97,8 @@ export interface WorkflowFacts {
   hasResumeSession?: boolean
   /** Frozen remote baseline branch; omitted legacy callers retain main wording. */
   baseBranch?: string
+  /** Whether the frozen origin/<base> branch still exists after fetch. */
+  baseRefAvailable?: boolean
 }
 
 function action(kind: NextActionKind, label: string, hint: string): NextAction {
@@ -226,6 +228,13 @@ export function deriveNextAction(facts: WorkflowFacts): NextAction {
       : action('develop', '重新开发', 'worktree 有未提交改动但无可恢复会话,启动新会话')
   }
   if (!facts.prNumber && facts.hasCommits) {
+    if (facts.baseRefAvailable === false && facts.baseBranch) {
+      return action(
+        'restore-base',
+        '恢复基线并创建 PR',
+        `远端基线 origin/${facts.baseBranch} 已删除;确认后按冻结提交恢复同名分支,再创建 PR`,
+      )
+    }
     return action('create-pr', '创建 PR', '开发分支已有提交,推送并创建 PR 后 Review')
   }
 

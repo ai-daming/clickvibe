@@ -78,7 +78,7 @@ test('issue development branch baseline suggests the parent issue dependency', (
   assert.equal(baselineDependencyIssue('origin/clickvibe-issue-999999999999999999999999'), null)
 })
 
-test('compare URL uses the live baseline branch or its frozen hash after deletion', () => {
+test('compare URL always targets the selected baseline branch', () => {
   assert.equal(workflowBaseBranch('origin/trunk @ abc123', 'main'), 'trunk')
   assert.equal(
     githubCompareUrl('o/r', 'feature/7', 'origin/trunk @ abc123', 'main'),
@@ -86,6 +86,6 @@ test('compare URL uses the live baseline branch or its frozen hash after deletio
   )
   assert.equal(
     githubCompareUrl('o/r', 'feature/7', 'origin/trunk @ abc123', 'main', false),
-    'https://github.com/o/r/compare/abc123...feature%2F7?expand=1',
+    'https://github.com/o/r/compare/trunk...feature%2F7?expand=1',
   )
 })

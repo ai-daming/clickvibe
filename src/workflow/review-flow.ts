@@ -21,7 +21,12 @@
 import { existsSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import { type AgentKind } from '../agent/agent-stream.ts'
-import { buildReviewPrompt, fetchPrHeadBranch, resolvePromptSnapshot } from '../agent/prompts.ts'
+import {
+  buildReviewPrompt,
+  fetchPrHeadBranch,
+  resolvePromptSnapshot,
+  resolveReviewBaseTarget,
+} from '../agent/prompts.ts'
 import { attachAgentProcess, createLiveTask, finishTask, pushTaskLine } from '../agent/task-supervisor.ts'
 import { detectLinkedPr } from '../github/pr.ts'
 import { githubRest } from '../github/rest.ts'
@@ -158,6 +163,7 @@ export async function startReview(
     workflow.prNumber = parsed.number
     await saveWorkflow(workflow)
   }
+  const reviewBase = await resolveReviewBaseTarget(ctx, workflow)
 
   // A prior run's file must never become the next run's verdict.
   try {
@@ -176,7 +182,15 @@ export async function startReview(
 
   // 仅续接归属匹配的精确会话;旧状态无 owner 或跨 agent 时直接全新 review。
   const agentCommand = sessionId ? buildResumeAgentCommand(agent, sessionId) : buildFreshAgentCommand(agent)
-  const prompt = await buildReviewPrompt(ctx, workflow, resolvedSnapshot, reviewedHead, sessionId, extraContext)
+  const prompt = await buildReviewPrompt(
+    ctx,
+    workflow,
+    resolvedSnapshot,
+    reviewedHead,
+    sessionId,
+    extraContext,
+    reviewBase,
+  )
 
   pushTaskLine(live, `[clickvibe] 启动 ${agent} review${sessionId ? `(续会话 ${sessionId})` : ''}…`)
   attachAgentProcess(
@@ -243,6 +257,7 @@ export async function startReview(
           taskId: live.taskId,
           verdict: { passed, issues },
           issueContract: reviewIssue.contract,
+          ...(reviewBase.sha ? { reviewBase: { ref: reviewBase.ref, sha: reviewBase.sha } } : {}),
           note: `${agent} review${passed ? ' 通过' : ` 发现 ${issues.length} 个问题`}`,
           // 用户附加说明只进本地事件时间线,不进 GitHub 评论(issue #54)。
           ...(extraContext !== '' ? { userContext: extraContext } : {}),
@@ -287,7 +302,15 @@ export async function startReview(
             if (reloaded && clearStaleSessionId(reloaded, 'review', sessionId)) await saveWorkflow(reloaded)
             return {
               command: buildFreshAgentCommand(agent),
-              prompt: await buildReviewPrompt(ctx, workflow, resolvedSnapshot, reviewedHead, null, extraContext),
+              prompt: await buildReviewPrompt(
+                ctx,
+                workflow,
+                resolvedSnapshot,
+                reviewedHead,
+                null,
+                extraContext,
+                reviewBase,
+              ),
             }
           },
         }

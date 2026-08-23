@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import type { PromptSnapshot } from './contracts.ts'
 
 export type DevelopAgent = 'codex' | 'claude' | 'dryrun'
-export type AgentAction = 'develop' | 'review' | 'resume' | 'merge'
+export type AgentAction = 'develop' | 'review' | 'resume' | 'merge' | 'restore-base'
 
 /**
  * ClickVibe 自身合并门禁项(issue #49)。门禁拒绝时可由用户人工放行逐项跳过;
@@ -10,6 +10,7 @@ export type AgentAction = 'develop' | 'review' | 'resume' | 'merge'
  */
 export const MERGE_OVERRIDE_GATES = [
   'review-hash', // 实时 PR HEAD 与最近一次通过的 review 结论哈希不一致
+  'review-base', // 实时 PR base 与最近一次通过的 review 基线身份不一致
   'review-contract-missing', // 最近通过的 review 缺少验收契约快照
   'contract-unreadable', // 无法读取当前验收契约
   'contract-changed', // 验收契约已变更
@@ -23,6 +24,7 @@ export const MERGE_OVERRIDE_REASON_MAX = 500
 /** 门禁 key → 面板/审计展示文案的唯一来源;服务端下发,客户端不再自行维护映射。 */
 export const MERGE_GATE_LABELS: Record<MergeOverrideGate, string> = {
   'review-hash': 'PR HEAD 与 review 结论哈希不一致',
+  'review-base': 'PR base 与 review 结论基线不一致',
   'review-contract-missing': 'review 缺少验收契约快照',
   'contract-unreadable': '无法读取当前验收契约',
   'contract-changed': '验收契约已变更',
@@ -377,10 +379,16 @@ export function makeAuthorizationInput(value: {
   override?: unknown
 }): AgentAuthorizationInput {
   const action = String(value.action ?? '') as AgentAction
-  if (action !== 'develop' && action !== 'review' && action !== 'resume' && action !== 'merge') {
+  if (
+    action !== 'develop' &&
+    action !== 'review' &&
+    action !== 'resume' &&
+    action !== 'merge' &&
+    action !== 'restore-base'
+  ) {
     throw new Error('不支持的 Agent 操作')
   }
-  const parsedAgent = action === 'merge' ? null : parseAgent(value.agent)
+  const parsedAgent = action === 'merge' || action === 'restore-base' ? null : parseAgent(value.agent)
   if (parsedAgent === 'dryrun') throw new Error('dryrun 不需要高权限授权')
   const url = String(value.url ?? '').trim()
   if (!parseGithubUrl(url)) throw new Error('GitHub URL 无效')

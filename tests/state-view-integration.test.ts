@@ -211,7 +211,7 @@ test('state view compares a custom workflow baseline instead of origin/main', as
   }
 })
 
-test('a deleted remote baseline warns but retains commit and review flow facts', async () => {
+test('a deleted remote baseline warns and requires explicit restoration before PR creation', async () => {
   const { root, worktree, git, wt, baseA } = await setupRepo()
   try {
     await git('switch', '-c', 'release/deleted')
@@ -228,7 +228,7 @@ test('a deleted remote baseline warns but retains commit and review flow facts',
     assert.equal(derived.aheadOfBase, 1)
     assert.equal(derived.hasCommits, true)
     assert.equal(derived.needsSync, false)
-    assert.equal(derived.nextAction.kind, 'create-pr')
+    assert.equal(derived.nextAction.kind, 'restore-base')
   } finally {
     await rm(root, { recursive: true, force: true })
   }

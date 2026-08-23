@@ -14,8 +14,10 @@ interface Scenario {
   symbolicRef?: string | null
   mainExists?: boolean
   baseHash?: string
+  branchContainsBase?: boolean
   failRemove?: boolean
   frozenBase?: string
+  persistFailure?: boolean
 }
 
 async function runScenario(number: string, scenario: Scenario = {}) {
@@ -32,6 +34,7 @@ async function runScenario(number: string, scenario: Scenario = {}) {
     join(home, '.clickvibe', 'config.yaml'),
     ['repos:', `  o/r: ${repo}`, `worktreeRoot: ${worktreeRoot}`, ''].join('\n'),
   )
+  if (scenario.persistFailure) await writeFile(join(home, '.clickvibe', 'state'), 'blocks workflow persistence')
   if (scenario.path === 'empty' || scenario.path === 'nonempty') await mkdir(target, { recursive: true })
   if (scenario.path === 'nonempty') await writeFile(join(target, 'owned.txt'), 'keep')
   if (scenario.frozenBase) {
@@ -83,6 +86,13 @@ async function runScenario(number: string, scenario: Scenario = {}) {
         }
         if (spec.command.startsWith('git rev-parse --short'))
           return { exitCode: 0, stdout: { text: scenario.baseHash ?? 'abc1234' }, stderr: { text: '' } }
+        if (spec.command.startsWith('git merge-base --is-ancestor')) {
+          return {
+            exitCode: scenario.branchContainsBase === false ? 1 : 0,
+            stdout: { text: '' },
+            stderr: { text: '' },
+          }
+        }
         if (spec.command === 'git worktree list --porcelain') {
           const records =
             typeof scenario.records === 'function'
@@ -99,7 +109,11 @@ async function runScenario(number: string, scenario: Scenario = {}) {
     },
   }
   try {
-    const result = await ensureWorktree(ctx as never, { owner: 'o', repo: 'r', number })
+    const result = await ensureWorktree(
+      ctx as never,
+      { owner: 'o', repo: 'r', number },
+      scenario.symbolicRef === 'origin/release/2.0' ? 'origin/release/2.0' : undefined,
+    )
     const stored = await loadWorkflow(issueKey('o/r', number))
     return { result, commands, target, stored }
   } finally {
@@ -135,6 +149,31 @@ test('worktree preparation fails clearly for missing config, repository, default
   const noHash = await runScenario('4', { baseHash: '' })
   assert.equal(noHash.result.ok, false)
   if (!noHash.result.ok) assert.match(noHash.result.error, /无法读取开发基线提交/)
+})
+
+test('first baseline selection rejects an existing issue branch that does not contain the selected base', async () => {
+  const mismatch = await runScenario('14', {
+    symbolicRef: 'origin/release/2.0',
+    path: 'nonempty',
+    branchExists: true,
+    branchContainsBase: false,
+    records: (target, branch) => `worktree ${target}\nHEAD old1111\nbranch refs/heads/${branch}\n\n`,
+  })
+  assert.equal(mismatch.result.ok, false)
+  if (!mismatch.result.ok) assert.match(mismatch.result.error, /既有开发分支.*所选基线/)
+  assert.equal(mismatch.stored, null)
+})
+
+test('repair rollback deletes the branch it created when baseline persistence fails', async () => {
+  const failed = await runScenario('15', {
+    path: 'empty',
+    branchExists: false,
+    persistFailure: true,
+    records: (target, branch) => `worktree ${target}\nHEAD stale111\nbranch refs/heads/${branch}\n\n`,
+  })
+  assert.equal(failed.result.ok, false)
+  assert.ok(failed.commands.some((command) => command.startsWith('git worktree add -b')))
+  assert.ok(failed.commands.some((command) => command.startsWith('git branch -D')))
 })
 
 test('worktree preparation executes reuse, detached attach and existing-branch attach recoveries', async () => {

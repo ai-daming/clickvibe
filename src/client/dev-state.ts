@@ -150,6 +150,31 @@ export function useDevSection({
       setBusy(null)
     }
   }
+  const restoreBase = async () => {
+    if (!workflow) return
+    setBusy('restoring-base')
+    setError(null)
+    try {
+      const authorization = await authorize('restore-base', null)
+      if (!authorization) return
+      const res = await apiCall<{ ok: true; baseBranch: string; baseHash: string } | { ok: false; error: string }>(
+        'sync',
+        { url, restoreBase: true, ...authorization },
+      )
+      if (!res.ok) {
+        setError(res.error)
+        return
+      }
+      await refresh()
+      const { repoKey, branch, baseRef, derived } = workflow
+      const compareUrl = githubCompareUrl(repoKey, branch, baseRef, derived?.baseBranch, true)
+      window.open(compareUrl, '_blank', 'noopener')
+    } catch (caught) {
+      setError(String(caught instanceof Error ? caught.message : caught))
+    } finally {
+      setBusy(null)
+    }
+  }
   const stop = async () => {
     if (!activeTaskId) return
     const res = await apiCall<{ ok: boolean; error?: string }>('stop', { taskId: activeTaskId })
@@ -347,6 +372,9 @@ export function useDevSection({
         break
       case 'sync':
         void syncWorktree()
+        break
+      case 'restore-base':
+        void restoreBase()
         break
       case 'create-pr':
         if (workflow) {

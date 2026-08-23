@@ -85,10 +85,10 @@ export interface WorkflowEvent {
   agent?: SessionAgent // 动作实际使用的 agent 快照
   stats?: DeliveryStats // fork point..锚定 HEAD 的 git 事实
   taskId?: string // 结构化任务日志锚点
-  /** review 结论(仅 review 事件)。 */
-  verdict?: { passed: boolean; issues: string[] }
+  verdict?: { passed: boolean; issues: string[] } // review 结论(仅 review 事件)
   /** review 启动时冻结的 Issue 验收契约。旧事件缺失时按过期处理。 */
   issueContract?: IssueContractSnapshot
+  reviewBase?: { ref: string; sha: string } // PR retargeting invalidates the verdict
   /** 本次开发完成前仍待修复的上一轮 review 问题数。 */
   fixed?: number
   /** 用户在动作触发时填写的附加说明(issue #54);只进 prompt 与本地时间线,不发布到 GitHub。 */

@@ -344,6 +344,19 @@ test('develop authorization binds the selected remote baseline', () => {
   )
 })
 
+test('restore-base authorization is a non-agent one-use action', () => {
+  const input = makeAuthorizationInput({
+    action: 'restore-base',
+    url: 'https://github.com/ai-daming/clickvibe/issues/60',
+  })
+  assert.deepEqual(input, {
+    action: 'restore-base',
+    url: 'https://github.com/ai-daming/clickvibe/issues/60',
+    agent: null,
+    context: '',
+  })
+})
+
 test('merge authorization input accepts only a well-formed manual override', () => {
   const base = {
     action: 'merge',

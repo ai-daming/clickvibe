@@ -29,6 +29,7 @@ export interface GithubPrFact {
   reviewDecision: string | null
   headRefOid?: string
   baseRefName?: string
+  baseRefOid?: string
 }
 
 export interface GithubUserRest {

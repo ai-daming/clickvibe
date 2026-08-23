@@ -86,6 +86,7 @@ export type NextActionKind =
   | 'develop'
   | 'resume'
   | 'sync'
+  | 'restore-base'
   | 'create-pr'
   | 'review'
   | 'rework'
@@ -116,6 +117,7 @@ export interface WorkflowEvent {
   taskId?: string
   verdict?: { passed: boolean; issues: string[] }
   issueContract?: { bodyHash: string; updatedAt: string }
+  reviewBase?: { ref: string; sha: string }
   fixed?: number
   /** 用户附加说明(issue #54):动作触发时填写,只进本地时间线。 */
   userContext?: string

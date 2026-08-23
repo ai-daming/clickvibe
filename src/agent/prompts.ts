@@ -94,6 +94,16 @@ export const DEVELOPMENT_REQUIREMENTS = [
   '用 gh 创建或更新 PR(若适用)。',
 ]
 
+function developmentRequirements(baseRef: string | null): string[] {
+  const remoteBase = frozenRemoteBase(baseRef) ?? 'origin/main'
+  const baseBranch = remoteBase.replace(/^origin\//, '')
+  return [
+    `先执行 git fetch origin 同步远端,并检查开发基线(${remoteBase})是否有更新;若已有更新,先合并或变基到最新再继续。`,
+    ...DEVELOPMENT_REQUIREMENTS.slice(1, -1),
+    `用 gh 创建或更新 PR(若适用);首次创建必须显式执行 gh pr create --base ${baseBranch},不得依赖仓库默认分支。`,
+  ]
+}
+
 export function buildDevelopPrompt(
   workflow: IssueWorkflow,
   resolved: ResolvedPromptSnapshot,
@@ -111,8 +121,35 @@ export function buildDevelopPrompt(
       `开发基线: ${workflow.baseRef ?? '未知'}`,
       ...(extraContext ? ['附加上下文:', extraContext] : []),
     ],
-    requirements: DEVELOPMENT_REQUIREMENTS,
+    requirements: developmentRequirements(workflow.baseRef),
   })
+}
+
+export interface ReviewBaseTarget {
+  ref: string
+  sha: string
+  diffBase: string
+}
+
+export async function resolveReviewBaseTarget(ctx: Context, workflow: IssueWorkflow): Promise<ReviewBaseTarget> {
+  let ref = (frozenRemoteBase(workflow.baseRef) ?? 'origin/main').replace(/^origin\//, '')
+  let sha = frozenBaseHash(workflow.baseRef) ?? ''
+  if (workflow.prNumber) {
+    const target = await fetchPrBaseTarget(ctx, workflow.repoKey, workflow.prNumber)
+    if (target) {
+      ref = target.ref
+      sha = target.sha ?? sha
+    }
+  }
+  const remote = `origin/${ref}`
+  const available = await runCommand(ctx, `git show-ref --verify --quiet ${shellQuote(`refs/remotes/${remote}`)}`, {
+    workdir: workflow.worktree,
+    timeoutMs: 10_000,
+    sandboxPolicy: { mode: 'read-only', workspaceRoot: workflow.worktree },
+  })
+    .then(() => true)
+    .catch(() => false)
+  return { ref, sha, diffBase: available || sha === '' ? remote : sha }
 }
 
 /** Build the review prompt: review `git diff base...HEAD` against the issue.
@@ -124,26 +161,10 @@ export async function buildReviewPrompt(
   reviewedHead: string,
   sessionId: string | null = null,
   extraContext = '',
+  frozenReviewBase?: ReviewBaseTarget,
 ): Promise<string> {
-  let base = frozenRemoteBase(workflow.baseRef) ?? 'origin/main'
-  let fallbackHash = frozenBaseHash(workflow.baseRef)
-  if (workflow.prNumber) {
-    const target = await fetchPrBaseTarget(ctx, workflow.repoKey, workflow.prNumber)
-    if (target) {
-      base = `origin/${target.ref}`
-      fallbackHash = target.sha ?? fallbackHash
-    }
-  }
-  if (fallbackHash) {
-    const available = await runCommand(ctx, `git show-ref --verify --quiet ${shellQuote(`refs/remotes/${base}`)}`, {
-      workdir: workflow.worktree,
-      timeoutMs: 10_000,
-      sandboxPolicy: { mode: 'read-only', workspaceRoot: workflow.worktree },
-    })
-      .then(() => true)
-      .catch(() => false)
-    if (!available) base = fallbackHash
-  }
+  const reviewBase = frozenReviewBase ?? (await resolveReviewBaseTarget(ctx, workflow))
+  const base = reviewBase.diffBase
   const prUrl = workflow.prNumber ? `https://github.com/${workflow.repoKey}/pull/${workflow.prNumber}` : '未关联'
   const contractHash = issueBodyHash(resolved.snapshot.body)
   return buildStagePrompt({
@@ -155,6 +176,7 @@ export async function buildReviewPrompt(
       `PR: ${prUrl}`,
       `被审 commit: ${reviewedHead}`,
       `对比 base: ${base}`,
+      `PR 基线身份: ${reviewBase.ref} @ ${reviewBase.sha || '未知'}`,
       `契约正文 SHA-256: ${contractHash}`,
       `会话模式: ${sessionId ? `续接 review 会话 ${sessionId};保留既有审查记忆` : '全新 review 会话'}`,
       ...(extraContext ? ['附加上下文:', extraContext] : []),

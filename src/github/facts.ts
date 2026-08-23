@@ -82,6 +82,7 @@ export async function fetchGithubPrFact(
         reviewDecision: deriveReviewDecision(reviews),
         headRefOid: raw.head?.sha ? String(raw.head.sha) : undefined,
         baseRefName: raw.base?.ref ? String(raw.base.ref) : undefined,
+        baseRefOid: raw.base?.sha ? String(raw.base.sha) : undefined,
       },
     }
   } catch (error) {

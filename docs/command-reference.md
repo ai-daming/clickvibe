@@ -18,6 +18,7 @@ ClickVibe 的每个操作都有一条**纯文本命令形式**,可在对话中�
 | `rework <目标> [context=…]` | 返工 / 按意见返工 | 按 review 意见返工(自动带上意见) | 是 |
 | `resume <目标> [context=…]` | 恢复 / 恢复开发 | 恢复中断的开发会话 | 是 |
 | `sync <目标>` | 同步 / 同步基线 | worktree 同步远端基线并推送 | 是(免授权,仍校验来源) |
+| `restore-base <目标>` | 恢复基线 | 远端基线已删除时,按 workflow 冻结提交原子恢复同名分支 | 是(显式二次确认) |
 | `stop <目标>` | 停止 | 停止该 issue 运行中的任务 | 是(免授权,仍校验来源) |
 | `merge <目标>` | 合并 | 合并 PR、清理 worktree/分支、关 Issue、归档 | 是(人的决策,必须明确确认) |
 | `merge <目标> override=<放行原因>` | — | 合并门禁拒绝后的人工放行(跳过项+原因写入审计,不绕过 GitHub 保护) | 是 |
@@ -35,10 +36,11 @@ curl -s http://127.0.0.1:3080/clickvibe/api/command \
 ```
 
 - 读命令直接返回:`{ ok: true, action, text, ... }`,`text` 是对话中可直接展示的可读文本。
-- 写命令(`develop/review/rework/resume/merge`)是**两阶段**的,与面板「预览 → window.confirm → 执行」同构:
+- 写命令(`develop/review/rework/resume/restore-base/merge`)是**两阶段**的,与面板「预览 → window.confirm → 执行」同构:
   1. **预览**:首次发送返回 `{ ok: true, needsConfirmation: true, text, authorization }`。`text` 是确认提示(冻结快照/PR 目标/清理范围),`authorization` 含一次性 `authorizationId` / `authorizationDigest`(2 分钟有效)。服务端自己冻结 Issue 快照,不信任调用方回传。
   2. **执行**:用户在对话中明确确认后,携带 `authorizationId` / `authorizationDigest`(merge 还需 `target`)原样重发同一命令。执行前服务端会再次校验快照未变,变了则拒绝并要求重新预览。
 - `sync` / `stop` / dryrun 不需要一次性授权,但仍要求本机回环 + 同源标记请求头。
+- `restore-base` 仅在冻结基线分支缺失时可用;执行使用 missing-only lease,同名分支若已指向其他提交则拒绝覆盖。
 - `merge` 被 ClickVibe 门禁拒绝时,响应会带全部失败项(`gateFailures`)与可读清单;用户逐项确认后可用 `merge <目标> override=<放行原因>` 重新预览——放行绑定**当时实际失败项**,执行前会重新收集门禁,新增失败项不被旧确认覆盖(同 issue #49 的面板放行协议)。
 
 ## 安全边界(与面板完全一致)

@@ -97,10 +97,12 @@ export async function deriveWorkflowState(
   const lastDevHash = latestDevelopmentHash(events) ?? null
   let lastReviewHash: string | null = null
   let lastReviewContract: IssueContractSnapshot | null = null
+  let lastReviewBase: { ref: string; sha: string } | null = null
   for (const ev of events) {
     if (ev.kind === 'review') {
       lastReviewHash = ev.hash ?? lastReviewHash
       lastReviewContract = ev.issueContract ?? null
+      lastReviewBase = ev.reviewBase ?? null
     }
   }
 
@@ -185,7 +187,14 @@ export async function deriveWorkflowState(
   const issueContractCurrent = issueContractStatus === 'current'
   // 结论同时绑定当前 HEAD 与验收契约；旧事件缺契约快照时 fail closed。
   const verdictCurrent =
-    reviewPassed !== null && head !== null && reviewedHash !== null && head === reviewedHash && issueContractCurrent
+    reviewPassed !== null &&
+    head !== null &&
+    reviewedHash !== null &&
+    head === reviewedHash &&
+    issueContractCurrent &&
+    (!options.pr?.baseRefName ||
+      !options.pr?.baseRefOid ||
+      (lastReviewBase?.ref === options.pr.baseRefName && lastReviewBase.sha === options.pr.baseRefOid))
 
   const devLive = workflow.devTaskId ? liveTasks.get(workflow.devTaskId) : undefined
   const reviewLive = workflow.reviewTaskId ? liveTasks.get(workflow.reviewTaskId) : undefined
@@ -228,6 +237,7 @@ export async function deriveWorkflowState(
     hasCommits,
     hasResumeSession: workflow.devSessionId !== null,
     baseBranch,
+    baseRefAvailable: originMainHead !== null,
   }
   const nextAction = deriveNextAction(facts)
   const status = deriveWorkflowStatus(facts)

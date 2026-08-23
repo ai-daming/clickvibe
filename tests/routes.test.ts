@@ -617,6 +617,99 @@ test('/sync rejects worktree mutation without the same-origin privileged headers
   assert.match(result.body.error ?? '', /授权请求头/)
 })
 
+test('missing baseline restoration requires and consumes an exact one-use authorization', async () => {
+  const previousHome = process.env.HOME
+  const home = await mkdtemp(join(tmpdir(), 'clickvibe-restore-route-'))
+  process.env.HOME = home
+  try {
+    const repo = join(home, 'repo')
+    await mkdir(join(home, '.clickvibe'), { recursive: true })
+    await mkdir(repo, { recursive: true })
+    await writeFile(
+      join(home, '.clickvibe', 'config.yaml'),
+      ['repos:', `  o/r: ${repo}`, `worktreeRoot: ${join(home, 'worktrees')}`, ''].join('\n'),
+    )
+    const workflow = {
+      key: 'o-r-60',
+      url: 'https://github.com/o/r/issues/60',
+      repoKey: 'o/r',
+      worktree: join(home, 'worktrees', 'repo', 'repo-issue-60'),
+      branch: 'repo-issue-60',
+      stage: 'review-ready',
+      devAgent: 'codex',
+      devTaskId: null,
+      devSessionId: null,
+      devSessionAgent: null,
+      devInterrupted: false,
+      reviewAgent: null,
+      reviewTaskId: null,
+      reviewSessionId: null,
+      reviewSessionAgent: null,
+      reviewResult: null,
+      prNumber: null,
+      issueState: 'OPEN',
+      baseRef: 'origin/release/deleted @ abc1234',
+      updatedAt: 0,
+      events: [],
+    } satisfies IssueWorkflow
+    await saveWorkflow(workflow)
+    const commands: string[] = []
+    const handler = createHandler(async (spec) => {
+      commands.push(spec.command)
+      if (spec.command.includes('refs/remotes/origin/release/deleted')) {
+        return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'missing' } }
+      }
+      return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+    })
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+    const unauthorized = await post(handler, '/clickvibe/api/sync', { url: workflow.url, restoreBase: true }, headers)
+    assert.equal(unauthorized.status, 403)
+    assert.equal(commands.length, 0)
+
+    const authorized = (await post(
+      handler,
+      '/clickvibe/api/authorize',
+      { action: 'restore-base', url: workflow.url },
+      headers,
+    )) as {
+      status: number
+      body: { authorizationId: string; authorizationDigest: string; preview: { baseline: string; baselineRef: string } }
+    }
+    assert.equal(authorized.status, 200)
+    assert.equal(authorized.body.preview.baseline, 'origin/release/deleted')
+    assert.equal(authorized.body.preview.baselineRef, 'abc1234')
+    const restored = await post(
+      handler,
+      '/clickvibe/api/sync',
+      {
+        url: workflow.url,
+        restoreBase: true,
+        authorizationId: authorized.body.authorizationId,
+        authorizationDigest: authorized.body.authorizationDigest,
+      },
+      headers,
+    )
+    assert.equal(restored.status, 200, JSON.stringify(restored.body))
+    assert.ok(commands.some((command) => command.startsWith('git push --force-with-lease=')))
+    const replay = await post(
+      handler,
+      '/clickvibe/api/sync',
+      {
+        url: workflow.url,
+        restoreBase: true,
+        authorizationId: authorized.body.authorizationId,
+        authorizationDigest: authorized.body.authorizationDigest,
+      },
+      headers,
+    )
+    assert.equal(replay.status, 403)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
 test('all privileged workflow routes reject missing request provenance before action dispatch', async () => {
   for (const method of ['review', 'resume', 'stop', 'sync', 'merge']) {
     const result = await post(createHandler(), `/clickvibe/api/${method}`, {

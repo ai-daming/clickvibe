@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { buildStagePrompt, selectReviewFeedback, type PromptSnapshot } from '../src/agent/prompt.ts'
-import { buildReviewPrompt } from '../src/agent/prompts.ts'
+import { buildDevelopPrompt, buildReviewPrompt } from '../src/agent/prompts.ts'
 
 const snapshot: PromptSnapshot = {
   url: 'https://github.com/o/r/issues/20',
@@ -11,6 +11,23 @@ const snapshot: PromptSnapshot = {
   updatedAt: '2026-08-22T06:13:11Z',
   comments: [{ author: 'owner', body: '相关评论正文' }],
 }
+
+test('develop prompt derives sync and PR target instructions from the frozen baseline', () => {
+  const prompt = buildDevelopPrompt(
+    {
+      repoKey: 'o/r',
+      branch: 'clickvibe-issue-60',
+      worktree: '/tmp/worktree',
+      baseRef: 'origin/release/2.0 @ abc1234',
+    } as never,
+    { snapshot, freshness: 'current' },
+    '',
+    true,
+  )
+  assert.match(prompt, /检查开发基线\(origin\/release\/2\.0\)/)
+  assert.match(prompt, /gh pr create --base release\/2\.0/)
+  assert.doesNotMatch(prompt, /默认 origin\/main/)
+})
 
 test('all agent stages share the snapshot/status/requirements/trust envelope', () => {
   for (const stage of ['develop', 'review', 'resume', 'rework'] as const) {

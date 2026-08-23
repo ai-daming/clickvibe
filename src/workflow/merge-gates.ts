@@ -163,6 +163,7 @@ export async function collectMergeGateFailures(
   ctx: Context,
   workflow: IssueWorkflow,
   prHead: string,
+  prBase?: { ref: string; sha: string },
 ): Promise<MergeGateFailure[]> {
   const failures: MergeGateFailure[] = []
   const reviewedHash = latestPassingReviewHash(workflow)
@@ -173,6 +174,12 @@ export async function collectMergeGateFailures(
       key: 'review-hash',
       message: String(error instanceof Error ? error.message : error).replace(/^合并门禁拒绝:/, ''),
     })
+  }
+  if (prBase) {
+    const reviewedBase = latestPassingReview(workflow)?.reviewBase
+    if (!reviewedBase || reviewedBase.ref !== prBase.ref || !sameCommitHash(reviewedBase.sha, prBase.sha)) {
+      failures.push({ key: 'review-base', message: '实时 PR base 与最近一次通过的 review 基线不一致,需重新 Review' })
+    }
   }
   const reviewedContract = latestPassingReview(workflow)?.issueContract
   if (!reviewedContract) {

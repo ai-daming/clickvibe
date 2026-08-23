@@ -91,6 +91,7 @@ interface PrFactForDerivation {
   reviewDecision: string | null
   headRefOid?: string
   baseRefName?: string
+  baseRefOid?: string
 }
 
 export interface DeriveOptions {

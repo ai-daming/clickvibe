@@ -44,6 +44,7 @@ import {
 import { appendEvent, archiveWorkflow, issueKey, loadWorkflow, saveWorkflowStrict } from '../infra/state.ts'
 import { collectMergeGateFailures, type MergeGateFailure, mergeGateRejection } from './merge-gates.ts'
 import { workflowBaseBranch } from './state-view.ts'
+import { baselineRestorePreview } from './baseline-restore.ts'
 import { type DevelopBaselinePreview, developBaselinePreview } from './develop-baseline-preview.ts'
 
 export type MergeAuthorizationPreview =
@@ -83,7 +84,14 @@ export async function mergeAuthorizationPreview(ctx: Context, url: string): Prom
     cleanup: ['worktree', '本地分支', '远端分支', `Issue #${parsed.number}`, 'workflow 归档'],
   }
   if (!workflow.delivery) {
-    const gateFailures = await collectMergeGateFailures(ctx, workflow, lookup.pr.headRefOid ?? '')
+    const gateFailures = await collectMergeGateFailures(
+      ctx,
+      workflow,
+      lookup.pr.headRefOid ?? '',
+      lookup.pr.baseRefName && lookup.pr.baseRefOid
+        ? { ref: lookup.pr.baseRefName, sha: lookup.pr.baseRefOid }
+        : undefined,
+    )
     if (gateFailures.length > 0) return { ok: false, gateFailures, ...base }
   }
   return { ok: true, ...base }
@@ -116,6 +124,7 @@ export async function authorizeAgent(
     let snapshot: IssuePromptSnapshot | null = null
     let baselinePreview: DevelopBaselinePreview | null = null
     let mergePreview: Extract<Awaited<ReturnType<typeof mergeAuthorizationPreview>>, { ok: true }> | null = null
+    let restorePreview: Awaited<ReturnType<typeof baselineRestorePreview>> | null = null
     let mergeOverride: AgentAuthorizationInput['override']
     if (input.action === 'develop') {
       const fetched = await fetchIssue(ctx, { url: input.url })
@@ -126,6 +135,8 @@ export async function authorizeAgent(
         return { ok: false, error: 'Issue 内容已变化或未提供完整预览快照,请刷新面板并重新确认' }
       }
       baselinePreview = await developBaselinePreview(ctx, input.url, input.baseline)
+    } else if (input.action === 'restore-base') {
+      restorePreview = await baselineRestorePreview(input.url)
     } else if (input.action === 'merge') {
       const preview = await mergeAuthorizationPreview(ctx, input.url)
       if (preview.ok) {
@@ -176,6 +187,16 @@ export async function authorizeAgent(
       expiresAt: authorization.expiresAt,
       preview:
         mergePreviewBody ??
+        (restorePreview
+          ? {
+              action: input.action,
+              agent: null,
+              url: input.url,
+              digest: authorization.digest,
+              baseline: `origin/${restorePreview.baseBranch}`,
+              baselineRef: restorePreview.baseHash,
+            }
+          : null) ??
         (snapshot
           ? {
               action: input.action,
@@ -246,7 +267,12 @@ export async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): P
   if (!pr.headRefOid) return { ok: false, error: '实时 PR HEAD 缺失,拒绝合并' }
 
   if (!workflow.delivery) {
-    const gateFailures = await collectMergeGateFailures(ctx, workflow, pr.headRefOid)
+    const gateFailures = await collectMergeGateFailures(
+      ctx,
+      workflow,
+      pr.headRefOid,
+      pr.baseRefName && pr.baseRefOid ? { ref: pr.baseRefName, sha: pr.baseRefOid } : undefined,
+    )
     if (gateFailures.length > 0) {
       // 门禁拒绝(issue #49):仅当用户已完成人工放行二次确认(授权绑定被跳过
       // 门禁项与原因)且当前失败项被完全覆盖时才放行;否则行为与文案保持不变。
