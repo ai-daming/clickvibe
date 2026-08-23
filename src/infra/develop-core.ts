@@ -172,7 +172,7 @@ export class LineLog {
     this.#limit = limit
   }
 
-  appendLine(line: string): void {
+  appendLine(line: string): number {
     const bounded =
       line.length > LineLog.MAX_LINE_CHARS
         ? `${line.slice(0, LineLog.MAX_LINE_CHARS)}… [clickvibe] 单行日志已截断`
@@ -182,6 +182,7 @@ export class LineLog {
     if (this.#entries.length > this.#limit) {
       this.#entries.splice(0, this.#entries.length - this.#limit)
     }
+    return this.#sequence
   }
 
   appendChunk(chunk: string): void {
