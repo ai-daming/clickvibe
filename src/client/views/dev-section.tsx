@@ -4,6 +4,8 @@ import { type GhIssue } from './issue-view.tsx'
 import { LiveTerminal } from './live-terminal.tsx'
 import { useDevSection } from '../dev-state.ts'
 import { DeliveryTimeline } from './delivery-timeline.tsx'
+import { contextToSubmit } from '../action-context.ts'
+import { freshSessionEntry } from '../fresh-session.ts'
 
 export function DevSection({
   url,
@@ -48,12 +50,20 @@ export function DevSection({
     showAgentToggle,
     stage,
     startDev,
+    startReview,
     stop,
     streamNotice,
     streamState,
     toggleContext,
+    resume,
     workflowEvents,
   } = useDevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoActionHandled, onDelivered })
+  const freshEntry = freshSessionEntry(effectiveAction.kind, derived?.freshSession)
+  const runFreshSession = () => {
+    const userContext = contextToSubmit(contextText)
+    if (freshEntry === 'develop') void resume(userContext, true)
+    if (freshEntry === 'review') void startReview(agentChoice, userContext, true)
+  }
   return (
     <div className="cv-dev">
       {/* 状态卡:当前状态 + 关键事实 */}
@@ -210,6 +220,16 @@ export function DevSection({
             >
               {busyLabel ?? effectiveAction.label}
             </button>
+            {freshEntry ? (
+              <button
+                className="cv-dev-link"
+                onClick={runFreshSession}
+                disabled={busy !== null}
+                title="放弃旧会话上下文，以当前需求快照和 worktree 状态启动全新会话；Git 产物保持不变"
+              >
+                {freshEntry === 'develop' ? '新开开发' : '新开 review'}
+              </button>
+            ) : null}
             {contextSupported ? (
               <div className="cv-context">
                 <button

@@ -31,6 +31,10 @@ test('authorization confirmation copy preserves develop, review and merge detail
   assert.match(authorizationSummary({ ...common, action: 'develop', agent: 'codex' }), /Issue #61/)
   assert.match(authorizationSummary({ ...common, action: 'review', agent: 'claude' }), /claude.*review/s)
   assert.match(
+    authorizationSummary({ ...common, action: 'review', agent: 'claude', freshSession: true }),
+    /全新.*review/s,
+  )
+  assert.match(
     authorizationSummary({
       ...common,
       action: 'merge',
