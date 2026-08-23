@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { appendFile, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { atomicWriteFile } from './atomic-file.ts'
 import { isAutoRunState } from './contracts.ts'
 import type { AutoRunState, DeliveryPublication, DeliveryStats, PromptSnapshot } from './contracts.ts'
 export type { AutoRunPausedReason, AutoRunState, AutoRunUnresolvedRound } from './contracts.ts'
@@ -208,7 +209,6 @@ export async function appendEvent(workflow: IssueWorkflow, event: WorkflowEvent)
 export function stateDir(): string {
   return join(homedir(), '.clickvibe', 'state')
 }
-
 export function statePath(workflow: WorkflowStorageIdentity): string {
   return workflowPath(stateDir(), workflow)
 }
@@ -376,7 +376,7 @@ export async function saveWorkflow(workflow: IssueWorkflow): Promise<void> {
 export async function saveWorkflowStrict(workflow: IssueWorkflow): Promise<void> {
   await mkdir(join(statePath(workflow), '..'), { recursive: true })
   workflow.updatedAt = Date.now()
-  await writeFile(statePath(workflow), JSON.stringify(workflow, null, 2), 'utf8')
+  await atomicWriteFile(statePath(workflow), JSON.stringify(workflow, null, 2))
 }
 
 export async function archiveWorkflow(workflow: IssueWorkflow): Promise<void> {

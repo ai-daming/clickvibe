@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { isActionErrorExpired } from '../src/client/action-error.ts'
 import {
   decodeLiveLogLine,
   deliveryPublicationLabel,
@@ -29,4 +30,15 @@ test('client runtime derives stable task, status, publication and compare labels
     githubCompareUrl('owner/repo', 'feature/x', 'origin/release'),
     'https://github.com/owner/repo/compare/release...feature%2Fx?expand=1',
   )
+})
+
+test('only stale development gate errors expire after derived state advances', () => {
+  const stale = '该 issue 尚未完成开发,无法 review'
+  assert.equal(isActionErrorExpired(stale, 'review-ready', null), true)
+  assert.equal(isActionErrorExpired(stale, 'reviewing', null), true)
+  assert.equal(isActionErrorExpired(stale, 'developing', null), false)
+  assert.equal(isActionErrorExpired(stale, 'review-ready', 'reviewing'), false)
+  assert.equal(isActionErrorExpired('合并门禁拒绝: review 结论过期', 'review-ready', null), false)
+  assert.equal(isActionErrorExpired('网络请求失败', 'reviewing', null), false)
+  assert.equal(isActionErrorExpired(null, 'review-ready', null), false)
 })

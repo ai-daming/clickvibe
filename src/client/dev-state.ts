@@ -1,5 +1,6 @@
 import React from 'react'
 import { clearedContext, contextToSubmit, toggledContext } from './action-context.ts'
+import { isActionErrorExpired } from './action-error.ts'
 import { type AuthorizationPreview, authorizationSummary, expectedDevelopSnapshot } from './dev-authorization.ts'
 import { useDevStream } from './dev-stream.ts'
 import { type MergeGateFailure, type NextAction, OVERRIDE_REASON_MAX, type Workflow, apiCall } from './domain.ts'
@@ -47,7 +48,8 @@ export function useDevSection({
   React.useEffect(() => {
     const preferred = workflow?.reviewAgent ?? workflow?.devAgent
     setAgentChoice(preferred ?? 'codex')
-  }, [workflow?.reviewAgent, workflow?.devAgent])
+    setError((current) => (isActionErrorExpired(current, derived?.status, busy) ? null : current))
+  }, [workflow?.reviewAgent, workflow?.devAgent, derived?.status, busy])
   const authorize = async (
     action: 'develop' | 'review' | 'resume' | 'create-pr' | 'merge',
     agent: 'codex' | 'claude' | null,

@@ -9,6 +9,7 @@ import {
   loadWorkflow,
   readTaskLog,
   saveWorkflow,
+  saveWorkflowStrict,
   startTaskLog,
   type IssueWorkflow,
 } from '../src/infra/state.ts'
@@ -147,6 +148,37 @@ test('a failed legacy migration does not block reads and retries after the sourc
     await writeFile(legacyPath, JSON.stringify(workflow), 'utf8')
     assert.equal((await loadWorkflow(workflow.key))?.repoKey, workflow.repoKey)
     assert.equal(await readFile(workflowPath(root, workflow), 'utf8').then(() => true), true)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('concurrent workflow loads never observe a partial save', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-atomic-workflow-'))
+  process.env.HOME = tempHome
+  try {
+    const workflow = fixture()
+    const payload = 'x'.repeat(128 * 1024)
+    await saveWorkflowStrict(workflow)
+
+    const writers = Array.from({ length: 3 }, async (_, writer) => {
+      for (let iteration = 0; iteration < 40; iteration++) {
+        await saveWorkflowStrict({
+          ...workflow,
+          events: [{ kind: 'note', at: `${writer}-${iteration}`, note: `${writer}-${iteration}-${payload}` }],
+        })
+      }
+    })
+    const readers = Array.from({ length: 4 }, async () => {
+      for (let iteration = 0; iteration < 120; iteration++) {
+        assert.notEqual(await loadWorkflow(workflow.key), null)
+      }
+    })
+
+    await Promise.all([...writers, ...readers])
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
