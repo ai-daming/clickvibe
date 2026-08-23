@@ -180,13 +180,13 @@ export function formatWriteOutcome(
           ? `已启动 review:任务 ${String(body.taskId ?? '')}。${followUp}`
           : action === 'rework' || action === 'resume'
             ? `已恢复开发会话:任务 ${String(body.taskId ?? '')}。${followUp}`
-           : action === 'merge'
-             ? `PR #${String(body.prNumber ?? '')} 已合并,worktree/分支/Issue 清理与归档完成。`
-             : action === 'restore-base'
-               ? `已恢复远端基线 origin/${String(body.baseBranch ?? '')} @ ${String(body.baseHash ?? '')},可继续创建 PR。`
-               : action === 'sync'
-                ? `已同步 ${String(body.branch ?? '')} 到远端基线,HEAD ${String(body.head ?? '未知')}。`
-                : `已请求停止任务 ${String(body.taskId ?? '')}${body.stopped === false ? '(任务此前已结束)' : ''}。`
+            : action === 'merge'
+              ? `PR #${String(body.prNumber ?? '')} 已合并,worktree/分支/Issue 清理与归档完成。`
+              : action === 'restore-base'
+                ? `已恢复远端基线 origin/${String(body.baseBranch ?? '')} @ ${String(body.baseHash ?? '')},可继续创建 PR。`
+                : action === 'sync'
+                  ? `已同步 ${String(body.branch ?? '')} 到远端基线,HEAD ${String(body.head ?? '未知')}。`
+                  : `已请求停止任务 ${String(body.taskId ?? '')}${body.stopped === false ? '(任务此前已结束)' : ''}。`
   return { status: result.status, body: { ok: true, action, text, ...body } }
 }
 
