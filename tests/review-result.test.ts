@@ -3,12 +3,12 @@ import { lstat, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { parseAgentChunk, type AgentKind } from '../src/agent-stream.ts'
+import { parseAgentChunk, type AgentKind } from '../src/agent/agent-stream.ts'
 import {
   clearReviewResultFile,
   loadReviewResult,
   REVIEW_RESULT_RELATIVE_PATH,
-} from '../src/review-result.ts'
+} from '../src/infra/review-result.ts'
 
 function agentOutput(agent: AgentKind, text: string): string {
   return agent === 'codex'

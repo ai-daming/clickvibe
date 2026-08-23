@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { deliveryPublicationLabel, extractGithubCommentUrl } from '../src/delivery-publication.ts'
+import { deliveryPublicationLabel, extractGithubCommentUrl } from '../src/workflow/delivery-publication.ts'
 
 test('comment URL extraction selects the first valid GitHub comment URL amid extra output', () => {
   assert.equal(

@@ -7,7 +7,7 @@ import {
   workflowBaseBranch,
   workflowStatusLabel,
   type WorkflowFacts,
-} from '../src/state-view.ts'
+} from '../src/workflow/state-view.ts'
 
 function facts(overrides: Partial<WorkflowFacts> = {}): WorkflowFacts {
   return {

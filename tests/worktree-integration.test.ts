@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
-import { buildWorktreeAddCommand } from '../src/develop.ts'
+import { buildWorktreeAddCommand } from '../src/agent/develop.ts'
 
 const execAsync = promisify(exec)
 const execFileAsync = promisify(execFile)

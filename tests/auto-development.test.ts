@@ -7,9 +7,9 @@ import {
   deriveAutoDevelopment,
   isFirstDevelopment,
   rewriteCompletedDependencySection,
-} from '../src/auto-development.ts'
-import { checkIssueContract } from '../src/issue-contract.ts'
-import { parseDependencies } from '../src/develop.ts'
+} from '../src/workflow/auto-development.ts'
+import { checkIssueContract } from '../src/workflow/issue-contract.ts'
+import { parseDependencies } from '../src/agent/develop.ts'
 
 const contract = { ok: true, missing: [] }
 

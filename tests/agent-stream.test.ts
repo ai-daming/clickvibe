@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { parseAgentChunk, parseClaudeEvent, parseCodexEvent } from '../src/agent-stream.ts'
+import { parseAgentChunk, parseClaudeEvent, parseCodexEvent } from '../src/agent/agent-stream.ts'
 
 const longMessage = 'x'.repeat(5000)
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildDevComment, buildReviewComment } from '../src/delivery-comment.ts'
+import { buildDevComment, buildReviewComment } from '../src/workflow/delivery-comment.ts'
 
 test('dev comment starts with the standard flat meta block and lists fixed review issues', () => {
   const body = buildDevComment({

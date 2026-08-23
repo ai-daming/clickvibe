@@ -5,8 +5,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { apply } from '../src/index.ts'
-import { parseCommand } from '../src/command.ts'
-import { issueBodyHash, saveWorkflow, type IssueWorkflow } from '../src/state.ts'
+import { parseCommand } from '../src/workflow/command.ts'
+import { issueBodyHash, saveWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
 
 function included(body: unknown, status = 200): string {
   return [

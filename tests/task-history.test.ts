@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { selectHistoryTask } from '../src/task-history.ts'
+import { selectHistoryTask } from '../src/infra/task-history.ts'
 
 test('a developing rework always restores the dev stream despite the failed review verdict', () => {
   assert.deepEqual(selectHistoryTask({

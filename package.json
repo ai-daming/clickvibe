@@ -48,6 +48,7 @@
     "yaml": "^2.9.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.10",
     "@deepseek-ai/cordis": "^4.0.0-rc.8",
     "@deepseek-ai/dsh-client-runtime": "0.1.0-rc.8",
     "@deepseek-ai/dsh-client-ui-layout": "0.1.0-rc.8",
@@ -67,6 +68,13 @@
     "bundle": "tsdown",
     "test": "node --test tests/*.test.ts",
     "watch": "tsdown --watch",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "coverage": "node --test --experimental-test-coverage --test-coverage-lines=85 --test-coverage-functions=85 tests/*.test.ts",
+    "lint": "biome lint src tests scripts",
+    "lint:fix": "biome lint --write src tests scripts",
+    "fmt": "biome format --write src tests scripts",
+    "check:size": "node scripts/check-file-size.mjs",
+    "check:layers": "node scripts/check-import-layers.mjs",
+    "check": "pnpm run typecheck && pnpm run lint && pnpm run check:size && pnpm run check:layers"
   }
 }

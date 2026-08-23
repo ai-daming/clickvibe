@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { approvePassedReview } from '../src/review-approval.ts'
+import { approvePassedReview } from '../src/github/review-approval.ts'
 
 test('passed review with a PR submits a native GitHub approval', async () => {
   const commands: string[] = []

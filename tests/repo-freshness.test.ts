@@ -4,7 +4,7 @@ import {
   RepositoryFreshnessGate,
   RepositoryRefreshClock,
   aggregateRepositoryFreshness,
-} from '../src/repo-freshness.ts'
+} from '../src/infra/repo-freshness.ts'
 
 test('repository freshness skips duplicate fetches inside the TTL and refreshes after expiry', async () => {
   let now = 1_000

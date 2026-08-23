@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { apply, fetchRepositoryIssues } from '../src/index.ts'
-import { encodeLiveLogEvent } from '../src/live-output.ts'
+import { encodeLiveLogEvent } from '../src/infra/live-output.ts'
 import {
   appendLog,
   issueBodyHash,
@@ -14,7 +14,7 @@ import {
   readLogHistory,
   saveWorkflow,
   type IssueWorkflow,
-} from '../src/state.ts'
+} from '../src/infra/state.ts'
 
 function included(body: unknown, status = 200, headers: Record<string, string> = {}): string {
   return [

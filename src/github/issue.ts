@@ -1,0 +1,157 @@
+/**
+ * clickvibe host half — routes:
+ * - `/clickvibe/api/fetch`          — fetch GitHub issue/PR data via gh
+ * - `/clickvibe/api/command`        — text-command entry (issue #13): conversation
+ *                                      triggers reuse the same action handlers below
+ * - `/clickvibe/api/state`          — restore panel context (all workflows)
+ * - `/clickvibe/api/develop`        — start dev: worktree+branch+agent
+ * - `/clickvibe/api/develop/poll`   — incremental dev log/status (JSON)
+ * - `/clickvibe/api/history`        — complete disk-backed task history
+ * - `/clickvibe/api/stream`         — SSE live status stream for a task
+ * - `/clickvibe/api/review`         — review the dev branch with codex/claude
+ * - `/clickvibe/api/resume`         — resume an interrupted dev session
+ * - `/clickvibe/api/sync`           — sync the worktree with the remote base (issue #5)
+ *
+ * Workflow per issue (persisted under ~/.clickvibe/state/):
+ *   developing → review-ready → reviewing → passed
+ *                      ↑                  │
+ *                      └── rework ────────┘
+ */
+
+import type { Context } from '@deepseek-ai/cordis'
+import { fetchDependencies, fetchTimeline, type IssueDependency } from '../github/dependencies.ts'
+import {
+  fetchIssueRestDetail,
+  fetchPrRestDetail,
+  fetchPrRestReviews,
+  type GithubCommentRest,
+  type GithubUserRest,
+  mapIssueDetail,
+  mapPrDetail,
+} from '../github/reads.ts'
+import { githubErrorMessage, githubRest, isGithubRateLimitError } from '../github/rest.ts'
+import {
+  type IssuePromptSnapshot,
+} from '../infra/develop-core.ts'
+import {
+  dependencyRefreshClock,
+  fetchTtlMs,
+  loadConfig,
+  parseUrl,
+} from '../infra/runtime.ts'
+export async function fetchIssue(
+  ctx: Context,
+  payload: unknown,
+): Promise<
+  | {
+      ok: true
+      data: {
+        kind: 'issue' | 'pr'
+        item: unknown
+        timeline?: unknown
+        dependencies?: { blockedBy: IssueDependency[]; blocking: IssueDependency[] }
+      }
+      dependencyError?: string
+    }
+  | { ok: false; error: string }
+> {
+  const url = String((payload as { url?: unknown } | undefined)?.url ?? '').trim()
+  const parsed = parseUrl(url)
+  if (!parsed) {
+    return { ok: false, error: '请输入形如 https://github.com/owner/repo/issues/123 或 /pull/123 的链接' }
+  }
+  const isPR = parsed.kind === 'pr'
+  try {
+    const repoKey = `${parsed.owner}/${parsed.repo}`
+    const rest = githubRest(ctx)
+    const resourceKey = `${repoKey}/${isPR ? 'pulls' : 'issues'}/${parsed.number}`
+    const panelCacheKey = `${resourceKey}/panel`
+    const fetchOptions = payload as { forceRefresh?: unknown; forceDependencyRefresh?: unknown } | undefined
+    const forceRefresh = fetchOptions?.forceRefresh === true
+    const forceDependencyRefresh =
+      fetchOptions?.forceDependencyRefresh === undefined ? forceRefresh : fetchOptions.forceDependencyRefresh === true
+    const detail = await rest.cachedResource(
+      panelCacheKey,
+      rest.resourceVersion(resourceKey),
+      async () => {
+        if (isPR) {
+          const pr = await fetchPrRestDetail(ctx, repoKey, parsed.number, forceRefresh, 20_000)
+          const [comments, reviews, requested] = await Promise.all([
+            rest.paginate<GithubCommentRest>(`repos/${repoKey}/issues/${parsed.number}/comments`, undefined, 20_000),
+            fetchPrRestReviews(ctx, repoKey, parsed.number, 20_000),
+            rest.json<{ users?: GithubUserRest[]; teams?: Array<{ name?: string; slug?: string }> }>(
+              `repos/${repoKey}/pulls/${parsed.number}/requested_reviewers`,
+              undefined,
+              20_000,
+            ),
+          ])
+          return { item: mapPrDetail(pr, comments, reviews, requested), updatedAt: pr.updated_at ?? '' }
+        }
+        const issue = await fetchIssueRestDetail(ctx, repoKey, parsed.number, forceRefresh, 20_000)
+        const [comments, timeline] = await Promise.all([
+          rest.paginate<GithubCommentRest>(`repos/${repoKey}/issues/${parsed.number}/comments`, undefined, 20_000),
+          fetchTimeline(ctx, parsed.owner, parsed.repo, parsed.number),
+        ])
+        return { item: mapIssueDetail(issue, comments), timeline, updatedAt: issue.updated_at ?? '' }
+      },
+      {
+        force: forceRefresh,
+        ttlMs: fetchTtlMs(await loadConfig()),
+        versionOf: (value) => value.updatedAt,
+      },
+    )
+    const data: {
+      kind: 'issue' | 'pr'
+      item: unknown
+      timeline?: unknown
+      dependencies?: { blockedBy: IssueDependency[]; blocking: IssueDependency[] }
+    } = {
+      kind: parsed.kind,
+      item: detail.item,
+      ...(detail.timeline ? { timeline: detail.timeline } : {}),
+    }
+    let dependencyError: string | undefined
+    // issue 额外拉 timeline,提取关联事件(linked PR/commit)——GitHub UI 的
+    // "linked a pull request" 就来自 cross-referenced 事件
+    if (!isPR) {
+      // 依赖图:blockedBy 来自本 issue 正文,blocking 扫描 repo 内其它 issue
+      const dependencyResult = await fetchDependencies(
+        ctx,
+        parsed,
+        detail.item as { body?: unknown },
+        forceDependencyRefresh,
+      )
+      if (dependencyResult.ok) {
+        data.dependencies = dependencyResult.dependencies
+        dependencyRefreshClock.mark(`${parsed.owner}/${parsed.repo}`)
+      } else {
+        dependencyError = dependencyResult.error
+      }
+    }
+    return { ok: true, data, ...(dependencyError ? { dependencyError } : {}) }
+  } catch (error) {
+    return {
+      ok: false,
+      error: isGithubRateLimitError(error) ? error.message : `抓取异常: ${githubErrorMessage(error)}`,
+    }
+  }
+}
+
+export function issueSnapshot(item: Record<string, unknown>): IssuePromptSnapshot {
+  const url = String(item.url ?? '')
+  if (!parseUrl(url)) throw new Error('GitHub 返回了无效 URL')
+  const comments = Array.isArray(item.comments)
+    ? (item.comments as { author?: { login?: string } | null; body?: unknown }[]).map((comment) => ({
+        author: String(comment.author?.login ?? 'unknown'),
+        body: String(comment.body ?? ''),
+      }))
+    : []
+  return {
+    url,
+    title: String(item.title ?? ''),
+    body: String(item.body ?? ''),
+    state: String(item.state ?? '').toUpperCase(),
+    updatedAt: String(item.updatedAt ?? ''),
+    comments,
+  }
+}

@@ -6,7 +6,7 @@ import {
   GithubRestReader,
   deriveReviewDecision,
   githubRest,
-} from '../src/github-rest.ts'
+} from '../src/github/rest.ts'
 
 function shellWith(responses: Array<{ exitCode: number; stdout: string; stderr?: string }>) {
   const commands: string[] = []

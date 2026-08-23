@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { decodeLiveLogLine, encodeLiveLogEvent, formatElapsed, latestTokenUsage, taskStartedAt, tokenUsage } from '../src/live-output.ts'
+import { decodeLiveLogLine, encodeLiveLogEvent, formatElapsed, latestTokenUsage, taskStartedAt, tokenUsage } from '../src/infra/live-output.ts'
 
 test('structured live records round-trip while old log lines remain readable', () => {
   const event = { source: 'agent', agent: 'codex', kind: 'command', text: '$ pnpm test' } as const

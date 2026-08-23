@@ -16,7 +16,7 @@ import {
   shouldFallbackFromExactResume,
   parseDependencies,
   validatePrivilegedRequest,
-} from '../src/develop.ts'
+} from '../src/agent/develop.ts'
 
 test('parseAgent accepts only the three supported agents', () => {
   assert.equal(parseAgent('codex'), 'codex')

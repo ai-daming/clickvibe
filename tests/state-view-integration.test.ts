@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
 import { deriveWorkflowState, enrichWorkflowStates, type IssueWorkflow } from '../src/index.ts'
-import { issueBodyHash } from '../src/state.ts'
+import { issueBodyHash } from '../src/infra/state.ts'
 
 const execFileAsync = promisify(execFile)
 

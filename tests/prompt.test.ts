@@ -4,7 +4,7 @@ import {
   buildStagePrompt,
   selectReviewFeedback,
   type PromptSnapshot,
-} from '../src/prompt.ts'
+} from '../src/agent/prompt.ts'
 
 const snapshot: PromptSnapshot = {
   url: 'https://github.com/o/r/issues/20',

@@ -12,7 +12,7 @@ import {
   resetLog,
   resolveSessionForAgent,
   type IssueWorkflow,
-} from '../src/state.ts'
+} from '../src/infra/state.ts'
 
 test('persistent log snapshots preserve append order without truncating history', async () => {
   const previousHome = process.env.HOME

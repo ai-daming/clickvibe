@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
 import { buildMergePreface, deriveWorkflowState, resumeDevelop, syncWorktree, type IssueWorkflow } from '../src/index.ts'
-import { applyDevRunOutcome, loadWorkflow, readLogTail, saveWorkflow } from '../src/state.ts'
+import { applyDevRunOutcome, loadWorkflow, readLogTail, saveWorkflow } from '../src/infra/state.ts'
 
 const execFileAsync = promisify(execFile)
 
