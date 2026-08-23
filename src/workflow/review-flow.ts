@@ -122,8 +122,6 @@ export async function startReview(
     workflow.reviewSessionId = null
     workflow.reviewSessionAgent = null
   }
-  // workflow 校验后、冻结契约/HEAD 等任何 await 之前同步占位。重复请求会立即
-  // 复用 taskId,不会重复支付 GitHub 刷新超时,也不会交错清理结论文件并双开 review。
   let reservation: { task: LiveTask; created: boolean }
   try {
     reservation = reviewTaskGate.reserve(workflowKey, () => {
@@ -140,7 +138,6 @@ export async function startReview(
     finishTask(live, 'failed', 1)
     return { ok: false, error: resolvedSnapshot.error }
   }
-  // Prompt 与 review 事件必须绑定同一份快照，避免两次 GitHub 读取之间的契约漂移。
   const reviewIssue: ReviewIssueContract = {
     title: resolvedSnapshot.snapshot.title,
     body: resolvedSnapshot.snapshot.body,

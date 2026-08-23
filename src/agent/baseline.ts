@@ -1,4 +1,5 @@
 /** Pure baseline rules shared by agent worktree creation and prompts. */
+import { isValidGitBranchName } from '../infra/authorization-target.ts'
 
 const ORIGIN_PREFIX = 'origin/'
 
@@ -6,17 +7,7 @@ export function requestedRemoteBase(value: unknown): string {
   const ref = String(value ?? '').trim() || 'origin/HEAD'
   if (!ref.startsWith(ORIGIN_PREFIX)) throw new Error('开发基线只接受 fetch 后的 origin/* 远端分支')
   const branch = ref.slice(ORIGIN_PREFIX.length)
-  if (
-    branch === '' ||
-    branch.startsWith('/') ||
-    branch.endsWith('/') ||
-    branch.endsWith('.') ||
-    branch.endsWith('.lock') ||
-    branch.includes('..') ||
-    branch.includes('//') ||
-    branch.includes('@{') ||
-    !/^[A-Za-z0-9._/-]+$/.test(branch)
-  ) {
+  if (!isValidGitBranchName(branch)) {
     throw new Error('开发基线不是有效的 origin/* 远端分支')
   }
   return ref

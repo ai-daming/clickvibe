@@ -141,7 +141,8 @@ export async function resumeDevelop(
   // 用精确会话 id 续会话(不能用 --last/--continue:worktree 里可能有多个
   // agent 会话,--last 续的是"最近那个",不一定是我们这个)。
   // sessionId 缺失时回退 --last/--continue(尽力而为)。
-  const command = freshSession || invalidSession ? buildFreshAgentCommand(agent) : buildResumeAgentCommand(agent, exactSessionId)
+  const command =
+    freshSession || invalidSession ? buildFreshAgentCommand(agent) : buildResumeAgentCommand(agent, exactSessionId)
   // 续会话前也同步远端(并行开发时 base 会变化)
   try {
     await runCommand(ctx, 'git fetch origin', {

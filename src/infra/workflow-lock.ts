@@ -15,3 +15,13 @@ export async function withWorkflowLock<T>(key: string, operation: () => Promise<
     if (workflowQueues.get(key) === tail) workflowQueues.delete(key)
   }
 }
+
+/** Acquire multiple workflow locks in stable order to avoid cross-workflow deadlocks. */
+export async function withWorkflowLocks<T>(keys: string[], operation: () => Promise<T>): Promise<T> {
+  const unique = [...new Set(keys)].sort()
+  const acquire = async (index: number): Promise<T> => {
+    if (index >= unique.length) return operation()
+    return withWorkflowLock(unique[index], () => acquire(index + 1))
+  }
+  return acquire(0)
+}

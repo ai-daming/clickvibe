@@ -138,7 +138,7 @@ export async function authorizeAgent(
       }
       baselinePreview = await developBaselinePreview(ctx, input.url, input.baseline)
     } else if (input.action === 'restore-base') {
-      restorePreview = await baselineRestorePreview(input.url)
+      restorePreview = await baselineRestorePreview(ctx, input.url)
     } else if (input.action === 'merge') {
       const preview = await mergeAuthorizationPreview(ctx, input.url)
       if (preview.ok) {

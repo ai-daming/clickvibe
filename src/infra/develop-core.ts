@@ -1,5 +1,9 @@
 import { createHash, randomBytes } from 'node:crypto'
-import { type RestoreAuthorizationTarget, restoreAuthorizationTarget } from './authorization-target.ts'
+import {
+  isValidGitBranchName,
+  type RestoreAuthorizationTarget,
+  restoreAuthorizationTarget,
+} from './authorization-target.ts'
 import type { PromptSnapshot } from './contracts.ts'
 
 export type DevelopAgent = 'codex' | 'claude' | 'dryrun'
@@ -386,7 +390,7 @@ export function makeAuthorizationInput(value: {
   let baseline: string | undefined
   if (action === 'develop' && value.baseline !== undefined) {
     baseline = String(value.baseline).trim()
-    if (!/^origin\/[A-Za-z0-9._/-]+$/.test(baseline)) {
+    if (!baseline.startsWith('origin/') || !isValidGitBranchName(baseline.slice('origin/'.length))) {
       throw new Error('开发基线只接受 origin/* 远端分支')
     }
   }

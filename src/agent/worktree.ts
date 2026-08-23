@@ -125,6 +125,11 @@ export async function ensureWorktree(
     return { ok: false, error: String(error instanceof Error ? error.message : error) }
   }
   const firstBaseSelection = !workflow.baseRef
+  const explicitCustomBase =
+    firstBaseSelection &&
+    requestedBaseline !== undefined &&
+    requestedBaseline !== null &&
+    remoteBase !== defaultRemoteBase
   if (firstBaseSelection && remoteBase === `origin/${branch}`) {
     return { ok: false, error: `开发基线不能选择当前 Issue 开发分支 ${remoteBase}` }
   }
@@ -197,6 +202,12 @@ export async function ensureWorktree(
   }
 
   if (firstBaseSelection && (branchExists || recovery.kind === 'attach-detached')) {
+    if (explicitCustomBase) {
+      return {
+        ok: false,
+        error: `既有开发分支 ${branch} 缺少冻结基线记录,无法证明从所选基线 ${remoteBase} 创建;拒绝定格或暗改 worktree`,
+      }
+    }
     const candidate = branchExists ? `refs/heads/${branch}` : 'HEAD'
     const candidateWorkdir = branchExists ? expandedRepo : normalizedTarget
     const compatible = await runCommand(

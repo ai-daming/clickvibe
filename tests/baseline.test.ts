@@ -15,6 +15,7 @@ test('baseline request accepts only origin refs and keeps origin/HEAD as the def
   assert.equal(requestedRemoteBase(undefined), 'origin/HEAD')
   assert.equal(requestedRemoteBase(' origin/HEAD '), 'origin/HEAD')
   assert.equal(requestedRemoteBase('origin/release/2.0'), 'origin/release/2.0')
+  assert.equal(requestedRemoteBase('origin/发布/二期'), 'origin/发布/二期')
   assert.throws(() => requestedRemoteBase('release/2.0'), /origin\/\*/)
   assert.throws(() => requestedRemoteBase('HEAD'), /origin\/\*/)
   assert.throws(() => requestedRemoteBase('origin/../main'), /远端分支/)
@@ -80,6 +81,11 @@ test('baseline preview keeps the default sentinel first and removes duplicate re
   assert.deepEqual(baselinePreviewOptions('invalid', ['origin/main', 'local', 'origin/../bad']), [
     'origin/HEAD',
     'origin/main',
+  ])
+  assert.deepEqual(baselinePreviewOptions('origin/main', ['origin/main', 'origin/发布/二期']), [
+    'origin/HEAD',
+    'origin/main',
+    'origin/发布/二期',
   ])
 })
 

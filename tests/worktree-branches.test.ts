@@ -19,6 +19,7 @@ interface Scenario {
   failRemove?: boolean
   frozenBase?: string
   persistFailure?: boolean
+  requestedBaseline?: string
 }
 
 async function runScenario(number: string, scenario: Scenario = {}) {
@@ -119,7 +120,7 @@ async function runScenario(number: string, scenario: Scenario = {}) {
     const result = await ensureWorktree(
       ctx as never,
       { owner: 'o', repo: 'r', number },
-      scenario.symbolicRef === 'origin/release/2.0' ? 'origin/release/2.0' : undefined,
+      scenario.requestedBaseline ?? (scenario.symbolicRef === 'origin/release/2.0' ? 'origin/release/2.0' : undefined),
     )
     const stored = await loadWorkflow(issueKey('o/r', number))
     return { result, commands, target, stored }
@@ -169,6 +170,20 @@ test('first baseline selection rejects an existing issue branch that does not co
   assert.equal(mismatch.result.ok, false)
   if (!mismatch.result.ok) assert.match(mismatch.result.error, /既有开发分支.*所选基线/)
   assert.equal(mismatch.stored, null)
+})
+
+test('custom first baseline selection rejects an existing issue branch even when the base is an ancestor', async () => {
+  const ambiguous = await runScenario('16', {
+    symbolicRef: 'origin/main',
+    requestedBaseline: 'origin/release/2.0',
+    path: 'nonempty',
+    branchExists: true,
+    branchContainsBase: true,
+    records: (target, branch) => `worktree ${target}\nHEAD main-only\nbranch refs/heads/${branch}\n\n`,
+  })
+  assert.equal(ambiguous.result.ok, false)
+  if (!ambiguous.result.ok) assert.match(ambiguous.result.error, /无法证明从所选基线.*创建/)
+  assert.equal(ambiguous.stored, null)
 })
 
 test('first baseline selection rejects the current issue development branch', async () => {
