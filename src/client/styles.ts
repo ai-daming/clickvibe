@@ -39,6 +39,7 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 .cv-issue-row-main { min-width: 0; }
 .cv-issue-row-title { display: block; color: #0969da; font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .cv-issue-row-meta { color: #57606a; font-size: 10.5px; margin-top: 3px; display: flex; gap: 7px; flex-wrap: wrap; }
+.cv-issue-row-main .cv-running-duration { display: block; margin-top: 3px; color: #0969da; font-weight: 600; }
 .cv-row-lag { color: #9a6700; font-weight: 600; }
 .cv-row-contract { color: #cf222e; font-weight: 600; }
 .cv-row-ready { color: #1a7f37; font-weight: 600; }
