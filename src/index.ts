@@ -21,12 +21,10 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
-import {
-  readJsonBody,
-  writeJson,
-} from './infra/runtime.ts'
+import { ROUTE } from './infra/http-contract.ts'
+import { readJsonBody, writeJson } from './infra/runtime.ts'
 import { handleApiPost } from './workflow/dispatch.ts'
-import { getTaskHistory, handleStream, } from './workflow/task-api.ts'
+import { getTaskHistory, handleStream } from './workflow/task-api.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -61,8 +59,7 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
-/** Prefix route owning every /clickvibe/api/<method> request. */
-export const ROUTE = '/clickvibe/api'
+export { ROUTE } from './infra/http-contract.ts'
 
 export const name = 'clickvibe'
 

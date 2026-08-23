@@ -1,4 +1,3 @@
-
 /**
  * clickvibe host half — routes:
  * - `/clickvibe/api/fetch`          — fetch GitHub issue/PR data via gh
@@ -19,11 +18,7 @@
  *                      └── rework ────────┘
  */
 import type { Context } from '@deepseek-ai/cordis'
-import {
-  type DevelopAgent,
-  LineLog,
-  shouldFallbackFromExactResume,
-} from '../infra/develop-core.ts'
+import { type DevelopAgent, LineLog, shouldFallbackFromExactResume } from '../infra/develop-core.ts'
 import { encodeLiveLogEvent, type LiveLogEvent } from '../infra/live-output.ts'
 import {
   type LiveTask,
@@ -37,9 +32,7 @@ import {
   TASK_RETENTION_MS,
   TASK_TIMEOUT_MS,
 } from '../infra/runtime.ts'
-import {
-  appendLog,
-} from '../infra/state.ts'
+import { appendLog } from '../infra/state.ts'
 import { type AgentKind, parseAgentChunk } from './agent-stream.ts'
 
 /** Start (or restart) a dev task in the live map with status parsing. */

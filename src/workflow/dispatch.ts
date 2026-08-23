@@ -1,37 +1,9 @@
-/** ClickVibe host composition root. */
-/**
- * clickvibe host half — routes:
- * - `/clickvibe/api/fetch`          — fetch GitHub issue/PR data via gh
- * - `/clickvibe/api/command`        — text-command entry (issue #13): conversation
- *                                      triggers reuse the same action handlers below
- * - `/clickvibe/api/state`          — restore panel context (all workflows)
- * - `/clickvibe/api/develop`        — start dev: worktree+branch+agent
- * - `/clickvibe/api/develop/poll`   — incremental dev log/status (JSON)
- * - `/clickvibe/api/history`        — complete disk-backed task history
- * - `/clickvibe/api/stream`         — SSE live status stream for a task
- * - `/clickvibe/api/review`         — review the dev branch with codex/claude
- * - `/clickvibe/api/resume`         — resume an interrupted dev session
- * - `/clickvibe/api/sync`           — sync the worktree with the remote base (issue #5)
- *
- * Workflow per issue (persisted under ~/.clickvibe/state/):
- *   developing → review-ready → reviewing → passed
- *                      ↑                  │
- *                      └── rework ────────┘
- */
-
-import type { IncomingMessage, ServerResponse } from 'node:http'
+/** Thin HTTP method dispatcher for workflow use cases. */
+import type { IncomingMessage } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import { fetchIssue } from '../github/issue.ts'
-import {
-  type AgentAuthorization,
-  isLoopbackAddress,
-  parseAgent,
-} from '../infra/develop-core.ts'
-import {
-  consumeAuthorization,
-  githubAwareStatus,
-  privilegedRequestError,
-} from '../infra/runtime.ts'
+import { type AgentAuthorization, isLoopbackAddress, parseAgent } from '../infra/develop-core.ts'
+import { consumeAuthorization, githubAwareStatus, privilegedRequestError } from '../infra/runtime.ts'
 import { startDevelop } from './develop-start.ts'
 import { handleCommand, listProjects, stateWorkflows } from './handlers.ts'
 import { authorizeAgent, mergeAndCleanup } from './merge.ts'
@@ -40,42 +12,6 @@ import { resumeDevelop } from './resume.ts'
 import { startReview } from './review-flow.ts'
 import { syncWorktree } from './sync.ts'
 import { pollDevelop, stopTask } from './task-api.ts'
-
-declare module '@deepseek-ai/cordis' {
-  interface Context {
-    webServer: {
-      register(route: {
-        kind: 'exact' | 'prefix'
-        path: string
-        handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
-      }): () => void
-    }
-    shell: {
-      resolve(request: {
-        command: string
-        timeoutMs?: number
-        workdir?: string
-        stdin?: string
-        sandboxPolicy?: { mode: 'read-only' | 'workspace-write' | 'danger-full-access'; workspaceRoot: string }
-      }): unknown
-      run(spec: unknown): Promise<{
-        exitCode: number | null
-        stdout: { text: string }
-        stderr?: { text?: string }
-      }>
-      start(spec: unknown): {
-        status: string
-        exitCode: number | null
-        readonly done: Promise<void>
-        readOutput(): { delta: string; lossy: boolean }
-        kill(): boolean
-      }
-    }
-  }
-}
-
-/** Prefix route owning every /clickvibe/api/<method> request. */
-export const ROUTE = '/clickvibe/api'
 
 /** Body size bound of one JSON request. */
 export async function handleApiPost(

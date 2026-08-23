@@ -20,19 +20,14 @@
 
 import { existsSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
-import { type AgentKind, } from '../agent/agent-stream.ts'
+import { type AgentKind } from '../agent/agent-stream.ts'
 import { buildReviewPrompt, fetchPrHeadBranch, resolvePromptSnapshot } from '../agent/prompts.ts'
 import { attachAgentProcess, createLiveTask, finishTask, pushTaskLine } from '../agent/task-supervisor.ts'
 import { detectLinkedPr } from '../github/pr.ts'
-import { githubRest, } from '../github/rest.ts'
+import { githubRest } from '../github/rest.ts'
 import { approvePassedReview } from '../github/review-approval.ts'
-import {
-  buildFreshAgentCommand,
-  buildResumeAgentCommand,
-  parseAgent,
-  shellQuote,
-} from '../infra/develop-core.ts'
-import { decodeLiveLogLine, } from '../infra/live-output.ts'
+import { buildFreshAgentCommand, buildResumeAgentCommand, parseAgent, shellQuote } from '../infra/develop-core.ts'
+import { decodeLiveLogLine } from '../infra/live-output.ts'
 import { clearReviewResultFile, loadReviewResult, REVIEW_RESULT_RELATIVE_PATH } from '../infra/review-result.ts'
 import { type LiveTask, parseUrl, readWorktreeHead, reviewTaskGate, runCommand, taskId } from '../infra/runtime.ts'
 import {

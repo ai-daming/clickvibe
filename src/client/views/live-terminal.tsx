@@ -1,23 +1,15 @@
-import {
-  formatElapsed,
-  latestTokenUsage,
-  taskStartedAt,
-  type LiveLogEvent,
-} from '../runtime.ts'
-/**
- * clickvibe client half: the right-side issue/PR panel.
- *
- * Registers:
- * - `shell.overlay` (id `clickvibe`) — the mount anchor for the occupied panel,
- * - `sidebar.footer.action` (id `clickvibe`) — the toggle button.
- *
- * Fetching goes through the plugin's own `/clickvibe/api/fetch` route
- * (no harness RPC — this is a formal bundle plugin, not a dynamic one).
- */
+import { formatElapsed, latestTokenUsage, taskStartedAt, type LiveLogEvent } from '../runtime.ts'
+/** Live and detached terminal presentation for one agent task. */
 import React from 'react'
 import { createPortal } from 'react-dom'
 
-export function LiveTerminal({ events, taskId, active, streamState, agent: fallbackAgent }: {
+export function LiveTerminal({
+  events,
+  taskId,
+  active,
+  streamState,
+  agent: fallbackAgent,
+}: {
   events: LiveLogEvent[]
   taskId: string | null
   active: boolean
@@ -60,19 +52,20 @@ export function LiveTerminal({ events, taskId, active, streamState, agent: fallb
   const tokenLabel = usage
     ? `tokens ${usage.totalTokens?.toLocaleString() ?? '?'}${usage.inputTokens !== undefined || usage.outputTokens !== undefined ? ` · in ${usage.inputTokens?.toLocaleString() ?? '?'} / out ${usage.outputTokens?.toLocaleString() ?? '?'}` : ''}`
     : null
-  const stateLabel = streamState === 'retrying'
-    ? '重连中'
-    : streamState === 'history'
-      ? '恢复历史'
-      : active ? 'LIVE' : '已结束'
+  const stateLabel =
+    streamState === 'retrying' ? '重连中' : streamState === 'history' ? '恢复历史' : active ? 'LIVE' : '已结束'
 
   const terminal = (
     <div className="cv-terminal" data-agent={agent ?? undefined}>
       <div className="cv-terminal-head">
         <span aria-hidden="true">●</span>
-        <span className="cv-terminal-agent" data-agent={agent ?? undefined}>{agent ?? 'agent'}</span>
+        <span className="cv-terminal-agent" data-agent={agent ?? undefined}>
+          {agent ?? 'agent'}
+        </span>
         <span>{stateLabel}</span>
-        {active && startedAt !== null ? <span aria-label="任务已运行时长">{formatElapsed(now - startedAt)}</span> : null}
+        {active && startedAt !== null ? (
+          <span aria-label="任务已运行时长">{formatElapsed(now - startedAt)}</span>
+        ) : null}
         {tokenLabel ? <span>{tokenLabel}</span> : null}
         <span className="cv-terminal-spacer" />
         <button
@@ -81,21 +74,37 @@ export function LiveTerminal({ events, taskId, active, streamState, agent: fallb
           aria-label={detached ? '收回实时输出' : '放大实时输出'}
           title={detached ? '收回(Esc)' : '放大查看'}
           onClick={() => setDetached((value) => !value)}
-        >{detached ? '↙ 收回' : '↗ 放大'}</button>
+        >
+          {detached ? '↙ 收回' : '↗ 放大'}
+        </button>
       </div>
       <div className="cv-dev-log" ref={logRef} role="log" aria-live="polite" aria-label="实时输出">
-        {events.filter((event) => event.kind !== 'usage').map((event, index) => (
-          <div key={index} className={`cv-terminal-line cv-terminal-line-${event.source === 'system' ? 'system' : event.kind}`}>
-            {event.text}
-          </div>
-        ))}
-        {events.length === 0 ? <div className="cv-terminal-line">{streamState === 'history' ? '正在恢复历史…' : '等待 agent 输出…'}</div> : null}
-        {streamState === 'retrying' ? <div className="cv-terminal-line cv-terminal-line-system">[clickvibe] 连接中断,正在自动重连…</div> : null}
+        {events
+          .filter((event) => event.kind !== 'usage')
+          .map((event, index) => (
+            <div
+              key={index}
+              className={`cv-terminal-line cv-terminal-line-${event.source === 'system' ? 'system' : event.kind}`}
+            >
+              {event.text}
+            </div>
+          ))}
+        {events.length === 0 ? (
+          <div className="cv-terminal-line">{streamState === 'history' ? '正在恢复历史…' : '等待 agent 输出…'}</div>
+        ) : null}
+        {streamState === 'retrying' ? (
+          <div className="cv-terminal-line cv-terminal-line-system">[clickvibe] 连接中断,正在自动重连…</div>
+        ) : null}
       </div>
     </div>
   )
 
   return detached
-    ? createPortal(<div className="cv-terminal-overlay" role="dialog" aria-modal="true" aria-label="放大的实时输出">{terminal}</div>, document.body)
+    ? createPortal(
+        <div className="cv-terminal-overlay" role="dialog" aria-modal="true" aria-label="放大的实时输出">
+          {terminal}
+        </div>,
+        document.body,
+      )
     : terminal
 }

@@ -1,13 +1,4 @@
-/**
- * clickvibe client half: the right-side issue/PR panel.
- *
- * Registers:
- * - `shell.overlay` (id `clickvibe`) — the mount anchor for the occupied panel,
- * - `sidebar.footer.action` (id `clickvibe`) — the toggle button.
- *
- * Fetching goes through the plugin's own `/clickvibe/api/fetch` route
- * (no harness RPC — this is a formal bundle plugin, not a dynamic one).
- */
+/** GitHub issue/PR detail presentation. */
 import React from 'react'
 import { openDshConversationDraft, resolveDshConversationDeps } from '../dsh-conversation.ts'
 import { type ProjectOption, type Workflow } from '../domain.ts'
@@ -69,27 +60,45 @@ export function linkedState(source: NonNullable<TimelineEvent['source']>): 'open
   return source.state === 'closed' ? 'closed' : 'open'
 }
 
-export const OCTICON_PR = 'M1.5 3.25a2.25 2.25 0 1 1 3 2.122v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 1.5 3.25Zm5.677-.177L9.573.677A.25.25 0 0 1 10 .854V2.5h1A2.5 2.5 0 0 1 13.5 5v5.628a2.251 2.251 0 1 1-1.5 0V5a1 1 0 0 0-1-1h-1v1.646a.25.25 0 0 1-.427.177L7.177 3.427a.25.25 0 0 1 0-.354ZM3.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm0 9.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm8.25.75a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Z'
+export const OCTICON_PR =
+  'M1.5 3.25a2.25 2.25 0 1 1 3 2.122v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 1.5 3.25Zm5.677-.177L9.573.677A.25.25 0 0 1 10 .854V2.5h1A2.5 2.5 0 0 1 13.5 5v5.628a2.251 2.251 0 1 1-1.5 0V5a1 1 0 0 0-1-1h-1v1.646a.25.25 0 0 1-.427.177L7.177 3.427a.25.25 0 0 1 0-.354ZM3.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm0 9.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm8.25.75a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Z'
 
-export const OCTICON_MERGE = 'M5.45 5.154A4.25 4.25 0 0 0 9.25 7.5h1.378a2.251 2.251 0 1 1 0 1.5H9.25A5.734 5.734 0 0 1 5 7.123v3.505a2.25 2.25 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.95-.218ZM4.25 13.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm8.5-8.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Z'
+export const OCTICON_MERGE =
+  'M5.45 5.154A4.25 4.25 0 0 0 9.25 7.5h1.378a2.251 2.251 0 1 1 0 1.5H9.25A5.734 5.734 0 0 1 5 7.123v3.505a2.25 2.25 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.95-.218ZM4.25 13.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm8.5-8.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Z'
 
 /** GitHub-style PR state icon (open: pull-request, merged: git-merge, closed: pull-request). */
 export function PrStateIcon({ state }: { state: 'open' | 'closed' | 'merged' }) {
   return (
-    <svg className={`cv-pr-icon cv-pr-${state}`} viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
+    <svg
+      className={`cv-pr-icon cv-pr-${state}`}
+      viewBox="0 0 16 16"
+      width="14"
+      height="14"
+      fill="currentColor"
+      aria-hidden="true"
+    >
       <path d={state === 'merged' ? OCTICON_MERGE : OCTICON_PR} />
     </svg>
   )
 }
 
-export const OCTICON_ISSUE_OPEN = 'M8 9.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3ZM8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Z'
+export const OCTICON_ISSUE_OPEN =
+  'M8 9.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3ZM8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Z'
 
-export const OCTICON_ISSUE_CLOSED = 'M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Zm3.97 1.78a.75.75 0 0 1 1.06 0l1.22 1.22 2.28-2.28a.75.75 0 1 1 1.06 1.06l-2.81 2.81a.75.75 0 0 1-1.06 0l-1.75-1.75a.75.75 0 0 1 0-1.06Z'
+export const OCTICON_ISSUE_CLOSED =
+  'M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Zm3.97 1.78a.75.75 0 0 1 1.06 0l1.22 1.22 2.28-2.28a.75.75 0 1 1 1.06 1.06l-2.81 2.81a.75.75 0 0 1-1.06 0l-1.75-1.75a.75.75 0 0 1 0-1.06Z'
 
 /** GitHub-style issue state icon (open: ring, closed: ring + check). */
 export function IssueStateIcon({ state }: { state: 'open' | 'closed' }) {
   return (
-    <svg className={`cv-pr-icon cv-issue-${state}`} viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
+    <svg
+      className={`cv-pr-icon cv-issue-${state}`}
+      viewBox="0 0 16 16"
+      width="14"
+      height="14"
+      fill="currentColor"
+      aria-hidden="true"
+    >
       <path d={state === 'closed' ? OCTICON_ISSUE_CLOSED : OCTICON_ISSUE_OPEN} />
     </svg>
   )
@@ -149,7 +158,7 @@ export function DshOpenButton({ project, issueUrl }: { project: ProjectOption | 
         return
       }
       const result = await openDshConversationDraft(deps, project.path, issueUrl)
-      setStatus(result.ok ? result.warning ?? null : result.error)
+      setStatus(result.ok ? (result.warning ?? null) : result.error)
     } catch (reason) {
       setStatus(`DSH 对话打开失败: ${reason instanceof Error ? reason.message : String(reason)}`)
     } finally {
@@ -161,18 +170,35 @@ export function DshOpenButton({ project, issueUrl }: { project: ProjectOption | 
     <div className="cv-dsh-open-row">
       <button
         className="cv-dsh-open-btn"
-        onClick={() => { void onClick() }}
+        onClick={() => {
+          void onClick()
+        }}
         disabled={disabledReason !== null || busy}
         title={disabledReason ?? '在该仓库对应的 DSH 项目新开空白对话,并预填此 issue 链接(回车前不会发送)'}
       >
         {busy ? 'DSH 打开中…' : '💬 在 DSH 对话中打开'}
       </button>
-      {status ? <span className="cv-dsh-open-status" role="status">{status}</span> : null}
+      {status ? (
+        <span className="cv-dsh-open-status" role="status">
+          {status}
+        </span>
+      ) : null}
     </div>
   )
 }
 
-export function IssueView({ issue, kind, workflow, onWorkflow, timeline, dependencies, autoAction, onAutoActionHandled, onDelivered, project }: {
+export function IssueView({
+  issue,
+  kind,
+  workflow,
+  onWorkflow,
+  timeline,
+  dependencies,
+  autoAction,
+  onAutoActionHandled,
+  onDelivered,
+  project,
+}: {
   issue: GhIssue
   kind: 'issue' | 'pr'
   workflow: Workflow | null
@@ -187,11 +213,14 @@ export function IssueView({ issue, kind, workflow, onWorkflow, timeline, depende
 }) {
   const isPR = kind === 'pr'
   const state = String(issue.state || '').toUpperCase()
-  const stateBadge = isPR && state === 'MERGED'
-    ? <span className="cv-badge cv-badge-merged">✅ Merged</span>
-    : state === 'OPEN'
-      ? <span className="cv-badge cv-badge-open">🟢 Open</span>
-      : <span className="cv-badge cv-badge-closed">🔴 Closed</span>
+  const stateBadge =
+    isPR && state === 'MERGED' ? (
+      <span className="cv-badge cv-badge-merged">✅ Merged</span>
+    ) : state === 'OPEN' ? (
+      <span className="cv-badge cv-badge-open">🟢 Open</span>
+    ) : (
+      <span className="cv-badge cv-badge-closed">🔴 Closed</span>
+    )
   const labels = (issue.labels ?? []).map((l) => `#${l.name}`).join(' ')
   const assignees = (issue.assignees ?? []).map((a) => `@${a.login}`).join(' ')
 
@@ -217,9 +246,17 @@ export function IssueView({ issue, kind, workflow, onWorkflow, timeline, depende
         {stateBadge}
         <span className="cv-badge cv-badge-kind">{isPR ? `PR #${issue.number}` : `Issue #${issue.number}`}</span>
       </div>
-      <a className="cv-issue-title" href={issue.url} target="_blank" rel="noreferrer">{issue.title}</a>
+      <a className="cv-issue-title" href={issue.url} target="_blank" rel="noreferrer">
+        {issue.title}
+      </a>
       {!isPR && issue.url ? <DshOpenButton project={project ?? null} issueUrl={String(issue.url)} /> : null}
-      {labels ? <div className="cv-issue-labels">{labels.split(' ').map((l, i) => <span key={i}>{l}</span>)}</div> : null}
+      {labels ? (
+        <div className="cv-issue-labels">
+          {labels.split(' ').map((l, i) => (
+            <span key={i}>{l}</span>
+          ))}
+        </div>
+      ) : null}
       {assignees ? <div className="cv-issue-assignees">👤 {assignees}</div> : null}
       <table className="cv-meta">
         <tbody>
@@ -254,16 +291,24 @@ export function IssueView({ issue, kind, workflow, onWorkflow, timeline, depende
               <div className="cv-dep-label">🔒 blockedBy(依赖,需先完成)</div>
               {dependencies.blockedBy.map((dep, i) => {
                 const dependencyState = dep.state.toLowerCase()
-                return <div key={i} className="cv-link-row">
-                  <a className="cv-link" href={`https://github.com/${repoOf(issue.url)}/issues/${dep.number}`} target="_blank" rel="noreferrer">
-                    #{dep.number}{dep.title ? ` ${dep.title}` : ''}
-                  </a>
-                  {dependencyState === 'closed'
-                    ? <span className="cv-link-state cv-link-state-closed">已关闭(依赖完成)</span>
-                    : dependencyState === 'open'
-                      ? <span className="cv-link-state cv-link-state-open">打开(未完成)</span>
-                      : null}
-                </div>
+                return (
+                  <div key={i} className="cv-link-row">
+                    <a
+                      className="cv-link"
+                      href={`https://github.com/${repoOf(issue.url)}/issues/${dep.number}`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      #{dep.number}
+                      {dep.title ? ` ${dep.title}` : ''}
+                    </a>
+                    {dependencyState === 'closed' ? (
+                      <span className="cv-link-state cv-link-state-closed">已关闭(依赖完成)</span>
+                    ) : dependencyState === 'open' ? (
+                      <span className="cv-link-state cv-link-state-open">打开(未完成)</span>
+                    ) : null}
+                  </div>
+                )
               })}
             </div>
           ) : null}
@@ -272,14 +317,22 @@ export function IssueView({ issue, kind, workflow, onWorkflow, timeline, depende
               <div className="cv-dep-label">🔓 blocking(被依赖,等我完成)</div>
               {dependencies.blocking.map((dep, i) => {
                 const dependencyState = dep.state.toLowerCase()
-                return <div key={i} className="cv-link-row">
-                  <a className="cv-link" href={`https://github.com/${repoOf(issue.url)}/issues/${dep.number}`} target="_blank" rel="noreferrer">
-                    #{dep.number}{dep.title ? ` ${dep.title}` : ''}
-                  </a>
-                  <span className={`cv-link-state cv-link-state-${dependencyState}`}>
-                    {dependencyState === 'closed' ? '已关闭' : dependencyState === 'open' ? '打开' : dep.state}
-                  </span>
-                </div>
+                return (
+                  <div key={i} className="cv-link-row">
+                    <a
+                      className="cv-link"
+                      href={`https://github.com/${repoOf(issue.url)}/issues/${dep.number}`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      #{dep.number}
+                      {dep.title ? ` ${dep.title}` : ''}
+                    </a>
+                    <span className={`cv-link-state cv-link-state-${dependencyState}`}>
+                      {dependencyState === 'closed' ? '已关闭' : dependencyState === 'open' ? '打开' : dep.state}
+                    </span>
+                  </div>
+                )
               })}
             </div>
           ) : null}
@@ -292,25 +345,33 @@ export function IssueView({ issue, kind, workflow, onWorkflow, timeline, depende
               const linkedStateValue = linkedState(ev.source)
               return (
                 <div key={i} className="cv-link-row">
-                  {ev.source.is_pr
-                    ? <PrStateIcon state={linkedStateValue} />
-                    : <IssueStateIcon state={linkedStateValue === 'closed' ? 'closed' : 'open'} />}
+                  {ev.source.is_pr ? (
+                    <PrStateIcon state={linkedStateValue} />
+                  ) : (
+                    <IssueStateIcon state={linkedStateValue === 'closed' ? 'closed' : 'open'} />
+                  )}
                   <span className="cv-link-kind">{ev.source.is_pr ? 'PR' : 'Issue'}</span>
                   <a className="cv-link" href={ev.source.html_url} target="_blank" rel="noreferrer">
                     #{ev.source.number} {ev.source.title ?? ''}
                   </a>
-                  <span className={
-                    ev.source.is_pr
-                      ? `cv-link-state cv-link-state-${linkedStateValue}`
-                      : `cv-link-state ${linkedStateValue === 'closed' ? 'cv-link-state-issue-closed' : 'cv-link-state-open'}`
-                  }>
+                  <span
+                    className={
+                      ev.source.is_pr
+                        ? `cv-link-state cv-link-state-${linkedStateValue}`
+                        : `cv-link-state ${linkedStateValue === 'closed' ? 'cv-link-state-issue-closed' : 'cv-link-state-open'}`
+                    }
+                  >
                     {linkedStateLabel(ev.source)}
                   </span>
                 </div>
               )
             }
             if (ev.event === 'referenced' && ev.commit_id) {
-              return <div key={i} className="cv-link-row">🔗 引用提交 <code className="cv-md-code">{ev.commit_id.slice(0, 7)}</code></div>
+              return (
+                <div key={i} className="cv-link-row">
+                  🔗 引用提交 <code className="cv-md-code">{ev.commit_id.slice(0, 7)}</code>
+                </div>
+              )
             }
             return null
           })}
@@ -319,9 +380,18 @@ export function IssueView({ issue, kind, workflow, onWorkflow, timeline, depende
       <div className="cv-issue-body">
         <div className="cv-md">{renderMarkdown(issue.body ?? '')}</div>
       </div>
-      {issue.url && kind === 'issue' && (state === 'OPEN' || workflow?.derived?.nextAction.kind === 'cleanup')
-        ? <DevSection key={issue.url} url={issue.url} issue={issue} workflow={workflow} onWorkflow={onWorkflow} autoAction={autoAction} onAutoActionHandled={onAutoActionHandled} onDelivered={onDelivered} />
-        : null}
+      {issue.url && kind === 'issue' && (state === 'OPEN' || workflow?.derived?.nextAction.kind === 'cleanup') ? (
+        <DevSection
+          key={issue.url}
+          url={issue.url}
+          issue={issue}
+          workflow={workflow}
+          onWorkflow={onWorkflow}
+          autoAction={autoAction}
+          onAutoActionHandled={onAutoActionHandled}
+          onDelivered={onDelivered}
+        />
+      ) : null}
       <CommentsSection comments={issue.comments ?? []} />
     </div>
   )
@@ -338,15 +408,17 @@ export function CommentsSection({ comments }: { comments: GhComment[] }) {
       <button className="cv-comments-toggle" onClick={() => setOpen(!open)}>
         💬 {count} 条评论 {open ? '▾' : '▸'}
       </button>
-      {open ? comments.map((c, i) => (
-        <div key={i} className="cv-comment">
-          <div className="cv-comment-head">
-            <span className="cv-comment-author">@{c.author?.login ?? 'unknown'}</span>
-            <span className="cv-comment-date">{fmtDate(c.createdAt)}</span>
-          </div>
-          <div className="cv-md cv-comment-body">{renderMarkdown(c.body ?? '')}</div>
-        </div>
-      )) : null}
+      {open
+        ? comments.map((c, i) => (
+            <div key={i} className="cv-comment">
+              <div className="cv-comment-head">
+                <span className="cv-comment-author">@{c.author?.login ?? 'unknown'}</span>
+                <span className="cv-comment-date">{fmtDate(c.createdAt)}</span>
+              </div>
+              <div className="cv-md cv-comment-body">{renderMarkdown(c.body ?? '')}</div>
+            </div>
+          ))
+        : null}
     </div>
   )
 }

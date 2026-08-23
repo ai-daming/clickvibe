@@ -68,17 +68,26 @@ function githubApi(
   let stderr = ''
   if (/\/issues\?state=all/.test(command)) {
     if (options.failRepoIssues) {
-      return { exitCode: 1, stdout: { text: included({ message: options.failRepoIssues }, 500) }, stderr: { text: options.failRepoIssues } }
+      return {
+        exitCode: 1,
+        stdout: { text: included({ message: options.failRepoIssues }, 500) },
+        stderr: { text: options.failRepoIssues },
+      }
     }
     body = (options.issues ?? []).map(restIssue)
   } else if (/\/pulls\?state=all/.test(command)) {
     body = options.pulls ?? []
   } else if (/\/issues\/\d+\/comments/.test(command)) {
     const commandNumber = command.match(/\/issues\/(\d+)\/comments/)?.[1]
-    const itemNumber = String(options.item?.number ?? String(options.item?.url ?? '').match(/\/issues\/(\d+)/)?.[1] ?? '')
-    const comments = commandNumber === itemNumber
-      ? (Array.isArray(options.item?.comments) ? options.item.comments as Array<Record<string, unknown>> : [])
-      : (options.prComments ?? [])
+    const itemNumber = String(
+      options.item?.number ?? String(options.item?.url ?? '').match(/\/issues\/(\d+)/)?.[1] ?? '',
+    )
+    const comments =
+      commandNumber === itemNumber
+        ? Array.isArray(options.item?.comments)
+          ? (options.item.comments as Array<Record<string, unknown>>)
+          : []
+        : (options.prComments ?? [])
     body = comments.map(restComment)
   } else if (/\/issues\/\d+\/timeline/.test(command)) {
     body = []
@@ -107,9 +116,19 @@ function createHandler(
       },
     },
     shell: {
-      resolve(spec: unknown) { return spec },
-      run: run ?? (() => { throw new Error('shell must not run for rejected requests') }),
-      start: start ?? (() => { throw new Error('shell must not run for rejected requests') }),
+      resolve(spec: unknown) {
+        return spec
+      },
+      run:
+        run ??
+        (() => {
+          throw new Error('shell must not run for rejected requests')
+        }),
+      start:
+        start ??
+        (() => {
+          throw new Error('shell must not run for rejected requests')
+        }),
     },
   }
   apply(ctx as never)
@@ -130,27 +149,35 @@ async function post(
   try {
     return await new Promise((resolve, reject) => {
       const payload = JSON.stringify(body)
-      const req = request({
-        host: '127.0.0.1', port: address.port, path, method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'content-length': Buffer.byteLength(payload),
-          ...headers,
-          ...(headers.origin === 'same-origin' ? { origin: `http://127.0.0.1:${address.port}` } : {}),
+      const req = request(
+        {
+          host: '127.0.0.1',
+          port: address.port,
+          path,
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'content-length': Buffer.byteLength(payload),
+            ...headers,
+            ...(headers.origin === 'same-origin' ? { origin: `http://127.0.0.1:${address.port}` } : {}),
+          },
         },
-      }, (res) => {
-        const chunks: Buffer[] = []
-        res.on('data', (chunk: Buffer) => chunks.push(chunk))
-        res.on('end', () => resolve({
-          status: res.statusCode ?? 0,
-          body: JSON.parse(Buffer.concat(chunks).toString('utf8')) as { ok: boolean; error?: string },
-        }))
-      })
+        (res) => {
+          const chunks: Buffer[] = []
+          res.on('data', (chunk: Buffer) => chunks.push(chunk))
+          res.on('end', () =>
+            resolve({
+              status: res.statusCode ?? 0,
+              body: JSON.parse(Buffer.concat(chunks).toString('utf8')) as { ok: boolean; error?: string },
+            }),
+          )
+        },
+      )
       req.on('error', reject)
       req.end(payload)
     })
   } finally {
-    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
   }
 }
 
@@ -167,32 +194,44 @@ async function get(
       request({ host: '127.0.0.1', port: address.port, path, method: 'GET' }, (res) => {
         const chunks: Buffer[] = []
         res.on('data', (chunk: Buffer) => chunks.push(chunk))
-        res.on('end', () => resolve({
-          status: res.statusCode ?? 0,
-          body: JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>,
-        }))
-      }).on('error', reject).end()
+        res.on('end', () =>
+          resolve({
+            status: res.statusCode ?? 0,
+            body: JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>,
+          }),
+        )
+      })
+        .on('error', reject)
+        .end()
     })
   } finally {
-    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
   }
 }
 
 test('/develop rejects a real agent before any shell command without server authorization', async () => {
   const result = await post(createHandler(), '/clickvibe/api/develop', {
-    url: 'https://github.com/ai-daming/clickvibe/issues/1', agent: 'codex',
+    url: 'https://github.com/ai-daming/clickvibe/issues/1',
+    agent: 'codex',
   })
   assert.equal(result.status, 403)
   assert.match(result.body.error ?? '', /授权请求头/)
 })
 
 test('/authorize rejects cross-origin requests before fetching issue content', async () => {
-  const result = await post(createHandler(), '/clickvibe/api/authorize', {
-    action: 'develop', url: 'https://github.com/ai-daming/clickvibe/issues/1', agent: 'codex',
-  }, {
-    origin: 'https://evil.example',
-    'x-clickvibe-request': '1',
-  })
+  const result = await post(
+    createHandler(),
+    '/clickvibe/api/authorize',
+    {
+      action: 'develop',
+      url: 'https://github.com/ai-daming/clickvibe/issues/1',
+      agent: 'codex',
+    },
+    {
+      origin: 'https://evil.example',
+      'x-clickvibe-request': '1',
+    },
+  )
   assert.equal(result.status, 403)
   assert.match(result.body.error ?? '', /跨站/)
 })
@@ -200,65 +239,126 @@ test('/authorize rejects cross-origin requests before fetching issue content', a
 test('authorization route freezes the displayed snapshot and consumes tampered capabilities', async () => {
   const item = {
     url: 'https://github.com/ai-daming/clickvibe/issues/1',
-    title: 'snapshot title', body: 'snapshot body', state: 'OPEN',
-    updatedAt: '2026-08-21T00:00:00Z', comments: [{ author: { login: 'owner' }, body: 'review note' }],
+    title: 'snapshot title',
+    body: 'snapshot body',
+    state: 'OPEN',
+    updatedAt: '2026-08-21T00:00:00Z',
+    comments: [{ author: { login: 'owner' }, body: 'review note' }],
   }
-  const handler = createHandler(async (spec) => githubApi(spec.command, { item }) ?? ({
-    exitCode: 0, stdout: { text: '' }, stderr: { text: '' },
-  }))
+  const handler = createHandler(
+    async (spec) =>
+      githubApi(spec.command, { item }) ?? {
+        exitCode: 0,
+        stdout: { text: '' },
+        stderr: { text: '' },
+      },
+  )
   const expectedSnapshot = {
-    url: item.url, title: item.title, body: item.body, state: item.state,
-    updatedAt: item.updatedAt, comments: [{ author: 'owner', body: 'review note' }],
+    url: item.url,
+    title: item.title,
+    body: item.body,
+    state: item.state,
+    updatedAt: item.updatedAt,
+    comments: [{ author: 'owner', body: 'review note' }],
   }
   const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
-  const authorized = await post(handler, '/clickvibe/api/authorize', {
-    action: 'develop', url: item.url, agent: 'codex', context: '', expectedSnapshot,
-  }, headers) as { status: number; body: { ok: boolean; authorizationId?: string; authorizationDigest?: string } }
+  const authorized = (await post(
+    handler,
+    '/clickvibe/api/authorize',
+    {
+      action: 'develop',
+      url: item.url,
+      agent: 'codex',
+      context: '',
+      expectedSnapshot,
+    },
+    headers,
+  )) as { status: number; body: { ok: boolean; authorizationId?: string; authorizationDigest?: string } }
   assert.equal(authorized.status, 200, JSON.stringify(authorized.body))
   assert.equal(authorized.body.ok, true)
 
-  const tampered = await post(handler, '/clickvibe/api/develop', {
-    url: item.url, agent: 'codex', context: 'changed after confirmation',
-    authorizationId: authorized.body.authorizationId,
-    authorizationDigest: authorized.body.authorizationDigest,
-  }, headers)
+  const tampered = await post(
+    handler,
+    '/clickvibe/api/develop',
+    {
+      url: item.url,
+      agent: 'codex',
+      context: 'changed after confirmation',
+      authorizationId: authorized.body.authorizationId,
+      authorizationDigest: authorized.body.authorizationDigest,
+    },
+    headers,
+  )
   assert.equal(tampered.status, 403)
   assert.match(tampered.body.error ?? '', /授权无效/)
 
-  const replay = await post(handler, '/clickvibe/api/develop', {
-    url: item.url, agent: 'codex', context: '',
-    authorizationId: authorized.body.authorizationId,
-    authorizationDigest: authorized.body.authorizationDigest,
-  }, headers)
+  const replay = await post(
+    handler,
+    '/clickvibe/api/develop',
+    {
+      url: item.url,
+      agent: 'codex',
+      context: '',
+      authorizationId: authorized.body.authorizationId,
+      authorizationDigest: authorized.body.authorizationDigest,
+    },
+    headers,
+  )
   assert.equal(replay.status, 403)
 })
 
 test('development rejects a confirmed snapshot when the issue changes before stage start', async () => {
   const url = 'https://github.com/ai-daming/clickvibe/issues/20'
   const oldItem = {
-    url, title: 'old target', body: 'old acceptance', state: 'OPEN',
-    updatedAt: '2026-08-22T05:00:00Z', comments: [],
+    url,
+    title: 'old target',
+    body: 'old acceptance',
+    state: 'OPEN',
+    updatedAt: '2026-08-22T05:00:00Z',
+    comments: [],
   }
   let issueReads = 0
   const handler = createHandler(async (spec) => {
     if (/gh api .*\/issues\/20'/.test(spec.command)) {
       issueReads += 1
-      const current = issueReads === 1 ? oldItem : {
-        ...oldItem, body: 'new acceptance', updatedAt: '2026-08-22T06:00:00Z',
-      }
+      const current =
+        issueReads === 1
+          ? oldItem
+          : {
+              ...oldItem,
+              body: 'new acceptance',
+              updatedAt: '2026-08-22T06:00:00Z',
+            }
       return githubApi(spec.command, { item: current })
     }
     return githubApi(spec.command, { item: oldItem }) ?? { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
   })
   const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
-  const authorized = await post(handler, '/clickvibe/api/authorize', {
-    action: 'develop', url, agent: 'codex', context: '', expectedSnapshot: oldItem,
-  }, headers) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
+  const authorized = (await post(
+    handler,
+    '/clickvibe/api/authorize',
+    {
+      action: 'develop',
+      url,
+      agent: 'codex',
+      context: '',
+      expectedSnapshot: oldItem,
+    },
+    headers,
+  )) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
   assert.equal(authorized.status, 200)
-  const developed = await post(handler, '/clickvibe/api/develop', {
-    url, agent: 'codex', context: '', authorizationId: authorized.body.authorizationId,
-    authorizationDigest: authorized.body.authorizationDigest,
-  }, headers)
+  const developed = await post(
+    handler,
+    '/clickvibe/api/develop',
+    {
+      url,
+      agent: 'codex',
+      context: '',
+      authorizationId: authorized.body.authorizationId,
+      authorizationDigest: authorized.body.authorizationDigest,
+    },
+    headers,
+  )
   assert.equal(developed.status, 400)
   assert.match(developed.body.error ?? '', /内容在确认后已变化/)
   assert.equal(issueReads, 2)
@@ -282,17 +382,24 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
     const worktree = join(worktreeRoot, 'r-issue-23')
     await mkdir(repo, { recursive: true })
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), `repos:\n  o/r: ${repo}\nworktreeRoot: ${worktreeRoot}\n`)
+    await writeFile(
+      join(tempHome, '.clickvibe', 'config.yaml'),
+      `repos:\n  o/r: ${repo}\nworktreeRoot: ${worktreeRoot}\n`,
+    )
     const workflow = interruptedWorkflow('o-r-23', 'https://github.com/o/r/issues/23', worktree)
     workflow.branch = 'r-issue-23'
     workflow.stage = 'passed'
     workflow.reviewResult = { passed: true, issues: [] }
     const reviewedBody = '## 验收标准\n- merge contract'
-    workflow.events = [{
-      kind: 'review', at: '2026-08-22T00:00:00Z', hash: 'abcdef1',
-      verdict: { passed: true, issues: [] },
-      issueContract: { bodyHash: issueBodyHash(reviewedBody), updatedAt: '2026-08-22T00:00:00Z' },
-    }]
+    workflow.events = [
+      {
+        kind: 'review',
+        at: '2026-08-22T00:00:00Z',
+        hash: 'abcdef1',
+        verdict: { passed: true, issues: [] },
+        issueContract: { bodyHash: issueBodyHash(reviewedBody), updatedAt: '2026-08-22T00:00:00Z' },
+      },
+    ]
     await saveWorkflow(workflow)
 
     let merged = false
@@ -302,12 +409,19 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
       commands.push(spec.command)
       const api = githubApi(spec.command, {
         item: {
-          url: workflow.url, number: 23, title: 'merge issue', body: reviewedBody,
-          state: issueClosed ? 'CLOSED' : 'OPEN', updatedAt: '2026-08-22T00:00:00Z',
+          url: workflow.url,
+          number: 23,
+          title: 'merge issue',
+          body: reviewedBody,
+          state: issueClosed ? 'CLOSED' : 'OPEN',
+          updatedAt: '2026-08-22T00:00:00Z',
         },
         pr: {
-          number: 29, state: merged ? 'closed' : 'open', merged_at: merged ? '2026-08-22T01:00:00Z' : null,
-          head: { ref: workflow.branch, sha: 'abcdef1234567890' }, base: { ref: 'main' },
+          number: 29,
+          state: merged ? 'closed' : 'open',
+          merged_at: merged ? '2026-08-22T01:00:00Z' : null,
+          head: { ref: workflow.branch, sha: 'abcdef1234567890' },
+          base: { ref: 'main' },
           html_url: 'https://github.com/o/r/pull/29',
         },
         reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
@@ -317,9 +431,11 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
         merged = true
         return { exitCode: 0, stdout: { text: 'merged' }, stderr: { text: '' } }
       }
-      if (spec.command === 'git worktree list --porcelain') return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      if (spec.command === 'git worktree list --porcelain')
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       if (spec.command.startsWith('if git show-ref')) return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-      if (spec.command.startsWith('if git ls-remote')) return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      if (spec.command.startsWith('if git ls-remote'))
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       if (spec.command.startsWith('gh issue close')) {
         issueClosed = true
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
@@ -327,34 +443,71 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
       throw new Error(`unexpected command: ${spec.command}`)
     })
     const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
-    const authorized = await post(handler, '/clickvibe/api/authorize', {
-      action: 'merge', url: workflow.url,
-    }, headers) as { status: number; body: { ok: boolean; authorizationId?: string; authorizationDigest?: string; target?: { prNumber: string; branch: string; head: string; mergeFlag: string }; preview?: { prNumber: string; branch: string; head: string; mergeFlag: string; cleanup: string[] } } }
+    const authorized = (await post(
+      handler,
+      '/clickvibe/api/authorize',
+      {
+        action: 'merge',
+        url: workflow.url,
+      },
+      headers,
+    )) as {
+      status: number
+      body: {
+        ok: boolean
+        authorizationId?: string
+        authorizationDigest?: string
+        target?: { prNumber: string; branch: string; head: string; mergeFlag: string }
+        preview?: { prNumber: string; branch: string; head: string; mergeFlag: string; cleanup: string[] }
+      }
+    }
     assert.equal(authorized.status, 200, JSON.stringify(authorized.body))
     assert.deepEqual(authorized.body.preview, {
-      prNumber: '29', branch: workflow.branch, head: 'abcdef1234567890', mergeFlag: '--merge',
+      prNumber: '29',
+      branch: workflow.branch,
+      head: 'abcdef1234567890',
+      mergeFlag: '--merge',
       cleanup: ['worktree', '本地分支', '远端分支', 'Issue #23', 'workflow 归档'],
     })
 
-    const tampered = await post(handler, '/clickvibe/api/merge', {
-      url: workflow.url,
-      authorizationId: authorized.body.authorizationId,
-      authorizationDigest: authorized.body.authorizationDigest,
-      target: { ...authorized.body.target, head: 'fffffffffffffff' },
-    }, headers)
+    const tampered = await post(
+      handler,
+      '/clickvibe/api/merge',
+      {
+        url: workflow.url,
+        authorizationId: authorized.body.authorizationId,
+        authorizationDigest: authorized.body.authorizationDigest,
+        target: { ...authorized.body.target, head: 'fffffffffffffff' },
+      },
+      headers,
+    )
     assert.equal(tampered.status, 403)
-    assert.equal(commands.some((command) => command.startsWith('gh pr merge')), false)
-    const executionAuthorization = await post(handler, '/clickvibe/api/authorize', {
-      action: 'merge', url: workflow.url,
-    }, headers) as typeof authorized
+    assert.equal(
+      commands.some((command) => command.startsWith('gh pr merge')),
+      false,
+    )
+    const executionAuthorization = (await post(
+      handler,
+      '/clickvibe/api/authorize',
+      {
+        action: 'merge',
+        url: workflow.url,
+      },
+      headers,
+    )) as typeof authorized
     assert.equal(executionAuthorization.status, 200)
 
-    const response = await post(handler, '/clickvibe/api/merge', {
-      url: workflow.url,
-      authorizationId: executionAuthorization.body.authorizationId,
-      authorizationDigest: executionAuthorization.body.authorizationDigest,
-      target: executionAuthorization.body.target,
-    }, headers) as { status: number; body: { ok: boolean; archived?: boolean } }
+    const response = (await post(
+      handler,
+      '/clickvibe/api/merge',
+      {
+        url: workflow.url,
+        authorizationId: executionAuthorization.body.authorizationId,
+        authorizationDigest: executionAuthorization.body.authorizationDigest,
+        target: executionAuthorization.body.target,
+      },
+      headers,
+    )) as { status: number; body: { ok: boolean; archived?: boolean } }
     assert.equal(response.status, 200, JSON.stringify(response.body))
     assert.equal(response.body.archived, true)
     const mergeCommand = commands.find((command) => command.startsWith('gh pr merge')) ?? ''
@@ -367,15 +520,23 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
     assert.equal(archived.length, 1)
     assert.equal(archived[0].delivery?.status, 'archived')
     assert.deepEqual(archived[0].delivery?.cleanup, {
-      worktree: true, localBranch: true, remoteBranch: true, issue: true,
+      worktree: true,
+      localBranch: true,
+      remoteBranch: true,
+      issue: true,
     })
 
-    const replay = await post(handler, '/clickvibe/api/merge', {
-      url: workflow.url,
-      authorizationId: executionAuthorization.body.authorizationId,
-      authorizationDigest: executionAuthorization.body.authorizationDigest,
-      target: executionAuthorization.body.target,
-    }, headers)
+    const replay = await post(
+      handler,
+      '/clickvibe/api/merge',
+      {
+        url: workflow.url,
+        authorizationId: executionAuthorization.body.authorizationId,
+        authorizationDigest: executionAuthorization.body.authorizationDigest,
+        target: executionAuthorization.body.target,
+      },
+      headers,
+    )
     assert.equal(replay.status, 403)
   } finally {
     if (previousHome === undefined) delete process.env.HOME
@@ -393,7 +554,10 @@ test('/merge rejects a stale review hash before invoking gh pr merge', async () 
     const worktreeRoot = join(tempHome, 'worktrees')
     await mkdir(repo, { recursive: true })
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), `repos:\n  o/r: ${repo}\nworktreeRoot: ${worktreeRoot}\n`)
+    await writeFile(
+      join(tempHome, '.clickvibe', 'config.yaml'),
+      `repos:\n  o/r: ${repo}\nworktreeRoot: ${worktreeRoot}\n`,
+    )
     const workflow = interruptedWorkflow('o-r-23', 'https://github.com/o/r/issues/23', join(worktreeRoot, 'r-issue-23'))
     workflow.branch = 'r-issue-23'
     workflow.stage = 'passed'
@@ -405,8 +569,11 @@ test('/merge rejects a stale review hash before invoking gh pr merge', async () 
       commands.push(spec.command)
       const api = githubApi(spec.command, {
         pr: {
-          number: 29, state: 'open', merged_at: null,
-          head: { ref: workflow.branch, sha: '2222222222222222' }, base: { ref: 'main' },
+          number: 29,
+          state: 'open',
+          merged_at: null,
+          head: { ref: workflow.branch, sha: '2222222222222222' },
+          base: { ref: 'main' },
           html_url: 'https://github.com/o/r/pull/29',
         },
         reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
@@ -418,7 +585,10 @@ test('/merge rejects a stale review hash before invoking gh pr merge', async () 
     const authorized = await post(handler, '/clickvibe/api/authorize', { action: 'merge', url: workflow.url }, headers)
     assert.equal(authorized.status, 400)
     assert.match(authorized.body.error ?? '', /review.*哈希不一致/)
-    assert.equal(commands.some((command) => command.startsWith('gh pr merge')), false)
+    assert.equal(
+      commands.some((command) => command.startsWith('gh pr merge')),
+      false,
+    )
     assert.equal((await loadWorkflow(workflow.key))?.delivery, undefined)
   } finally {
     if (previousHome === undefined) delete process.env.HOME
@@ -436,25 +606,37 @@ test('/merge authorization rejects a changed acceptance contract with the same P
     workflow.branch = 'r-issue-23'
     workflow.stage = 'passed'
     workflow.reviewResult = { passed: true, issues: [] }
-    workflow.events = [{
-      kind: 'review', at: 'now', hash: 'abcdef1', verdict: { passed: true, issues: [] },
-      issueContract: {
-        bodyHash: issueBodyHash('## 验收标准\n- reviewed contract'),
-        updatedAt: '2026-08-22T00:00:00Z',
+    workflow.events = [
+      {
+        kind: 'review',
+        at: 'now',
+        hash: 'abcdef1',
+        verdict: { passed: true, issues: [] },
+        issueContract: {
+          bodyHash: issueBodyHash('## 验收标准\n- reviewed contract'),
+          updatedAt: '2026-08-22T00:00:00Z',
+        },
       },
-    }]
+    ]
     await saveWorkflow(workflow)
     const commands: string[] = []
     const handler = createHandler(async (spec) => {
       commands.push(spec.command)
       const api = githubApi(spec.command, {
         item: {
-          url: workflow.url, number: 23, title: 'changed issue', body: '## 验收标准\n- changed contract',
-          state: 'OPEN', updatedAt: '2026-08-22T01:00:00Z',
+          url: workflow.url,
+          number: 23,
+          title: 'changed issue',
+          body: '## 验收标准\n- changed contract',
+          state: 'OPEN',
+          updatedAt: '2026-08-22T01:00:00Z',
         },
         pr: {
-          number: 29, state: 'open', merged_at: null,
-          head: { ref: workflow.branch, sha: 'abcdef1234567890' }, base: { ref: 'main' },
+          number: 29,
+          state: 'open',
+          merged_at: null,
+          head: { ref: workflow.branch, sha: 'abcdef1234567890' },
+          base: { ref: 'main' },
           html_url: 'https://github.com/o/r/pull/29',
         },
         reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
@@ -462,12 +644,21 @@ test('/merge authorization rejects a changed acceptance contract with the same P
       if (api) return api
       throw new Error(`unexpected command: ${spec.command}`)
     })
-    const result = await post(handler, '/clickvibe/api/authorize', {
-      action: 'merge', url: workflow.url,
-    }, { origin: 'same-origin', 'x-clickvibe-request': '1' })
+    const result = await post(
+      handler,
+      '/clickvibe/api/authorize',
+      {
+        action: 'merge',
+        url: workflow.url,
+      },
+      { origin: 'same-origin', 'x-clickvibe-request': '1' },
+    )
     assert.equal(result.status, 400)
     assert.match(result.body.error ?? '', /验收契约已变更.*重新 Review/)
-    assert.equal(commands.some((command) => command.startsWith('gh pr merge')), false)
+    assert.equal(
+      commands.some((command) => command.startsWith('gh pr merge')),
+      false,
+    )
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
@@ -485,17 +676,24 @@ test('/merge gate rejection offers manual override that merges once and audits t
     const worktree = join(worktreeRoot, 'r-issue-23')
     await mkdir(repo, { recursive: true })
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), `repos:\n  o/r: ${repo}\nworktreeRoot: ${worktreeRoot}\n`)
+    await writeFile(
+      join(tempHome, '.clickvibe', 'config.yaml'),
+      `repos:\n  o/r: ${repo}\nworktreeRoot: ${worktreeRoot}\n`,
+    )
     const workflow = interruptedWorkflow('o-r-23', 'https://github.com/o/r/issues/23', worktree)
     workflow.branch = 'r-issue-23'
     workflow.stage = 'passed'
     workflow.reviewResult = { passed: true, issues: [] }
     const reviewedBody = '## 验收标准\n- override contract'
-    workflow.events = [{
-      kind: 'review', at: '2026-08-22T00:00:00Z', hash: '1111111',
-      verdict: { passed: true, issues: [] },
-      issueContract: { bodyHash: issueBodyHash(reviewedBody), updatedAt: '2026-08-22T00:00:00Z' },
-    }]
+    workflow.events = [
+      {
+        kind: 'review',
+        at: '2026-08-22T00:00:00Z',
+        hash: '1111111',
+        verdict: { passed: true, issues: [] },
+        issueContract: { bodyHash: issueBodyHash(reviewedBody), updatedAt: '2026-08-22T00:00:00Z' },
+      },
+    ]
     await saveWorkflow(workflow)
 
     let merged = false
@@ -505,12 +703,19 @@ test('/merge gate rejection offers manual override that merges once and audits t
       commands.push(spec.command)
       const api = githubApi(spec.command, {
         item: {
-          url: workflow.url, number: 23, title: 'override issue', body: reviewedBody,
-          state: issueClosed ? 'CLOSED' : 'OPEN', updatedAt: '2026-08-22T00:00:00Z',
+          url: workflow.url,
+          number: 23,
+          title: 'override issue',
+          body: reviewedBody,
+          state: issueClosed ? 'CLOSED' : 'OPEN',
+          updatedAt: '2026-08-22T00:00:00Z',
         },
         pr: {
-          number: 29, state: merged ? 'closed' : 'open', merged_at: merged ? '2026-08-22T01:00:00Z' : null,
-          head: { ref: workflow.branch, sha: '2222222222222222' }, base: { ref: 'main' },
+          number: 29,
+          state: merged ? 'closed' : 'open',
+          merged_at: merged ? '2026-08-22T01:00:00Z' : null,
+          head: { ref: workflow.branch, sha: '2222222222222222' },
+          base: { ref: 'main' },
           html_url: 'https://github.com/o/r/pull/29',
         },
         reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
@@ -520,9 +725,11 @@ test('/merge gate rejection offers manual override that merges once and audits t
         merged = true
         return { exitCode: 0, stdout: { text: 'merged' }, stderr: { text: '' } }
       }
-      if (spec.command === 'git worktree list --porcelain') return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      if (spec.command === 'git worktree list --porcelain')
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       if (spec.command.startsWith('if git show-ref')) return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-      if (spec.command.startsWith('if git ls-remote')) return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      if (spec.command.startsWith('if git ls-remote'))
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       if (spec.command.startsWith('gh issue close')) {
         issueClosed = true
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
@@ -532,9 +739,18 @@ test('/merge gate rejection offers manual override that merges once and audits t
     const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
 
     // 1) 门禁拒绝:错误文案不变,同时返回可放行的门禁清单
-    const rejected = await post(handler, '/clickvibe/api/authorize', {
-      action: 'merge', url: workflow.url,
-    }, headers) as { status: number; body: { ok: boolean; error?: string; gateFailures?: Array<{ key: string; message: string }> } }
+    const rejected = (await post(
+      handler,
+      '/clickvibe/api/authorize',
+      {
+        action: 'merge',
+        url: workflow.url,
+      },
+      headers,
+    )) as {
+      status: number
+      body: { ok: boolean; error?: string; gateFailures?: Array<{ key: string; message: string }> }
+    }
     assert.equal(rejected.status, 400)
     assert.match(rejected.body.error ?? '', /合并门禁拒绝.*哈希不一致/)
     assert.deepEqual(
@@ -544,9 +760,17 @@ test('/merge gate rejection offers manual override that merges once and audits t
 
     // 2) 人工放行授权:绑定被跳过的门禁项与原因,预览列出明细
     const overrideReason = '人工确认该提交可合并'
-    const overrideAuthorize = await post(handler, '/clickvibe/api/authorize', {
-      action: 'merge', url: workflow.url, override: true, overrideReason,
-    }, headers) as {
+    const overrideAuthorize = (await post(
+      handler,
+      '/clickvibe/api/authorize',
+      {
+        action: 'merge',
+        url: workflow.url,
+        override: true,
+        overrideReason,
+      },
+      headers,
+    )) as {
       status: number
       body: {
         ok: boolean
@@ -560,16 +784,24 @@ test('/merge gate rejection offers manual override that merges once and audits t
     assert.equal(overrideAuthorize.status, 200, JSON.stringify(overrideAuthorize.body))
     assert.deepEqual(overrideAuthorize.body.override, { skipped: ['review-hash'], reason: overrideReason })
     assert.equal(overrideAuthorize.body.preview?.override?.gates.length, 1)
-    assert.equal(commands.some((command) => command.startsWith('gh pr merge')), false)
+    assert.equal(
+      commands.some((command) => command.startsWith('gh pr merge')),
+      false,
+    )
 
     // 3) 带放行执行合并:成功且写入审计事件
-    const mergedResponse = await post(handler, '/clickvibe/api/merge', {
-      url: workflow.url,
-      authorizationId: overrideAuthorize.body.authorizationId,
-      authorizationDigest: overrideAuthorize.body.authorizationDigest,
-      target: overrideAuthorize.body.target,
-      override: overrideAuthorize.body.override,
-    }, headers) as { status: number; body: { ok: boolean; archived?: boolean } }
+    const mergedResponse = (await post(
+      handler,
+      '/clickvibe/api/merge',
+      {
+        url: workflow.url,
+        authorizationId: overrideAuthorize.body.authorizationId,
+        authorizationDigest: overrideAuthorize.body.authorizationDigest,
+        target: overrideAuthorize.body.target,
+        override: overrideAuthorize.body.override,
+      },
+      headers,
+    )) as { status: number; body: { ok: boolean; archived?: boolean } }
     assert.equal(mergedResponse.status, 200, JSON.stringify(mergedResponse.body))
     assert.equal(mergedResponse.body.archived, true)
     const mergeCommand = commands.find((command) => command.startsWith('gh pr merge')) ?? ''
@@ -586,13 +818,18 @@ test('/merge gate rejection offers manual override that merges once and audits t
     assert.ok(typeof audit[0].at === 'string' && audit[0].at !== '')
 
     // 4) 放行授权单次有效:重放拒绝
-    const replay = await post(handler, '/clickvibe/api/merge', {
-      url: workflow.url,
-      authorizationId: overrideAuthorize.body.authorizationId,
-      authorizationDigest: overrideAuthorize.body.authorizationDigest,
-      target: overrideAuthorize.body.target,
-      override: overrideAuthorize.body.override,
-    }, headers)
+    const replay = await post(
+      handler,
+      '/clickvibe/api/merge',
+      {
+        url: workflow.url,
+        authorizationId: overrideAuthorize.body.authorizationId,
+        authorizationDigest: overrideAuthorize.body.authorizationDigest,
+        target: overrideAuthorize.body.target,
+        override: overrideAuthorize.body.override,
+      },
+      headers,
+    )
     assert.equal(replay.status, 403)
   } finally {
     if (previousHome === undefined) delete process.env.HOME
@@ -610,18 +847,26 @@ test('/merge manual override refuses gate failures not covered by the confirmati
     const worktreeRoot = join(tempHome, 'worktrees')
     await mkdir(repo, { recursive: true })
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), `repos:\n  o/r: ${repo}\nworktreeRoot: ${worktreeRoot}\n`)
+    await writeFile(
+      join(tempHome, '.clickvibe', 'config.yaml'),
+      `repos:\n  o/r: ${repo}\nworktreeRoot: ${worktreeRoot}\n`,
+    )
     const workflow = interruptedWorkflow('o-r-23', 'https://github.com/o/r/issues/23', join(worktreeRoot, 'r-issue-23'))
     workflow.branch = 'r-issue-23'
     workflow.stage = 'passed'
     workflow.reviewResult = { passed: true, issues: [] }
-    workflow.events = [{
-      kind: 'review', at: 'now', hash: 'abcdef1', verdict: { passed: true, issues: [] },
-      issueContract: {
-        bodyHash: issueBodyHash('## 验收标准\n- reviewed contract'),
-        updatedAt: '2026-08-22T00:00:00Z',
+    workflow.events = [
+      {
+        kind: 'review',
+        at: 'now',
+        hash: 'abcdef1',
+        verdict: { passed: true, issues: [] },
+        issueContract: {
+          bodyHash: issueBodyHash('## 验收标准\n- reviewed contract'),
+          updatedAt: '2026-08-22T00:00:00Z',
+        },
       },
-    }]
+    ]
     await saveWorkflow(workflow)
     // 授权时:哈希一致、契约已变更 → 只放行 contract-changed;
     // 合并时:Issue 契约读取失败(合并路径强制刷新)→ 新增 contract-unreadable
@@ -635,12 +880,19 @@ test('/merge manual override refuses gate failures not covered by the confirmati
       }
       const api = githubApi(spec.command, {
         item: {
-          url: workflow.url, number: 23, title: 'changed issue', body: '## 验收标准\n- changed contract',
-          state: 'OPEN', updatedAt: '2026-08-22T01:00:00Z',
+          url: workflow.url,
+          number: 23,
+          title: 'changed issue',
+          body: '## 验收标准\n- changed contract',
+          state: 'OPEN',
+          updatedAt: '2026-08-22T01:00:00Z',
         },
         pr: {
-          number: 29, state: 'open', merged_at: null,
-          head: { ref: workflow.branch, sha: 'abcdef1234567890' }, base: { ref: 'main' },
+          number: 29,
+          state: 'open',
+          merged_at: null,
+          head: { ref: workflow.branch, sha: 'abcdef1234567890' },
+          base: { ref: 'main' },
           html_url: 'https://github.com/o/r/pull/29',
         },
         reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
@@ -649,28 +901,49 @@ test('/merge manual override refuses gate failures not covered by the confirmati
       throw new Error(`unexpected command: ${spec.command}`)
     })
     const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
-    const overrideAuthorize = await post(handler, '/clickvibe/api/authorize', {
-      action: 'merge', url: workflow.url, override: true, overrideReason: '契约改动无关紧要',
-    }, headers) as { status: number; body: { authorizationId?: string; authorizationDigest?: string; target?: unknown; override?: unknown } }
+    const overrideAuthorize = (await post(
+      handler,
+      '/clickvibe/api/authorize',
+      {
+        action: 'merge',
+        url: workflow.url,
+        override: true,
+        overrideReason: '契约改动无关紧要',
+      },
+      headers,
+    )) as {
+      status: number
+      body: { authorizationId?: string; authorizationDigest?: string; target?: unknown; override?: unknown }
+    }
     assert.equal(overrideAuthorize.status, 200, JSON.stringify(overrideAuthorize.body))
-    assert.deepEqual(
-      (overrideAuthorize.body.override as { skipped: string[] } | undefined)?.skipped,
-      ['contract-changed'],
-    )
+    assert.deepEqual((overrideAuthorize.body.override as { skipped: string[] } | undefined)?.skipped, [
+      'contract-changed',
+    ])
 
     issueReadFailing = true
-    const response = await post(handler, '/clickvibe/api/merge', {
-      url: workflow.url,
-      authorizationId: overrideAuthorize.body.authorizationId,
-      authorizationDigest: overrideAuthorize.body.authorizationDigest,
-      target: overrideAuthorize.body.target,
-      override: overrideAuthorize.body.override,
-    }, headers) as { status: number; body: { ok: boolean; error?: string } }
+    const response = (await post(
+      handler,
+      '/clickvibe/api/merge',
+      {
+        url: workflow.url,
+        authorizationId: overrideAuthorize.body.authorizationId,
+        authorizationDigest: overrideAuthorize.body.authorizationDigest,
+        target: overrideAuthorize.body.target,
+        override: overrideAuthorize.body.override,
+      },
+      headers,
+    )) as { status: number; body: { ok: boolean; error?: string } }
     assert.equal(response.status, 400)
     assert.match(response.body.error ?? '', /无法读取当前验收契约.*请重新确认/)
-    assert.equal(commands.some((command) => command.startsWith('gh pr merge')), false)
+    assert.equal(
+      commands.some((command) => command.startsWith('gh pr merge')),
+      false,
+    )
     const persisted = await loadWorkflow(workflow.key)
-    assert.equal((persisted?.events ?? []).some((event) => event.kind === 'merge-override'), false)
+    assert.equal(
+      (persisted?.events ?? []).some((event) => event.kind === 'merge-override'),
+      false,
+    )
     assert.equal(persisted?.delivery, undefined)
   } finally {
     if (previousHome === undefined) delete process.env.HOME
@@ -689,16 +962,24 @@ test('cleanup failure keeps merged terminal state and retries without merging ag
     const worktree = join(worktreeRoot, 'r-issue-23')
     await mkdir(repo, { recursive: true })
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), `repos:\n  o/r: ${repo}\nworktreeRoot: ${worktreeRoot}\n`)
+    await writeFile(
+      join(tempHome, '.clickvibe', 'config.yaml'),
+      `repos:\n  o/r: ${repo}\nworktreeRoot: ${worktreeRoot}\n`,
+    )
     const workflow = interruptedWorkflow('o-r-23', 'https://github.com/o/r/issues/23', worktree)
     workflow.branch = 'r-issue-23'
     workflow.stage = 'passed'
     workflow.reviewResult = { passed: true, issues: [] }
     const reviewedBody = '## 验收标准\n- retry cleanup contract'
-    workflow.events = [{
-      kind: 'review', at: 'now', hash: 'abcdef1', verdict: { passed: true, issues: [] },
-      issueContract: { bodyHash: issueBodyHash(reviewedBody), updatedAt: '2026-08-22T00:00:00Z' },
-    }]
+    workflow.events = [
+      {
+        kind: 'review',
+        at: 'now',
+        hash: 'abcdef1',
+        verdict: { passed: true, issues: [] },
+        issueContract: { bodyHash: issueBodyHash(reviewedBody), updatedAt: '2026-08-22T00:00:00Z' },
+      },
+    ]
     await saveWorkflow(workflow)
 
     let merged = false
@@ -708,12 +989,19 @@ test('cleanup failure keeps merged terminal state and retries without merging ag
       commands.push(spec.command)
       const api = githubApi(spec.command, {
         item: {
-          url: workflow.url, number: 23, title: 'merge issue', body: reviewedBody,
-          state: 'CLOSED', updatedAt: '2026-08-22T00:00:00Z',
+          url: workflow.url,
+          number: 23,
+          title: 'merge issue',
+          body: reviewedBody,
+          state: 'CLOSED',
+          updatedAt: '2026-08-22T00:00:00Z',
         },
         pr: {
-          number: 29, state: merged ? 'closed' : 'open', merged_at: merged ? '2026-08-22T01:00:00Z' : null,
-          head: { ref: workflow.branch, sha: 'abcdef1234567890' }, base: { ref: 'main' },
+          number: 29,
+          state: merged ? 'closed' : 'open',
+          merged_at: merged ? '2026-08-22T01:00:00Z' : null,
+          head: { ref: workflow.branch, sha: 'abcdef1234567890' },
+          base: { ref: 'main' },
           html_url: 'https://github.com/o/r/pull/29',
         },
         reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
@@ -723,9 +1011,12 @@ test('cleanup failure keeps merged terminal state and retries without merging ag
         merged = true
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       }
-      if (spec.command === 'git worktree list --porcelain') return {
-        exitCode: 0, stdout: { text: removeAttempts === 0 ? `worktree ${worktree}\nbranch refs/heads/${workflow.branch}\n` : '' }, stderr: { text: '' },
-      }
+      if (spec.command === 'git worktree list --porcelain')
+        return {
+          exitCode: 0,
+          stdout: { text: removeAttempts === 0 ? `worktree ${worktree}\nbranch refs/heads/${workflow.branch}\n` : '' },
+          stderr: { text: '' },
+        }
       if (spec.command.startsWith('git worktree remove')) {
         removeAttempts++
         return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'worktree contains changes' } }
@@ -736,16 +1027,27 @@ test('cleanup failure keeps merged terminal state and retries without merging ag
       throw new Error(`unexpected command: ${spec.command}`)
     })
     const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
-    const authorize = () => post(handler, '/clickvibe/api/authorize', { action: 'merge', url: workflow.url }, headers) as Promise<{
-      status: number; body: { authorizationId?: string; authorizationDigest?: string; target?: { prNumber: string; branch: string; head: string; mergeFlag: string } }
-    }>
+    const authorize = () =>
+      post(handler, '/clickvibe/api/authorize', { action: 'merge', url: workflow.url }, headers) as Promise<{
+        status: number
+        body: {
+          authorizationId?: string
+          authorizationDigest?: string
+          target?: { prNumber: string; branch: string; head: string; mergeFlag: string }
+        }
+      }>
     const firstAuthorization = await authorize()
-    const first = await post(handler, '/clickvibe/api/merge', {
-      url: workflow.url,
-      authorizationId: firstAuthorization.body.authorizationId,
-      authorizationDigest: firstAuthorization.body.authorizationDigest,
-      target: firstAuthorization.body.target,
-    }, headers)
+    const first = await post(
+      handler,
+      '/clickvibe/api/merge',
+      {
+        url: workflow.url,
+        authorizationId: firstAuthorization.body.authorizationId,
+        authorizationDigest: firstAuthorization.body.authorizationDigest,
+        target: firstAuthorization.body.target,
+      },
+      headers,
+    )
     assert.equal(first.status, 400)
     assert.match(first.body.error ?? '', /PR 已合并;移除 worktree失败,可重试/)
     const pending = await loadWorkflow(workflow.key)
@@ -754,12 +1056,17 @@ test('cleanup failure keeps merged terminal state and retries without merging ag
 
     const secondAuthorization = await authorize()
     assert.equal(secondAuthorization.status, 200)
-    const second = await post(handler, '/clickvibe/api/merge', {
-      url: workflow.url,
-      authorizationId: secondAuthorization.body.authorizationId,
-      authorizationDigest: secondAuthorization.body.authorizationDigest,
-      target: secondAuthorization.body.target,
-    }, headers)
+    const second = await post(
+      handler,
+      '/clickvibe/api/merge',
+      {
+        url: workflow.url,
+        authorizationId: secondAuthorization.body.authorizationId,
+        authorizationDigest: secondAuthorization.body.authorizationDigest,
+        target: secondAuthorization.body.target,
+      },
+      headers,
+    )
     assert.equal(second.status, 200, JSON.stringify(second.body))
     assert.equal(commands.filter((command) => command.startsWith('gh pr merge')).length, 1)
     assert.equal((await loadAllArchivedWorkflows())[0]?.delivery?.status, 'archived')
@@ -775,23 +1082,31 @@ test('/state uses the live GitHub issue state instead of the stored issueState',
   const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-live-issue-'))
   process.env.HOME = tempHome
   try {
-    const workflow = interruptedWorkflow('o-r-23', 'https://github.com/o/r/issues/23', join(tempHome, 'missing-worktree'))
+    const workflow = interruptedWorkflow(
+      'o-r-23',
+      'https://github.com/o/r/issues/23',
+      join(tempHome, 'missing-worktree'),
+    )
     workflow.issueState = 'OPEN'
     await saveWorkflow(workflow)
     const handler = createHandler(async (spec) => {
       const api = githubApi(spec.command, {
         item: { url: workflow.url, number: 23, state: 'CLOSED' },
         pr: {
-          number: 29, state: 'open', merged_at: null,
-          head: { ref: workflow.branch, sha: 'abcdef1234567890' }, base: { ref: 'main' },
+          number: 29,
+          state: 'open',
+          merged_at: null,
+          head: { ref: workflow.branch, sha: 'abcdef1234567890' },
+          base: { ref: 'main' },
           html_url: 'https://github.com/o/r/pull/29',
         },
       })
       if (api) return api
       throw new Error(`unexpected command: ${spec.command}`)
     })
-    const response = await post(handler, '/clickvibe/api/state', { url: workflow.url }) as {
-      status: number; body: { workflows?: Array<{ issueState: string; derived: { nextAction: { kind: string } } }> }
+    const response = (await post(handler, '/clickvibe/api/state', { url: workflow.url })) as {
+      status: number
+      body: { workflows?: Array<{ issueState: string; derived: { nextAction: { kind: string } } }> }
     }
     assert.equal(response.status, 200)
     assert.equal(response.body.workflows?.[0].issueState, 'CLOSED')
@@ -817,12 +1132,10 @@ test('/state and repo/issues share one repository fetch TTL while manual refresh
     const repo = join(tempHome, 'repo')
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
     await mkdir(repo, { recursive: true })
-    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), [
-      'repos:',
-      `  o/r: ${repo}`,
-      'fetchTtlSeconds: 45',
-      '',
-    ].join('\n'))
+    await writeFile(
+      join(tempHome, '.clickvibe', 'config.yaml'),
+      ['repos:', `  o/r: ${repo}`, 'fetchTtlSeconds: 45', ''].join('\n'),
+    )
     let fetches = 0
     const handler = createHandler(async ({ command }) => {
       if (command === 'git fetch origin --prune') {
@@ -864,11 +1177,7 @@ test('/state keeps local-ref state readable and marks freshness stale when fetch
     const repo = join(tempHome, 'repo')
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
     await mkdir(repo, { recursive: true })
-    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), [
-      'repos:',
-      `  o/r: ${repo}`,
-      '',
-    ].join('\n'))
+    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), ['repos:', `  o/r: ${repo}`, ''].join('\n'))
     const handler = createHandler(async ({ command }) => {
       assert.equal(command, 'git fetch origin --prune')
       return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'offline' } }
@@ -893,11 +1202,10 @@ test('/state schedules dependency refreshes for a remote-only configured reposit
   process.env.HOME = tempHome
   try {
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), [
-      'repos:',
-      '  remote/only: /path/not/on/this/host',
-      '',
-    ].join('\n'))
+    await writeFile(
+      join(tempHome, '.clickvibe', 'config.yaml'),
+      ['repos:', '  remote/only: /path/not/on/this/host', ''].join('\n'),
+    )
     const handler = createHandler()
 
     const first = await post(handler, '/clickvibe/api/state', { repoKey: 'remote/only' })
@@ -921,11 +1229,7 @@ test('/state returns stale local facts within a bounded wait when git fetch hang
     const repo = join(tempHome, 'repo')
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
     await mkdir(repo, { recursive: true })
-    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), [
-      'repos:',
-      `  hanging/repo: ${repo}`,
-      '',
-    ].join('\n'))
+    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), ['repos:', `  hanging/repo: ${repo}`, ''].join('\n'))
     const handler = createHandler(async ({ command }) => {
       assert.equal(command, 'git fetch origin --prune')
       return new Promise(() => {})
@@ -958,26 +1262,32 @@ test('a rejected dry-run worktree attempt preserves the previous durable dev his
     await mkdir(repo, { recursive: true })
     await mkdir(target, { recursive: true })
     await writeFile(join(target, 'unregistered.txt'), 'must not be removed')
-    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), [
-      'repos:',
-      `  o/r: ${repo}`,
-      `worktreeRoot: ${worktreeRoot}`,
-      '',
-    ].join('\n'))
+    await writeFile(
+      join(tempHome, '.clickvibe', 'config.yaml'),
+      ['repos:', `  o/r: ${repo}`, `worktreeRoot: ${worktreeRoot}`, ''].join('\n'),
+    )
     await appendLog('o-r-905', 'dev', 'previous completed task history')
 
     const issue = {
-      url: 'https://github.com/o/r/issues/905', title: 'conflicting worktree', body: '',
-      state: 'OPEN', updatedAt: 'now', comments: [],
+      url: 'https://github.com/o/r/issues/905',
+      title: 'conflicting worktree',
+      body: '',
+      state: 'OPEN',
+      updatedAt: 'now',
+      comments: [],
     }
     const handler = createHandler(async ({ command }) => {
       const api = githubApi(command, { item: issue })
       if (api) return api
       if (command === 'git fetch origin --prune') return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-      if (command === 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD') return { exitCode: 0, stdout: { text: 'origin/main' }, stderr: { text: '' } }
-      if (command === "git rev-parse --short 'origin/main'") return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
-      if (command === 'git worktree list --porcelain') return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-      if (command.includes("git show-ref --verify --quiet 'refs/heads/repo-issue-905'")) return { exitCode: 0, stdout: { text: '1' }, stderr: { text: '' } }
+      if (command === 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD')
+        return { exitCode: 0, stdout: { text: 'origin/main' }, stderr: { text: '' } }
+      if (command === "git rev-parse --short 'origin/main'")
+        return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
+      if (command === 'git worktree list --porcelain')
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      if (command.includes("git show-ref --verify --quiet 'refs/heads/repo-issue-905'"))
+        return { exitCode: 0, stdout: { text: '1' }, stderr: { text: '' } }
       throw new Error(`unexpected command: ${command}`)
     })
 
@@ -999,11 +1309,7 @@ test('/history restores the complete disk log by task id after Host restart', as
   const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-history-restart-'))
   process.env.HOME = tempHome
   try {
-    const workflow = interruptedWorkflow(
-      'o-r-903',
-      'https://github.com/o/r/issues/903',
-      join(tempHome, 'worktree'),
-    )
+    const workflow = interruptedWorkflow('o-r-903', 'https://github.com/o/r/issues/903', join(tempHome, 'worktree'))
     workflow.devTaskId = 'dev-before-restart'
     await saveWorkflow(workflow)
     await appendLog(workflow.key, 'dev', 'thinking one')
@@ -1030,9 +1336,16 @@ test('/history restores structured agent records and keeps legacy lines compatib
     const workflow = interruptedWorkflow('o-r-906', 'https://github.com/o/r/issues/906', join(tempHome, 'worktree'))
     workflow.devTaskId = 'dev-1720000000000-event'
     await saveWorkflow(workflow)
-    await appendLog(workflow.key, 'dev', encodeLiveLogEvent({
-      source: 'agent', agent: 'codex', kind: 'command', text: '$ pnpm test',
-    }))
+    await appendLog(
+      workflow.key,
+      'dev',
+      encodeLiveLogEvent({
+        source: 'agent',
+        agent: 'codex',
+        kind: 'command',
+        text: '$ pnpm test',
+      }),
+    )
     await appendLog(workflow.key, 'dev', '[clickvibe] legacy system line')
 
     const result = await get(createHandler(), '/clickvibe/api/history?taskId=dev-1720000000000-event')
@@ -1081,15 +1394,35 @@ test('/stream reports a cleaned-up task as 404 instead of a silent empty SSE', a
 
 function interruptedWorkflow(key: string, url: string, worktree: string): IssueWorkflow {
   return {
-    key, url, repoKey: 'o/r', worktree, branch: 'r-issue-17', stage: 'developing',
-    devAgent: 'codex', devTaskId: 'old-dev', devSessionId: 'dead-session', devSessionAgent: 'codex', devInterrupted: true,
-    reviewAgent: 'codex', reviewTaskId: null, reviewSessionId: null, reviewSessionAgent: null,
-    reviewResult: null, prNumber: '29', issueState: 'OPEN', baseRef: 'origin/main @ abc',
+    key,
+    url,
+    repoKey: 'o/r',
+    worktree,
+    branch: 'r-issue-17',
+    stage: 'developing',
+    devAgent: 'codex',
+    devTaskId: 'old-dev',
+    devSessionId: 'dead-session',
+    devSessionAgent: 'codex',
+    devInterrupted: true,
+    reviewAgent: 'codex',
+    reviewTaskId: null,
+    reviewSessionId: null,
+    reviewSessionAgent: null,
+    reviewResult: null,
+    prNumber: '29',
+    issueState: 'OPEN',
+    baseRef: 'origin/main @ abc',
     issueSnapshot: {
-      url, title: 'persisted issue', body: '## 验收标准\n- persisted', state: 'OPEN',
-      updatedAt: '2026-08-21T00:00:00Z', comments: [],
+      url,
+      title: 'persisted issue',
+      body: '## 验收标准\n- persisted',
+      state: 'OPEN',
+      updatedAt: '2026-08-21T00:00:00Z',
+      comments: [],
     },
-    updatedAt: 1, events: [],
+    updatedAt: 1,
+    events: [],
   }
 }
 
@@ -1117,50 +1450,91 @@ test('invalid exact dev session falls back once to a fresh session on the same t
     const starts: Array<{ command: string; workdir?: string; prompt: string }> = []
     const comments: Array<{ command: string; body: string }> = []
     const currentIssue = {
-      url: workflow.url, title: 'resume issue', body: '## 验收标准\n- fallback', state: 'OPEN', updatedAt: 'now',
+      url: workflow.url,
+      title: 'resume issue',
+      body: '## 验收标准\n- fallback',
+      state: 'OPEN',
+      updatedAt: 'now',
       comments: [],
     }
-    const reviewComments = [{ author: { login: 'review-bot' }, body: '== Review Meta ==\n- event: review\n- passed: false\n\n- 修复竞态\n- 补充失败测试' }]
-    const handler = createHandler(async (spec) => {
-      const api = githubApi(spec.command, { item: currentIssue, prComments: reviewComments })
-      if (api) return api
-      if (spec.command === 'git rev-parse --short HEAD') return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
-      if (spec.command.startsWith('gh issue comment')) {
-        comments.push({ command: spec.command, body: spec.stdin ?? '' })
-        return { exitCode: 0, stdout: { text: 'https://github.com/o/r/pull/29#issuecomment-1' }, stderr: { text: '' } }
-      }
-      return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-    }, (spec) => {
-      starts.push({ command: spec.command, workdir: spec.workdir, prompt: spec.stdin ?? '' })
-      const fresh = starts.length === 2
-      let read = false
-      return {
-        status: 'running', exitCode: fresh ? 0 : 1,
-        done: new Promise<void>((resolve) => setTimeout(resolve, 5)),
-        readOutput() {
-          if (read) return { delta: '', lossy: false }
-          read = true
-          return { delta: fresh ? '{"type":"thread.started","thread_id":"new-session"}\n' : 'no rollout found\n', lossy: false }
-        },
-        kill() { return true },
-      }
-    })
+    const reviewComments = [
+      {
+        author: { login: 'review-bot' },
+        body: '== Review Meta ==\n- event: review\n- passed: false\n\n- 修复竞态\n- 补充失败测试',
+      },
+    ]
+    const handler = createHandler(
+      async (spec) => {
+        const api = githubApi(spec.command, { item: currentIssue, prComments: reviewComments })
+        if (api) return api
+        if (spec.command === 'git rev-parse --short HEAD')
+          return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
+        if (spec.command.startsWith('gh issue comment')) {
+          comments.push({ command: spec.command, body: spec.stdin ?? '' })
+          return {
+            exitCode: 0,
+            stdout: { text: 'https://github.com/o/r/pull/29#issuecomment-1' },
+            stderr: { text: '' },
+          }
+        }
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      },
+      (spec) => {
+        starts.push({ command: spec.command, workdir: spec.workdir, prompt: spec.stdin ?? '' })
+        const fresh = starts.length === 2
+        let read = false
+        return {
+          status: 'running',
+          exitCode: fresh ? 0 : 1,
+          done: new Promise<void>((resolve) => setTimeout(resolve, 5)),
+          readOutput() {
+            if (read) return { delta: '', lossy: false }
+            read = true
+            return {
+              delta: fresh ? '{"type":"thread.started","thread_id":"new-session"}\n' : 'no rollout found\n',
+              lossy: false,
+            }
+          },
+          kill() {
+            return true
+          },
+        }
+      },
+    )
     const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
-    const authorized = await post(handler, '/clickvibe/api/authorize', {
-      action: 'resume', url: workflow.url, agent: 'codex', context: '',
-    }, headers) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
-    const resumed = await post(handler, '/clickvibe/api/resume', {
-      url: workflow.url, agent: 'codex', context: '',
-      authorizationId: authorized.body.authorizationId,
-      authorizationDigest: authorized.body.authorizationDigest,
-    }, headers) as { status: number; body: { ok: boolean; taskId?: string } }
+    const authorized = (await post(
+      handler,
+      '/clickvibe/api/authorize',
+      {
+        action: 'resume',
+        url: workflow.url,
+        agent: 'codex',
+        context: '',
+      },
+      headers,
+    )) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
+    const resumed = (await post(
+      handler,
+      '/clickvibe/api/resume',
+      {
+        url: workflow.url,
+        agent: 'codex',
+        context: '',
+        authorizationId: authorized.body.authorizationId,
+        authorizationDigest: authorized.body.authorizationDigest,
+      },
+      headers,
+    )) as { status: number; body: { ok: boolean; taskId?: string } }
     assert.equal(resumed.status, 200, JSON.stringify(resumed.body))
     assert.ok(resumed.body.taskId)
     const completed = await waitForTask(handler, resumed.body.taskId)
     assert.equal(starts.length, 2)
     assert.match(starts[0].command, /danger-full-access resume 'dead-session'/)
     assert.equal(starts[1].command, `codex exec -c 'approval_policy="never"' -s danger-full-access --json -`)
-    assert.deepEqual(starts.map((start) => start.workdir), [worktree, worktree])
+    assert.deepEqual(
+      starts.map((start) => start.workdir),
+      [worktree, worktree],
+    )
     for (const start of starts) {
       assert.match(start.prompt, /=== 需求快照 ===/)
       assert.match(start.prompt, /updatedAt: now/)
@@ -1200,43 +1574,68 @@ test('completed development without a PR appends its Dev Meta comment to the iss
     await saveWorkflow(workflow)
     const comments: Array<{ command: string; body: string }> = []
     const prompts: string[] = []
-    const handler = createHandler(async (spec) => {
-      if (/gh api .*\/issues\/920'/.test(spec.command)) {
-        return { exitCode: 1, stdout: { text: included({ message: 'offline' }, 500) }, stderr: { text: 'offline' } }
-      }
-      if (spec.command === 'git rev-parse --short HEAD') {
-        return { exitCode: 0, stdout: { text: 'def4567' }, stderr: { text: '' } }
-      }
-      const api = githubApi(spec.command)
-      if (api) return api
-      if (spec.command.startsWith('gh issue comment')) {
-        comments.push({ command: spec.command, body: spec.stdin ?? '' })
-        return { exitCode: 0, stdout: { text: 'https://github.com/o/r/issues/920#issuecomment-3' }, stderr: { text: '' } }
-      }
-      return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-    }, (spec) => {
-      prompts.push(spec.stdin ?? '')
-      let read = false
-      return {
-        status: 'running', exitCode: 0,
-        done: new Promise<void>((resolve) => setTimeout(resolve, 5)),
-        readOutput() {
-          if (read) return { delta: '', lossy: false }
-          read = true
-          return { delta: '{"type":"thread.started","thread_id":"continued-session"}\n', lossy: false }
-        },
-        kill() { return true },
-      }
-    })
+    const handler = createHandler(
+      async (spec) => {
+        if (/gh api .*\/issues\/920'/.test(spec.command)) {
+          return { exitCode: 1, stdout: { text: included({ message: 'offline' }, 500) }, stderr: { text: 'offline' } }
+        }
+        if (spec.command === 'git rev-parse --short HEAD') {
+          return { exitCode: 0, stdout: { text: 'def4567' }, stderr: { text: '' } }
+        }
+        const api = githubApi(spec.command)
+        if (api) return api
+        if (spec.command.startsWith('gh issue comment')) {
+          comments.push({ command: spec.command, body: spec.stdin ?? '' })
+          return {
+            exitCode: 0,
+            stdout: { text: 'https://github.com/o/r/issues/920#issuecomment-3' },
+            stderr: { text: '' },
+          }
+        }
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      },
+      (spec) => {
+        prompts.push(spec.stdin ?? '')
+        let read = false
+        return {
+          status: 'running',
+          exitCode: 0,
+          done: new Promise<void>((resolve) => setTimeout(resolve, 5)),
+          readOutput() {
+            if (read) return { delta: '', lossy: false }
+            read = true
+            return { delta: '{"type":"thread.started","thread_id":"continued-session"}\n', lossy: false }
+          },
+          kill() {
+            return true
+          },
+        }
+      },
+    )
     const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
-    const authorized = await post(handler, '/clickvibe/api/authorize', {
-      action: 'resume', url: workflow.url, agent: 'codex', context: '',
-    }, headers) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
-    const resumed = await post(handler, '/clickvibe/api/resume', {
-      url: workflow.url, agent: 'codex', context: '',
-      authorizationId: authorized.body.authorizationId,
-      authorizationDigest: authorized.body.authorizationDigest,
-    }, headers) as { status: number; body: { taskId?: string } }
+    const authorized = (await post(
+      handler,
+      '/clickvibe/api/authorize',
+      {
+        action: 'resume',
+        url: workflow.url,
+        agent: 'codex',
+        context: '',
+      },
+      headers,
+    )) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
+    const resumed = (await post(
+      handler,
+      '/clickvibe/api/resume',
+      {
+        url: workflow.url,
+        agent: 'codex',
+        context: '',
+        authorizationId: authorized.body.authorizationId,
+        authorizationDigest: authorized.body.authorizationDigest,
+      },
+      headers,
+    )) as { status: number; body: { taskId?: string } }
     assert.equal(resumed.status, 200, JSON.stringify(resumed.body))
     assert.ok(resumed.body.taskId)
     await waitForTask(handler, resumed.body.taskId)
@@ -1272,45 +1671,76 @@ test('concurrent resume requests reserve one workflow task before refreshing the
     let issueReads = 0
     let starts = 0
     const currentIssue = {
-      url: workflow.url, title: 'resume gate', body: '## 验收标准\n- one task',
-      state: 'OPEN', updatedAt: '2026-08-22T07:00:00Z', comments: [],
+      url: workflow.url,
+      title: 'resume gate',
+      body: '## 验收标准\n- one task',
+      state: 'OPEN',
+      updatedAt: '2026-08-22T07:00:00Z',
+      comments: [],
     }
-    const handler = createHandler(async (spec) => {
-      if (/gh api .*\/issues\/930'/.test(spec.command)) {
-        issueReads += 1
-        await new Promise((resolve) => setTimeout(resolve, 25))
-        return githubApi(spec.command, { item: currentIssue })
-      }
-      const api = githubApi(spec.command, { item: currentIssue })
-      if (api) return api
-      if (spec.command.startsWith('gh issue comment')) {
-        return { exitCode: 0, stdout: { text: 'https://github.com/o/r/issues/930#issuecomment-1' }, stderr: { text: '' } }
-      }
-      return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-    }, () => {
-      starts += 1
-      let read = false
-      return {
-        status: 'running', exitCode: 0,
-        done: new Promise<void>((resolve) => setTimeout(resolve, 50)),
-        readOutput() {
-          if (read) return { delta: '', lossy: false }
-          read = true
-          return { delta: '{"type":"thread.started","thread_id":"resume-gate"}\n', lossy: false }
-        },
-        kill() { return true },
-      }
-    })
+    const handler = createHandler(
+      async (spec) => {
+        if (/gh api .*\/issues\/930'/.test(spec.command)) {
+          issueReads += 1
+          await new Promise((resolve) => setTimeout(resolve, 25))
+          return githubApi(spec.command, { item: currentIssue })
+        }
+        const api = githubApi(spec.command, { item: currentIssue })
+        if (api) return api
+        if (spec.command.startsWith('gh issue comment')) {
+          return {
+            exitCode: 0,
+            stdout: { text: 'https://github.com/o/r/issues/930#issuecomment-1' },
+            stderr: { text: '' },
+          }
+        }
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      },
+      () => {
+        starts += 1
+        let read = false
+        return {
+          status: 'running',
+          exitCode: 0,
+          done: new Promise<void>((resolve) => setTimeout(resolve, 50)),
+          readOutput() {
+            if (read) return { delta: '', lossy: false }
+            read = true
+            return { delta: '{"type":"thread.started","thread_id":"resume-gate"}\n', lossy: false }
+          },
+          kill() {
+            return true
+          },
+        }
+      },
+    )
     const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
-    const authorize = () => post(handler, '/clickvibe/api/authorize', {
-      action: 'resume', url: workflow.url, agent: 'codex', context: '',
-    }, headers) as Promise<{ status: number; body: { authorizationId?: string; authorizationDigest?: string } }>
+    const authorize = () =>
+      post(
+        handler,
+        '/clickvibe/api/authorize',
+        {
+          action: 'resume',
+          url: workflow.url,
+          agent: 'codex',
+          context: '',
+        },
+        headers,
+      ) as Promise<{ status: number; body: { authorizationId?: string; authorizationDigest?: string } }>
     const [firstAuth, secondAuth] = await Promise.all([authorize(), authorize()])
-    const resume = (authorization: typeof firstAuth.body) => post(handler, '/clickvibe/api/resume', {
-      url: workflow.url, agent: 'codex', context: '',
-      authorizationId: authorization.authorizationId,
-      authorizationDigest: authorization.authorizationDigest,
-    }, headers) as Promise<{ status: number; body: { ok: boolean; taskId?: string } }>
+    const resume = (authorization: typeof firstAuth.body) =>
+      post(
+        handler,
+        '/clickvibe/api/resume',
+        {
+          url: workflow.url,
+          agent: 'codex',
+          context: '',
+          authorizationId: authorization.authorizationId,
+          authorizationDigest: authorization.authorizationDigest,
+        },
+        headers,
+      ) as Promise<{ status: number; body: { ok: boolean; taskId?: string } }>
     const [first, second] = await Promise.all([resume(firstAuth.body), resume(secondAuth.body)])
     assert.equal(first.status, 200)
     assert.equal(second.status, 200)
@@ -1336,36 +1766,57 @@ test('comment publication failure keeps the delivery event and stores a bounded 
     const workflow = interruptedWorkflow('o-r-921', 'https://github.com/o/r/issues/921', worktree)
     workflow.reviewResult = { passed: false, issues: ['must remain traceable'] }
     await saveWorkflow(workflow)
-    const handler = createHandler(async (spec) => {
-      if (spec.command === 'git rev-parse --short HEAD') {
-        return { exitCode: 0, stdout: { text: '987abcd' }, stderr: { text: '' } }
-      }
-      if (spec.command.startsWith('gh issue comment')) {
-        return { exitCode: 1, stdout: { text: '' }, stderr: { text: `offline-${'x'.repeat(700)}` } }
-      }
-      return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-    }, () => {
-      let read = false
-      return {
-        status: 'running', exitCode: 0,
-        done: new Promise<void>((resolve) => setTimeout(resolve, 5)),
-        readOutput() {
-          if (read) return { delta: '', lossy: false }
-          read = true
-          return { delta: '{"type":"thread.started","thread_id":"failure-session"}\n', lossy: false }
-        },
-        kill() { return true },
-      }
-    })
+    const handler = createHandler(
+      async (spec) => {
+        if (spec.command === 'git rev-parse --short HEAD') {
+          return { exitCode: 0, stdout: { text: '987abcd' }, stderr: { text: '' } }
+        }
+        if (spec.command.startsWith('gh issue comment')) {
+          return { exitCode: 1, stdout: { text: '' }, stderr: { text: `offline-${'x'.repeat(700)}` } }
+        }
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      },
+      () => {
+        let read = false
+        return {
+          status: 'running',
+          exitCode: 0,
+          done: new Promise<void>((resolve) => setTimeout(resolve, 5)),
+          readOutput() {
+            if (read) return { delta: '', lossy: false }
+            read = true
+            return { delta: '{"type":"thread.started","thread_id":"failure-session"}\n', lossy: false }
+          },
+          kill() {
+            return true
+          },
+        }
+      },
+    )
     const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
-    const authorized = await post(handler, '/clickvibe/api/authorize', {
-      action: 'resume', url: workflow.url, agent: 'codex', context: '',
-    }, headers) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
-    const resumed = await post(handler, '/clickvibe/api/resume', {
-      url: workflow.url, agent: 'codex', context: '',
-      authorizationId: authorized.body.authorizationId,
-      authorizationDigest: authorized.body.authorizationDigest,
-    }, headers) as { status: number; body: { taskId?: string } }
+    const authorized = (await post(
+      handler,
+      '/clickvibe/api/authorize',
+      {
+        action: 'resume',
+        url: workflow.url,
+        agent: 'codex',
+        context: '',
+      },
+      headers,
+    )) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
+    const resumed = (await post(
+      handler,
+      '/clickvibe/api/resume',
+      {
+        url: workflow.url,
+        agent: 'codex',
+        context: '',
+        authorizationId: authorized.body.authorizationId,
+        authorizationDigest: authorized.body.authorizationDigest,
+      },
+      headers,
+    )) as { status: number; body: { taskId?: string } }
     assert.equal(resumed.status, 200, JSON.stringify(resumed.body))
     assert.ok(resumed.body.taskId)
     await waitForTask(handler, resumed.body.taskId)
@@ -1403,8 +1854,12 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     const reviewedUpdatedAt = '2026-08-22T01:02:03Z'
     const issueSpill = join(tempHome, 'issue-contract.json')
     const currentIssue = {
-      url: workflow.url, number: 918,
-      title: 'review issue', body: reviewedBody, state: 'OPEN', updatedAt: reviewedUpdatedAt,
+      url: workflow.url,
+      number: 918,
+      title: 'review issue',
+      body: reviewedBody,
+      state: 'OPEN',
+      updatedAt: reviewedUpdatedAt,
       comments: [{ author: { login: 'bot' }, body: 'related note' }],
     }
     await writeFile(issueSpill, included(restIssue(currentIssue)))
@@ -1413,64 +1868,97 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     const approvals: string[] = []
     const issueTimeouts: number[] = []
     const pr = {
-      number: 29, state: 'open', html_url: 'https://github.com/o/r/pull/29', updated_at: reviewedUpdatedAt,
-      base: { ref: 'main' }, head: { ref: workflow.branch },
+      number: 29,
+      state: 'open',
+      html_url: 'https://github.com/o/r/pull/29',
+      updated_at: reviewedUpdatedAt,
+      base: { ref: 'main' },
+      head: { ref: workflow.branch },
     }
-    const handler = createHandler(async (spec) => {
-      if (spec.command === 'git fetch origin --prune') {
-        reviewFetches++
-        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-      }
-      if (/gh api .*\/issues\/918'/.test(spec.command)) {
-        issueTimeouts.push(spec.timeoutMs ?? 0)
-        return {
-          exitCode: 0,
-          stdout: { text: 'truncated tail', truncated: true, spillPath: issueSpill },
-          stderr: { text: '' },
+    const handler = createHandler(
+      async (spec) => {
+        if (spec.command === 'git fetch origin --prune') {
+          reviewFetches++
+          return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
         }
-      }
-      const api = githubApi(spec.command, { item: currentIssue, pr })
-      if (api) return api
-      if (spec.command === 'git rev-parse --short HEAD') return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
-      if (spec.command.startsWith('gh issue comment')) {
-        comments.push({ command: spec.command, body: spec.stdin ?? '' })
-        return { exitCode: 0, stdout: { text: 'https://github.com/o/r/pull/29#issuecomment-2' }, stderr: { text: '' } }
-      }
-      if (spec.command.startsWith('gh pr review')) {
-        approvals.push(spec.command)
-        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-      }
-      return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-    }, (spec) => {
-      starts.push({ command: spec.command, prompt: spec.stdin ?? '' })
-      const fresh = starts.length === 2
-      let read = false
-      return {
-        status: 'running', exitCode: fresh ? 0 : 1,
-        done: (async () => {
-          if (fresh) {
-            await mkdir(join(worktree, '.clickvibe'), { recursive: true })
-            await writeFile(join(worktree, '.clickvibe', 'review-result.json'), '{"passed":true,"issues":[]}')
+        if (/gh api .*\/issues\/918'/.test(spec.command)) {
+          issueTimeouts.push(spec.timeoutMs ?? 0)
+          return {
+            exitCode: 0,
+            stdout: { text: 'truncated tail', truncated: true, spillPath: issueSpill },
+            stderr: { text: '' },
           }
-          await new Promise((resolve) => setTimeout(resolve, 5))
-        })(),
-        readOutput() {
-          if (read) return { delta: '', lossy: false }
-          read = true
-          return { delta: fresh ? '{"type":"thread.started","thread_id":"new-review"}\n' : 'no rollout found\n', lossy: false }
-        },
-        kill() { return true },
-      }
-    })
+        }
+        const api = githubApi(spec.command, { item: currentIssue, pr })
+        if (api) return api
+        if (spec.command === 'git rev-parse --short HEAD')
+          return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
+        if (spec.command.startsWith('gh issue comment')) {
+          comments.push({ command: spec.command, body: spec.stdin ?? '' })
+          return {
+            exitCode: 0,
+            stdout: { text: 'https://github.com/o/r/pull/29#issuecomment-2' },
+            stderr: { text: '' },
+          }
+        }
+        if (spec.command.startsWith('gh pr review')) {
+          approvals.push(spec.command)
+          return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+        }
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      },
+      (spec) => {
+        starts.push({ command: spec.command, prompt: spec.stdin ?? '' })
+        const fresh = starts.length === 2
+        let read = false
+        return {
+          status: 'running',
+          exitCode: fresh ? 0 : 1,
+          done: (async () => {
+            if (fresh) {
+              await mkdir(join(worktree, '.clickvibe'), { recursive: true })
+              await writeFile(join(worktree, '.clickvibe', 'review-result.json'), '{"passed":true,"issues":[]}')
+            }
+            await new Promise((resolve) => setTimeout(resolve, 5))
+          })(),
+          readOutput() {
+            if (read) return { delta: '', lossy: false }
+            read = true
+            return {
+              delta: fresh ? '{"type":"thread.started","thread_id":"new-review"}\n' : 'no rollout found\n',
+              lossy: false,
+            }
+          },
+          kill() {
+            return true
+          },
+        }
+      },
+    )
     const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
-    const authorized = await post(handler, '/clickvibe/api/authorize', {
-      action: 'review', url: workflow.url, agent: 'codex', context: '',
-    }, headers) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
-    const reviewed = await post(handler, '/clickvibe/api/review', {
-      url: workflow.url, agent: 'codex', context: '',
-      authorizationId: authorized.body.authorizationId,
-      authorizationDigest: authorized.body.authorizationDigest,
-    }, headers) as { status: number; body: { ok: boolean; taskId?: string } }
+    const authorized = (await post(
+      handler,
+      '/clickvibe/api/authorize',
+      {
+        action: 'review',
+        url: workflow.url,
+        agent: 'codex',
+        context: '',
+      },
+      headers,
+    )) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
+    const reviewed = (await post(
+      handler,
+      '/clickvibe/api/review',
+      {
+        url: workflow.url,
+        agent: 'codex',
+        context: '',
+        authorizationId: authorized.body.authorizationId,
+        authorizationDigest: authorized.body.authorizationDigest,
+      },
+      headers,
+    )) as { status: number; body: { ok: boolean; taskId?: string } }
     assert.equal(reviewed.status, 200, JSON.stringify(reviewed.body))
     assert.ok(reviewed.body.taskId)
     const completed = await waitForTask(handler, reviewed.body.taskId)
@@ -1494,18 +1982,20 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     assert.equal(reloaded?.reviewResult?.passed, true)
     assert.deepEqual(issueTimeouts, [20000])
     assert.deepEqual(reloaded?.events.at(-1)?.issueContract, {
-      bodyHash: issueBodyHash(reviewedBody), updatedAt: reviewedUpdatedAt,
+      bodyHash: issueBodyHash(reviewedBody),
+      updatedAt: reviewedUpdatedAt,
     })
     assert.ok(completed.delta.some((line) => line.includes('review 结束,退出码 0')))
     assert.ok(completed.delta.some((line) => line.includes('review 结论来源')))
     assert.equal(reloaded?.reviewResult?.commentUrl, 'https://github.com/o/r/pull/29#issuecomment-2')
     assert.equal(comments.length, 1)
     assert.match(comments[0].command, /github\.com\/o\/r\/pull\/29/)
-    assert.match(comments[0].body, /^== Review Meta ==\n- event: review\n- commit: abc123\n- issue: #918\n- passed: true\n- next: merge/m)
+    assert.match(
+      comments[0].body,
+      /^== Review Meta ==\n- event: review\n- commit: abc123\n- issue: #918\n- passed: true\n- next: merge/m,
+    )
     assert.match(comments[0].body, /下一步:可合并当前提交。/)
-    assert.deepEqual(approvals, [
-      "gh pr review 'https://github.com/o/r/pull/29' --approve --body 'LGTM'",
-    ])
+    assert.deepEqual(approvals, ["gh pr review 'https://github.com/o/r/pull/29' --approve --body 'LGTM'"])
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
@@ -1527,55 +2017,95 @@ test('duplicate review requests reuse the reserved task before fetching the Issu
     let issueCalls = 0
     let notifyIssueEntered!: () => void
     let releaseIssue!: () => void
-    const issueEntered = new Promise<void>((resolve) => { notifyIssueEntered = resolve })
-    const issueBlocked = new Promise<void>((resolve) => { releaseIssue = resolve })
+    const issueEntered = new Promise<void>((resolve) => {
+      notifyIssueEntered = resolve
+    })
+    const issueBlocked = new Promise<void>((resolve) => {
+      releaseIssue = resolve
+    })
     let finishProcess!: () => void
-    const processDone = new Promise<void>((resolve) => { finishProcess = resolve })
+    const processDone = new Promise<void>((resolve) => {
+      finishProcess = resolve
+    })
     const currentIssue = {
-      url: workflow.url, number: 920, title: 'review issue', body: '## 验收标准\n- gate',
-      state: 'OPEN', updatedAt: '2026-08-22T03:04:05Z', comments: [],
+      url: workflow.url,
+      number: 920,
+      title: 'review issue',
+      body: '## 验收标准\n- gate',
+      state: 'OPEN',
+      updatedAt: '2026-08-22T03:04:05Z',
+      comments: [],
     }
-    const handler = createHandler(async (spec) => {
-      if (/gh api .*\/issues\/920'/.test(spec.command)) {
-        issueCalls += 1
-        notifyIssueEntered()
-        await issueBlocked
-        return githubApi(spec.command, { item: currentIssue })
-      }
-      const api = githubApi(spec.command, {
-        item: currentIssue,
-        pr: { number: 29, state: 'open', html_url: 'https://github.com/o/r/pull/29', base: { ref: 'main' }, head: { ref: workflow.branch } },
-      })
-      if (api) return api
-      if (spec.command === 'git rev-parse --short HEAD') return { exitCode: 0, stdout: { text: 'gate123' }, stderr: { text: '' } }
-      return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-    }, () => ({
-      status: 'running', exitCode: 0, done: processDone,
-      readOutput() { return { delta: '', lossy: false } },
-      kill() { return true },
-    }))
+    const handler = createHandler(
+      async (spec) => {
+        if (/gh api .*\/issues\/920'/.test(spec.command)) {
+          issueCalls += 1
+          notifyIssueEntered()
+          await issueBlocked
+          return githubApi(spec.command, { item: currentIssue })
+        }
+        const api = githubApi(spec.command, {
+          item: currentIssue,
+          pr: {
+            number: 29,
+            state: 'open',
+            html_url: 'https://github.com/o/r/pull/29',
+            base: { ref: 'main' },
+            head: { ref: workflow.branch },
+          },
+        })
+        if (api) return api
+        if (spec.command === 'git rev-parse --short HEAD')
+          return { exitCode: 0, stdout: { text: 'gate123' }, stderr: { text: '' } }
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      },
+      () => ({
+        status: 'running',
+        exitCode: 0,
+        done: processDone,
+        readOutput() {
+          return { delta: '', lossy: false }
+        },
+        kill() {
+          return true
+        },
+      }),
+    )
     const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
-    const authorize = async () => post(handler, '/clickvibe/api/authorize', {
-      action: 'review', url: workflow.url, agent: 'codex', context: '',
-    }, headers) as Promise<{ status: number; body: { authorizationId?: string; authorizationDigest?: string } }>
+    const authorize = async () =>
+      post(
+        handler,
+        '/clickvibe/api/authorize',
+        {
+          action: 'review',
+          url: workflow.url,
+          agent: 'codex',
+          context: '',
+        },
+        headers,
+      ) as Promise<{ status: number; body: { authorizationId?: string; authorizationDigest?: string } }>
     const [auth1, auth2] = await Promise.all([authorize(), authorize()])
     const reviewPayload = (auth: typeof auth1) => ({
-      url: workflow.url, agent: 'codex', context: '',
+      url: workflow.url,
+      agent: 'codex',
+      context: '',
       authorizationId: auth.body.authorizationId,
       authorizationDigest: auth.body.authorizationDigest,
     })
 
     const firstPromise = post(handler, '/clickvibe/api/review', reviewPayload(auth1), headers)
     await issueEntered
-    const second = await Promise.race([
+    const second = (await Promise.race([
       post(handler, '/clickvibe/api/review', reviewPayload(auth2), headers),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('duplicate review waited for contract fetch')), 200)),
-    ]) as { status: number; body: { taskId?: string } }
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('duplicate review waited for contract fetch')), 200),
+      ),
+    ])) as { status: number; body: { taskId?: string } }
     assert.equal(second.status, 200)
     assert.equal(issueCalls, 1)
 
     releaseIssue()
-    const first = await firstPromise as { status: number; body: { taskId?: string } }
+    const first = (await firstPromise) as { status: number; body: { taskId?: string } }
     assert.equal(first.status, 200)
     assert.equal(first.body.taskId, second.body.taskId)
     await mkdir(join(worktree, '.clickvibe'), { recursive: true })
@@ -1606,44 +2136,73 @@ test('cross-agent review starts fresh and an empty failed verdict requires re-re
     await saveWorkflow(workflow)
     const starts: string[] = []
     const reviewedBody = '## 验收标准\n- current contract'
-    const handler = createHandler(async (spec) => {
-      const api = githubApi(spec.command, {
-        item: { url: workflow.url, number: 919, title: 'review issue', body: reviewedBody, state: 'OPEN', updatedAt: '2026-08-22T02:03:04Z' },
-        pr: { number: 29, base: { ref: 'main' }, head: { ref: workflow.branch } },
-      })
-      if (api) return api
-      if (spec.command === 'git rev-parse --short HEAD') return { exitCode: 0, stdout: { text: 'def456' }, stderr: { text: '' } }
-      return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-    }, (spec) => {
-      starts.push(spec.command)
-      let read = false
-      return {
-        status: 'running', exitCode: 0,
-        done: (async () => {
-          await mkdir(join(worktree, '.clickvibe'), { recursive: true })
-          await writeFile(join(worktree, '.clickvibe', 'review-result.json'), '{"passed":false,"issues":[]}')
-          await new Promise((resolve) => setTimeout(resolve, 5))
-        })(),
-        readOutput() {
-          if (read) return { delta: '', lossy: false }
-          read = true
-          return {
-            delta: '{"type":"system","session_id":"new-claude"}\n{"type":"result","session_id":"new-claude"}\n',
-            lossy: false,
-          }
-        },
-        kill() { return true },
-      }
-    })
+    const handler = createHandler(
+      async (spec) => {
+        const api = githubApi(spec.command, {
+          item: {
+            url: workflow.url,
+            number: 919,
+            title: 'review issue',
+            body: reviewedBody,
+            state: 'OPEN',
+            updatedAt: '2026-08-22T02:03:04Z',
+          },
+          pr: { number: 29, base: { ref: 'main' }, head: { ref: workflow.branch } },
+        })
+        if (api) return api
+        if (spec.command === 'git rev-parse --short HEAD')
+          return { exitCode: 0, stdout: { text: 'def456' }, stderr: { text: '' } }
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      },
+      (spec) => {
+        starts.push(spec.command)
+        let read = false
+        return {
+          status: 'running',
+          exitCode: 0,
+          done: (async () => {
+            await mkdir(join(worktree, '.clickvibe'), { recursive: true })
+            await writeFile(join(worktree, '.clickvibe', 'review-result.json'), '{"passed":false,"issues":[]}')
+            await new Promise((resolve) => setTimeout(resolve, 5))
+          })(),
+          readOutput() {
+            if (read) return { delta: '', lossy: false }
+            read = true
+            return {
+              delta: '{"type":"system","session_id":"new-claude"}\n{"type":"result","session_id":"new-claude"}\n',
+              lossy: false,
+            }
+          },
+          kill() {
+            return true
+          },
+        }
+      },
+    )
     const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
-    const authorized = await post(handler, '/clickvibe/api/authorize', {
-      action: 'review', url: workflow.url, agent: 'claude', context: '',
-    }, headers) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
-    const reviewed = await post(handler, '/clickvibe/api/review', {
-      url: workflow.url, agent: 'claude', context: '',
-      authorizationId: authorized.body.authorizationId,
-      authorizationDigest: authorized.body.authorizationDigest,
-    }, headers) as { status: number; body: { ok: boolean; taskId?: string } }
+    const authorized = (await post(
+      handler,
+      '/clickvibe/api/authorize',
+      {
+        action: 'review',
+        url: workflow.url,
+        agent: 'claude',
+        context: '',
+      },
+      headers,
+    )) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
+    const reviewed = (await post(
+      handler,
+      '/clickvibe/api/review',
+      {
+        url: workflow.url,
+        agent: 'claude',
+        context: '',
+        authorizationId: authorized.body.authorizationId,
+        authorizationDigest: authorized.body.authorizationDigest,
+      },
+      headers,
+    )) as { status: number; body: { ok: boolean; taskId?: string } }
     assert.equal(reviewed.status, 200, JSON.stringify(reviewed.body))
     assert.ok(reviewed.body.taskId)
     await waitForTask(handler, reviewed.body.taskId)
@@ -1660,13 +2219,14 @@ test('cross-agent review starts fresh and an empty failed verdict requires re-re
   }
 })
 
-
-
 test('/fetch resolves blockedBy from the body and blocking from a repo scan', async () => {
   const item = {
     url: 'https://github.com/ai-daming/clickvibe/issues/7',
-    number: 7, title: 'issue 7', state: 'OPEN',
-    body: '## 目标\n做 X\n\n## 依赖\n\nBlocked by #5', comments: [],
+    number: 7,
+    title: 'issue 7',
+    state: 'OPEN',
+    body: '## 目标\n做 X\n\n## 依赖\n\nBlocked by #5',
+    comments: [],
   }
   const issues = [
     { number: 5, title: 'issue 5', state: 'OPEN', body: '## 目标\nx' },
@@ -1678,17 +2238,31 @@ test('/fetch resolves blockedBy from the body and blocking from a repo scan', as
   })
   const result = await post(handler, '/clickvibe/api/fetch', { url: item.url })
   assert.equal(result.status, 200, JSON.stringify(result.body))
-  const deps = (result.body as { ok: true; data: { dependencies?: { blockedBy: { number: number }[]; blocking: { number: number }[] } } }).data.dependencies
+  const deps = (
+    result.body as {
+      ok: true
+      data: { dependencies?: { blockedBy: { number: number }[]; blocking: { number: number }[] } }
+    }
+  ).data.dependencies
   assert.ok(deps)
-  assert.deepEqual(deps.blockedBy.map((d) => d.number), [5])
-  assert.deepEqual(deps.blocking.map((d) => d.number), [8])
+  assert.deepEqual(
+    deps.blockedBy.map((d) => d.number),
+    [5],
+  )
+  assert.deepEqual(
+    deps.blocking.map((d) => d.number),
+    [8],
+  )
 })
 
 test('/fetch on an issue without a 依赖 section yields no blockedBy (and no blocking)', async () => {
   const item = {
     url: 'https://github.com/ai-daming/clickvibe/issues/5',
-    number: 5, title: 'issue 5', state: 'OPEN',
-    body: '## 目标\n做 Y', comments: [],
+    number: 5,
+    title: 'issue 5',
+    state: 'OPEN',
+    body: '## 目标\n做 Y',
+    comments: [],
   }
   const issues = [
     { number: 5, title: 'issue 5', state: 'OPEN', body: '## 目标\n做 Y' },
@@ -1699,17 +2273,26 @@ test('/fetch on an issue without a 依赖 section yields no blockedBy (and no bl
   })
   const result = await post(handler, '/clickvibe/api/fetch', { url: item.url })
   assert.equal(result.status, 200)
-  const deps = (result.body as { ok: true; data: { dependencies?: { blockedBy: unknown[]; blocking: unknown[] } } }).data.dependencies
+  const deps = (result.body as { ok: true; data: { dependencies?: { blockedBy: unknown[]; blocking: unknown[] } } })
+    .data.dependencies
   assert.ok(deps)
   assert.deepEqual(deps.blockedBy, [])
-  assert.deepEqual(deps.blocking.map((d) => (d as { number: number }).number), [7])
+  assert.deepEqual(
+    deps.blocking.map((d) => (d as { number: number }).number),
+    [7],
+  )
 })
 
 test('/develop automatic mode fails closed before worktree creation for invalid or blocked issues', async () => {
   const url = 'https://github.com/o/r/issues/77'
   const invalid = {
-    url, number: 77, title: 'invalid', state: 'OPEN', updatedAt: '2026-08-22T00:00:00Z',
-    body: '## 目标\n做事\n\n## 依赖\n无', comments: [],
+    url,
+    number: 77,
+    title: 'invalid',
+    state: 'OPEN',
+    updatedAt: '2026-08-22T00:00:00Z',
+    body: '## 目标\n做事\n\n## 依赖\n无',
+    comments: [],
   }
   const invalidHandler = createHandler(async (spec) => {
     const api = githubApi(spec.command, { item: invalid, issues: [invalid] })
@@ -1717,7 +2300,9 @@ test('/develop automatic mode fails closed before worktree creation for invalid 
     throw new Error(`worktree command must not run: ${spec.command}`)
   })
   const invalidResult = await post(invalidHandler, '/clickvibe/api/develop', {
-    url, agent: 'dryrun', automatic: true,
+    url,
+    agent: 'dryrun',
+    automatic: true,
   })
   assert.equal(invalidResult.status, 400)
   assert.match(invalidResult.body.error ?? '', /契约缺失: 验收标准/)
@@ -1734,7 +2319,9 @@ test('/develop automatic mode fails closed before worktree creation for invalid 
     throw new Error(`worktree command must not run: ${spec.command}`)
   })
   const blockedResult = await post(blockedHandler, '/clickvibe/api/develop', {
-    url, agent: 'dryrun', automatic: true,
+    url,
+    agent: 'dryrun',
+    automatic: true,
   })
   assert.equal(blockedResult.status, 400)
   assert.match(blockedResult.body.error ?? '', /存在未完成的直接依赖/)
@@ -1749,11 +2336,19 @@ test('/develop automatic mode rejects a branch with commits when workflow histor
     const worktreeRoot = join(tempHome, 'worktrees')
     await mkdir(repo, { recursive: true })
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), `repos:\n  history/repo: ${repo}\nworktreeRoot: ${worktreeRoot}\n`)
+    await writeFile(
+      join(tempHome, '.clickvibe', 'config.yaml'),
+      `repos:\n  history/repo: ${repo}\nworktreeRoot: ${worktreeRoot}\n`,
+    )
     const url = 'https://github.com/history/repo/issues/910'
     const issue = {
-      url, number: 910, title: 'lost workflow', state: 'OPEN', updatedAt: '2026-08-22T00:00:00Z',
-      body: '## 目标\n自动开发\n\n## 验收标准\n- [ ] 完成\n\n## 依赖\n无', comments: [],
+      url,
+      number: 910,
+      title: 'lost workflow',
+      state: 'OPEN',
+      updatedAt: '2026-08-22T00:00:00Z',
+      body: '## 目标\n自动开发\n\n## 验收标准\n- [ ] 完成\n\n## 依赖\n无',
+      comments: [],
     }
     const commands: string[] = []
     const handler = createHandler(async (spec) => {
@@ -1787,8 +2382,11 @@ test('/develop automatic mode rejects a branch with commits when workflow histor
 test('/fetch keeps issue data but reports dependency refresh failure without inventing an empty graph', async () => {
   const item = {
     url: 'https://github.com/ai-daming/clickvibe/issues/938',
-    number: 938, title: 'dependency refresh failure', state: 'OPEN',
-    body: '## 依赖\n\nBlocked by #4', comments: [],
+    number: 938,
+    title: 'dependency refresh failure',
+    state: 'OPEN',
+    body: '## 依赖\n\nBlocked by #4',
+    comments: [],
   }
   const handler = createHandler(async (spec) => {
     const api = githubApi(spec.command, { item, failRepoIssues: 'offline' })
@@ -1808,10 +2406,23 @@ test('/fetch maps PR REST fields and latest reviews without any GraphQL read com
   const url = 'https://github.com/o/r/pull/41'
   const commands: string[] = []
   const pr = {
-    number: 41, title: 'REST PR', state: 'open', body: 'body', html_url: url,
-    user: { login: 'author' }, created_at: '2026-08-22T01:00:00Z', updated_at: '2026-08-22T02:00:00Z',
-    additions: 12, deletions: 3, changed_files: 2, commits: 4, draft: false,
-    mergeable: true, mergeable_state: 'clean', base: { ref: 'main' }, head: { ref: 'feature', sha: 'abc123' },
+    number: 41,
+    title: 'REST PR',
+    state: 'open',
+    body: 'body',
+    html_url: url,
+    user: { login: 'author' },
+    created_at: '2026-08-22T01:00:00Z',
+    updated_at: '2026-08-22T02:00:00Z',
+    additions: 12,
+    deletions: 3,
+    changed_files: 2,
+    commits: 4,
+    draft: false,
+    mergeable: true,
+    mergeable_state: 'clean',
+    base: { ref: 'main' },
+    head: { ref: 'feature', sha: 'abc123' },
   }
   const reviews = [
     { id: 1, user: { login: 'alice' }, state: 'CHANGES_REQUESTED', submitted_at: '2026-08-22T02:00:00Z' },
@@ -1828,7 +2439,7 @@ test('/fetch maps PR REST fields and latest reviews without any GraphQL read com
     throw new Error(`unexpected command: ${spec.command}`)
   })
 
-  const first = await post(handler, '/clickvibe/api/fetch', { url }) as {
+  const first = (await post(handler, '/clickvibe/api/fetch', { url })) as {
     status: number
     body: { ok: boolean; data?: { item?: Record<string, unknown> } }
   }
@@ -1853,13 +2464,15 @@ test('rate-limit response opens a circuit and returns the friendly recovery time
     requests++
     return {
       exitCode: 1,
-      stdout: { text: [
-        'HTTP/2.0 403 Forbidden',
-        'x-ratelimit-remaining: 0',
-        `x-ratelimit-reset: ${reset}`,
-        '',
-        JSON.stringify({ message: 'API rate limit exceeded' }),
-      ].join('\n') },
+      stdout: {
+        text: [
+          'HTTP/2.0 403 Forbidden',
+          'x-ratelimit-remaining: 0',
+          `x-ratelimit-reset: ${reset}`,
+          '',
+          JSON.stringify({ message: 'API rate limit exceeded' }),
+        ].join('\n'),
+      },
       stderr: { text: '' },
     }
   })
@@ -1878,11 +2491,15 @@ test('repository GitHub aggregation uses its short TTL cache and force refresh b
   const commands: string[] = []
   const ctx = {
     shell: {
-      resolve(spec: unknown) { return spec },
+      resolve(spec: unknown) {
+        return spec
+      },
       async run(spec: { command: string }) {
         commands.push(spec.command)
-        if (spec.command.includes('/issues?')) return { exitCode: 0, stdout: { text: included([issue]) }, stderr: { text: '' } }
-        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: included([]) }, stderr: { text: '' } }
+        if (spec.command.includes('/issues?'))
+          return { exitCode: 0, stdout: { text: included([issue]) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls?'))
+          return { exitCode: 0, stdout: { text: included([]) }, stderr: { text: '' } }
         throw new Error(`unexpected command: ${spec.command}`)
       },
     },
@@ -1898,31 +2515,62 @@ test('repository GitHub aggregation uses its short TTL cache and force refresh b
 
 test('repo issue aggregation includes open issues without workflows and honors live merged PR state', async () => {
   const allIssues = [
-    { number: 5, title: 'dependency', state: 'closed', body: '', html_url: 'https://github.com/o/r/issues/5', milestone: null },
-    { number: 7, title: 'delivered but still open', state: 'open', body: '## 依赖\nBlocked by #5', html_url: 'https://github.com/o/r/issues/7', milestone: { title: 'M1' } },
     {
-      number: 8, title: 'never developed', state: 'open',
+      number: 5,
+      title: 'dependency',
+      state: 'closed',
+      body: '',
+      html_url: 'https://github.com/o/r/issues/5',
+      milestone: null,
+    },
+    {
+      number: 7,
+      title: 'delivered but still open',
+      state: 'open',
+      body: '## 依赖\nBlocked by #5',
+      html_url: 'https://github.com/o/r/issues/7',
+      milestone: { title: 'M1' },
+    },
+    {
+      number: 8,
+      title: 'never developed',
+      state: 'open',
       body: '## 目标\n自动开发\n\n## 验收标准\n- [ ] 完成\n\n## 依赖\n无',
-      html_url: 'https://github.com/o/r/issues/8', milestone: null,
+      html_url: 'https://github.com/o/r/issues/8',
+      milestone: null,
     },
   ]
   const prs = [
-    { number: 19, state: 'closed', merged_at: '2026-08-22T00:00:00Z', head: { ref: 'r-issue-7' }, html_url: 'https://github.com/o/r/pull/19' },
+    {
+      number: 19,
+      state: 'closed',
+      merged_at: '2026-08-22T00:00:00Z',
+      head: { ref: 'r-issue-7' },
+      html_url: 'https://github.com/o/r/pull/19',
+    },
   ]
   const ctx = {
     shell: {
-      resolve(spec: unknown) { return spec },
+      resolve(spec: unknown) {
+        return spec
+      },
       async run(spec: { command: string }) {
-        if (spec.command.includes('/issues?')) return { exitCode: 0, stdout: { text: included(allIssues) }, stderr: { text: '' } }
-        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: included(prs) }, stderr: { text: '' } }
+        if (spec.command.includes('/issues?'))
+          return { exitCode: 0, stdout: { text: included(allIssues) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls?'))
+          return { exitCode: 0, stdout: { text: included(prs) }, stderr: { text: '' } }
         throw new Error(`unexpected command: ${spec.command}`)
       },
     },
   }
-  const result = await fetchRepositoryIssues(ctx as never, { repoKey: 'o/r' }, {
-    config: { repos: { 'o/r': '/remote/r' }, worktreeRoot: '/remote/worktrees' },
-    workflows: [],
-  })
+  const result = await fetchRepositoryIssues(
+    ctx as never,
+    { repoKey: 'o/r' },
+    {
+      config: { repos: { 'o/r': '/remote/r' }, worktreeRoot: '/remote/worktrees' },
+      workflows: [],
+    },
+  )
   assert.equal(result.ok, true)
   if (!result.ok) return
   const issues = result.issues as Array<{
@@ -1932,7 +2580,10 @@ test('repo issue aggregation includes open issues without workflows and honors l
     workflow: { prNumber: string | null; derived: { status: string; nextAction: { kind: string; label: string } } }
     autoDevelopment: { ready: boolean; status: string }
   }>
-  assert.deepEqual(issues.map((issue) => issue.number), [7, 8])
+  assert.deepEqual(
+    issues.map((issue) => issue.number),
+    [7, 8],
+  )
   assert.deepEqual(issues[0].blockedBy, [{ number: 5, title: 'dependency', state: 'CLOSED' }])
   assert.equal(issues[0].milestone?.title, 'M1')
   assert.equal(issues[0].workflow.prNumber, '19')
@@ -1942,15 +2593,20 @@ test('repo issue aggregation includes open issues without workflows and honors l
   assert.equal(issues[1].workflow.derived.status, 'idle')
   assert.equal(issues[1].workflow.derived.nextAction.label, '开始开发')
   assert.deepEqual(issues[1].autoDevelopment, {
-    status: 'ready', ready: true, reason: '契约完整且直接依赖均已完成',
+    status: 'ready',
+    ready: true,
+    reason: '契约完整且直接依赖均已完成',
   })
 })
 
 test('repo ready excludes recovery even when the generic next action is develop', async () => {
   const issue = {
-    number: 81, title: 'resume existing development', state: 'open',
+    number: 81,
+    title: 'resume existing development',
+    state: 'open',
     body: '## 目标\n继续开发\n\n## 验收标准\n- [ ] 完成\n\n## 依赖\n无',
-    html_url: 'https://github.com/recovery/case/issues/81', milestone: null,
+    html_url: 'https://github.com/recovery/case/issues/81',
+    milestone: null,
   }
   const workflow = interruptedWorkflow('recovery-case-81', issue.html_url, '/missing/worktree/case-issue-81')
   workflow.repoKey = 'recovery/case'
@@ -1962,19 +2618,27 @@ test('repo ready excludes recovery even when the generic next action is develop'
   workflow.events = []
   const ctx = {
     shell: {
-      resolve(spec: unknown) { return spec },
+      resolve(spec: unknown) {
+        return spec
+      },
       async run(spec: { command: string }) {
-        if (spec.command.includes('/issues?')) return { exitCode: 0, stdout: { text: included([issue]) }, stderr: { text: '' } }
-        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: included([]) }, stderr: { text: '' } }
+        if (spec.command.includes('/issues?'))
+          return { exitCode: 0, stdout: { text: included([issue]) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls?'))
+          return { exitCode: 0, stdout: { text: included([]) }, stderr: { text: '' } }
         throw new Error(`unexpected command: ${spec.command}`)
       },
     },
   }
 
-  const result = await fetchRepositoryIssues(ctx as never, { repoKey: 'recovery/case' }, {
-    config: { repos: { 'recovery/case': '/remote/case' }, worktreeRoot: '/remote/worktrees' },
-    workflows: [workflow],
-  })
+  const result = await fetchRepositoryIssues(
+    ctx as never,
+    { repoKey: 'recovery/case' },
+    {
+      config: { repos: { 'recovery/case': '/remote/case' }, worktreeRoot: '/remote/worktrees' },
+      workflows: [workflow],
+    },
+  )
   assert.equal(result.ok, true)
   if (!result.ok) return
   const item = result.issues[0] as {
@@ -1983,21 +2647,41 @@ test('repo ready excludes recovery even when the generic next action is develop'
   }
   assert.equal(item.workflow.derived.nextAction.kind, 'develop')
   assert.deepEqual(item.autoDevelopment, {
-    status: 'not-startable', ready: false, reason: '当前阶段不是首次开发',
+    status: 'not-startable',
+    ready: false,
+    reason: '当前阶段不是首次开发',
   })
 })
 
 test('repo aggregation unlocks closed dependencies with an idempotent comment before rewriting the ledger', async () => {
   const body = '## 目标\n自动开发\n\n## 验收标准\n- [ ] 可启动\n\n## 依赖\nBlocked by #8'
-  const issue = { number: 9, title: 'ready after dependency', state: 'open', body, html_url: 'https://github.com/o/r/issues/9', milestone: null }
-  const dependency = { number: 8, title: 'done', state: 'closed', body: '', html_url: 'https://github.com/o/r/issues/8', milestone: null }
+  const issue = {
+    number: 9,
+    title: 'ready after dependency',
+    state: 'open',
+    body,
+    html_url: 'https://github.com/o/r/issues/9',
+    milestone: null,
+  }
+  const dependency = {
+    number: 8,
+    title: 'done',
+    state: 'closed',
+    body: '',
+    html_url: 'https://github.com/o/r/issues/8',
+    milestone: null,
+  }
   const writes: Array<{ command: string; stdin?: string }> = []
   const ctx = {
     shell: {
-      resolve(spec: unknown) { return spec },
+      resolve(spec: unknown) {
+        return spec
+      },
       async run(spec: { command: string; stdin?: string }) {
-        if (spec.command.includes('/issues?')) return { exitCode: 0, stdout: { text: included([issue, dependency]) }, stderr: { text: '' } }
-        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: included([]) }, stderr: { text: '' } }
+        if (spec.command.includes('/issues?'))
+          return { exitCode: 0, stdout: { text: included([issue, dependency]) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls?'))
+          return { exitCode: 0, stdout: { text: included([]) }, stderr: { text: '' } }
         if (spec.command.includes('/issues/9/comments') && !spec.command.includes('--method')) {
           return { exitCode: 0, stdout: { text: included([]) }, stderr: { text: '' } }
         }
@@ -2007,15 +2691,24 @@ test('repo aggregation unlocks closed dependencies with an idempotent comment be
         }
         if (spec.command.includes('--method PATCH')) {
           writes.push(spec)
-          return { exitCode: 0, stdout: { text: included({ updated_at: '2026-08-22T08:00:00Z' }) }, stderr: { text: '' } }
+          return {
+            exitCode: 0,
+            stdout: { text: included({ updated_at: '2026-08-22T08:00:00Z' }) },
+            stderr: { text: '' },
+          }
         }
         throw new Error(`unexpected command: ${spec.command}`)
       },
     },
   }
-  const result = await fetchRepositoryIssues(ctx as never, { repoKey: 'o/r' }, {
-    config: { repos: { 'o/r': '/remote/r' }, worktreeRoot: '/remote/worktrees' }, workflows: [],
-  })
+  const result = await fetchRepositoryIssues(
+    ctx as never,
+    { repoKey: 'o/r' },
+    {
+      config: { repos: { 'o/r': '/remote/r' }, worktreeRoot: '/remote/worktrees' },
+      workflows: [],
+    },
+  )
   assert.equal(result.ok, true)
   if (!result.ok) return
   assert.equal(writes.length, 2)
@@ -2035,15 +2728,33 @@ test('repo aggregation unlocks closed dependencies with an idempotent comment be
 
 test('repo aggregation cools down failed dependency-ledger writes across forced refreshes', async () => {
   const body = '## 目标\n自动开发\n\n## 验收标准\n- [ ] 可启动\n\n## 依赖\nBlocked by #908'
-  const issue = { number: 909, title: 'retry later', state: 'open', body, html_url: 'https://github.com/cooldown/r/issues/909', milestone: null }
-  const dependency = { number: 908, title: 'done', state: 'closed', body: '', html_url: 'https://github.com/cooldown/r/issues/908', milestone: null }
+  const issue = {
+    number: 909,
+    title: 'retry later',
+    state: 'open',
+    body,
+    html_url: 'https://github.com/cooldown/r/issues/909',
+    milestone: null,
+  }
+  const dependency = {
+    number: 908,
+    title: 'done',
+    state: 'closed',
+    body: '',
+    html_url: 'https://github.com/cooldown/r/issues/908',
+    milestone: null,
+  }
   let commentReads = 0
   const ctx = {
     shell: {
-      resolve(spec: unknown) { return spec },
+      resolve(spec: unknown) {
+        return spec
+      },
       async run(spec: { command: string }) {
-        if (spec.command.includes('/issues?')) return { exitCode: 0, stdout: { text: included([issue, dependency]) }, stderr: { text: '' } }
-        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: included([]) }, stderr: { text: '' } }
+        if (spec.command.includes('/issues?'))
+          return { exitCode: 0, stdout: { text: included([issue, dependency]) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls?'))
+          return { exitCode: 0, stdout: { text: included([]) }, stderr: { text: '' } }
         if (spec.command.includes('/issues/909/comments')) {
           commentReads += 1
           return { exitCode: 1, stdout: { text: included({ message: 'offline' }, 500) }, stderr: { text: 'offline' } }
@@ -2053,7 +2764,8 @@ test('repo aggregation cools down failed dependency-ledger writes across forced 
     },
   }
   const overrides = {
-    config: { repos: { 'cooldown/r': '/remote/r' }, worktreeRoot: '/remote/worktrees' }, workflows: [],
+    config: { repos: { 'cooldown/r': '/remote/r' }, worktreeRoot: '/remote/worktrees' },
+    workflows: [],
   }
 
   const first = await fetchRepositoryIssues(ctx as never, { repoKey: 'cooldown/r', forceRefresh: true }, overrides)
@@ -2061,8 +2773,12 @@ test('repo aggregation cools down failed dependency-ledger writes across forced 
   assert.equal(first.ok, true)
   assert.equal(second.ok, true)
   if (!first.ok || !second.ok) return
-  const firstLedger = first.issues.find((candidate) => (candidate as { number: number }).number === 909) as { dependencyLedger: { error?: string } }
-  const secondLedger = second.issues.find((candidate) => (candidate as { number: number }).number === 909) as { dependencyLedger: { error?: string } }
+  const firstLedger = first.issues.find((candidate) => (candidate as { number: number }).number === 909) as {
+    dependencyLedger: { error?: string }
+  }
+  const secondLedger = second.issues.find((candidate) => (candidate as { number: number }).number === 909) as {
+    dependencyLedger: { error?: string }
+  }
   assert.match(firstLedger.dependencyLedger.error ?? '', /更新失败;冷却至/)
   assert.match(secondLedger.dependencyLedger.error ?? '', /更新冷却至/)
   assert.equal(commentReads, 1, 'refreshes inside the cooldown must not retry GitHub writes')
@@ -2070,41 +2786,84 @@ test('repo aggregation cools down failed dependency-ledger writes across forced 
 
 test('repo aggregation keeps a closed issue visible while merged cleanup is pending', async () => {
   const issue = {
-    number: 23, title: 'cleanup pending', state: 'closed', body: '',
-    html_url: 'https://github.com/o/r/issues/23', milestone: null,
+    number: 23,
+    title: 'cleanup pending',
+    state: 'closed',
+    body: '',
+    html_url: 'https://github.com/o/r/issues/23',
+    milestone: null,
   }
   const workflow = interruptedWorkflow('o-r-23', issue.html_url, '/remote/worktrees/r-issue-23')
   workflow.branch = 'r-issue-23'
   workflow.stage = 'passed'
   workflow.delivery = {
-    status: 'cleanup-pending', mergedAt: '2026-08-22T00:00:00Z', prHead: 'abcdef1', mergeStrategy: 'merge',
+    status: 'cleanup-pending',
+    mergedAt: '2026-08-22T00:00:00Z',
+    prHead: 'abcdef1',
+    mergeStrategy: 'merge',
     cleanup: { worktree: false, localBranch: false, remoteBranch: false, issue: false },
   }
   const ctx = {
     shell: {
-      resolve(spec: unknown) { return spec },
+      resolve(spec: unknown) {
+        return spec
+      },
       async run(spec: { command: string }) {
-        if (spec.command.includes('/issues?')) return { exitCode: 0, stdout: { text: included([issue]) }, stderr: { text: '' } }
-        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: included([
-          { number: 29, state: 'closed', merged_at: '2026-08-22T00:00:00Z', head: { ref: workflow.branch }, html_url: 'https://github.com/o/r/pull/29' },
-        ]) }, stderr: { text: '' } }
-        if (spec.command.includes('/pulls/29/reviews')) return { exitCode: 0, stdout: { text: included([
-          { id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' },
-        ]) }, stderr: { text: '' } }
-        if (spec.command.includes('/pulls/29')) return {
-          exitCode: 0,
-          stdout: { text: included({
-            number: 29, state: 'closed', merged_at: '2026-08-22T00:00:00Z',
-            head: { ref: workflow.branch, sha: 'abcdef1' }, base: { ref: 'main' }, html_url: 'https://github.com/o/r/pull/29',
-          }) }, stderr: { text: '' },
-        }
+        if (spec.command.includes('/issues?'))
+          return { exitCode: 0, stdout: { text: included([issue]) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls?'))
+          return {
+            exitCode: 0,
+            stdout: {
+              text: included([
+                {
+                  number: 29,
+                  state: 'closed',
+                  merged_at: '2026-08-22T00:00:00Z',
+                  head: { ref: workflow.branch },
+                  html_url: 'https://github.com/o/r/pull/29',
+                },
+              ]),
+            },
+            stderr: { text: '' },
+          }
+        if (spec.command.includes('/pulls/29/reviews'))
+          return {
+            exitCode: 0,
+            stdout: {
+              text: included([
+                { id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' },
+              ]),
+            },
+            stderr: { text: '' },
+          }
+        if (spec.command.includes('/pulls/29'))
+          return {
+            exitCode: 0,
+            stdout: {
+              text: included({
+                number: 29,
+                state: 'closed',
+                merged_at: '2026-08-22T00:00:00Z',
+                head: { ref: workflow.branch, sha: 'abcdef1' },
+                base: { ref: 'main' },
+                html_url: 'https://github.com/o/r/pull/29',
+              }),
+            },
+            stderr: { text: '' },
+          }
         throw new Error(`unexpected command: ${spec.command}`)
       },
     },
   }
-  const result = await fetchRepositoryIssues(ctx as never, { repoKey: 'o/r' }, {
-    config: { repos: { 'o/r': '/remote/r' }, worktreeRoot: '/remote/worktrees' }, workflows: [workflow],
-  })
+  const result = await fetchRepositoryIssues(
+    ctx as never,
+    { repoKey: 'o/r' },
+    {
+      config: { repos: { 'o/r': '/remote/r' }, worktreeRoot: '/remote/worktrees' },
+      workflows: [workflow],
+    },
+  )
   assert.equal(result.ok, true)
   if (!result.ok) return
   const items = result.issues as Array<{ state: string; workflow: { derived: { nextAction: { kind: string } } } }>
@@ -2118,111 +2877,244 @@ test('repo aggregation consumes snapshot PR facts and skips per-PR detail networ
   // 直接消费快照,不再为 workflow 打 pulls/{n}(+reviews) 请求;reviewDecision
   // 等详情留给 /state 后台轮询。fake shell 对 /pulls/29 抛错即证明无网络调用。
   const issue = {
-    number: 7, title: 'issue 7', state: 'open', body: '',
-    html_url: 'https://github.com/o/r/issues/7', milestone: null,
+    number: 7,
+    title: 'issue 7',
+    state: 'open',
+    body: '',
+    html_url: 'https://github.com/o/r/issues/7',
+    milestone: null,
   }
   const workflow = {
-    key: 'o-r-7', url: issue.html_url, repoKey: 'o/r', worktree: '/remote/worktrees/r/r-issue-7', branch: 'r-issue-7',
-    stage: 'review-ready', devAgent: 'codex', devTaskId: null, devSessionId: null, devSessionAgent: null, devInterrupted: false,
-    reviewAgent: 'codex', reviewTaskId: null, reviewSessionId: null, reviewSessionAgent: null,
-    reviewResult: null, prNumber: 29, issueState: 'OPEN',
-    baseRef: 'origin/main @ abc', updatedAt: 1, events: [],
+    key: 'o-r-7',
+    url: issue.html_url,
+    repoKey: 'o/r',
+    worktree: '/remote/worktrees/r/r-issue-7',
+    branch: 'r-issue-7',
+    stage: 'review-ready',
+    devAgent: 'codex',
+    devTaskId: null,
+    devSessionId: null,
+    devSessionAgent: null,
+    devInterrupted: false,
+    reviewAgent: 'codex',
+    reviewTaskId: null,
+    reviewSessionId: null,
+    reviewSessionAgent: null,
+    reviewResult: null,
+    prNumber: 29,
+    issueState: 'OPEN',
+    baseRef: 'origin/main @ abc',
+    updatedAt: 1,
+    events: [],
   }
   const commands: string[] = []
   const ctx = {
     shell: {
-      resolve(spec: unknown) { return spec },
+      resolve(spec: unknown) {
+        return spec
+      },
       async run(spec: { command: string }) {
         commands.push(spec.command)
-        if (spec.command.includes('/issues?')) return { exitCode: 0, stdout: { text: included([issue]) }, stderr: { text: '' } }
-        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: included([
-          { number: 29, state: 'closed', merged_at: '2026-08-22T00:00:00Z', head: { ref: 'r-issue-7' }, html_url: 'https://github.com/o/r/pull/29' },
-        ]) }, stderr: { text: '' } }
+        if (spec.command.includes('/issues?'))
+          return { exitCode: 0, stdout: { text: included([issue]) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls?'))
+          return {
+            exitCode: 0,
+            stdout: {
+              text: included([
+                {
+                  number: 29,
+                  state: 'closed',
+                  merged_at: '2026-08-22T00:00:00Z',
+                  head: { ref: 'r-issue-7' },
+                  html_url: 'https://github.com/o/r/pull/29',
+                },
+              ]),
+            },
+            stderr: { text: '' },
+          }
         throw new Error('snapshot fast path must not run: ' + spec.command)
       },
     },
   }
-  const result = await fetchRepositoryIssues(ctx as never, { repoKey: 'o/r' }, {
-    config: { repos: { 'o/r': '/remote/r' }, worktreeRoot: '/remote/worktrees' },
-    workflows: [workflow as never],
-  })
+  const result = await fetchRepositoryIssues(
+    ctx as never,
+    { repoKey: 'o/r' },
+    {
+      config: { repos: { 'o/r': '/remote/r' }, worktreeRoot: '/remote/worktrees' },
+      workflows: [workflow as never],
+    },
+  )
   assert.equal(result.ok, true)
   if (!result.ok) return
-  const item = result.issues[0] as { workflow: { prNumber: string; derived: { status: string; nextAction: { kind: string } } } }
+  const item = result.issues[0] as {
+    workflow: { prNumber: string; derived: { status: string; nextAction: { kind: string } } }
+  }
   assert.equal(item.workflow.prNumber, '29')
   assert.equal(item.workflow.derived.status, 'passed')
   assert.equal(item.workflow.derived.nextAction.kind, 'none')
-  assert.equal(commands.filter((command) => command.startsWith('gh api ')).length, 2, 'only the issues+pulls snapshot, no per-PR detail')
+  assert.equal(
+    commands.filter((command) => command.startsWith('gh api ')).length,
+    2,
+    'only the issues+pulls snapshot, no per-PR detail',
+  )
   // #8:列表项携带契约合规字段;空正文 = 缺 目标/验收标准/依赖(选前校验标记,不硬选)
   const contractItem = result.issues[0] as unknown as { contract: { ok: boolean; missing: string[] } }
   assert.equal(contractItem.contract.ok, false)
   assert.deepEqual(contractItem.contract.missing, ['目标', '验收标准', '依赖'])
 })
 test('repo issue aggregation fails closed when a stored PR cannot be refreshed by number', async () => {
-  const issue = { number: 7, title: 'issue 7', state: 'open', body: '', html_url: 'https://github.com/o/r/issues/7', milestone: null }
+  const issue = {
+    number: 7,
+    title: 'issue 7',
+    state: 'open',
+    body: '',
+    html_url: 'https://github.com/o/r/issues/7',
+    milestone: null,
+  }
   const workflow = {
-    key: 'o-r-7', url: issue.html_url, repoKey: 'o/r', worktree: '/remote/worktrees/r/r-issue-7', branch: 'renamed-branch',
-    stage: 'passed', devAgent: 'codex', devTaskId: null, devSessionId: null, devSessionAgent: null, devInterrupted: false,
-    reviewAgent: 'codex', reviewTaskId: null, reviewSessionId: null, reviewSessionAgent: null,
-    reviewResult: { passed: true, issues: [] }, prNumber: 99, issueState: 'OPEN',
-    baseRef: 'origin/main @ abc', updatedAt: 1, events: [],
+    key: 'o-r-7',
+    url: issue.html_url,
+    repoKey: 'o/r',
+    worktree: '/remote/worktrees/r/r-issue-7',
+    branch: 'renamed-branch',
+    stage: 'passed',
+    devAgent: 'codex',
+    devTaskId: null,
+    devSessionId: null,
+    devSessionAgent: null,
+    devInterrupted: false,
+    reviewAgent: 'codex',
+    reviewTaskId: null,
+    reviewSessionId: null,
+    reviewSessionAgent: null,
+    reviewResult: { passed: true, issues: [] },
+    prNumber: 99,
+    issueState: 'OPEN',
+    baseRef: 'origin/main @ abc',
+    updatedAt: 1,
+    events: [],
   }
   const ctx = {
     shell: {
-      resolve(spec: unknown) { return spec },
+      resolve(spec: unknown) {
+        return spec
+      },
       async run(spec: { command: string }) {
-        if (spec.command.includes('/issues?')) return { exitCode: 0, stdout: { text: included([issue]) }, stderr: { text: '' } }
-        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: included([]) }, stderr: { text: '' } }
-        if (spec.command.includes('/pulls/99')) return { exitCode: 1, stdout: { text: included({ message: 'offline' }, 500) }, stderr: { text: 'offline' } }
+        if (spec.command.includes('/issues?'))
+          return { exitCode: 0, stdout: { text: included([issue]) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls?'))
+          return { exitCode: 0, stdout: { text: included([]) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls/99'))
+          return { exitCode: 1, stdout: { text: included({ message: 'offline' }, 500) }, stderr: { text: 'offline' } }
         throw new Error(`unexpected command: ${spec.command}`)
       },
     },
   }
-  const result = await fetchRepositoryIssues(ctx as never, { repoKey: 'o/r' }, {
-    config: { repos: { 'o/r': '/remote/r' }, worktreeRoot: '/remote/worktrees' },
-    workflows: [workflow as never],
-  })
+  const result = await fetchRepositoryIssues(
+    ctx as never,
+    { repoKey: 'o/r' },
+    {
+      config: { repos: { 'o/r': '/remote/r' }, worktreeRoot: '/remote/worktrees' },
+      workflows: [workflow as never],
+    },
+  )
   assert.equal(result.ok, true)
   if (!result.ok) return
-  const item = result.issues[0] as { workflow: { prNumber: string; derived: { nextAction: { kind: string; label: string } } } }
+  const item = result.issues[0] as {
+    workflow: { prNumber: string; derived: { nextAction: { kind: string; label: string } } }
+  }
   assert.equal(item.workflow.prNumber, '99')
   assert.deepEqual(item.workflow.derived.nextAction, {
-    kind: 'none', label: '刷新 PR 状态', hint: 'GitHub PR 实时状态查询失败,为避免误合并已暂停动作',
+    kind: 'none',
+    label: '刷新 PR 状态',
+    hint: 'GitHub PR 实时状态查询失败,为避免误合并已暂停动作',
   })
 })
 
 test('repo issue aggregation refreshes stored PR by number when its head no longer matches', async () => {
-  const issue = { number: 7, title: 'issue 7', state: 'open', body: '', html_url: 'https://github.com/o/r/issues/7', milestone: null }
+  const issue = {
+    number: 7,
+    title: 'issue 7',
+    state: 'open',
+    body: '',
+    html_url: 'https://github.com/o/r/issues/7',
+    milestone: null,
+  }
   const workflow = {
-    key: 'o-r-7', url: issue.html_url, repoKey: 'o/r', worktree: '/remote/worktrees/r/r-issue-7', branch: 'old-branch-name',
-    stage: 'passed', devAgent: 'codex', devTaskId: null, devSessionId: null, devSessionAgent: null, devInterrupted: false,
-    reviewAgent: 'codex', reviewTaskId: null, reviewSessionId: null, reviewSessionAgent: null,
-    reviewResult: { passed: true, issues: [] }, prNumber: 99, issueState: 'OPEN',
-    baseRef: 'origin/main @ abc', updatedAt: 1, events: [],
+    key: 'o-r-7',
+    url: issue.html_url,
+    repoKey: 'o/r',
+    worktree: '/remote/worktrees/r/r-issue-7',
+    branch: 'old-branch-name',
+    stage: 'passed',
+    devAgent: 'codex',
+    devTaskId: null,
+    devSessionId: null,
+    devSessionAgent: null,
+    devInterrupted: false,
+    reviewAgent: 'codex',
+    reviewTaskId: null,
+    reviewSessionId: null,
+    reviewSessionAgent: null,
+    reviewResult: { passed: true, issues: [] },
+    prNumber: 99,
+    issueState: 'OPEN',
+    baseRef: 'origin/main @ abc',
+    updatedAt: 1,
+    events: [],
   }
   const ctx = {
     shell: {
-      resolve(spec: unknown) { return spec },
+      resolve(spec: unknown) {
+        return spec
+      },
       async run(spec: { command: string }) {
-        if (spec.command.includes('/issues?')) return { exitCode: 0, stdout: { text: included([issue]) }, stderr: { text: '' } }
-        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: included([]) }, stderr: { text: '' } }
-        if (spec.command.includes('/pulls/99/reviews')) return { exitCode: 0, stdout: { text: included([{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T01:00:00Z' }]) }, stderr: { text: '' } }
-        if (spec.command.includes('/pulls/99')) return {
-          exitCode: 0,
-          stdout: { text: included({ number: 99, state: 'closed', merged_at: '2026-08-22T00:00:00Z', head: { ref: 'new-branch-name' }, html_url: 'https://github.com/o/r/pull/99' }) },
-          stderr: { text: '' },
-        }
+        if (spec.command.includes('/issues?'))
+          return { exitCode: 0, stdout: { text: included([issue]) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls?'))
+          return { exitCode: 0, stdout: { text: included([]) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls/99/reviews'))
+          return {
+            exitCode: 0,
+            stdout: {
+              text: included([
+                { id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T01:00:00Z' },
+              ]),
+            },
+            stderr: { text: '' },
+          }
+        if (spec.command.includes('/pulls/99'))
+          return {
+            exitCode: 0,
+            stdout: {
+              text: included({
+                number: 99,
+                state: 'closed',
+                merged_at: '2026-08-22T00:00:00Z',
+                head: { ref: 'new-branch-name' },
+                html_url: 'https://github.com/o/r/pull/99',
+              }),
+            },
+            stderr: { text: '' },
+          }
         throw new Error(`unexpected command: ${spec.command}`)
       },
     },
   }
-  const result = await fetchRepositoryIssues(ctx as never, { repoKey: 'o/r' }, {
-    config: { repos: { 'o/r': '/remote/r' }, worktreeRoot: '/remote/worktrees' },
-    workflows: [workflow as never],
-  })
+  const result = await fetchRepositoryIssues(
+    ctx as never,
+    { repoKey: 'o/r' },
+    {
+      config: { repos: { 'o/r': '/remote/r' }, worktreeRoot: '/remote/worktrees' },
+      workflows: [workflow as never],
+    },
+  )
   assert.equal(result.ok, true)
   if (!result.ok) return
-  const item = result.issues[0] as { workflow: { prNumber: string; derived: { status: string; nextAction: { kind: string } } } }
+  const item = result.issues[0] as {
+    workflow: { prNumber: string; derived: { status: string; nextAction: { kind: string } } }
+  }
   assert.equal(item.workflow.prNumber, '99')
   assert.equal(item.workflow.derived.status, 'passed')
   assert.equal(item.workflow.derived.nextAction.kind, 'none')
@@ -2230,27 +3122,43 @@ test('repo issue aggregation refreshes stored PR by number when its head no long
 
 test('repo issue aggregation uses unbounded pagination and keeps issues beyond 1000', async () => {
   const allIssues = Array.from({ length: 1001 }, (_, index) => ({
-    number: index + 1, title: `issue ${index + 1}`, state: 'open', body: '',
-    html_url: `https://github.com/o/r/issues/${index + 1}`, milestone: null,
+    number: index + 1,
+    title: `issue ${index + 1}`,
+    state: 'open',
+    body: '',
+    html_url: `https://github.com/o/r/issues/${index + 1}`,
+    milestone: null,
   }))
   const commands: string[] = []
   const ctx = {
     shell: {
-      resolve(spec: unknown) { return spec },
+      resolve(spec: unknown) {
+        return spec
+      },
       async run(spec: { command: string }) {
         commands.push(spec.command)
         if (spec.command.includes('/issues?')) {
           const page = Number(spec.command.match(/[?&]page=(\d+)/)?.[1] ?? 1)
-          return { exitCode: 0, stdout: { text: included(allIssues.slice((page - 1) * 100, page * 100)) }, stderr: { text: '' } }
+          return {
+            exitCode: 0,
+            stdout: { text: included(allIssues.slice((page - 1) * 100, page * 100)) },
+            stderr: { text: '' },
+          }
         }
-        if (spec.command.includes('/pulls?')) return { exitCode: 0, stdout: { text: included([]) }, stderr: { text: '' } }
+        if (spec.command.includes('/pulls?'))
+          return { exitCode: 0, stdout: { text: included([]) }, stderr: { text: '' } }
         throw new Error(`unexpected command: ${spec.command}`)
       },
     },
   }
-  const result = await fetchRepositoryIssues(ctx as never, { repoKey: 'o/r' }, {
-    config: { repos: { 'o/r': '/remote/r' }, worktreeRoot: '/remote/worktrees' }, workflows: [],
-  })
+  const result = await fetchRepositoryIssues(
+    ctx as never,
+    { repoKey: 'o/r' },
+    {
+      config: { repos: { 'o/r': '/remote/r' }, worktreeRoot: '/remote/worktrees' },
+      workflows: [],
+    },
+  )
   assert.equal(result.ok, true)
   if (!result.ok) return
   assert.equal(result.issues.length, 1001)
@@ -2266,59 +3174,93 @@ test('develop with user context stays a first development and records the note i
     const worktreeRoot = join(tempHome, 'worktrees')
     await mkdir(repo, { recursive: true })
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), [
-      'repos:',
-      `  o/r: ${repo}`,
-      `worktreeRoot: ${worktreeRoot}`,
-      '',
-    ].join('\n'))
+    await writeFile(
+      join(tempHome, '.clickvibe', 'config.yaml'),
+      ['repos:', `  o/r: ${repo}`, `worktreeRoot: ${worktreeRoot}`, ''].join('\n'),
+    )
     const url = 'https://github.com/o/r/issues/54'
     const item = {
-      url, title: 'context issue', body: '## 验收标准\n- context', state: 'OPEN',
-      updatedAt: '2026-08-22T00:00:00Z', comments: [],
+      url,
+      title: 'context issue',
+      body: '## 验收标准\n- context',
+      state: 'OPEN',
+      updatedAt: '2026-08-22T00:00:00Z',
+      comments: [],
     }
     const expectedSnapshot = {
-      url: item.url, title: item.title, body: item.body, state: item.state,
-      updatedAt: item.updatedAt, comments: [],
+      url: item.url,
+      title: item.title,
+      body: item.body,
+      state: item.state,
+      updatedAt: item.updatedAt,
+      comments: [],
     }
     const prompts: string[] = []
     const comments: Array<{ command: string; body: string }> = []
-    const handler = createHandler(async (spec) => {
-      const api = githubApi(spec.command, { item })
-      if (api) return api
-      if (spec.command === 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD') return { exitCode: 0, stdout: { text: 'origin/main' }, stderr: { text: '' } }
-      if (spec.command === 'git rev-parse --short HEAD') return { exitCode: 0, stdout: { text: 'f00d123' }, stderr: { text: '' } }
-      if (spec.command.startsWith('gh issue comment')) {
-        comments.push({ command: spec.command, body: spec.stdin ?? '' })
-        return { exitCode: 0, stdout: { text: 'https://github.com/o/r/issues/54#issuecomment-9' }, stderr: { text: '' } }
-      }
-      return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-    }, (spec) => {
-      prompts.push(spec.stdin ?? '')
-      let read = false
-      return {
-        status: 'running', exitCode: 0,
-        done: new Promise<void>((resolve) => setTimeout(resolve, 5)),
-        readOutput() {
-          if (read) return { delta: '', lossy: false }
-          read = true
-          return { delta: `{"type":"thread.started","thread_id":"dev-session-${prompts.length}"}\n`, lossy: false }
-        },
-        kill() { return true },
-      }
-    })
+    const handler = createHandler(
+      async (spec) => {
+        const api = githubApi(spec.command, { item })
+        if (api) return api
+        if (spec.command === 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD')
+          return { exitCode: 0, stdout: { text: 'origin/main' }, stderr: { text: '' } }
+        if (spec.command === 'git rev-parse --short HEAD')
+          return { exitCode: 0, stdout: { text: 'f00d123' }, stderr: { text: '' } }
+        if (spec.command.startsWith('gh issue comment')) {
+          comments.push({ command: spec.command, body: spec.stdin ?? '' })
+          return {
+            exitCode: 0,
+            stdout: { text: 'https://github.com/o/r/issues/54#issuecomment-9' },
+            stderr: { text: '' },
+          }
+        }
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      },
+      (spec) => {
+        prompts.push(spec.stdin ?? '')
+        let read = false
+        return {
+          status: 'running',
+          exitCode: 0,
+          done: new Promise<void>((resolve) => setTimeout(resolve, 5)),
+          readOutput() {
+            if (read) return { delta: '', lossy: false }
+            read = true
+            return { delta: `{"type":"thread.started","thread_id":"dev-session-${prompts.length}"}\n`, lossy: false }
+          },
+          kill() {
+            return true
+          },
+        }
+      },
+    )
     const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
 
     // 首次开工:附加说明非空也必须是「开发」,不得沿用 context!==''→rework 的判定。
     const firstContext = '优先补齐边界测试,注意向后兼容'
-    const firstAuthorized = await post(handler, '/clickvibe/api/authorize', {
-      action: 'develop', url, agent: 'codex', context: firstContext, expectedSnapshot,
-    }, headers) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
-    const first = await post(handler, '/clickvibe/api/develop', {
-      url, agent: 'codex', context: firstContext,
-      authorizationId: firstAuthorized.body.authorizationId,
-      authorizationDigest: firstAuthorized.body.authorizationDigest,
-    }, headers) as { status: number; body: { ok: boolean; taskId?: string } }
+    const firstAuthorized = (await post(
+      handler,
+      '/clickvibe/api/authorize',
+      {
+        action: 'develop',
+        url,
+        agent: 'codex',
+        context: firstContext,
+        expectedSnapshot,
+      },
+      headers,
+    )) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
+    const first = (await post(
+      handler,
+      '/clickvibe/api/develop',
+      {
+        url,
+        agent: 'codex',
+        context: firstContext,
+        authorizationId: firstAuthorized.body.authorizationId,
+        authorizationDigest: firstAuthorized.body.authorizationDigest,
+      },
+      headers,
+    )) as { status: number; body: { ok: boolean; taskId?: string } }
     assert.equal(first.status, 200, JSON.stringify(first.body))
     await waitForTask(handler, first.body.taskId ?? '')
 
@@ -2333,14 +3275,30 @@ test('develop with user context stays a first development and records the note i
 
     // 非首次 develop 带附加说明:保留既有「升级为返工」语义。
     const secondContext = '第二轮:按新约束调整实现'
-    const secondAuthorized = await post(handler, '/clickvibe/api/authorize', {
-      action: 'develop', url, agent: 'codex', context: secondContext, expectedSnapshot,
-    }, headers) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
-    const second = await post(handler, '/clickvibe/api/develop', {
-      url, agent: 'codex', context: secondContext,
-      authorizationId: secondAuthorized.body.authorizationId,
-      authorizationDigest: secondAuthorized.body.authorizationDigest,
-    }, headers) as { status: number; body: { ok: boolean; taskId?: string } }
+    const secondAuthorized = (await post(
+      handler,
+      '/clickvibe/api/authorize',
+      {
+        action: 'develop',
+        url,
+        agent: 'codex',
+        context: secondContext,
+        expectedSnapshot,
+      },
+      headers,
+    )) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
+    const second = (await post(
+      handler,
+      '/clickvibe/api/develop',
+      {
+        url,
+        agent: 'codex',
+        context: secondContext,
+        authorizationId: secondAuthorized.body.authorizationId,
+        authorizationDigest: secondAuthorized.body.authorizationDigest,
+      },
+      headers,
+    )) as { status: number; body: { ok: boolean; taskId?: string } }
     assert.equal(second.status, 200, JSON.stringify(second.body))
     await waitForTask(handler, second.body.taskId ?? '')
 
@@ -2368,41 +3326,71 @@ test('resume (rework) carries the user context next to the review feedback and a
     await saveWorkflow(workflow)
     const prompts: string[] = []
     const currentIssue = {
-      url: workflow.url, title: 'resume issue', body: '## 验收标准\n- context', state: 'OPEN',
-      updatedAt: 'now', comments: [],
+      url: workflow.url,
+      title: 'resume issue',
+      body: '## 验收标准\n- context',
+      state: 'OPEN',
+      updatedAt: 'now',
+      comments: [],
     }
-    const handler = createHandler(async (spec) => {
-      const api = githubApi(spec.command, { item: currentIssue })
-      if (api) return api
-      if (spec.command === 'git rev-parse --short HEAD') return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
-      if (spec.command.startsWith('gh issue comment')) {
-        return { exitCode: 0, stdout: { text: 'https://github.com/o/r/pull/29#issuecomment-4' }, stderr: { text: '' } }
-      }
-      return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-    }, (spec) => {
-      prompts.push(spec.stdin ?? '')
-      let read = false
-      return {
-        status: 'running', exitCode: 0,
-        done: new Promise<void>((resolve) => setTimeout(resolve, 5)),
-        readOutput() {
-          if (read) return { delta: '', lossy: false }
-          read = true
-          return { delta: '{"type":"thread.started","thread_id":"resumed-session"}\n', lossy: false }
-        },
-        kill() { return true },
-      }
-    })
+    const handler = createHandler(
+      async (spec) => {
+        const api = githubApi(spec.command, { item: currentIssue })
+        if (api) return api
+        if (spec.command === 'git rev-parse --short HEAD')
+          return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
+        if (spec.command.startsWith('gh issue comment')) {
+          return {
+            exitCode: 0,
+            stdout: { text: 'https://github.com/o/r/pull/29#issuecomment-4' },
+            stderr: { text: '' },
+          }
+        }
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      },
+      (spec) => {
+        prompts.push(spec.stdin ?? '')
+        let read = false
+        return {
+          status: 'running',
+          exitCode: 0,
+          done: new Promise<void>((resolve) => setTimeout(resolve, 5)),
+          readOutput() {
+            if (read) return { delta: '', lossy: false }
+            read = true
+            return { delta: '{"type":"thread.started","thread_id":"resumed-session"}\n', lossy: false }
+          },
+          kill() {
+            return true
+          },
+        }
+      },
+    )
     const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
     const userContext = '重点先修竞态,再补并发测试'
-    const authorized = await post(handler, '/clickvibe/api/authorize', {
-      action: 'resume', url: workflow.url, agent: 'codex', context: userContext,
-    }, headers) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
-    const resumed = await post(handler, '/clickvibe/api/resume', {
-      url: workflow.url, agent: 'codex', context: userContext,
-      authorizationId: authorized.body.authorizationId,
-      authorizationDigest: authorized.body.authorizationDigest,
-    }, headers) as { status: number; body: { ok: boolean; taskId?: string } }
+    const authorized = (await post(
+      handler,
+      '/clickvibe/api/authorize',
+      {
+        action: 'resume',
+        url: workflow.url,
+        agent: 'codex',
+        context: userContext,
+      },
+      headers,
+    )) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
+    const resumed = (await post(
+      handler,
+      '/clickvibe/api/resume',
+      {
+        url: workflow.url,
+        agent: 'codex',
+        context: userContext,
+        authorizationId: authorized.body.authorizationId,
+        authorizationDigest: authorized.body.authorizationDigest,
+      },
+      headers,
+    )) as { status: number; body: { ok: boolean; taskId?: string } }
     assert.equal(resumed.status, 200, JSON.stringify(resumed.body))
     await waitForTask(handler, resumed.body.taskId ?? '')
 
@@ -2433,50 +3421,84 @@ test('review with user context appends it to the prompt and audits it in the rev
     const starts: Array<{ command: string; prompt: string }> = []
     const reviewedBody = '## 验收标准\n- review context'
     const currentIssue = {
-      url: workflow.url, number: 922,
-      title: 'review issue', body: reviewedBody, state: 'OPEN', updatedAt: '2026-08-22T02:00:00Z',
+      url: workflow.url,
+      number: 922,
+      title: 'review issue',
+      body: reviewedBody,
+      state: 'OPEN',
+      updatedAt: '2026-08-22T02:00:00Z',
       comments: [],
     }
     const pr = {
-      number: 29, state: 'open', html_url: 'https://github.com/o/r/pull/29', updated_at: '2026-08-22T02:00:00Z',
-      base: { ref: 'main' }, head: { ref: workflow.branch },
+      number: 29,
+      state: 'open',
+      html_url: 'https://github.com/o/r/pull/29',
+      updated_at: '2026-08-22T02:00:00Z',
+      base: { ref: 'main' },
+      head: { ref: workflow.branch },
     }
-    const handler = createHandler(async (spec) => {
-      const api = githubApi(spec.command, { item: currentIssue, pr })
-      if (api) return api
-      if (spec.command === 'git rev-parse --short HEAD') return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
-      if (spec.command.startsWith('gh issue comment')) {
-        return { exitCode: 0, stdout: { text: 'https://github.com/o/r/pull/29#issuecomment-5' }, stderr: { text: '' } }
-      }
-      return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-    }, (spec) => {
-      starts.push({ command: spec.command, prompt: spec.stdin ?? '' })
-      let read = false
-      return {
-        status: 'running', exitCode: 0,
-        done: (async () => {
-          await mkdir(join(worktree, '.clickvibe'), { recursive: true })
-          await writeFile(join(worktree, '.clickvibe', 'review-result.json'), '{"passed":true,"issues":[]}')
-          await new Promise((resolve) => setTimeout(resolve, 5))
-        })(),
-        readOutput() {
-          if (read) return { delta: '', lossy: false }
-          read = true
-          return { delta: '{"type":"thread.started","thread_id":"review-session"}\n', lossy: false }
-        },
-        kill() { return true },
-      }
-    })
+    const handler = createHandler(
+      async (spec) => {
+        const api = githubApi(spec.command, { item: currentIssue, pr })
+        if (api) return api
+        if (spec.command === 'git rev-parse --short HEAD')
+          return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
+        if (spec.command.startsWith('gh issue comment')) {
+          return {
+            exitCode: 0,
+            stdout: { text: 'https://github.com/o/r/pull/29#issuecomment-5' },
+            stderr: { text: '' },
+          }
+        }
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      },
+      (spec) => {
+        starts.push({ command: spec.command, prompt: spec.stdin ?? '' })
+        let read = false
+        return {
+          status: 'running',
+          exitCode: 0,
+          done: (async () => {
+            await mkdir(join(worktree, '.clickvibe'), { recursive: true })
+            await writeFile(join(worktree, '.clickvibe', 'review-result.json'), '{"passed":true,"issues":[]}')
+            await new Promise((resolve) => setTimeout(resolve, 5))
+          })(),
+          readOutput() {
+            if (read) return { delta: '', lossy: false }
+            read = true
+            return { delta: '{"type":"thread.started","thread_id":"review-session"}\n', lossy: false }
+          },
+          kill() {
+            return true
+          },
+        }
+      },
+    )
     const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
     const userContext = '额外关注并发安全与错误处理路径'
-    const authorized = await post(handler, '/clickvibe/api/authorize', {
-      action: 'review', url: workflow.url, agent: 'codex', context: userContext,
-    }, headers) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
-    const reviewed = await post(handler, '/clickvibe/api/review', {
-      url: workflow.url, agent: 'codex', context: userContext,
-      authorizationId: authorized.body.authorizationId,
-      authorizationDigest: authorized.body.authorizationDigest,
-    }, headers) as { status: number; body: { ok: boolean; taskId?: string } }
+    const authorized = (await post(
+      handler,
+      '/clickvibe/api/authorize',
+      {
+        action: 'review',
+        url: workflow.url,
+        agent: 'codex',
+        context: userContext,
+      },
+      headers,
+    )) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
+    const reviewed = (await post(
+      handler,
+      '/clickvibe/api/review',
+      {
+        url: workflow.url,
+        agent: 'codex',
+        context: userContext,
+        authorizationId: authorized.body.authorizationId,
+        authorizationDigest: authorized.body.authorizationDigest,
+      },
+      headers,
+    )) as { status: number; body: { ok: boolean; taskId?: string } }
     assert.equal(reviewed.status, 200, JSON.stringify(reviewed.body))
     await waitForTask(handler, reviewed.body.taskId ?? '')
 
@@ -2488,7 +3510,10 @@ test('review with user context appends it to the prompt and audits it in the rev
     assert.equal(reloaded?.events.at(-1)?.userContext, userContext)
     // 附加说明不自动发布为 GitHub 评论。
     const comments = await readLogHistory(workflow.key, 'review')
-    assert.equal(comments.some((line) => line.includes('额外关注并发安全')), false)
+    assert.equal(
+      comments.some((line) => line.includes('额外关注并发安全')),
+      false,
+    )
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome

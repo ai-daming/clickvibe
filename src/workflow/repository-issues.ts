@@ -19,20 +19,13 @@
  */
 
 import { existsSync } from 'node:fs'
-import { basename, join, } from 'node:path'
+import { basename, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { fetchGithubPrFact, fetchGithubRepoSnapshot, type RepositoryIssueItem } from '../github/facts.ts'
-import {
-  type GithubPrFact,
-} from '../github/reads.ts'
+import { type GithubPrFact } from '../github/reads.ts'
 import { githubErrorMessage, githubRest, isGithubRateLimitError } from '../github/rest.ts'
-import {
-  parseDependencies,
-  shellQuote,
-} from '../infra/develop-core.ts'
-import {
-  type RepositoryFreshness,
-} from '../infra/repo-freshness.ts'
+import { parseDependencies, shellQuote } from '../infra/develop-core.ts'
+import { type RepositoryFreshness } from '../infra/repo-freshness.ts'
 import {
   type ClickVibeConfig,
   dependencyRefreshClock,
@@ -43,17 +36,10 @@ import {
   parseUrl,
   runCommand,
 } from '../infra/runtime.ts'
-import {
-  type IssueWorkflow,
-  issueBodyHash,
-  issueKey,
-  loadAllWorkflows,
-} from '../infra/state.ts'
-import {
-  deriveAutoDevelopment,
-} from './auto-development.ts'
+import { type IssueWorkflow, issueBodyHash, issueKey, loadAllWorkflows } from '../infra/state.ts'
+import { deriveAutoDevelopment } from './auto-development.ts'
 import { deriveWorkflowState } from './derive.ts'
-import { checkIssueContract, } from './issue-contract.ts'
+import { checkIssueContract } from './issue-contract.ts'
 import { firstDevelopmentFor, maintainCompletedDependencyLedger } from './repository-state.ts'
 
 export async function fetchRepositoryIssues(

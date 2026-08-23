@@ -20,13 +20,9 @@
 
 import { existsSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
-import {
-  shellQuote,
-} from '../infra/develop-core.ts'
+import { shellQuote } from '../infra/develop-core.ts'
 import { type ClickVibeConfig, expandHome, parseUrl, runCommand } from '../infra/runtime.ts'
-import {
-  type IssueWorkflow,
-} from '../infra/state.ts'
+import { type IssueWorkflow } from '../infra/state.ts'
 import type { IssueContractCheck } from '../infra/contracts.ts'
 import {
   fetchIssueRestDetail,

@@ -27,11 +27,9 @@ import {
   type RepositoryIssueRest,
   readConfiguredBranchFacts,
 } from '../github/facts.ts'
-import { githubErrorMessage, githubRest, } from '../github/rest.ts'
-import { type ClickVibeConfig, loadConfig, } from '../infra/runtime.ts'
-import {
-  type IssueWorkflow,
-} from '../infra/state.ts'
+import { githubErrorMessage, githubRest } from '../github/rest.ts'
+import { type ClickVibeConfig, loadConfig } from '../infra/runtime.ts'
+import { type IssueWorkflow } from '../infra/state.ts'
 import {
   buildDependencyUnlockComment,
   DependencyLedgerRetryGate,
@@ -41,7 +39,7 @@ import {
   rewriteCompletedDependencySection,
 } from './auto-development.ts'
 import { deriveWorkflowState, type WorkflowDerived } from './derive.ts'
-import { checkIssueContract, } from './issue-contract.ts'
+import { checkIssueContract } from './issue-contract.ts'
 import { fetchIssueContract } from './merge-gates.ts'
 
 export async function enrichWorkflowStates(

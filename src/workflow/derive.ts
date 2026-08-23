@@ -22,10 +22,7 @@ import { existsSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import { type DeriveOptions, hasMergeConflict, readBranch, readRefShort, readRevCount } from '../infra/git.ts'
 import { liveTasks, readWorktreeHead, runCommand } from '../infra/runtime.ts'
-import {
-  type IssueContractSnapshot,
-  type IssueWorkflow,
-} from '../infra/state.ts'
+import { type IssueContractSnapshot, type IssueWorkflow } from '../infra/state.ts'
 import {
   deriveNextAction,
   deriveWorkflowStatus,

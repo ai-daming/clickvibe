@@ -5,6 +5,9 @@ export interface TaskHistoryWorkflow {
   hasReviewResult: boolean
 }
 
+// The client has the same pure selector in client/runtime.ts; the cross-boundary
+// cases in runtime-contract.test.ts prevent either copy from drifting alone.
+
 function taskStartedAt(taskId: string | null): number {
   const matched = taskId?.match(/^[a-z]+-(\d+)-/)
   return matched ? Number(matched[1]) : 0

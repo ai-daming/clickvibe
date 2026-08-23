@@ -18,9 +18,7 @@
  *                      └── rework ────────┘
  */
 import type { Context } from '@deepseek-ai/cordis'
-import {
-  parseDependencies,
-} from '../infra/develop-core.ts'
+import { parseDependencies } from '../infra/develop-core.ts'
 import { fetchTtlMs, loadConfig } from '../infra/runtime.ts'
 import { fetchGithubRepoSnapshot } from './facts.ts'
 import { type GithubUserRest } from './reads.ts'

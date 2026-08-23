@@ -23,11 +23,7 @@ import { fetchPrRestDetail, type GithubCommentRest } from '../github/reads.ts'
 import { githubRest, isGithubRateLimitError } from '../github/rest.ts'
 import { REVIEW_RESULT_RELATIVE_PATH } from '../infra/review-result.ts'
 import { readWorktreeHead } from '../infra/runtime.ts'
-import {
-  type IssueWorkflow,
-  issueBodyHash,
-  saveWorkflow,
-} from '../infra/state.ts'
+import { type IssueWorkflow, issueBodyHash, saveWorkflow } from '../infra/state.ts'
 import { buildStagePrompt, type PromptSnapshot, type SnapshotFreshness, selectReviewFeedback } from './prompt.ts'
 
 export interface ResolvedPromptSnapshot {

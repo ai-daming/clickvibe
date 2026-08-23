@@ -1,11 +1,18 @@
-
-import { deliveryPublicationLabel, } from '../runtime.ts'
+import { deliveryPublicationLabel } from '../runtime.ts'
 import { type Workflow, fmtTime, stageLabel } from '../domain.ts'
 import { type GhIssue } from './issue-view.tsx'
 import { LiveTerminal } from './live-terminal.tsx'
 import { useDevSection } from '../dev-state.ts'
 
-export function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoActionHandled, onDelivered }: {
+export function DevSection({
+  url,
+  issue,
+  workflow,
+  onWorkflow,
+  autoAction,
+  onAutoActionHandled,
+  onDelivered,
+}: {
   url: string
   issue: GhIssue
   workflow: Workflow | null
@@ -14,7 +21,37 @@ export function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAut
   onAutoActionHandled?: () => void
   onDelivered?: () => void
 }) {
-  const { actionButtonClass, activeTaskId, agentChoice, busy, busyLabel, contextOpen, contextSupported, contextText, derived, effectiveAction, error, historyKind, lastDelivery, lockedAgent, logEvents, mergeWithOverride, overrideEntryVisible, overrideGates, runAction, setAgentChoice, setContextText, showAgentToggle, stage, startDev, stop, streamNotice, streamState, toggleContext, workflowEvents } = useDevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoActionHandled, onDelivered })
+  const {
+    actionButtonClass,
+    activeTaskId,
+    agentChoice,
+    busy,
+    busyLabel,
+    contextOpen,
+    contextSupported,
+    contextText,
+    derived,
+    effectiveAction,
+    error,
+    historyKind,
+    lastDelivery,
+    lockedAgent,
+    logEvents,
+    mergeWithOverride,
+    overrideEntryVisible,
+    overrideGates,
+    runAction,
+    setAgentChoice,
+    setContextText,
+    showAgentToggle,
+    stage,
+    startDev,
+    stop,
+    streamNotice,
+    streamState,
+    toggleContext,
+    workflowEvents,
+  } = useDevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoActionHandled, onDelivered })
   return (
     <div className="cv-dev">
       {/* 状态卡:当前状态 + 关键事实 */}
@@ -26,7 +63,12 @@ export function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAut
       {workflow?.prNumber ? (
         <div className="cv-dev-path">
           🔗 PR{' '}
-          <a className="cv-link" href={`https://github.com/${workflow.repoKey}/pull/${workflow.prNumber}`} target="_blank" rel="noreferrer">
+          <a
+            className="cv-link"
+            href={`https://github.com/${workflow.repoKey}/pull/${workflow.prNumber}`}
+            target="_blank"
+            rel="noreferrer"
+          >
             #{workflow.prNumber}
           </a>
         </div>
@@ -56,7 +98,9 @@ export function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAut
                   <td className="cv-state-k">main</td>
                   <td className="cv-state-v">
                     <code className="cv-tl-hash">{derived.mainHead}</code>
-                    <span className="cv-state-delta">worktree 落后 {derived.behindMain} · 领先 {derived.aheadOfMain}</span>
+                    <span className="cv-state-delta">
+                      worktree 落后 {derived.behindMain} · 领先 {derived.aheadOfMain}
+                    </span>
                   </td>
                 </tr>
               ) : null}
@@ -65,7 +109,9 @@ export function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAut
                   <td className="cv-state-k">远端</td>
                   <td className="cv-state-v">
                     origin/main <code className="cv-tl-hash">{derived.originMainHead}</code>
-                    <span className="cv-state-delta">worktree 落后 {derived.behindBase} · 领先 {derived.aheadOfBase}</span>
+                    <span className="cv-state-delta">
+                      worktree 落后 {derived.behindBase} · 领先 {derived.aheadOfBase}
+                    </span>
                     {derived.needsSync ? <span className="cv-state-warn">⚠ 需要同步</span> : null}
                     {derived.mergeConflict ? <span className="cv-state-warn">⚠ 合并冲突待解决(转交 agent)</span> : null}
                   </td>
@@ -75,8 +121,11 @@ export function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAut
                 <tr>
                   <td className="cv-state-k">远端分支</td>
                   <td className="cv-state-v">
-                    origin/{derived.branch ?? workflow?.branch} <code className="cv-tl-hash">{derived.upstreamHead}</code>
-                    <span className="cv-state-delta">worktree 落后 {derived.behindUpstream ?? 0} · 领先 {derived.aheadOfUpstream ?? 0}</span>
+                    origin/{derived.branch ?? workflow?.branch}{' '}
+                    <code className="cv-tl-hash">{derived.upstreamHead}</code>
+                    <span className="cv-state-delta">
+                      worktree 落后 {derived.behindUpstream ?? 0} · 领先 {derived.aheadOfUpstream ?? 0}
+                    </span>
                   </td>
                 </tr>
               ) : null}
@@ -87,23 +136,33 @@ export function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAut
 
       {/* review 结论同时绑定 HEAD 与 Issue 正文契约；任一变化都不冒充当前结论。 */}
       {workflow?.reviewResult ? (
-        <div className={derived?.verdictCurrent ? (workflow.reviewResult.passed ? 'cv-dev-done' : 'cv-review-fail') : 'cv-review-stale'}>
+        <div
+          className={
+            derived?.verdictCurrent
+              ? workflow.reviewResult.passed
+                ? 'cv-dev-done'
+                : 'cv-review-fail'
+              : 'cv-review-stale'
+          }
+        >
           {derived?.verdictCurrent
-            ? (workflow.reviewResult.passed
+            ? workflow.reviewResult.passed
               ? `✅ Review 通过(针对提交 ${derived.reviewedHash ?? '?'})`
-              : `❌ Review 发现 ${workflow.reviewResult.issues.length} 个问题(针对提交 ${derived.reviewedHash ?? '?'})`)
+              : `❌ Review 发现 ${workflow.reviewResult.issues.length} 个问题(针对提交 ${derived.reviewedHash ?? '?'})`
             : derived?.issueContractStatus === 'changed'
               ? `⏳ 验收已变更,需重新 Review(原契约 ${derived.reviewedIssueBodyHash?.slice(0, 12) ?? '?'},当前 ${derived.currentIssueBodyHash?.slice(0, 12) ?? '?'})`
               : derived?.issueContractUnknownReason === 'missing-review-snapshot'
                 ? '⏳ 现有 Review 结论缺少验收契约快照,需重新 Review'
                 : derived?.issueContractUnknownReason === 'current-contract-unavailable'
                   ? '⏸ 暂时无法读取当前验收契约,合并已暂停;请刷新后重试'
-              : `⏳ Review 结论针对旧提交 ${derived?.reviewedHash ?? '?'},当前 HEAD ${derived?.head ?? '?'} 已变化,结论已过期`}
+                  : `⏳ Review 结论针对旧提交 ${derived?.reviewedHash ?? '?'},当前 HEAD ${derived?.head ?? '?'} 已变化,结论已过期`}
         </div>
       ) : null}
       {workflow?.reviewResult && !workflow.reviewResult.passed && derived?.verdictCurrent ? (
         <ul className="cv-review-issues">
-          {workflow.reviewResult.issues.map((issue, i) => <li key={i}>{issue}</li>)}
+          {workflow.reviewResult.issues.map((issue, i) => (
+            <li key={i}>{issue}</li>
+          ))}
         </ul>
       ) : null}
       {workflow?.reviewResult && derived?.verdictCurrent ? (
@@ -120,8 +179,20 @@ export function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAut
           <>
             {showAgentToggle ? (
               <div className="cv-agent-toggle" title={lockedAgent ? `Review 锁定 ${lockedAgent}` : '选择 agent'}>
-                <button className={agentChoice === 'codex' ? 'on' : ''} onClick={() => setAgentChoice('codex')} disabled={lockedAgent !== null && lockedAgent !== 'codex'}>Codex</button>
-                <button className={agentChoice === 'claude' ? 'on' : ''} onClick={() => setAgentChoice('claude')} disabled={lockedAgent !== null && lockedAgent !== 'claude'}>Claude</button>
+                <button
+                  className={agentChoice === 'codex' ? 'on' : ''}
+                  onClick={() => setAgentChoice('codex')}
+                  disabled={lockedAgent !== null && lockedAgent !== 'codex'}
+                >
+                  Codex
+                </button>
+                <button
+                  className={agentChoice === 'claude' ? 'on' : ''}
+                  onClick={() => setAgentChoice('claude')}
+                  disabled={lockedAgent !== null && lockedAgent !== 'claude'}
+                >
+                  Claude
+                </button>
               </div>
             ) : null}
             <button
@@ -148,9 +219,11 @@ export function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAut
                     value={contextText}
                     onChange={(event) => setContextText(event.target.value)}
                     rows={3}
-                    placeholder={effectiveAction.kind === 'rework'
-                      ? '已预填当前 Review 意见,可编辑;发送以这里的最终文本为准'
-                      : '补充给 agent 的附加上下文,可留空'}
+                    placeholder={
+                      effectiveAction.kind === 'rework'
+                        ? '已预填当前 Review 意见,可编辑;发送以这里的最终文本为准'
+                        : '补充给 agent 的附加上下文,可留空'
+                    }
                   />
                 ) : null}
               </div>
@@ -158,10 +231,14 @@ export function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAut
           </>
         )}
         {stage === 'idle' && effectiveAction.kind === 'develop' ? (
-          <button className="cv-dev-link" onClick={() => startDev('dryrun')} disabled={busy !== null}>安全演练(dry-run)</button>
+          <button className="cv-dev-link" onClick={() => startDev('dryrun')} disabled={busy !== null}>
+            安全演练(dry-run)
+          </button>
         ) : null}
         {activeTaskId ? (
-          <button className="cv-dev-btn cv-dev-warn" onClick={() => void stop()}>停止任务</button>
+          <button className="cv-dev-btn cv-dev-warn" onClick={() => void stop()}>
+            停止任务
+          </button>
         ) : null}
       </div>
 
@@ -170,7 +247,9 @@ export function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAut
         <div className="cv-override-entry">
           {overrideGates ? (
             <ul className="cv-override-gates">
-              {overrideGates.map((gate) => <li key={gate.key}>门禁未过:{gate.message}</li>)}
+              {overrideGates.map((gate) => (
+                <li key={gate.key}>门禁未过:{gate.message}</li>
+              ))}
             </ul>
           ) : null}
           <button
@@ -191,7 +270,9 @@ export function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAut
           taskId={activeTaskId}
           active={activeTaskId !== null}
           streamState={streamState}
-          agent={historyKind === 'review' ? workflow?.reviewAgent : historyKind === 'dev' ? workflow?.devAgent : agentChoice}
+          agent={
+            historyKind === 'review' ? workflow?.reviewAgent : historyKind === 'dev' ? workflow?.devAgent : agentChoice
+          }
         />
       ) : logEvents.length > 0 ? (
         <details className="cv-log-history">
@@ -213,38 +294,55 @@ export function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAut
           {[...workflowEvents].reverse().map((ev, i) => (
             <div key={i} className="cv-tl-row">
               <span className={`cv-tl-kind cv-tl-kind-${ev.kind}`}>
-                {ev.kind === 'dev' ? '开发' : ev.kind === 'rework' ? '返工' : ev.kind === 'review' ? 'Review' : ev.kind === 'resume' ? '恢复' : ev.kind === 'merge-override' ? '人工放行' : '备注'}
+                {ev.kind === 'dev'
+                  ? '开发'
+                  : ev.kind === 'rework'
+                    ? '返工'
+                    : ev.kind === 'review'
+                      ? 'Review'
+                      : ev.kind === 'resume'
+                        ? '恢复'
+                        : ev.kind === 'merge-override'
+                          ? '人工放行'
+                          : '备注'}
               </span>
               <span className="cv-tl-time">{fmtTime(ev.at)}</span>
               {ev.hash ? <code className="cv-tl-hash">{ev.hash}</code> : null}
               {ev.kind === 'merge-override' ? (
                 <span className="cv-tl-note" title={ev.reason}>
-                  跳过 {(ev.skippedLabels ?? ev.skipped ?? []).join('、')} · 操作者 @{ev.operator ?? '?'} · 原因:{ev.reason ?? '?'}
+                  跳过 {(ev.skippedLabels ?? ev.skipped ?? []).join('、')} · 操作者 @{ev.operator ?? '?'} · 原因:
+                  {ev.reason ?? '?'}
                 </span>
               ) : null}
-              {ev.kind === 'review' && ev.verdict
-                ? <span className={ev.verdict.passed ? 'cv-tl-verdict cv-tl-pass' : 'cv-tl-verdict cv-tl-fail'}>
-                    {ev.verdict.passed ? '✅ 通过' : `❌ ${ev.verdict.issues.length} 个问题`}
-                  </span>
-                : null}
-              {(ev.kind === 'dev' || ev.kind === 'rework') && ev.fixed !== undefined
-                ? <span className="cv-tl-note">修复 {ev.fixed} 个问题</span>
-                : null}
+              {ev.kind === 'review' && ev.verdict ? (
+                <span className={ev.verdict.passed ? 'cv-tl-verdict cv-tl-pass' : 'cv-tl-verdict cv-tl-fail'}>
+                  {ev.verdict.passed ? '✅ 通过' : `❌ ${ev.verdict.issues.length} 个问题`}
+                </span>
+              ) : null}
+              {(ev.kind === 'dev' || ev.kind === 'rework') && ev.fixed !== undefined ? (
+                <span className="cv-tl-note">修复 {ev.fixed} 个问题</span>
+              ) : null}
               {ev.note ? <span className="cv-tl-note">{ev.note}</span> : null}
               {ev.userContext ? (
                 <span className="cv-tl-user-context" title={ev.userContext}>
                   用户附加说明:{ev.userContext.length > 80 ? `${ev.userContext.slice(0, 80)}…` : ev.userContext}
                 </span>
               ) : null}
-              {ev.publication?.status === 'posted'
-                ? ev.publication.url
-                  ? <a className="cv-tl-public" href={ev.publication.url} target="_blank" rel="noreferrer">
-                      {deliveryPublicationLabel(ev.publication)}
-                    </a>
-                  : <span className="cv-tl-public">{deliveryPublicationLabel(ev.publication)}</span>
-                : ev.publication?.status === 'failed'
-                  ? <span className="cv-tl-publish-fail" title={ev.publication.error}>{deliveryPublicationLabel(ev.publication)}</span>
-                  : <span className="cv-tl-local">{deliveryPublicationLabel(ev.publication)}</span>}
+              {ev.publication?.status === 'posted' ? (
+                ev.publication.url ? (
+                  <a className="cv-tl-public" href={ev.publication.url} target="_blank" rel="noreferrer">
+                    {deliveryPublicationLabel(ev.publication)}
+                  </a>
+                ) : (
+                  <span className="cv-tl-public">{deliveryPublicationLabel(ev.publication)}</span>
+                )
+              ) : ev.publication?.status === 'failed' ? (
+                <span className="cv-tl-publish-fail" title={ev.publication.error}>
+                  {deliveryPublicationLabel(ev.publication)}
+                </span>
+              ) : (
+                <span className="cv-tl-local">{deliveryPublicationLabel(ev.publication)}</span>
+              )}
             </div>
           ))}
         </div>

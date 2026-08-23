@@ -19,19 +19,13 @@
  */
 
 import { existsSync } from 'node:fs'
-import type { IncomingMessage, } from 'node:http'
+import type { IncomingMessage } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import { fetchIssue, issueSnapshot } from '../github/issue.ts'
 import { githubErrorMessage, githubRest, isGithubRateLimitError } from '../github/rest.ts'
 import { handleApiPost } from './dispatch.ts'
-import {
-  type IssuePromptSnapshot,
-  mergeGateLabel,
-} from '../infra/develop-core.ts'
-import {
-  aggregateRepositoryFreshness,
-  type RepositoryFreshness,
-} from '../infra/repo-freshness.ts'
+import { type IssuePromptSnapshot, mergeGateLabel } from '../infra/develop-core.ts'
+import { aggregateRepositoryFreshness, type RepositoryFreshness } from '../infra/repo-freshness.ts'
 import {
   dependencyRefreshClock,
   ensureConfiguredRepoFresh,
@@ -42,12 +36,7 @@ import {
   parseUrl,
   privilegedRequestError,
 } from '../infra/runtime.ts'
-import {
-  issueKey,
-  loadAllArchivedWorkflows,
-  loadAllWorkflows,
-  loadWorkflow,
-} from '../infra/state.ts'
+import { issueKey, loadAllArchivedWorkflows, loadAllWorkflows, loadWorkflow } from '../infra/state.ts'
 import {
   COMMAND_HELP_TEXT,
   type CommandAction,

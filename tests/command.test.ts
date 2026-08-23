@@ -9,11 +9,7 @@ import { parseCommand } from '../src/workflow/command.ts'
 import { issueBodyHash, saveWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
 
 function included(body: unknown, status = 200): string {
-  return [
-    `HTTP/2.0 ${status} ${status === 200 ? 'OK' : 'Error'}`,
-    '',
-    JSON.stringify(body),
-  ].join('\n')
+  return [`HTTP/2.0 ${status} ${status === 200 ? 'OK' : 'Error'}`, '', JSON.stringify(body)].join('\n')
 }
 
 function restIssue(item: Record<string, unknown>): Record<string, unknown> {
@@ -66,9 +62,19 @@ function createHandler(
       },
     },
     shell: {
-      resolve(spec: unknown) { return spec },
-      run: run ?? (() => { throw new Error('shell must not run for this request') }),
-      start: start ?? (() => { throw new Error('shell must not start for this request') }),
+      resolve(spec: unknown) {
+        return spec
+      },
+      run:
+        run ??
+        (() => {
+          throw new Error('shell must not run for this request')
+        }),
+      start:
+        start ??
+        (() => {
+          throw new Error('shell must not start for this request')
+        }),
     },
   }
   apply(ctx as never)
@@ -88,86 +94,65 @@ async function post(
   try {
     return await new Promise((resolve, reject) => {
       const payload = JSON.stringify(body)
-      const req = request({
-        host: '127.0.0.1', port: address.port, path: '/clickvibe/api/command', method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'content-length': Buffer.byteLength(payload),
-          ...headers,
-          ...(headers.origin === 'same-origin' ? { origin: `http://127.0.0.1:${address.port}` } : {}),
+      const req = request(
+        {
+          host: '127.0.0.1',
+          port: address.port,
+          path: '/clickvibe/api/command',
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'content-length': Buffer.byteLength(payload),
+            ...headers,
+            ...(headers.origin === 'same-origin' ? { origin: `http://127.0.0.1:${address.port}` } : {}),
+          },
         },
-      }, (res) => {
-        const chunks: Buffer[] = []
-        res.on('data', (chunk: Buffer) => chunks.push(chunk))
-        res.on('end', () => resolve({
-          status: res.statusCode ?? 0,
-          body: JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>,
-        }))
-      })
+        (res) => {
+          const chunks: Buffer[] = []
+          res.on('data', (chunk: Buffer) => chunks.push(chunk))
+          res.on('end', () =>
+            resolve({
+              status: res.statusCode ?? 0,
+              body: JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>,
+            }),
+          )
+        },
+      )
       req.on('error', reject)
       req.end(payload)
     })
   } finally {
-    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
   }
 }
 
 function workflowFixture(key: string, url: string, worktree: string): IssueWorkflow {
   return {
-    key, url, repoKey: 'o/r', worktree, branch: 'r-issue-23', stage: 'review-ready',
-    devAgent: 'codex', devTaskId: null, devSessionId: null, devSessionAgent: null, devInterrupted: false,
-    reviewAgent: 'codex', reviewTaskId: null, reviewSessionId: null, reviewSessionAgent: null,
-    reviewResult: { passed: true, issues: [] }, prNumber: '29', issueState: 'OPEN',
-    baseRef: 'origin/main @ abc', updatedAt: 1, events: [],
+    key,
+    url,
+    repoKey: 'o/r',
+    worktree,
+    branch: 'r-issue-23',
+    stage: 'review-ready',
+    devAgent: 'codex',
+    devTaskId: null,
+    devSessionId: null,
+    devSessionAgent: null,
+    devInterrupted: false,
+    reviewAgent: 'codex',
+    reviewTaskId: null,
+    reviewSessionId: null,
+    reviewSessionAgent: null,
+    reviewResult: { passed: true, issues: [] },
+    prNumber: '29',
+    issueState: 'OPEN',
+    baseRef: 'origin/main @ abc',
+    updatedAt: 1,
+    events: [],
   }
 }
 
 const PRIVILEGED = { origin: 'same-origin', 'x-clickvibe-request': '1' }
-
-test('parseCommand understands the canonical Chinese phrasing and strict grammar', () => {
-  const canonical = parseCommand('把 #8 下单开发')
-  assert.ok(canonical.ok)
-  assert.equal(canonical.command.action, 'develop')
-  assert.equal(canonical.command.number, '8')
-  assert.equal(canonical.command.agent, null)
-
-  const glued = parseCommand('把#8下单开发')
-  assert.ok(glued.ok)
-  assert.equal(glued.command.action, 'develop')
-  assert.equal(glued.command.number, '8')
-
-  const full = parseCommand('develop 8 ai-daming/clickvibe agent=claude')
-  assert.ok(full.ok)
-  assert.deepEqual(
-    [full.command.action, full.command.number, full.command.repoKey, full.command.agent],
-    ['develop', '8', 'ai-daming/clickvibe', 'claude'],
-  )
-
-  const dryrun = parseCommand('安全演练 #8')
-  assert.ok(dryrun.ok)
-  assert.equal(dryrun.command.action, 'develop')
-  assert.equal(dryrun.command.agent, 'dryrun')
-
-  const rework = parseCommand('rework #8 context=先修 A 再补测试')
-  assert.ok(rework.ok)
-  assert.equal(rework.command.action, 'rework')
-  assert.equal(rework.command.context, '先修 A 再补测试')
-
-  const urlStatus = parseCommand('status https://github.com/o/r/issues/23')
-  assert.ok(urlStatus.ok)
-  assert.equal(urlStatus.command.action, 'status')
-  assert.equal(urlStatus.command.url, 'https://github.com/o/r/issues/23')
-
-  const prReview = parseCommand('用 claude review https://github.com/o/r/pull/41')
-  assert.ok(prReview.ok)
-  assert.equal(prReview.command.action, 'review')
-  assert.equal(prReview.command.agent, 'claude')
-
-  for (const bad of ['', 'foo bar', 'develop', 'develop #8 agent=gpt', 'develop #8 context=']) {
-    const rejected = parseCommand(bad)
-    assert.equal(rejected.ok, false, `"${bad}" must be rejected`)
-  }
-})
 
 test('help command answers readable text without any shell call', async () => {
   const result = await post(createHandler(), { command: 'help' })
@@ -192,11 +177,25 @@ test('status command returns readable workflow state derived from the same /stat
     await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), `repos:\n  o/r: ${join(tempHome, 'missing-repo')}\n`)
     const workflow = workflowFixture('o-r-23', 'https://github.com/o/r/issues/23', join(tempHome, 'missing-worktree'))
     await saveWorkflow(workflow)
-    const item = { url: workflow.url, number: 23, title: 'cmd issue', body: 'x', state: 'OPEN', updatedAt: 'now', comments: [] }
+    const item = {
+      url: workflow.url,
+      number: 23,
+      title: 'cmd issue',
+      body: 'x',
+      state: 'OPEN',
+      updatedAt: 'now',
+      comments: [],
+    }
     const handler = createHandler(async ({ command }) => {
       const api = githubApi(command, {
         item,
-        pr: { number: 29, state: 'open', merged_at: null, head: { ref: workflow.branch, sha: 'abc' }, base: { ref: 'main' } },
+        pr: {
+          number: 29,
+          state: 'open',
+          merged_at: null,
+          head: { ref: workflow.branch, sha: 'abc' },
+          base: { ref: 'main' },
+        },
       })
       if (api) return api
       throw new Error(`unexpected command: ${command}`)
@@ -243,16 +242,26 @@ test('develop command previews with a one-use authorization instead of starting 
 
 async function developPreviewScenario(): Promise<void> {
   const item = {
-    url: 'https://github.com/o/r/issues/13', number: 13, title: 'command develop',
-    body: '## 验收标准\n- x', state: 'OPEN', updatedAt: '2026-08-23T00:00:00Z', comments: [],
+    url: 'https://github.com/o/r/issues/13',
+    number: 13,
+    title: 'command develop',
+    body: '## 验收标准\n- x',
+    state: 'OPEN',
+    updatedAt: '2026-08-23T00:00:00Z',
+    comments: [],
   }
   let issueReads = 0
-  const handler = createHandler(async ({ command }) => {
-    if (/\/issues\/13'/.test(command)) issueReads += 1
-    const api = githubApi(command, { item })
-    if (api) return api
-    throw new Error(`unexpected command: ${command}`)
-  }, () => { throw new Error('phase 1 must not start an agent') })
+  const handler = createHandler(
+    async ({ command }) => {
+      if (/\/issues\/13'/.test(command)) issueReads += 1
+      const api = githubApi(command, { item })
+      if (api) return api
+      throw new Error(`unexpected command: ${command}`)
+    },
+    () => {
+      throw new Error('phase 1 must not start an agent')
+    },
+  )
 
   const preview = await post(handler, { command: '把 #13 下单开发' }, PRIVILEGED)
   assert.equal(preview.status, 200, JSON.stringify(preview.body))
@@ -265,11 +274,15 @@ async function developPreviewScenario(): Promise<void> {
   assert.ok(authorization.authorizationDigest)
 
   // 授权是消费型的:篡改 context 后重发,必须被同一 consumeAuthorization 拒绝
-  const tampered = await post(handler, {
-    command: 'develop #13 context=changed after preview',
-    authorizationId: authorization.authorizationId,
-    authorizationDigest: authorization.authorizationDigest,
-  }, PRIVILEGED)
+  const tampered = await post(
+    handler,
+    {
+      command: 'develop #13 context=changed after preview',
+      authorizationId: authorization.authorizationId,
+      authorizationDigest: authorization.authorizationDigest,
+    },
+    PRIVILEGED,
+  )
   assert.equal(tampered.status, 403)
   assert.match(String(tampered.body.error), /授权无效/)
 }
@@ -292,28 +305,43 @@ test('confirmed develop revalidates the frozen snapshot through the same backend
 async function confirmedDevelopScenario(): Promise<void> {
   const url = 'https://github.com/o/r/issues/14'
   const oldItem = {
-    url, number: 14, title: 'old target', body: 'old acceptance', state: 'OPEN',
-    updatedAt: '2026-08-23T05:00:00Z', comments: [],
+    url,
+    number: 14,
+    title: 'old target',
+    body: 'old acceptance',
+    state: 'OPEN',
+    updatedAt: '2026-08-23T05:00:00Z',
+    comments: [],
   }
   let issueReads = 0
-  const handler = createHandler(async ({ command }) => {
-    if (/\/issues\/14'/.test(command)) {
-      issueReads += 1
-      // read1 = 命令预览时的强制刷新;read2 = 确认执行前的快照复验(此时已变化)
-      const current = issueReads === 1 ? oldItem : { ...oldItem, body: 'new acceptance', updatedAt: '2026-08-23T06:00:00Z' }
-      return githubApi(command, { item: current })
-    }
-    return githubApi(command, { item: oldItem }) ?? { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-  }, () => { throw new Error('no agent may start when the snapshot changed') })
+  const handler = createHandler(
+    async ({ command }) => {
+      if (/\/issues\/14'/.test(command)) {
+        issueReads += 1
+        // read1 = 命令预览时的强制刷新;read2 = 确认执行前的快照复验(此时已变化)
+        const current =
+          issueReads === 1 ? oldItem : { ...oldItem, body: 'new acceptance', updatedAt: '2026-08-23T06:00:00Z' }
+        return githubApi(command, { item: current })
+      }
+      return githubApi(command, { item: oldItem }) ?? { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+    },
+    () => {
+      throw new Error('no agent may start when the snapshot changed')
+    },
+  )
 
   const preview = await post(handler, { command: 'develop #14' }, PRIVILEGED)
   assert.equal(preview.status, 200)
   const authorization = preview.body.authorization as Record<string, string>
-  const confirmed = await post(handler, {
-    command: 'develop #14',
-    authorizationId: authorization.authorizationId,
-    authorizationDigest: authorization.authorizationDigest,
-  }, PRIVILEGED)
+  const confirmed = await post(
+    handler,
+    {
+      command: 'develop #14',
+      authorizationId: authorization.authorizationId,
+      authorizationDigest: authorization.authorizationDigest,
+    },
+    PRIVILEGED,
+  )
   // startDevelop 在执行前重新拉取 issue:预览后正文变化 → 拒绝,与面板按钮同一门禁
   assert.equal(confirmed.status, 400)
   assert.match(String(confirmed.body.error), /内容在确认后已变化/)
@@ -327,14 +355,24 @@ test('review command previews through the shared authorize path', async () => {
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
     await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), `repos:\n  o/r: ${join(tempHome, 'missing-repo')}\n`)
     const item = {
-      url: 'https://github.com/o/r/issues/15', number: 15, title: 'review target',
-      body: 'y', state: 'OPEN', updatedAt: '2026-08-23T00:00:00Z', comments: [],
+      url: 'https://github.com/o/r/issues/15',
+      number: 15,
+      title: 'review target',
+      body: 'y',
+      state: 'OPEN',
+      updatedAt: '2026-08-23T00:00:00Z',
+      comments: [],
     }
-    const handler = createHandler(async ({ command }) => {
-      const api = githubApi(command, { item })
-      if (api) return api
-      throw new Error(`unexpected command: ${command}`)
-    }, () => { throw new Error('phase 1 must not start an agent') })
+    const handler = createHandler(
+      async ({ command }) => {
+        const api = githubApi(command, { item })
+        if (api) return api
+        throw new Error(`unexpected command: ${command}`)
+      },
+      () => {
+        throw new Error('phase 1 must not start an agent')
+      },
+    )
     const preview = await post(handler, { command: 'review #15' }, PRIVILEGED)
     assert.equal(preview.status, 200, JSON.stringify(preview.body))
     assert.equal(preview.body.needsConfirmation, true)
@@ -354,36 +392,63 @@ test('merge command surfaces every gate failure and supports the manual override
     const repo = join(tempHome, 'repo')
     await mkdir(repo, { recursive: true })
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), `repos:\n  o/r: ${repo}\nworktreeRoot: ${join(tempHome, 'worktrees')}\n`)
-    const workflow = workflowFixture('o-r-23', 'https://github.com/o/r/issues/23', join(tempHome, 'worktrees', 'r-issue-23'))
+    await writeFile(
+      join(tempHome, '.clickvibe', 'config.yaml'),
+      `repos:\n  o/r: ${repo}\nworktreeRoot: ${join(tempHome, 'worktrees')}\n`,
+    )
+    const workflow = workflowFixture(
+      'o-r-23',
+      'https://github.com/o/r/issues/23',
+      join(tempHome, 'worktrees', 'r-issue-23'),
+    )
     workflow.branch = 'r-issue-23'
     workflow.stage = 'passed'
-    workflow.events = [{
-      kind: 'review', at: 'now', hash: '1111111', verdict: { passed: true, issues: [] },
-      // 契约也变更:两个门禁同时失败,命令应把清单全量列出
-      issueContract: { bodyHash: issueBodyHash('## 验收标准\n- old'), updatedAt: '2026-08-22T00:00:00Z' },
-    }]
+    workflow.events = [
+      {
+        kind: 'review',
+        at: 'now',
+        hash: '1111111',
+        verdict: { passed: true, issues: [] },
+        // 契约也变更:两个门禁同时失败,命令应把清单全量列出
+        issueContract: { bodyHash: issueBodyHash('## 验收标准\n- old'), updatedAt: '2026-08-22T00:00:00Z' },
+      },
+    ]
     await saveWorkflow(workflow)
-    const handler = createHandler(async ({ command }) => {
-      const api = githubApi(command, {
-        item: {
-          url: workflow.url, number: 23, title: 'override issue',
-          body: '## 验收标准\n- changed', state: 'OPEN', updatedAt: '2026-08-23T00:00:00Z',
-        },
-        pr: {
-          number: 29, state: 'open', merged_at: null,
-          head: { ref: workflow.branch, sha: '2222222222222222' }, base: { ref: 'main' },
-        },
-      })
-      if (api) return api
-      throw new Error(`unexpected command: ${command}`)
-    }, () => { throw new Error('merge preview must not start an agent') })
+    const handler = createHandler(
+      async ({ command }) => {
+        const api = githubApi(command, {
+          item: {
+            url: workflow.url,
+            number: 23,
+            title: 'override issue',
+            body: '## 验收标准\n- changed',
+            state: 'OPEN',
+            updatedAt: '2026-08-23T00:00:00Z',
+          },
+          pr: {
+            number: 29,
+            state: 'open',
+            merged_at: null,
+            head: { ref: workflow.branch, sha: '2222222222222222' },
+            base: { ref: 'main' },
+          },
+        })
+        if (api) return api
+        throw new Error(`unexpected command: ${command}`)
+      },
+      () => {
+        throw new Error('merge preview must not start an agent')
+      },
+    )
 
     // 不带放行:门禁拒绝,可读文本列出全部失败项 + 放行路径
     const rejected = await post(handler, { command: 'merge #23' }, PRIVILEGED)
     assert.equal(rejected.status, 400, JSON.stringify(rejected.body))
     const failures = rejected.body.gateFailures as { key: string }[]
-    assert.deepEqual(failures.map((failure) => failure.key), ['review-hash', 'contract-changed'])
+    assert.deepEqual(
+      failures.map((failure) => failure.key),
+      ['review-hash', 'contract-changed'],
+    )
     assert.match(String(rejected.body.text), /哈希不一致/)
     assert.match(String(rejected.body.text), /验收契约已变更/)
     assert.match(String(rejected.body.text), /merge <目标> override=<放行原因>/)

@@ -1,14 +1,5 @@
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-/**
- * clickvibe client half: the right-side issue/PR panel.
- *
- * Registers:
- * - `shell.overlay` (id `clickvibe`) — the mount anchor for the occupied panel,
- * - `sidebar.footer.action` (id `clickvibe`) — the toggle button.
- *
- * Fetching goes through the plugin's own `/clickvibe/api/fetch` route
- * (no harness RPC — this is a formal bundle plugin, not a dynamic one).
- */
+/** Panel lifecycle state shared by the client composition root and views. */
 import React from 'react'
 
 export const PANEL_ID = 'clickvibe'
@@ -46,7 +37,9 @@ export function usePanelOpen(): boolean {
   React.useEffect(() => {
     const listener = (v: boolean) => setOpen(v)
     panelState.listeners.add(listener)
-    return () => { panelState.listeners.delete(listener) }
+    return () => {
+      panelState.listeners.delete(listener)
+    }
   }, [])
   return open
 }

@@ -20,10 +20,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { buildResumePrompt, resolvePromptSnapshot } from '../agent/prompts.ts'
 import { attachAgentProcess, createLiveTask, finishTask, pushTaskLine } from '../agent/task-supervisor.ts'
-import {
-  buildFreshAgentCommand,
-  buildResumeAgentCommand,
-} from '../infra/develop-core.ts'
+import { buildFreshAgentCommand, buildResumeAgentCommand } from '../infra/develop-core.ts'
 import { buildMergePreface } from '../infra/git.ts'
 import {
   type LiveTask,
@@ -44,9 +41,7 @@ import {
   saveWorkflow,
 } from '../infra/state.ts'
 import { recordDevDelivery } from './review-flow.ts'
-import {
-  workflowBaseBranch,
-} from './state-view.ts'
+import { workflowBaseBranch } from './state-view.ts'
 
 /** Resume (or continue) a dev session with an exact session id; `context`
  *  carries extra instructions (e.g. review issues for a rework).

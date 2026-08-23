@@ -21,19 +21,9 @@
 import { existsSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import {
-  buildWorktreeAddCommand,
-  decideWorktreeRecovery,
-  shellQuote,
-} from '../infra/develop-core.ts'
+import { buildWorktreeAddCommand, decideWorktreeRecovery, shellQuote } from '../infra/develop-core.ts'
 import { expandHome, loadConfig, runCommand } from '../infra/runtime.ts'
-import {
-  appendLog,
-  type IssueWorkflow,
-  issueKey,
-  loadWorkflow,
-  saveWorkflow,
-} from '../infra/state.ts'
+import { appendLog, type IssueWorkflow, issueKey, loadWorkflow, saveWorkflow } from '../infra/state.ts'
 
 /** Create (or reuse) the workflow record and the worktree+branch. */
 export async function ensureWorktree(

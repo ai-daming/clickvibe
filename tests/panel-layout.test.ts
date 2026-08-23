@@ -1,10 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import {
-  MOBILE_BREAKPOINT,
-  resolveDesktopPanelWidth,
-  resolvePanelLayout,
-} from '../src/client/panel-layout.ts'
+import { MOBILE_BREAKPOINT, resolveDesktopPanelWidth, resolvePanelLayout } from '../src/client/panel-layout.ts'
 
 test('desktop panel defaults to 25% of the viewport', () => {
   assert.equal(resolveDesktopPanelWidth(1200), 300)

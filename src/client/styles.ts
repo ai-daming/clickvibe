@@ -222,5 +222,7 @@ export function installStyles(): () => void {
   tag.dataset.plugin = PANEL_ID
   tag.textContent = PANEL_CSS
   document.head.appendChild(tag)
-  return () => { tag.remove() }
+  return () => {
+    tag.remove()
+  }
 }

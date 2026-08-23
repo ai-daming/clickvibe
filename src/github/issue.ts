@@ -30,15 +30,8 @@ import {
   mapPrDetail,
 } from '../github/reads.ts'
 import { githubErrorMessage, githubRest, isGithubRateLimitError } from '../github/rest.ts'
-import {
-  type IssuePromptSnapshot,
-} from '../infra/develop-core.ts'
-import {
-  dependencyRefreshClock,
-  fetchTtlMs,
-  loadConfig,
-  parseUrl,
-} from '../infra/runtime.ts'
+import { type IssuePromptSnapshot } from '../infra/develop-core.ts'
+import { dependencyRefreshClock, fetchTtlMs, loadConfig, parseUrl } from '../infra/runtime.ts'
 export async function fetchIssue(
   ctx: Context,
   payload: unknown,

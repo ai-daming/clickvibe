@@ -73,9 +73,10 @@
     "coverage": "node --test --experimental-test-coverage --test-coverage-lines=85 --test-coverage-functions=85 tests/*.test.ts",
     "lint": "biome lint src tests scripts",
     "lint:fix": "biome lint --write src tests scripts",
+    "format:check": "biome format src tests scripts",
     "fmt": "biome format --write src tests scripts",
     "check:size": "node scripts/check-file-size.mjs",
     "check:layers": "node scripts/check-import-layers.mjs",
-    "check": "pnpm run typecheck && pnpm run lint && pnpm run check:size && pnpm run check:layers"
+    "check": "pnpm run typecheck && pnpm run lint && pnpm run format:check && pnpm run check:size && pnpm run check:layers"
   }
 }

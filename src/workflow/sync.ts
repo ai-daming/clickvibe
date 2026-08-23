@@ -20,17 +20,10 @@
 
 import { existsSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
-import {
-  shellQuote,
-} from '../infra/develop-core.ts'
+import { shellQuote } from '../infra/develop-core.ts'
 import { conflictFileSuffix, hasMergeConflict, listConflictFiles } from '../infra/git.ts'
 import { parseUrl, readWorktreeHead, runCommand } from '../infra/runtime.ts'
-import {
-  appendEvent,
-  appendLog,
-  issueKey,
-  loadWorkflow,
-} from '../infra/state.ts'
+import { appendEvent, appendLog, issueKey, loadWorkflow } from '../infra/state.ts'
 
 /** Sync a workflow's worktree with the remote base, then push the PR branch.
  *  Keeps the worktree on the latest base so dev/review never target stale code

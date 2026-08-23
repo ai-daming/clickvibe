@@ -29,5 +29,6 @@ jobs:
       - run: pnpm test
       - run: pnpm run coverage
       - run: pnpm run lint
+      - run: pnpm run format:check
       - run: pnpm run check:size
       - run: pnpm run check:layers

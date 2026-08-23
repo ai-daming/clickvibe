@@ -1,5 +1,8 @@
 import type { AgentKind } from './contracts.ts'
 
+// Client decoding is intentionally browser-local; runtime-contract.test.ts
+// locks this wire contract to src/client/runtime.ts without crossing bundles.
+
 export type LiveLogKind =
   | 'system'
   | 'stage'

@@ -1,7 +1,4 @@
-import {
-  type DeliveryPublication,
-  workflowStatusLabel,
-} from './runtime.ts'
+import { type DeliveryPublication, workflowStatusLabel } from './runtime.ts'
 import { type Dependencies, type Dependency, type GhIssue, type TimelineEvent } from './views/issue-view.tsx'
 
 export async function apiCall<T>(method: string, body: Record<string, unknown>, timeoutMs?: number): Promise<T> {
@@ -82,7 +79,16 @@ export interface Workflow {
   }
 }
 
-export type NextActionKind = 'develop' | 'resume' | 'sync' | 'create-pr' | 'review' | 'rework' | 'merge' | 'cleanup' | 'none'
+export type NextActionKind =
+  | 'develop'
+  | 'resume'
+  | 'sync'
+  | 'create-pr'
+  | 'review'
+  | 'rework'
+  | 'merge'
+  | 'cleanup'
+  | 'none'
 
 export interface NextAction {
   kind: NextActionKind
@@ -118,7 +124,11 @@ export interface MergeGateFailure {
 export const OVERRIDE_REASON_MAX = 500
 
 export function fmtTime(iso: string): string {
-  try { return new Date(iso).toLocaleString() } catch { return iso }
+  try {
+    return new Date(iso).toLocaleString()
+  } catch {
+    return iso
+  }
 }
 
 export function stageLabel(stage: Workflow['stage'], workflow: Workflow | null): string {
@@ -132,7 +142,11 @@ export function stageLabel(stage: Workflow['stage'], workflow: Workflow | null):
 }
 
 export type FetchIssueResponse =
-  | { ok: true; data: { kind: 'issue' | 'pr'; item: unknown; timeline?: TimelineEvent[]; dependencies?: Dependencies }; dependencyError?: string }
+  | {
+      ok: true
+      data: { kind: 'issue' | 'pr'; item: unknown; timeline?: TimelineEvent[]; dependencies?: Dependencies }
+      dependencyError?: string
+    }
   | { ok: false; error: string }
 
 export async function fetchIssue(url: string, timeoutMs?: number, forceRefresh = false): Promise<FetchIssueResponse> {
@@ -151,7 +165,11 @@ export async function fetchIssue(url: string, timeoutMs?: number, forceRefresh =
   }
 }
 
-export interface ProjectOption { repoKey: string; path: string; available: boolean }
+export interface ProjectOption {
+  repoKey: string
+  path: string
+  available: boolean
+}
 
 export interface RepositoryIssue extends GhIssue {
   blockedBy: Dependency[]

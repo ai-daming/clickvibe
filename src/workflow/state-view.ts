@@ -6,6 +6,9 @@
  * unit-testable without a shell.
  */
 
+// Browser labels/compare URLs live in client/runtime.ts to preserve the client
+// boundary; runtime-contract.test.ts anchors their shared behavior here.
+
 export type NextActionKind =
   | 'develop'
   | 'resume'

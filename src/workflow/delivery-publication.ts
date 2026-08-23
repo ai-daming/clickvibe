@@ -2,6 +2,9 @@ export type { DeliveryPublication } from '../infra/contracts.ts'
 
 import type { DeliveryPublication } from '../infra/contracts.ts'
 
+// client/runtime.ts mirrors this presentation label without importing host
+// code; runtime-contract.test.ts verifies both implementations together.
+
 const GITHUB_COMMENT_URL = /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/(?:issues|pull)\/\d+#issuecomment-\d+$/
 
 /** Select the first complete GitHub comment URL and ignore surrounding CLI output. */

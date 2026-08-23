@@ -25,7 +25,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { parseWorktreeList } from '../agent/worktree.ts'
 import { fetchGithubIssueState, fetchGithubPrFact } from '../github/facts.ts'
 import { fetchIssue, issueSnapshot } from '../github/issue.ts'
-import { githubRest, } from '../github/rest.ts'
+import { githubRest } from '../github/rest.ts'
 import {
   type AgentAuthorizationInput,
   type IssuePromptSnapshot,
@@ -41,17 +41,9 @@ import {
   parseUrl,
   runCommand,
 } from '../infra/runtime.ts'
-import {
-  appendEvent,
-  archiveWorkflow,
-  issueKey,
-  loadWorkflow,
-  saveWorkflowStrict,
-} from '../infra/state.ts'
+import { appendEvent, archiveWorkflow, issueKey, loadWorkflow, saveWorkflowStrict } from '../infra/state.ts'
 import { collectMergeGateFailures, type MergeGateFailure, mergeGateRejection } from './merge-gates.ts'
-import {
-  workflowBaseBranch,
-} from './state-view.ts'
+import { workflowBaseBranch } from './state-view.ts'
 
 export type MergeAuthorizationPreview =
   | {

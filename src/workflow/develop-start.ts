@@ -18,7 +18,7 @@
  *                      └── rework ────────┘
  */
 
-import { basename, join, } from 'node:path'
+import { basename, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { buildDevelopPrompt, type ResolvedPromptSnapshot, sameSnapshot } from '../agent/prompts.ts'
 import { attachAgentProcess, createLiveTask, finishTask, pushTaskLine } from '../agent/task-supervisor.ts'
@@ -50,11 +50,9 @@ import {
   resetLog,
   saveWorkflow,
 } from '../infra/state.ts'
-import {
-  deriveAutoDevelopment,
-} from './auto-development.ts'
+import { deriveAutoDevelopment } from './auto-development.ts'
 import { deriveWorkflowState } from './derive.ts'
-import { checkIssueContract, } from './issue-contract.ts'
+import { checkIssueContract } from './issue-contract.ts'
 import { firstDevelopmentFor } from './repository-state.ts'
 import { recordDevDelivery } from './review-flow.ts'
 

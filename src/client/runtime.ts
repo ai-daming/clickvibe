@@ -1,8 +1,23 @@
-/** Browser-local copies of pure wire/view helpers; this module performs no I/O. */
+/**
+ * Browser-local copies of pure wire/view helpers; this module performs no I/O.
+ *
+ * The browser bundle must not import host modules. Keep these copies aligned
+ * with infra/live-output.ts, infra/task-history.ts, workflow/state-view.ts and
+ * workflow/delivery-publication.ts. tests/runtime-contract.test.ts compares
+ * both boundaries so a one-sided protocol or label change fails CI.
+ */
 export type AgentKind = 'codex' | 'claude'
 export type LiveLogKind =
-  | 'system' | 'stage' | 'command' | 'command_output' | 'reasoning'
-  | 'tool' | 'thinking' | 'message' | 'text' | 'usage'
+  | 'system'
+  | 'stage'
+  | 'command'
+  | 'command_output'
+  | 'reasoning'
+  | 'tool'
+  | 'thinking'
+  | 'message'
+  | 'text'
+  | 'usage'
 
 export interface TokenUsage {
   inputTokens?: number
@@ -34,7 +49,7 @@ export function decodeLiveLogLine(line: string): LiveLogEvent {
       const value = JSON.parse(decodeURIComponent(line.slice(EVENT_PREFIX.length))) as LiveLogEvent
       if ((value.source === 'system' || value.source === 'agent') && typeof value.text === 'string') return value
     } catch {
-      // Corrupt records stay visible as plain text.
+      // Corrupt records remain visible as plain text instead of breaking history.
     }
   }
   return line.startsWith('[clickvibe]')
@@ -83,17 +98,27 @@ export function selectHistoryTask(workflow: TaskHistoryWorkflow): { taskId: stri
   if (workflow.stage === 'developing') return { taskId: workflow.devTaskId, expectRunning: true }
   if (workflow.stage === 'reviewing') return { taskId: workflow.reviewTaskId, expectRunning: true }
   const started = (taskId: string | null) => Number(taskId?.match(/^[a-z]+-(\d+)-/)?.[1] ?? 0)
-  const showReview = workflow.stage === 'passed' || workflow.hasReviewResult || started(workflow.reviewTaskId) > started(workflow.devTaskId)
+  const showReview =
+    workflow.stage === 'passed' ||
+    workflow.hasReviewResult ||
+    started(workflow.reviewTaskId) > started(workflow.devTaskId)
   return { taskId: showReview ? workflow.reviewTaskId : workflow.devTaskId, expectRunning: false }
 }
 
 function workflowBaseBranch(baseRef: string | null | undefined, defaultBranch = 'main'): string {
-  const ref = String(baseRef ?? '').split(/\s+@\s+/, 1)[0].trim()
+  const ref = String(baseRef ?? '')
+    .split(/\s+@\s+/, 1)[0]
+    .trim()
   const branch = ref.replace(/^refs\/remotes\/origin\//, '').replace(/^origin\//, '')
   return branch !== '' && branch !== 'HEAD' ? branch : defaultBranch
 }
 
-export function githubCompareUrl(repoKey: string, branch: string, baseRef: string | null | undefined, defaultBranch = 'main'): string {
+export function githubCompareUrl(
+  repoKey: string,
+  branch: string,
+  baseRef: string | null | undefined,
+  defaultBranch = 'main',
+): string {
   const base = workflowBaseBranch(baseRef, defaultBranch)
   return `https://github.com/${repoKey}/compare/${encodeURIComponent(base)}...${encodeURIComponent(branch)}?expand=1`
 }
@@ -111,7 +136,8 @@ export function workflowStatusLabel(
   if (status === 'passed') return '✅ 已通过'
   if (reviewPassed !== null && verdictCurrent === false) {
     return issueContractStatus === 'unknown' && issueContractUnknownReason === 'current-contract-unavailable'
-      ? '验收状态未知' : '待重新 Review'
+      ? '验收状态未知'
+      : '待重新 Review'
   }
   if (reviewPassed === true) return 'Review 通过'
   if (reviewPassed === false) return 'Review 未通过'

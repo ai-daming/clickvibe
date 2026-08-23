@@ -1,4 +1,3 @@
-
 /**
  * clickvibe host half — routes:
  * - `/clickvibe/api/fetch`          — fetch GitHub issue/PR data via gh
@@ -19,13 +18,9 @@
  *                      └── rework ────────┘
  */
 import type { Context } from '@deepseek-ai/cordis'
-import {
-  shellQuote,
-} from './develop-core.ts'
+import { shellQuote } from './develop-core.ts'
 import { runCommand } from './runtime.ts'
-import {
-  type IssueContractSnapshot,
-} from './state.ts'
+import { type IssueContractSnapshot } from './state.ts'
 
 interface GitCompare {
   behind: number

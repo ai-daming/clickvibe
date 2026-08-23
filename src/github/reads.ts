@@ -18,7 +18,7 @@
  *                      └── rework ────────┘
  */
 import type { Context } from '@deepseek-ai/cordis'
-import { deriveReviewDecision, githubRest, } from './rest.ts'
+import { deriveReviewDecision, githubRest } from './rest.ts'
 
 export interface GithubPrFact {
   number: string

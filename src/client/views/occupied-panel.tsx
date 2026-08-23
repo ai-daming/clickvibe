@@ -1,13 +1,4 @@
-/**
- * clickvibe client half: the right-side issue/PR panel.
- *
- * Registers:
- * - `shell.overlay` (id `clickvibe`) — the mount anchor for the occupied panel,
- * - `sidebar.footer.action` (id `clickvibe`) — the toggle button.
- *
- * Fetching goes through the plugin's own `/clickvibe/api/fetch` route
- * (no harness RPC — this is a formal bundle plugin, not a dynamic one).
- */
+/** Responsive shell that owns the occupied panel layout. */
 import React from 'react'
 import { resolveDesktopPanelWidth, resolvePanelLayout } from '../panel-layout.ts'
 import { createPortal } from 'react-dom'
@@ -22,8 +13,8 @@ import { PanelContent } from './project-panel.tsx'
 export function OccupiedPanel() {
   const [portalHost, setPortalHost] = React.useState<HTMLDivElement | null>(null)
   const [viewportWidth, setViewportWidth] = React.useState(() => window.innerWidth)
-  const [desktopWidth, setDesktopWidth] = React.useState(
-    () => resolveDesktopPanelWidth(window.innerWidth, panelState.desktopWidth),
+  const [desktopWidth, setDesktopWidth] = React.useState(() =>
+    resolveDesktopPanelWidth(window.innerWidth, panelState.desktopWidth),
   )
   const layout = resolvePanelLayout(viewportWidth, desktopWidth)
   const layoutRef = React.useRef(layout)
@@ -97,10 +88,7 @@ export function OccupiedPanel() {
     const drag = dragRef.current
     if (!drag || !event.currentTarget.hasPointerCapture(event.pointerId)) return
     const pending = pendingWidthRef.current
-    const width = pending ?? resolveDesktopPanelWidth(
-      window.innerWidth,
-      drag.width - (event.clientX - drag.x),
-    )
+    const width = pending ?? resolveDesktopPanelWidth(window.innerWidth, drag.width - (event.clientX - drag.x))
     if (dragFrameRef.current !== null) {
       cancelAnimationFrame(dragFrameRef.current)
       dragFrameRef.current = null
@@ -125,33 +113,32 @@ export function OccupiedPanel() {
   const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current
     if (!drag || !event.currentTarget.hasPointerCapture(event.pointerId)) return
-    scheduleDragWidth(resolveDesktopPanelWidth(
-      window.innerWidth,
-      drag.width - (event.clientX - drag.x),
-    ))
+    scheduleDragWidth(resolveDesktopPanelWidth(window.innerWidth, drag.width - (event.clientX - drag.x)))
   }
 
   return (
     <>
-      {portalHost ? createPortal(
-        <>
-          {!layout.mobile && (
-            <div
-              className="cv-panel-resizer"
-              role="separator"
-              aria-label="调整 ClickVibe 面板宽度"
-              aria-orientation="vertical"
-              aria-valuenow={layout.panelWidth}
-              onPointerDown={onPointerDown}
-              onPointerMove={onPointerMove}
-              onPointerUp={finishDrag}
-              onPointerCancel={finishDrag}
-            />
-          )}
-          <PanelContent />
-        </>,
-        portalHost,
-      ) : null}
+      {portalHost
+        ? createPortal(
+            <>
+              {!layout.mobile && (
+                <div
+                  className="cv-panel-resizer"
+                  role="separator"
+                  aria-label="调整 ClickVibe 面板宽度"
+                  aria-orientation="vertical"
+                  aria-valuenow={layout.panelWidth}
+                  onPointerDown={onPointerDown}
+                  onPointerMove={onPointerMove}
+                  onPointerUp={finishDrag}
+                  onPointerCancel={finishDrag}
+                />
+              )}
+              <PanelContent />
+            </>,
+            portalHost,
+          )
+        : null}
     </>
   )
 }

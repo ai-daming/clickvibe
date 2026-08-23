@@ -20,17 +20,9 @@ import { existsSync } from 'node:fs'
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { fetchIssueRestDetail } from '../github/reads.ts'
-import {
-  type MergeOverrideGate,
-  shellQuote,
-} from '../infra/develop-core.ts'
+import { type MergeOverrideGate, shellQuote } from '../infra/develop-core.ts'
 import { parseUrl, runCommand } from '../infra/runtime.ts'
-import {
-  type IssueContractSnapshot,
-  type IssueWorkflow,
-  issueBodyHash,
-  type WorkflowEvent,
-} from '../infra/state.ts'
+import { type IssueContractSnapshot, type IssueWorkflow, issueBodyHash, type WorkflowEvent } from '../infra/state.ts'
 
 export interface ReviewIssueContract {
   title: string
