@@ -78,6 +78,7 @@ export interface Workflow {
     nextAction: NextAction
     status: 'idle' | 'developing' | 'review-ready' | 'reviewing' | 'passed'
     baseBranch: string
+    freshSession: { round: number; develop: boolean; review: boolean }
   }
 }
 

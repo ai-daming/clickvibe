@@ -1,4 +1,5 @@
 import { RunningDuration } from '../duration.ts'
+import { LogBlocks } from '../log-block-view.ts'
 import { latestTokenUsage, taskStartedAt, type LiveLogEvent } from '../runtime.ts'
 /** Live and detached terminal presentation for one agent task. */
 import React from 'react'
@@ -70,16 +71,7 @@ export function LiveTerminal({
         </button>
       </div>
       <div className="cv-dev-log" ref={logRef} role="log" aria-live="polite" aria-label="实时输出">
-        {events
-          .filter((event) => event.kind !== 'usage')
-          .map((event, index) => (
-            <div
-              key={index}
-              className={`cv-terminal-line cv-terminal-line-${event.source === 'system' ? 'system' : event.kind}`}
-            >
-              {event.text}
-            </div>
-          ))}
+        <LogBlocks events={events} taskId={taskId} />
         {events.length === 0 ? (
           <div className="cv-terminal-line">{streamState === 'history' ? '正在恢复历史…' : '等待 agent 输出…'}</div>
         ) : null}
