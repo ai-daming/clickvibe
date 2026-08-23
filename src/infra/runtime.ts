@@ -37,6 +37,7 @@ import {
 } from './develop-core.ts'
 import { type RepositoryFreshness, RepositoryFreshnessGate, RepositoryRefreshClock } from './repo-freshness.ts'
 import { ExclusiveTaskGate } from './task-gate.ts'
+import type { IssueWorkflow } from './state.ts'
 
 const MAX_BODY_BYTES = 64 * 1024
 
@@ -62,6 +63,7 @@ export const automaticDependencyValidationClock = new RepositoryRefreshClock()
 export interface LiveTask {
   taskId: string
   workflowKey: string
+  workflow: IssueWorkflow
   kind: 'dev' | 'review'
   agent: DevelopAgent
   process?: ReturnType<Context['shell']['start']>

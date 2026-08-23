@@ -41,7 +41,6 @@ import {
   loadWorkflow,
   readLogTail,
   recordSessionId,
-  resetLog,
   resolveSessionForAgent,
   saveWorkflow,
   type WorkflowEvent,
@@ -98,7 +97,7 @@ export async function startReview(
   try {
     reservation = reviewTaskGate.reserve(workflow.key, () => {
       const id = taskId('review')
-      return createLiveTask(id, workflow.key, 'review', agent, sessionId)
+      return createLiveTask(id, workflow, 'review', agent, sessionId)
     })
   } catch (error) {
     return { ok: false, error: String(error instanceof Error ? error.message : error) }
@@ -120,8 +119,6 @@ export async function startReview(
       updatedAt: resolvedSnapshot.snapshot.updatedAt,
     },
   }
-  await resetLog(workflow.key, 'review')
-
   // Review must inspect the branch against current remote refs. Keep review
   // available during an outage, but make the degraded input explicit in its log.
   try {

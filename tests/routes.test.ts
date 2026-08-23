@@ -8,11 +8,13 @@ import { apply, fetchRepositoryIssues } from '../src/index.ts'
 import { encodeLiveLogEvent } from '../src/infra/live-output.ts'
 import {
   appendLog,
+  appendTaskLog,
   issueBodyHash,
   loadAllArchivedWorkflows,
   loadWorkflow,
   readLogHistory,
   saveWorkflow,
+  startTaskLog,
   type IssueWorkflow,
 } from '../src/infra/state.ts'
 
@@ -1321,6 +1323,38 @@ test('/history restores the complete disk log by task id after Host restart', as
     assert.equal(result.body.cursor, 0)
     assert.equal(result.body.active, false)
     assert.equal(result.body.kind, 'dev')
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('/history queries an older round by project and issue while binding the round to that issue', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-history-round-'))
+  process.env.HOME = tempHome
+  try {
+    const workflow = interruptedWorkflow('o-r-907', 'https://github.com/o/r/issues/907', join(tempHome, 'worktree'))
+    const older = 'dev-1720000000000-older'
+    const current = 'dev-1720000005000-current'
+    workflow.devTaskId = current
+    await saveWorkflow(workflow)
+    await startTaskLog(workflow, 'dev', older)
+    await appendTaskLog(workflow, 'dev', older, 1, 'older round')
+    await startTaskLog(workflow, 'dev', current)
+    await appendTaskLog(workflow, 'dev', current, 1, 'current round')
+
+    const result = await get(createHandler(), `/clickvibe/api/history?owner=o&repo=r&issue=907&kind=dev&round=${older}`)
+    assert.equal(result.status, 200)
+    assert.deepEqual(result.body.lines, ['older round'])
+    assert.equal(result.body.taskId, older)
+
+    const wrongIssue = await get(
+      createHandler(),
+      `/clickvibe/api/history?owner=o&repo=r&issue=999&kind=dev&round=${older}`,
+    )
+    assert.equal(wrongIssue.status, 404)
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome

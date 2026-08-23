@@ -1,15 +1,23 @@
-/**
- * clickvibe persistent workflow state.
- *
- * One JSON document per issue under ~/.clickvibe/state/, plus per-issue log
- * files. Survives web restarts and page refreshes so the panel can restore
- * its context (the issue being viewed + its dev/review workflow stage).
- */
+/** Project-scoped workflow state and task-log compatibility facade. */
 import { createHash } from 'node:crypto'
-import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import type { DeliveryPublication, PromptSnapshot } from './contracts.ts'
+import { issueKey, legacyIssueKey, taskLogPath, workflowPath, type WorkflowStorageIdentity } from './state-layout.ts'
+import {
+  appendTaskLog as appendTaskLogRecord,
+  appendTaskLogNext,
+  listTaskIds,
+  migrateLegacyLog,
+  readTaskLog as readTaskLogRecords,
+  startTaskLog as createTaskLog,
+  type AppendTaskLogOptions,
+  type TaskLogKind,
+  type TaskLogRead,
+} from './task-log-store.ts'
+
+export { issueKey } from './state-layout.ts'
 
 /** The workflow stage of one issue. */
 export type WorkflowStage =
@@ -200,92 +208,162 @@ export function stateDir(): string {
   return join(homedir(), '.clickvibe', 'state')
 }
 
-/** Derive the state file path for one issue key. */
-export function statePath(key: string): string {
-  return join(stateDir(), `${key}.json`)
+export function statePath(workflow: WorkflowStorageIdentity): string {
+  return workflowPath(stateDir(), workflow)
 }
 
-export function archiveStatePath(key: string): string {
-  return join(stateDir(), 'archive', `${key}.json`)
+export function logPath(workflow: WorkflowStorageIdentity, kind: TaskLogKind, taskId: string): string {
+  return taskLogPath(stateDir(), workflow, kind, taskId)
 }
 
-/** Derive the log file path for one issue's dev/review log. */
-export function logPath(key: string, kind: 'dev' | 'review'): string {
-  return join(stateDir(), key, `${kind}.log`)
-}
-
-// Keep every operation for one persistent log in call order. Besides avoiding
-// reordered appendFile completions, this gives /history a real snapshot
-// boundary: writes queued before the read are included, later writes are SSE
-// increments after the returned in-memory cursor.
-const logQueues = new Map<string, Promise<unknown>>()
-
-function enqueueLogOperation<T>(path: string, operation: () => Promise<T>): Promise<T> {
-  const previous = logQueues.get(path) ?? Promise.resolve()
-  const current = previous.catch(() => undefined).then(operation)
-  logQueues.set(path, current)
-  void current
-    .finally(() => {
-      if (logQueues.get(path) === current) logQueues.delete(path)
-    })
-    .catch(() => undefined)
-  return current
-}
-
-/** Load one issue's workflow state; missing file yields a fresh idle record. */
-export async function loadWorkflow(key: string): Promise<IssueWorkflow | null> {
+async function readWorkflowFile(path: string): Promise<IssueWorkflow | null> {
   try {
-    const raw = await readFile(statePath(key), 'utf8')
-    return normalizeWorkflow(JSON.parse(raw) as IssueWorkflow)
+    return normalizeWorkflow(JSON.parse(await readFile(path, 'utf8')) as IssueWorkflow)
   } catch {
     return null
   }
 }
 
-/** Load every stored workflow (for panel restore). */
+function currentKey(workflow: IssueWorkflow): string | null {
+  const number = workflow.url.match(/\/(?:issues|pull)\/(\d+)(?:[/?#]|$)/)?.[1]
+  if (!number) return null
+  try {
+    return issueKey(workflow.repoKey, number)
+  } catch {
+    return null
+  }
+}
+
+async function storedWorkflowFiles(): Promise<string[]> {
+  const root = stateDir()
+  const files: string[] = []
+  try {
+    for (const owner of await readdir(root, { withFileTypes: true })) {
+      if (!owner.isDirectory() || owner.name === 'archive') continue
+      for (const repo of await readdir(join(root, owner.name), { withFileTypes: true })) {
+        if (!repo.isDirectory()) continue
+        for (const issue of await readdir(join(root, owner.name, repo.name), { withFileTypes: true })) {
+          if (issue.isDirectory() && /^issue-[1-9]\d*$/.test(issue.name)) {
+            files.push(join(root, owner.name, repo.name, issue.name, 'workflow.json'))
+          }
+        }
+      }
+    }
+  } catch {
+    return files
+  }
+  return files
+}
+
+async function migrateWorkflowLogs(workflow: IssueWorkflow): Promise<void> {
+  for (const kind of ['dev', 'review'] as const) {
+    const legacy = join(stateDir(), workflow.key, `${kind}.log`)
+    const taskId = kind === 'dev' ? workflow.devTaskId : workflow.reviewTaskId
+    if (!taskId) continue
+    try {
+      await migrateLegacyLog(
+        stateDir(),
+        workflow,
+        kind,
+        taskId,
+        legacy,
+        new Date(workflow.updatedAt || 0).toISOString(),
+      )
+    } catch {
+      // Best effort: leave the source untouched so a later startup can retry.
+    }
+  }
+}
+
+async function migrateLegacyWorkflowFile(path: string): Promise<void> {
+  const workflow = await readWorkflowFile(path)
+  if (!workflow) return
+  const destination = statePath(workflow)
+  try {
+    await mkdir(join(destination, '..'), { recursive: true })
+    try {
+      await writeFile(destination, await readFile(path), { flag: 'wx' })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      const existing = await readWorkflowFile(destination)
+      if (!existing || existing.key !== workflow.key) throw error
+    }
+    await rm(path)
+    await migrateWorkflowLogs(workflow)
+  } catch {
+    // Migration is retryable and must not prevent startup.
+  }
+}
+
+const migrations = new Map<string, Promise<void>>()
+
+async function migrateLegacyState(): Promise<void> {
+  const root = stateDir()
+  const existing = migrations.get(root)
+  if (existing) return existing
+  const migration = (async () => {
+    try {
+      for (const entry of await readdir(root, { withFileTypes: true })) {
+        if (entry.isFile() && entry.name.endsWith('.json')) {
+          await migrateLegacyWorkflowFile(join(root, entry.name))
+        }
+      }
+      const archive = join(root, 'archive')
+      try {
+        for (const entry of await readdir(archive, { withFileTypes: true })) {
+          if (entry.isFile() && entry.name.endsWith('.json')) await migrateLegacyWorkflowFile(join(archive, entry.name))
+        }
+        await rm(archive, { recursive: false }).catch(() => undefined)
+      } catch {
+        // No legacy archive directory.
+      }
+    } catch {
+      // Missing state root or a transient read failure is non-fatal.
+    }
+  })()
+  migrations.set(root, migration)
+  try {
+    await migration
+  } finally {
+    if (migrations.get(root) === migration) migrations.delete(root)
+  }
+}
+
+export async function loadWorkflow(key: string): Promise<IssueWorkflow | null> {
+  await migrateLegacyState()
+  for (const path of await storedWorkflowFiles()) {
+    const workflow = await readWorkflowFile(path)
+    if (workflow && (workflow.key === key || currentKey(workflow) === key || legacyIssueKey(workflow.key) === key)) {
+      await migrateWorkflowLogs(workflow)
+      return workflow.delivery?.status === 'archived' ? null : workflow
+    }
+  }
+  return null
+}
+
 export async function loadAllWorkflows(): Promise<IssueWorkflow[]> {
-  try {
-    const { readdir } = await import('node:fs/promises')
-    const entries = await readdir(stateDir())
-    const workflows: IssueWorkflow[] = []
-    for (const entry of entries) {
-      if (!entry.endsWith('.json')) continue
-      try {
-        const raw = await readFile(join(stateDir(), entry), 'utf8')
-        workflows.push(normalizeWorkflow(JSON.parse(raw) as IssueWorkflow))
-      } catch {
-        // corrupt state file: skip
-      }
+  await migrateLegacyState()
+  const workflows: IssueWorkflow[] = []
+  for (const path of await storedWorkflowFiles()) {
+    const workflow = await readWorkflowFile(path)
+    if (workflow) {
+      await migrateWorkflowLogs(workflow)
+      if (workflow.delivery?.status !== 'archived') workflows.push(workflow)
     }
-    return workflows.sort((a, b) => b.updatedAt - a.updatedAt)
-  } catch {
-    return []
   }
+  return workflows.sort((a, b) => b.updatedAt - a.updatedAt)
 }
 
-/** Load archived terminal workflows for direct URL restoration only. */
 export async function loadAllArchivedWorkflows(): Promise<IssueWorkflow[]> {
-  try {
-    const { readdir } = await import('node:fs/promises')
-    const dir = join(stateDir(), 'archive')
-    const entries = await readdir(dir)
-    const workflows: IssueWorkflow[] = []
-    for (const entry of entries) {
-      if (!entry.endsWith('.json')) continue
-      try {
-        const raw = await readFile(join(dir, entry), 'utf8')
-        workflows.push(normalizeWorkflow(JSON.parse(raw) as IssueWorkflow))
-      } catch {
-        // corrupt archived file: skip
-      }
-    }
-    return workflows.sort((a, b) => b.updatedAt - a.updatedAt)
-  } catch {
-    return []
+  await migrateLegacyState()
+  const workflows: IssueWorkflow[] = []
+  for (const path of await storedWorkflowFiles()) {
+    const workflow = await readWorkflowFile(path)
+    if (workflow?.delivery?.status === 'archived') workflows.push(workflow)
   }
+  return workflows.sort((a, b) => b.updatedAt - a.updatedAt)
 }
 
-/** Persist one issue's workflow state (atomic-ish: write then ignore errors). */
 export async function saveWorkflow(workflow: IssueWorkflow): Promise<void> {
   try {
     await saveWorkflowStrict(workflow)
@@ -294,68 +372,127 @@ export async function saveWorkflow(workflow: IssueWorkflow): Promise<void> {
   }
 }
 
-/** Persist workflow state or surface the failure to transactional callers. */
 export async function saveWorkflowStrict(workflow: IssueWorkflow): Promise<void> {
-  await mkdir(stateDir(), { recursive: true })
+  await mkdir(join(statePath(workflow), '..'), { recursive: true })
   workflow.updatedAt = Date.now()
-  await writeFile(statePath(workflow.key), JSON.stringify(workflow, null, 2), 'utf8')
+  await writeFile(statePath(workflow), JSON.stringify(workflow, null, 2), 'utf8')
 }
 
-/** Persist the final workflow and atomically remove it from the active set. */
 export async function archiveWorkflow(workflow: IssueWorkflow): Promise<void> {
-  await mkdir(join(stateDir(), 'archive'), { recursive: true })
   await saveWorkflowStrict(workflow)
-  await rename(statePath(workflow.key), archiveStatePath(workflow.key))
 }
 
-/** Append one line to an issue's log file (creating the directory). */
+export async function startTaskLog(workflow: IssueWorkflow, kind: TaskLogKind, taskId: string): Promise<void> {
+  try {
+    await createTaskLog(stateDir(), workflow, kind, taskId)
+  } catch {
+    // Log persistence remains best-effort.
+  }
+}
+
+export async function appendTaskLog(
+  workflow: IssueWorkflow,
+  kind: TaskLogKind,
+  taskId: string,
+  sequence: number,
+  line: string,
+  options: AppendTaskLogOptions = {},
+): Promise<void> {
+  try {
+    await appendTaskLogRecord(stateDir(), workflow, kind, taskId, sequence, line, options)
+  } catch {
+    // Log persistence remains best-effort.
+  }
+}
+
+export async function readTaskLog(workflow: IssueWorkflow, kind: TaskLogKind, taskId: string): Promise<TaskLogRead> {
+  return readTaskLogRecords(stateDir(), workflow, kind, taskId)
+}
+
+/** Compatibility append for workflow actions outside a live agent task. */
 export async function appendLog(key: string, kind: 'dev' | 'review', line: string): Promise<void> {
-  const path = logPath(key, kind)
   try {
-    await enqueueLogOperation(path, async () => {
-      await mkdir(dirname(path), { recursive: true })
-      await appendFile(path, `${line}\n`, 'utf8')
-    })
+    const workflow = await loadWorkflow(key)
+    let taskId = kind === 'dev' ? workflow?.devTaskId : workflow?.reviewTaskId
+    if (workflow && !taskId) {
+      taskId = `legacy-${kind}-${Date.now()}`
+      if (kind === 'dev') workflow.devTaskId = taskId
+      else workflow.reviewTaskId = taskId
+      await saveWorkflow(workflow)
+      await migrateWorkflowLogs(workflow)
+    }
+    if (workflow && taskId) {
+      await appendTaskLogNext(stateDir(), workflow, kind, taskId, line)
+      return
+    }
+    const legacyAlias = legacyIssueKey(key)
+    let storageKey = key
+    if (legacyAlias) {
+      try {
+        await readFile(join(stateDir(), legacyAlias, `${kind}.log`), 'utf8')
+        storageKey = legacyAlias
+      } catch {
+        // No legacy alias exists; use the current stable id.
+      }
+    }
+    const legacyPath = join(stateDir(), storageKey, `${kind}.log`)
+    await mkdir(join(legacyPath, '..'), { recursive: true })
+    await appendFile(legacyPath, `${line}\n`, 'utf8')
   } catch {
     // log persistence is best-effort
   }
 }
 
-/** Start a new task generation while preserving full history within that run. */
+/** @deprecated New task generations call startTaskLog with an explicit task id. */
 export async function resetLog(key: string, kind: 'dev' | 'review'): Promise<void> {
-  const path = logPath(key, kind)
-  try {
-    await enqueueLogOperation(path, async () => {
-      await mkdir(dirname(path), { recursive: true })
-      await writeFile(path, '', 'utf8')
-    })
-  } catch {
-    // log persistence is best-effort
-  }
+  const workflow = await loadWorkflow(key)
+  const taskId = kind === 'dev' ? workflow?.devTaskId : workflow?.reviewTaskId
+  if (workflow && taskId) await startTaskLog(workflow, kind, taskId)
 }
 
 /** Read the complete durable log at an ordered snapshot boundary. */
 export async function readLogHistory(key: string, kind: 'dev' | 'review'): Promise<string[]> {
-  const path = logPath(key, kind)
-  try {
-    return await enqueueLogOperation(path, async () => {
-      const raw = await readFile(path, 'utf8')
+  const workflow = await loadWorkflow(key)
+  if (!workflow) {
+    try {
+      const raw = await readFile(join(stateDir(), key, `${kind}.log`), 'utf8')
       const lines = raw.split('\n')
       if (lines.at(-1) === '') lines.pop()
       return lines
-    })
-  } catch {
-    return []
+    } catch {
+      return []
+    }
   }
+  const taskId = kind === 'dev' ? workflow.devTaskId : workflow.reviewTaskId
+  if (!taskId) return []
+  return (await readTaskLog(workflow, kind, taskId)).encodedLines
 }
 
-/** Read a log file's tail; returns up to `limit` last lines. */
 export async function readLogTail(key: string, kind: 'dev' | 'review', limit = 500): Promise<string[]> {
   const lines = await readLogHistory(key, kind)
   return lines.slice(Math.max(0, lines.length - limit))
 }
 
-/** Derive a stable issue key from repo + number (safe for filenames). */
-export function issueKey(repoKey: string, number: string): string {
-  return `${repoKey.replace(/[^A-Za-z0-9_.-]/g, '-')}-${number}`
+export async function findTaskHistory(taskId: string): Promise<{
+  workflow: IssueWorkflow
+  kind: TaskLogKind
+  history: TaskLogRead
+} | null> {
+  for (const workflow of [...(await loadAllWorkflows()), ...(await loadAllArchivedWorkflows())]) {
+    for (const kind of ['dev', 'review'] as const) {
+      if ((await listTaskIds(stateDir(), workflow, kind)).includes(taskId)) {
+        return { workflow, kind, history: await readTaskLog(workflow, kind, taskId) }
+      }
+    }
+  }
+  return null
+}
+
+export async function findWorkflowByIssue(repoKey: string, issue: string): Promise<IssueWorkflow | null> {
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repoKey) || !/^[1-9]\d*$/.test(issue)) return null
+  for (const workflow of [...(await loadAllWorkflows()), ...(await loadAllArchivedWorkflows())]) {
+    const number = workflow.url.match(/\/(?:issues|pull)\/(\d+)(?:[/?#]|$)/)?.[1]
+    if (workflow.repoKey === repoKey && number === issue) return workflow
+  }
+  return null
 }
