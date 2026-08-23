@@ -116,7 +116,7 @@ export function buildDevelopPrompt(
 }
 
 /** Build the review prompt: review `git diff base...HEAD` against the issue.
- *  A live PR base wins; without a PR, use the frozen workflow baseline. */
+ *  A live PR base wins while available; a deleted remote ref falls back to the frozen hash. */
 export async function buildReviewPrompt(
   ctx: Context,
   workflow: IssueWorkflow,
@@ -129,7 +129,8 @@ export async function buildReviewPrompt(
   if (workflow.prNumber) {
     const baseRef = await fetchPrBase(ctx, workflow.repoKey, workflow.prNumber)
     if (baseRef) base = `origin/${baseRef}`
-  } else if (workflow.baseRef) {
+  }
+  if (workflow.baseRef) {
     const available = await runCommand(ctx, `git show-ref --verify --quiet ${shellQuote(`refs/remotes/${base}`)}`, {
       workdir: workflow.worktree,
       timeoutMs: 10_000,

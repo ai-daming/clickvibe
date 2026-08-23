@@ -144,17 +144,8 @@ export async function ensureWorktree(
       })
     : null
 
-  // Reserve the immutable baseline before touching the worktree. startDevelop
-  // holds the workflow lock around this strict write and task placeholder, so
-  // a concurrent authorization must reload and match this exact reservation.
   if (firstBaseSelection) {
     if (!remoteBaseHash) return { ok: false, error: `无法读取开发基线提交: ${remoteBase}` }
-    workflow.baseRef = `${remoteBase} @ ${remoteBaseHash}`
-    try {
-      await saveWorkflowStrict(workflow)
-    } catch (error) {
-      return { ok: false, error: `无法定格开发基线: ${String(error instanceof Error ? error.message : error)}` }
-    }
   }
 
   // 幂等建 worktree:用完整恢复决策(处理 reuse/attach/conflict/重建),
@@ -255,7 +246,19 @@ export async function ensureWorktree(
     )
   }
 
-  await saveWorkflow(workflow)
+  if (firstBaseSelection) {
+    // startDevelop holds the workflow lock across worktree preparation and
+    // task reservation. Freeze the baseline only after preparation succeeds,
+    // so a rejected first attempt remains eligible to select another base.
+    workflow.baseRef = `${remoteBase} @ ${remoteBaseHash}`
+    try {
+      await saveWorkflowStrict(workflow)
+    } catch (error) {
+      return { ok: false, error: `无法定格开发基线: ${String(error instanceof Error ? error.message : error)}` }
+    }
+  } else {
+    await saveWorkflow(workflow)
+  }
   return { ok: true, workflow, worktree, branch }
 }
 

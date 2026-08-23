@@ -207,6 +207,46 @@ test('review keeps the live PR base ahead of the frozen workflow baseline', asyn
   assert.match(prompt, /对比 base: origin\/integration/)
 })
 
+test('review with a PR falls back to the frozen commit when the PR base was deleted', async () => {
+  const commands: string[] = []
+  const ctx = {
+    shell: {
+      resolve(spec: unknown) {
+        return spec
+      },
+      async run(spec: { command: string }) {
+        commands.push(spec.command)
+        if (spec.command.includes('/pulls/77')) {
+          return {
+            exitCode: 0,
+            stdout: {
+              text: ['HTTP/2.0 200 OK', '', JSON.stringify({ base: { ref: 'release/deleted' } })].join('\n'),
+            },
+            stderr: { text: '' },
+          }
+        }
+        return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'missing ref' } }
+      },
+    },
+  }
+  const prompt = await buildReviewPrompt(
+    ctx as never,
+    {
+      repoKey: 'o/r',
+      branch: 'clickvibe-issue-60',
+      worktree: '/tmp/worktree',
+      prNumber: '77',
+      baseRef: 'origin/release/deleted @ abc123',
+    } as never,
+    { snapshot, freshness: 'current' },
+    'def456',
+  )
+  assert.ok(commands.some((command) => command.includes('refs/remotes/origin/release/deleted')))
+  assert.match(prompt, /对比 base: abc123/)
+  assert.match(prompt, /git diff abc123\.\.\.HEAD/)
+  assert.doesNotMatch(prompt, /git diff origin\/release\/deleted/)
+})
+
 test('legacy review without a persisted baseline retains origin/main without probing a ref', async () => {
   const prompt = await buildReviewPrompt(
     {} as never,

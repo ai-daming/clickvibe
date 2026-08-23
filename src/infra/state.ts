@@ -118,7 +118,6 @@ export function issueBodyHash(body: string): string {
   return createHash('sha256').update(body, 'utf8').digest('hex')
 }
 
-/** Apply the durable state shared by initial-development and resumed runs. */
 export function applyDevRunOutcome(
   workflow: IssueWorkflow,
   status: 'running' | 'done' | 'failed' | 'stopped' | 'timed_out',

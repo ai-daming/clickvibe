@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { ensureWorktree } from '../src/agent/worktree.ts'
-import { saveWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
+import { issueKey, loadWorkflow, saveWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
 
 interface Scenario {
   records?: string | ((target: string, branch: string) => string)
@@ -100,7 +100,8 @@ async function runScenario(number: string, scenario: Scenario = {}) {
   }
   try {
     const result = await ensureWorktree(ctx as never, { owner: 'o', repo: 'r', number })
-    return { result, commands, target }
+    const stored = await loadWorkflow(issueKey('o/r', number))
+    return { result, commands, target, stored }
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
@@ -167,6 +168,7 @@ test('worktree preparation executes reuse, detached attach and existing-branch a
   const conflict = await runScenario('13', { path: 'nonempty', branchExists: true })
   assert.equal(conflict.result.ok, false)
   if (!conflict.result.ok) assert.match(conflict.result.error, /未注册的非空目录/)
+  assert.equal(conflict.stored, null)
 })
 
 test('stale registrations repair safely and deleted frozen bases cannot recreate a missing branch', async () => {
