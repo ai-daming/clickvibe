@@ -4,6 +4,7 @@ import { openDshConversationDraft, resolveDshConversationDeps } from '../dsh-con
 import { type ProjectOption, type Workflow } from '../domain.ts'
 import { fmtDate, renderMarkdown } from '../format.tsx'
 import { getClientContext } from '../panel-state.ts'
+import { CollapsibleSection, sectionStorageKey } from './collapsible-section.ts'
 import { DevSection } from './dev-section.tsx'
 
 export interface GhComment {
@@ -285,97 +286,111 @@ export function IssueView({
       ) : null}
       {/* 依赖图:blockedBy(依赖谁)/ blocking(谁依赖我)——与 GitHub「关联」明确区分 */}
       {dependencies && (dependencies.blockedBy.length > 0 || dependencies.blocking.length > 0) ? (
-        <div className="cv-links">
-          {dependencies.blockedBy.length > 0 ? (
-            <div className="cv-dep-block">
-              <div className="cv-dep-label">🔒 blockedBy(依赖,需先完成)</div>
-              {dependencies.blockedBy.map((dep, i) => {
-                const dependencyState = dep.state.toLowerCase()
+        <CollapsibleSection
+          key={sectionStorageKey(issue.url, 'dependencies')}
+          storageKey={sectionStorageKey(issue.url, 'dependencies')}
+          title="依赖图"
+          defaultExpanded={true}
+        >
+          <div className="cv-links">
+            {dependencies.blockedBy.length > 0 ? (
+              <div className="cv-dep-block">
+                <div className="cv-dep-label">🔒 blockedBy(依赖,需先完成)</div>
+                {dependencies.blockedBy.map((dep, i) => {
+                  const dependencyState = dep.state.toLowerCase()
+                  return (
+                    <div key={i} className="cv-link-row">
+                      <a
+                        className="cv-link"
+                        href={`https://github.com/${repoOf(issue.url)}/issues/${dep.number}`}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        #{dep.number}
+                        {dep.title ? ` ${dep.title}` : ''}
+                      </a>
+                      {dependencyState === 'closed' ? (
+                        <span className="cv-link-state cv-link-state-closed">已关闭(依赖完成)</span>
+                      ) : dependencyState === 'open' ? (
+                        <span className="cv-link-state cv-link-state-open">打开(未完成)</span>
+                      ) : null}
+                    </div>
+                  )
+                })}
+              </div>
+            ) : null}
+            {dependencies.blocking.length > 0 ? (
+              <div className="cv-dep-block">
+                <div className="cv-dep-label">🔓 blocking(被依赖,等我完成)</div>
+                {dependencies.blocking.map((dep, i) => {
+                  const dependencyState = dep.state.toLowerCase()
+                  return (
+                    <div key={i} className="cv-link-row">
+                      <a
+                        className="cv-link"
+                        href={`https://github.com/${repoOf(issue.url)}/issues/${dep.number}`}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        #{dep.number}
+                        {dep.title ? ` ${dep.title}` : ''}
+                      </a>
+                      <span className={`cv-link-state cv-link-state-${dependencyState}`}>
+                        {dependencyState === 'closed' ? '已关闭' : dependencyState === 'open' ? '打开' : dep.state}
+                      </span>
+                    </div>
+                  )
+                })}
+              </div>
+            ) : null}
+          </div>
+        </CollapsibleSection>
+      ) : null}
+      {timeline && timeline.length > 0 ? (
+        <CollapsibleSection
+          key={sectionStorageKey(issue.url, 'github-timeline')}
+          storageKey={sectionStorageKey(issue.url, 'github-timeline')}
+          title="时间线"
+          defaultExpanded={false}
+        >
+          <div className="cv-links">
+            {timeline.map((ev, i) => {
+              if (ev.event === 'cross-referenced' && ev.source) {
+                const linkedStateValue = linkedState(ev.source)
                 return (
                   <div key={i} className="cv-link-row">
-                    <a
-                      className="cv-link"
-                      href={`https://github.com/${repoOf(issue.url)}/issues/${dep.number}`}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      #{dep.number}
-                      {dep.title ? ` ${dep.title}` : ''}
+                    {ev.source.is_pr ? (
+                      <PrStateIcon state={linkedStateValue} />
+                    ) : (
+                      <IssueStateIcon state={linkedStateValue === 'closed' ? 'closed' : 'open'} />
+                    )}
+                    <span className="cv-link-kind">{ev.source.is_pr ? 'PR' : 'Issue'}</span>
+                    <a className="cv-link" href={ev.source.html_url} target="_blank" rel="noreferrer">
+                      #{ev.source.number} {ev.source.title ?? ''}
                     </a>
-                    {dependencyState === 'closed' ? (
-                      <span className="cv-link-state cv-link-state-closed">已关闭(依赖完成)</span>
-                    ) : dependencyState === 'open' ? (
-                      <span className="cv-link-state cv-link-state-open">打开(未完成)</span>
-                    ) : null}
-                  </div>
-                )
-              })}
-            </div>
-          ) : null}
-          {dependencies.blocking.length > 0 ? (
-            <div className="cv-dep-block">
-              <div className="cv-dep-label">🔓 blocking(被依赖,等我完成)</div>
-              {dependencies.blocking.map((dep, i) => {
-                const dependencyState = dep.state.toLowerCase()
-                return (
-                  <div key={i} className="cv-link-row">
-                    <a
-                      className="cv-link"
-                      href={`https://github.com/${repoOf(issue.url)}/issues/${dep.number}`}
-                      target="_blank"
-                      rel="noreferrer"
+                    <span
+                      className={
+                        ev.source.is_pr
+                          ? `cv-link-state cv-link-state-${linkedStateValue}`
+                          : `cv-link-state ${linkedStateValue === 'closed' ? 'cv-link-state-issue-closed' : 'cv-link-state-open'}`
+                      }
                     >
-                      #{dep.number}
-                      {dep.title ? ` ${dep.title}` : ''}
-                    </a>
-                    <span className={`cv-link-state cv-link-state-${dependencyState}`}>
-                      {dependencyState === 'closed' ? '已关闭' : dependencyState === 'open' ? '打开' : dep.state}
+                      {linkedStateLabel(ev.source)}
                     </span>
                   </div>
                 )
-              })}
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-      {timeline && timeline.length > 0 ? (
-        <div className="cv-links">
-          {timeline.map((ev, i) => {
-            if (ev.event === 'cross-referenced' && ev.source) {
-              const linkedStateValue = linkedState(ev.source)
-              return (
-                <div key={i} className="cv-link-row">
-                  {ev.source.is_pr ? (
-                    <PrStateIcon state={linkedStateValue} />
-                  ) : (
-                    <IssueStateIcon state={linkedStateValue === 'closed' ? 'closed' : 'open'} />
-                  )}
-                  <span className="cv-link-kind">{ev.source.is_pr ? 'PR' : 'Issue'}</span>
-                  <a className="cv-link" href={ev.source.html_url} target="_blank" rel="noreferrer">
-                    #{ev.source.number} {ev.source.title ?? ''}
-                  </a>
-                  <span
-                    className={
-                      ev.source.is_pr
-                        ? `cv-link-state cv-link-state-${linkedStateValue}`
-                        : `cv-link-state ${linkedStateValue === 'closed' ? 'cv-link-state-issue-closed' : 'cv-link-state-open'}`
-                    }
-                  >
-                    {linkedStateLabel(ev.source)}
-                  </span>
-                </div>
-              )
-            }
-            if (ev.event === 'referenced' && ev.commit_id) {
-              return (
-                <div key={i} className="cv-link-row">
-                  🔗 引用提交 <code className="cv-md-code">{ev.commit_id.slice(0, 7)}</code>
-                </div>
-              )
-            }
-            return null
-          })}
-        </div>
+              }
+              if (ev.event === 'referenced' && ev.commit_id) {
+                return (
+                  <div key={i} className="cv-link-row">
+                    🔗 引用提交 <code className="cv-md-code">{ev.commit_id.slice(0, 7)}</code>
+                  </div>
+                )
+              }
+              return null
+            })}
+          </div>
+        </CollapsibleSection>
       ) : null}
       <div className="cv-issue-body">
         <div className="cv-md">{renderMarkdown(issue.body ?? '')}</div>
