@@ -20,6 +20,8 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 .cv-input-row:last-of-type { padding-bottom: 10px; }
 .cv-project-toolbar { padding: 10px 12px; border-bottom: 1px solid #d0d7de; display: grid; gap: 8px; }
 .cv-project-selects { display: flex; gap: 6px; }
+.cv-project-import { display: flex; align-items: center; gap: 8px; color: #57606a; font-size: 11px; }
+.cv-project-import span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cv-batch-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .cv-batch-btn { border: none; border-radius: 6px; padding: 6px 9px; background: #0969da; color: #fff; font-size: 11px; font-weight: 600; cursor: pointer; }
 .cv-batch-btn:disabled { opacity: .5; cursor: not-allowed; }

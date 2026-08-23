@@ -3,5 +3,10 @@
     "path": "tests/routes.test.ts",
     "reason": "Existing route-contract suite is intentionally unchanged during issue #61's production-code-only split.",
     "issueRef": "#61"
+  },
+  {
+    "path": "src/client/views/project-panel.tsx",
+    "reason": "Issue #66 conflict reconciliation keeps the existing project panel flow intact while combining DSH import and repository-advance UI; splitting is a separate behavior-preserving change.",
+    "issueRef": "#66"
   }
 ]

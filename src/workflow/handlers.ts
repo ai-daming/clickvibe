@@ -52,6 +52,7 @@ import {
   parseCommand,
 } from './command.ts'
 import { authorizeAgent } from './merge.ts'
+import { importDshProject } from './project-import.ts'
 import { fetchRepositoryIssues } from './repository-issues.ts'
 import { enrichWorkflowStates } from './repository-state.ts'
 import { readConfiguredRepositoryAdvance } from './repository-sync.ts'
@@ -215,6 +216,18 @@ export async function handleCommand(
     return { status: 200, body: { ok: true, action: 'help', text: COMMAND_HELP_TEXT } }
   }
   if (command.action === 'projects') {
+    const importPath = (payload as { importPath?: unknown } | undefined)?.importPath
+    if (importPath !== undefined) {
+      const securityError = privilegedRequestError(req)
+      if (securityError) return { status: 403, body: { ok: false, action: 'projects', error: securityError } }
+      if (typeof importPath !== 'string' || importPath.trim() === '') {
+        return { status: 400, body: { ok: false, action: 'projects', error: 'DSH 项目路径为空，无法导入' } }
+      }
+      const imported = await importDshProject(ctx, importPath)
+      if (!imported.ok) {
+        return { status: 400, body: { ok: false, action: 'projects', error: imported.error } }
+      }
+    }
     const result = await listProjects()
     return {
       status: 200,
