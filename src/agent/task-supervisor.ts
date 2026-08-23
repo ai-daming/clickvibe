@@ -32,13 +32,13 @@ import {
   TASK_RETENTION_MS,
   TASK_TIMEOUT_MS,
 } from '../infra/runtime.ts'
-import { appendLog } from '../infra/state.ts'
+import { appendTaskLog, startTaskLog, type IssueWorkflow } from '../infra/state.ts'
 import { type AgentKind, parseAgentChunk } from './agent-stream.ts'
 
 /** Start (or restart) a dev task in the live map with status parsing. */
 export function createLiveTask(
   taskId: string,
-  workflowKey: string,
+  workflow: IssueWorkflow,
   kind: LiveTask['kind'],
   agent: DevelopAgent,
   sessionId: string | null,
@@ -54,7 +54,8 @@ export function createLiveTask(
   if (liveTasks.size >= MAX_TASKS) throw new Error('运行中任务过多,请先停止或等待现有任务完成')
   const task: LiveTask = {
     taskId,
-    workflowKey,
+    workflowKey: workflow.key,
+    workflow,
     kind,
     agent,
     log: new LineLog(TASK_LOG_LINES),
@@ -66,10 +67,16 @@ export function createLiveTask(
     sessionId,
   }
   liveTasks.set(taskId, task)
+  void startTaskLog(workflow, kind, taskId)
+  pushTaskLine(task, '[clickvibe] 任务开始')
   return task
 }
 
-export function pushTaskLine(task: LiveTask, value: string | LiveLogEvent): void {
+export function pushTaskLine(
+  task: LiveTask,
+  value: string | LiveLogEvent,
+  completion?: { status: Exclude<LiveTask['status'], 'running'>; exitCode: number | null },
+): void {
   const event: LiveLogEvent =
     typeof value === 'string'
       ? value.startsWith('[clickvibe]')
@@ -77,8 +84,8 @@ export function pushTaskLine(task: LiveTask, value: string | LiveLogEvent): void
         : { source: 'agent', kind: 'text', text: value }
       : value
   const line = encodeLiveLogEvent(event)
-  task.log.appendLine(line)
-  void appendLog(task.workflowKey, task.kind, line)
+  const sequence = task.log.appendLine(line)
+  void appendTaskLog(task.workflow, task.kind, task.taskId, sequence, line, completion)
   notifyTask(task.taskId)
 }
 
@@ -96,9 +103,10 @@ export function finishTask(
   exitCode: number | null,
 ): void {
   if (task.closed) return
-  task.closed = true
   task.status = status
   task.exitCode = exitCode
+  pushTaskLine(task, `[clickvibe] 任务结束:${status},退出码 ${exitCode ?? '未知'}`, { status, exitCode })
+  task.closed = true
   if (task.kind === 'review') reviewTaskGate.release(task.workflowKey, task)
   else resumeTaskGate.release(task.workflowKey, task)
   if (task.timeout) clearTimeout(task.timeout)
