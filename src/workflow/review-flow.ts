@@ -51,6 +51,7 @@ import { deriveEventRound } from './delivery-audit.ts'
 import { deriveFreshSessionAvailability, selectSessionLaunch } from './fresh-session.ts'
 import { extractGithubCommentId, extractGithubCommentUrl } from './delivery-publication.ts'
 import { type ReviewIssueContract } from './merge-gates.ts'
+import { resolveReviewStartWorkflow } from './review-start.ts'
 import { workflowBaseBranch } from './state-view.ts'
 import { notifyAutoRunCompletion } from './auto-run-signal.ts'
 
@@ -89,9 +90,9 @@ export async function startReview(
     }
   }
 
-  if (!workflow || workflow.stage === 'idle' || workflow.stage === 'developing') {
-    return { ok: false, error: '该 issue 尚未完成开发,无法 review' }
-  }
+  const resolvedStart = await resolveReviewStartWorkflow(ctx, parsed, workflow)
+  if (!resolvedStart.ok) return resolvedStart
+  workflow = resolvedStart.workflow
   if (!existsSync(workflow.worktree)) {
     return { ok: false, error: `worktree 不存在: ${workflow.worktree}` }
   }

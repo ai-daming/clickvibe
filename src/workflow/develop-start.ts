@@ -42,9 +42,10 @@ import {
   runCommand,
   taskId,
 } from '../infra/runtime.ts'
-import { applyDevRunOutcome, type IssueWorkflow, issueKey, loadWorkflow, saveWorkflow } from '../infra/state.ts'
+import { type IssueWorkflow, issueKey, loadWorkflow, saveWorkflow } from '../infra/state.ts'
 import { deriveAutoDevelopment } from './auto-development.ts'
 import { deriveDevelopmentEventKind } from './delivery-audit.ts'
+import { finalizeDevRun } from './dev-completion.ts'
 import { deriveWorkflowState } from './derive.ts'
 import { checkIssueContract } from './issue-contract.ts'
 import { firstDevelopmentFor } from './repository-state.ts'
@@ -270,7 +271,7 @@ export async function startDevelop(
         const reloaded = await loadWorkflow(workflow.key)
         if (reloaded) {
           const fixedIssues = reloaded.reviewResult?.passed === false ? [...reloaded.reviewResult.issues] : []
-          if (applyDevRunOutcome(reloaded, live.status, exitCode, sessionId, agent)) {
+          await finalizeDevRun(reloaded, live.status, exitCode, sessionId, agent, async () => {
             // 开发完成(含 rework):旧的 review 结论已归档到 events 历史,
             // 当前回到"待 review"——不能继续显示"Review 未通过"
             const head = await readWorktreeHead(ctx, workflow.worktree)
@@ -285,8 +286,7 @@ export async function startDevelop(
               live.taskId,
               durationMs,
             )
-          }
-          await saveWorkflow(reloaded)
+          })
         }
         notifyAutoRunCompletion(ctx, workflow.key, live.status === 'running' ? 'failed' : live.status)
       })

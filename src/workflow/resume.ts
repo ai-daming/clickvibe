@@ -31,15 +31,9 @@ import {
   runCommand,
   taskId,
 } from '../infra/runtime.ts'
-import {
-  applyDevRunOutcome,
-  clearStaleSessionId,
-  issueKey,
-  loadWorkflow,
-  resolveSessionForAgent,
-  saveWorkflow,
-} from '../infra/state.ts'
+import { clearStaleSessionId, issueKey, loadWorkflow, resolveSessionForAgent, saveWorkflow } from '../infra/state.ts'
 import { recordDevDelivery } from './review-flow.ts'
+import { finalizeDevRun } from './dev-completion.ts'
 import { deriveFreshSessionAvailability, selectSessionLaunch } from './fresh-session.ts'
 import { workflowBaseBranch } from './state-view.ts'
 import { notifyAutoRunCompletion } from './auto-run-signal.ts'
@@ -157,7 +151,7 @@ export async function resumeDevelop(
       const reloaded = await loadWorkflow(workflow.key)
       if (reloaded) {
         const fixedIssues = reloaded.reviewResult?.passed === false ? [...reloaded.reviewResult.issues] : []
-        if (applyDevRunOutcome(reloaded, live.status, exitCode, newSessionId, agent)) {
+        await finalizeDevRun(reloaded, live.status, exitCode, newSessionId, agent, async () => {
           // rework 完成:旧的 review 结论已归档到 events,回到"待 review",
           // 不能继续显示"Review 未通过"让用户无限重复点
           const head = await readWorktreeHead(ctx, workflow.worktree)
@@ -172,8 +166,7 @@ export async function resumeDevelop(
             live.taskId,
             durationMs,
           )
-        }
-        await saveWorkflow(reloaded)
+        })
       }
       notifyAutoRunCompletion(ctx, workflow.key, live.status === 'running' ? 'failed' : live.status)
     },
