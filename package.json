@@ -1,6 +1,7 @@
 {
   "name": "clickvibe",
   "version": "0.1.0",
+  "packageManager": "pnpm@11.21.0",
   "description": "DSH web plugin: a right-side panel that fetches and renders GitHub issues / PRs via the local gh CLI.",
   "type": "module",
   "license": "MIT",
