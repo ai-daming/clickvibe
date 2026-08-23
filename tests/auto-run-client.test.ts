@@ -4,6 +4,7 @@ import {
   AUTO_RUN_PAUSE_LABEL,
   autoRunBanner,
   autoRunDefaults,
+  autoRunTrigger,
   synchronizeAutoRunDraft,
   unresolvedFindingCount,
 } from '../src/client/auto-run.ts'
@@ -66,6 +67,30 @@ test('auto-run banner: list rows show no pause banner while detail shows the tru
   const running = { autoRun: { status: 'running', pausedReason: null, unresolved: [] }, runStartedAt: 1 } as Workflow
   assert.equal(autoRunBanner(running.autoRun!, running, { compact: false }), null)
   assert.equal(autoRunBanner(undefined, null, { compact: false }), null)
+})
+
+test('auto-run trigger: disabled while anything is still running, not only when auto-run says running', () => {
+  // 自动跑自己在跑:显示进度、禁用。
+  const autoRunning = {
+    autoRun: { status: 'running', pausedReason: null, unresolved: [], step: 3, rounds: 1, maxRounds: 20 },
+    runStartedAt: 1,
+  } as Workflow
+  assert.deepEqual(autoRunTrigger(autoRunning.autoRun!, autoRunning), {
+    label: '自动运行 · 第 3 步 · 已完成 1/20 轮',
+    disabled: true,
+  })
+
+  // 任务(开发/review)在跑但 autoRun 已暂停:按钮禁用,显示任务进行中——不允许双开。
+  const taskRunning = {
+    autoRun: { status: 'paused', pausedReason: 'session-interrupted', unresolved: [] },
+    runStartedAt: 1787509087252,
+  } as Workflow
+  assert.deepEqual(autoRunTrigger(taskRunning.autoRun!, taskRunning), { label: '任务进行中', disabled: true })
+
+  // 没有在跑的任务:可以启动自动跑到底(哪怕 autoRun 曾暂停)。
+  const idle = { autoRun: { status: 'paused', pausedReason: 'session-interrupted', unresolved: [] } } as Workflow
+  assert.deepEqual(autoRunTrigger(idle.autoRun!, idle), { label: '自动跑到底', disabled: false })
+  assert.deepEqual(autoRunTrigger(undefined, null), { label: '自动跑到底', disabled: false })
 })
 
 test('untouched form draft follows asynchronous workflow defaults without overwriting edits', () => {
