@@ -52,6 +52,7 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 .cv-fetch:disabled { opacity: 0.6; }
 .cv-error { margin: 0 14px 10px; padding: 8px 10px; border-radius: 6px; background: #ffebe9; color: #cf222e; border: 1px solid #ff8182; flex-shrink: 0; }
 .cv-stale { margin: 8px 12px 0; padding: 6px 8px; border-radius: 6px; background: #fff8c5; color: #9a6700; border: 1px solid #d4a72c; font-size: 11.5px; flex-shrink: 0; }
+.cv-repo-advance { margin: 8px 12px 0; padding: 7px 8px; border-radius: 6px; background: #fff8c5; color: #7d4e00; border: 1px solid #d4a72c; font-size: 11.5px; flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .cv-hint { padding: 20px 14px; color: #8c959f; text-align: center; }
 .cv-loading { padding: 20px 14px; color: #57606a; text-align: center; }
 .cv-issue { padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; flex: 1; overflow-y: auto; }
@@ -141,6 +142,7 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 .cv-stage-review-ready { background: #fff8c5; color: #9a6700; }
 .cv-stage-reviewing { background: #fbefff; color: #8250df; }
 .cv-stage-passed { background: #dafbe1; color: #1a7f37; }
+.cv-running-duration { color: #57606a; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; white-space: nowrap; }
 .cv-dev-btn.cv-dev-warn { background: #d4a72c; color: #ffffff; }
 .cv-dev-btn.cv-dev-review { background: #8250df; color: #ffffff; }
 .cv-review-fail { display: flex; flex-direction: column; gap: 6px; }
@@ -181,6 +183,7 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 .cv-override-entry { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; margin: 4px 0; }
 .cv-override-gates { margin: 0; padding-left: 18px; font-size: 11.5px; color: #9a6700; }
 .cv-tl-time { color: #8c959f; }
+.cv-tl-duration { color: #57606a; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; }
 .cv-tl-hash { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; background: #eff1f3; padding: 0 4px; border-radius: 4px; }
 .cv-tl-verdict { font-weight: 600; }
 .cv-tl-pass { color: #1a7f37; }

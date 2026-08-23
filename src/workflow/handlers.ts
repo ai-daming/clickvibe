@@ -55,6 +55,7 @@ import { authorizeAgent } from './merge.ts'
 import { importDshProject } from './project-import.ts'
 import { fetchRepositoryIssues } from './repository-issues.ts'
 import { enrichWorkflowStates } from './repository-state.ts'
+import { readConfiguredRepositoryAdvance } from './repository-sync.ts'
 
 /** `/state` implementation, shared by the route and the `status` command (issue #13). */
 export async function stateWorkflows(
@@ -80,17 +81,25 @@ export async function stateWorkflows(
   try {
     const circuitError = githubRest(ctx).rateLimitError()
     if (circuitError) throw circuitError
-    const freshnesses = (
-      await Promise.all(
-        [...repoKeys].map((key) => ensureConfiguredRepoFresh(ctx, config, key, filter?.forceRefresh === true)),
-      )
-    ).filter((value): value is RepositoryFreshness => value !== null)
+    const keyedFreshness = await Promise.all(
+      [...repoKeys].map(async (key) => ({
+        key,
+        freshness: await ensureConfiguredRepoFresh(ctx, config, key, filter?.forceRefresh === true),
+      })),
+    )
+    const freshnesses = keyedFreshness
+      .map((item) => item.freshness)
+      .filter((value): value is RepositoryFreshness => value !== null)
     const dependenciesRefreshDue = [...repoKeys]
       .map((key) => dependencyRefreshClock.take(key, fetchTtlMs(config), filter?.forceRefresh === true))
       .some(Boolean)
     const enriched = await enrichWorkflowStates(ctx, workflows, config)
     const freshness = aggregateRepositoryFreshness(freshnesses)
-    return { status: 200, body: { ok: true, workflows: enriched, freshness, dependenciesRefreshDue } }
+    const onlyRepo = keyedFreshness.length === 1 ? keyedFreshness[0] : null
+    const repoAdvance = onlyRepo
+      ? await readConfiguredRepositoryAdvance(ctx, config, onlyRepo.key, onlyRepo.freshness?.lastSuccessAt ?? null)
+      : null
+    return { status: 200, body: { ok: true, workflows: enriched, freshness, dependenciesRefreshDue, repoAdvance } }
   } catch (error) {
     const message = isGithubRateLimitError(error) ? error.message : `状态刷新失败: ${githubErrorMessage(error)}`
     return { status: isGithubRateLimitError(error) ? 429 : 400, body: { ok: false, error: message } }

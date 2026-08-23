@@ -1,11 +1,13 @@
 /** Project issue-list presentation and navigation. */
 import React from 'react'
 import { useProjectPanel } from '../project-state.ts'
+import { RunningDuration } from '../duration.ts'
 import { githubCompareUrl } from '../runtime.ts'
 import { type RepositoryIssue, apiCall, fetchIssue, stageLabel } from '../domain.ts'
 import { MAX_BATCH_ISSUES, setPanelOpen } from '../panel-state.ts'
 import { type Dependencies, type GhIssue, IssueView, type TimelineEvent, repoOf } from './issue-view.tsx'
 import { ProjectSelector } from './project-selector.tsx'
+import { RepositoryAdvanceBanner } from './repository-advance-banner.tsx'
 
 export function PanelContent() {
   const {
@@ -28,7 +30,10 @@ export function PanelContent() {
     projects,
     refreshDetail,
     refreshWorkflowStates,
+    repoAdvance,
     repoKey,
+    repoSyncBusy,
+    repoSyncMessage,
     result,
     selectedIssues,
     setAutoAction,
@@ -41,6 +46,7 @@ export function PanelContent() {
     setRepoKey,
     setResult,
     setSelectedIssues,
+    safeSyncRepository,
     stateRefreshError,
     updateWorkflow,
     workflow,
@@ -236,6 +242,10 @@ export function PanelContent() {
           ⚠ {dshWorkspaceError}
         </div>
       ) : null}
+      {!result ? (
+        <RepositoryAdvanceBanner signal={repoAdvance} busy={repoSyncBusy} onSync={() => void safeSyncRepository()} />
+      ) : null}
+      {!result && repoSyncMessage ? <div className="cv-project-meta">{repoSyncMessage}</div> : null}
       {result ? (
         <IssueView
           issue={result.item}
@@ -430,6 +440,11 @@ export function PanelContent() {
                               }
                             />
                             <span className={`cv-stage cv-stage-${status}`}>{stageLabel(status, issue.workflow)}</span>
+                            {(status === 'developing' || status === 'reviewing') &&
+                            issue.workflow.runStartedAt !== null &&
+                            issue.workflow.runStartedAt !== undefined ? (
+                              <RunningDuration startedAt={issue.workflow.runStartedAt} />
+                            ) : null}
                             <div className="cv-issue-row-main">
                               <span className="cv-issue-row-title" onClick={() => void openIssue(issue)}>
                                 #{issue.number} {issue.title}

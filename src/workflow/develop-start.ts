@@ -261,6 +261,7 @@ export async function startDevelop(
       const agentCommand = buildFreshAgentCommand(agent)
 
       attachAgentProcess(ctx, live, agentCommand, workflow.worktree, prompt, async (exitCode, sessionId) => {
+        const durationMs = Math.max(0, Date.now() - live.startedAt)
         pushTaskLine(live, `[clickvibe] ${agent} 结束,退出码 ${exitCode}`)
         const reloaded = await loadWorkflow(workflow.key)
         if (reloaded) {
@@ -277,6 +278,7 @@ export async function startDevelop(
               fixedIssues,
               extraContext !== '' && !firstDevelopment ? 'rework' : 'dev',
               extraContext,
+              durationMs,
             )
           }
           await saveWorkflow(reloaded)

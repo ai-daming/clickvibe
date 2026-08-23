@@ -183,6 +183,7 @@ export async function startReview(
     workflow.worktree,
     prompt,
     async (exitCode, newSessionId) => {
+      const durationMs = Math.max(0, Date.now() - live.startedAt)
       pushTaskLine(live, `[clickvibe] review 结束,退出码 ${exitCode}`)
       if (live.status !== 'done' || exitCode !== 0) {
         const interrupted = await loadWorkflow(workflow.key)
@@ -224,6 +225,7 @@ export async function startReview(
         const event: WorkflowEvent = {
           kind: 'review',
           at: new Date().toISOString(),
+          durationMs,
           hash: reviewedHead,
           verdict: { passed, issues },
           issueContract: reviewIssue.contract,
@@ -288,6 +290,7 @@ export async function recordDevDelivery(
   fixedIssues: string[],
   kind: 'dev' | 'rework',
   userContext = '',
+  durationMs?: number,
 ): Promise<void> {
   if (!workflow.prNumber) {
     const pr = await detectLinkedPr(ctx, workflow.repoKey, workflow.branch)
@@ -296,6 +299,7 @@ export async function recordDevDelivery(
   const event: WorkflowEvent = {
     kind,
     at: new Date().toISOString(),
+    ...(Number.isFinite(durationMs) ? { durationMs: Math.max(0, durationMs ?? 0) } : {}),
     hash: head ?? undefined,
     fixed: fixedIssues.length,
     note: `${agent} 完成开发${kind === 'rework' ? '(按 review 意见返工)' : ''}`,
