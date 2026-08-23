@@ -22,16 +22,14 @@ async function withWorktree(run: (worktree: string) => Promise<void>): Promise<v
 }
 
 for (const agent of ['codex', 'claude'] as const) {
-  test(`${agent}: materialized JSON wins even when the displayed conclusion is truncated`, async () => {
+  test(`${agent}: materialized JSON wins while the displayed conclusion remains complete`, async () => {
     await withWorktree(async (worktree) => {
       const issues = Array.from({ length: 12 }, (_, index) => `问题 ${index + 1}: ${'长描述'.repeat(220)}`)
       await mkdir(join(worktree, '.clickvibe'))
       await writeFile(join(worktree, REVIEW_RESULT_RELATIVE_PATH), JSON.stringify({ passed: false, issues }))
-      const parsed = parseAgentChunk(
-        agent,
-        agentOutput(agent, `${'分析'.repeat(2500)}${JSON.stringify({ passed: true, issues: [] })}`),
-      )
-      assert.match(parsed.lines[0].text, /…$/)
+      const conclusion = `${'分析'.repeat(2500)}${JSON.stringify({ passed: true, issues: [] })}`
+      const parsed = parseAgentChunk(agent, agentOutput(agent, conclusion))
+      assert.equal(parsed.lines[0].text, `💬 ${conclusion}`)
 
       const resolved = await loadReviewResult(
         worktree,

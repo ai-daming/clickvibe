@@ -7,6 +7,7 @@ import { promisify } from 'node:util'
 import test from 'node:test'
 import { deriveWorkflowState, enrichWorkflowStates, type IssueWorkflow } from '../src/index.ts'
 import { LineLog } from '../src/infra/develop-core.ts'
+import { LineBuffer } from '../src/infra/line-buffer.ts'
 import { liveTasks } from '../src/infra/runtime.ts'
 import { issueBodyHash } from '../src/infra/state.ts'
 import { readConfiguredBranchFacts } from '../src/github/facts.ts'
@@ -105,8 +106,7 @@ test('state exposes only the current in-memory task start time', async () => {
     agent: 'codex',
     startedAt: 1_720_000_000_000,
     log: new LineLog(10),
-    rawLog: new LineLog(10),
-    rawCursor: 0,
+    rawLog: new LineBuffer(),
     closed: false,
     status: 'running',
     exitCode: null,

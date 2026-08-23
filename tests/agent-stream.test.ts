@@ -2,9 +2,9 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { parseAgentChunk, parseClaudeEvent, parseCodexEvent } from '../src/agent/agent-stream.ts'
 
-const longMessage = 'x'.repeat(5000)
+const longMessage = `/Users/example/project\n  ${'x'.repeat(5000)}\n/tmp/clickvibe-worktree`
 
-test('codex and claude use the same 4000-character display limit for messages', () => {
+test('codex and claude preserve complete messages with whitespace unchanged', () => {
   const codex = parseCodexEvent(
     JSON.stringify({
       type: 'item.completed',
@@ -18,7 +18,68 @@ test('codex and claude use the same 4000-character display limit for messages', 
     }),
   )
   assert.equal(codex[0].text, claude[0].text)
-  assert.equal(codex[0].text, `💬 ${'x'.repeat(4000)}…`)
+  assert.equal(codex[0].text, `💬 ${longMessage}`)
+})
+
+test('codex preserves complete reasoning, commands, errors and tool arguments', () => {
+  const reasoning = `inspect\n  ${'r'.repeat(5000)}`
+  const command = `cd /Users/example/project\n${'c'.repeat(1200)}`
+  const error = `failed\n  ${'e'.repeat(300)}`
+  const toolArguments = `/tmp/clickvibe\n  ${'a'.repeat(300)}`
+
+  assert.equal(
+    parseCodexEvent(JSON.stringify({ type: 'item.completed', item: { type: 'reasoning', text: reasoning } }))[0].text,
+    `◌ ${reasoning}`,
+  )
+  assert.equal(
+    parseCodexEvent(JSON.stringify({ type: 'item.completed', item: { type: 'command_execution', command } }))[0].text,
+    `$ ${command}`,
+  )
+  assert.equal(
+    parseCodexEvent(JSON.stringify({ type: 'item.completed', item: { type: 'error', text: error } }))[0].text,
+    `⚠️ ${error}`,
+  )
+  assert.equal(
+    parseCodexEvent(
+      JSON.stringify({
+        type: 'item.completed',
+        item: { type: 'function_call', name: 'shell', arguments: toolArguments },
+      }),
+    )[0].text,
+    `🔧 执行命令: ${toolArguments}`,
+  )
+})
+
+test('codex preserves command output whitespace as one complete event', () => {
+  const output = 'first line\n\n  indented with trailing spaces  \nlast line\n'
+  assert.deepEqual(
+    parseCodexEvent(
+      JSON.stringify({
+        type: 'item.completed',
+        item: { type: 'command_execution', aggregated_output: output },
+      }),
+    ),
+    [{ kind: 'command_output', text: output }],
+  )
+})
+
+test('claude preserves complete thinking and tool arguments', () => {
+  const thinking = `inspect\n  ${'t'.repeat(5000)}`
+  const input = { command: `cd /Users/example/project\n${'z'.repeat(300)}`, workdir: '/tmp/clickvibe' }
+  const lines = parseClaudeEvent(
+    JSON.stringify({
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'thinking', thinking },
+          { type: 'tool_use', name: 'bash', input },
+        ],
+      },
+    }),
+  )
+
+  assert.equal(lines[0].text, `◌ ${thinking}`)
+  assert.equal(lines[1].text, `🔧 执行命令: ${JSON.stringify(input)}`)
 })
 
 test('agent streams expose session ids before completion', () => {
@@ -55,8 +116,7 @@ test('codex renders command execution, reasoning and token_count with its own sc
     ),
     [
       { kind: 'command', text: '$ pnpm test' },
-      { kind: 'command_output', text: 'one' },
-      { kind: 'command_output', text: 'two' },
+      { kind: 'command_output', text: 'one\ntwo\n' },
     ],
   )
   assert.equal(
