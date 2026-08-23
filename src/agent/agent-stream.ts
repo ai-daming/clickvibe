@@ -18,52 +18,45 @@ export interface StatusLine {
   usage?: TokenUsage
 }
 
-/** Trim a string to a bounded single line for display. */
-function oneLine(value: string, max = 140): string {
-  const collapsed = value.replace(/\s+/g, ' ').trim()
-  return collapsed.length > max ? `${collapsed.slice(0, max)}…` : collapsed
-}
-
 /** Classify a tool name into a friendly "current action" label. */
 function toolLabel(name: string, args: string): string {
-  const short = oneLine(args, 80)
   switch (name) {
     case 'bash':
     case 'shell':
     case 'execute_command':
-      return `🔧 执行命令: ${short}`
+      return `🔧 执行命令: ${args}`
     case 'read':
     case 'read_file':
     case 'fs.read':
     case 'View':
-      return `📖 读取文件: ${short}`
+      return `📖 读取文件: ${args}`
     case 'write':
     case 'write_file':
     case 'fs.write':
     case 'Edit':
-      return `✍️ 修改文件: ${short}`
+      return `✍️ 修改文件: ${args}`
     case 'apply_patch':
     case 'MultiEdit':
-      return `🩹 应用补丁: ${short}`
+      return `🩹 应用补丁: ${args}`
     case 'git':
     case 'git_diff':
-      return `🌿 git: ${short}`
+      return `🌿 git: ${args}`
     case 'gh':
-      return `🐙 gh: ${short}`
+      return `🐙 gh: ${args}`
     case 'web_search':
     case 'WebSearch':
-      return `🔍 搜索: ${short}`
+      return `🔍 搜索: ${args}`
     case 'web_fetch':
     case 'WebFetch':
-      return `🌐 抓取网页: ${short}`
+      return `🌐 抓取网页: ${args}`
     case 'subagent':
     case 'task':
-      return `🤖 子代理: ${short}`
+      return `🤖 子代理: ${args}`
     case 'ask_user_question':
     case 'AskUserQuestion':
-      return `❓ 提问: ${short}`
+      return `❓ 提问: ${args}`
     default:
-      return `🛠️ ${name}: ${short}`
+      return `🛠️ ${name}: ${args}`
   }
 }
 
@@ -109,9 +102,7 @@ export function parseCodexEvent(line: string): StatusLine[] {
       const item = event.item ?? {}
       switch (item.type) {
         case 'agent_message':
-          // 结论类消息必须保留完整内容(截断会丢失 review 条目),
-          // 所以消息截断上限远大于工具行
-          out.push({ kind: 'message', text: `💬 ${oneLine(item.text ?? '', 4000)}` })
+          out.push({ kind: 'message', text: `💬 ${item.text ?? ''}` })
           break
         case 'function_call': {
           let args = ''
@@ -127,15 +118,11 @@ export function parseCodexEvent(line: string): StatusLine[] {
           break
         }
         case 'command_execution':
-          if (item.command) out.push({ kind: 'command', text: `$ ${oneLine(item.command, 1000)}` })
-          if (item.aggregated_output) {
-            for (const output of item.aggregated_output.replace(/\s+$/, '').split(/\r?\n/)) {
-              if (output !== '') out.push({ kind: 'command_output', text: output })
-            }
-          }
+          if (item.command) out.push({ kind: 'command', text: `$ ${item.command}` })
+          if (item.aggregated_output) out.push({ kind: 'command_output', text: item.aggregated_output })
           break
         case 'reasoning':
-          if (item.text) out.push({ kind: 'reasoning', text: `◌ ${oneLine(item.text, 4000)}` })
+          if (item.text) out.push({ kind: 'reasoning', text: `◌ ${item.text}` })
           break
         case 'token_count': {
           const usage = tokenUsage(item)
@@ -143,7 +130,7 @@ export function parseCodexEvent(line: string): StatusLine[] {
           break
         }
         case 'error':
-          out.push({ kind: 'text', text: `⚠️ ${oneLine(item.text ?? 'error')}` })
+          out.push({ kind: 'text', text: `⚠️ ${item.text ?? 'error'}` })
           break
         default:
           break
@@ -177,11 +164,11 @@ export function parseClaudeEvent(line: string): StatusLine[] {
     case 'assistant': {
       for (const block of event.message?.content ?? []) {
         if (block.type === 'text' && block.text) {
-          out.push({ kind: 'message', text: `💬 ${oneLine(block.text, 4000)}` })
+          out.push({ kind: 'message', text: `💬 ${block.text}` })
         } else if (block.type === 'thinking' && (block.thinking || block.text)) {
-          out.push({ kind: 'thinking', text: `◌ ${oneLine(block.thinking ?? block.text ?? '', 4000)}` })
+          out.push({ kind: 'thinking', text: `◌ ${block.thinking ?? block.text ?? ''}` })
         } else if (block.type === 'tool_use' && block.name) {
-          const args = block.input ? oneLine(JSON.stringify(block.input), 80) : ''
+          const args = block.input ? JSON.stringify(block.input) : ''
           out.push({ kind: 'tool', text: toolLabel(block.name, args) })
         }
       }
