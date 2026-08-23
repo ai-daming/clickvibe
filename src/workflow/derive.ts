@@ -27,10 +27,12 @@ import { latestDevelopmentHash } from './delivery-audit.ts'
 import { deriveFreshSessionAvailability, type FreshSessionAvailability } from './fresh-session.ts'
 import {
   deriveNextAction,
+  deriveReviewStartDecision,
   deriveWorkflowStatus,
   type IssueContractStatus,
   type IssueContractUnknownReason,
   type NextAction,
+  type ReviewStartDecision,
   type WorkflowFacts,
   workflowBaseBranch,
 } from './state-view.ts'
@@ -68,6 +70,7 @@ export interface WorkflowDerived {
   hasNewCommits: boolean
   verdictCurrent: boolean
   nextAction: NextAction
+  reviewStart: ReviewStartDecision
   status: 'idle' | 'developing' | 'review-ready' | 'reviewing' | 'passed'
   baseBranch: string
   freshSession: FreshSessionAvailability
@@ -223,7 +226,12 @@ export async function deriveWorkflowState(
     hasUncommittedChanges,
     hasCommits,
     hasResumeSession: workflow.devSessionId !== null,
+    workflowCachePresent: options.workflowCachePresent,
+    // The live PR head is the newest GitHub delivery fact. During completion
+    // persistence it can legitimately advance before the local event cache.
+    deliveryHash: options.pr?.headRefOid ?? lastDevHash,
   }
+  const reviewStart = deriveReviewStartDecision(facts)
   const nextAction = deriveNextAction(facts)
   const baseBranch = workflowBaseBranch(workflow.baseRef, options.defaultBranch ?? 'main')
   const status = deriveWorkflowStatus(facts)
@@ -268,6 +276,7 @@ export async function deriveWorkflowState(
       issueContractUnknownReason,
       hasNewCommits,
       verdictCurrent,
+      reviewStart,
       nextAction,
       status,
       baseBranch,
