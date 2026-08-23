@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { mergingWorkflows } from '../src/infra/runtime.ts'
-import { saveWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
+import { issueKey, saveWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
 import {
   authorizeAgent,
   mergeAndCleanup,
@@ -14,7 +14,7 @@ import {
 
 function workflow(number: string, overrides: Partial<IssueWorkflow> = {}): IssueWorkflow {
   return {
-    key: `o-r-${number}`,
+    key: issueKey('o/r', number),
     url: `https://github.com/o/r/issues/${number}`,
     repoKey: 'o/r',
     worktree: `/tmp/worktrees/repo/repo-issue-${number}`,
@@ -109,7 +109,7 @@ test('merge execution validates URL, exclusivity, workflow, config, worktree roo
   process.env.HOME = home
   try {
     assert.match((await mergeAndCleanup({} as never, undefined)).error, /GitHub Issue URL/)
-    const key = 'o-r-2'
+    const key = issueKey('o/r', '2')
     mergingWorkflows.add(key)
     assert.match(
       (await mergeAndCleanup({} as never, { url: 'https://github.com/o/r/issues/2' })).error,
@@ -145,7 +145,7 @@ test('merge execution validates URL, exclusivity, workflow, config, worktree roo
     await saveWorkflow(workflow('2', { worktree: join(root, 'repo', 'issue-2'), branch: ' ' }))
     assert.match((await mergeAndCleanupUnlocked({} as never, { url: workflow('2').url })).error, /分支无效/)
   } finally {
-    mergingWorkflows.delete('o-r-2')
+    mergingWorkflows.delete(issueKey('o/r', '2'))
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(home, { recursive: true, force: true })

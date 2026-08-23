@@ -155,7 +155,6 @@ export async function ensureWorktree(
     } catch (error) {
       return { ok: false, error: `无法定格开发基线: ${String(error instanceof Error ? error.message : error)}` }
     }
-    await appendLog(workflow.key, 'dev', `[clickvibe] 开发基线: ${workflow.baseRef}`)
   }
 
   // 幂等建 worktree:用完整恢复决策(处理 reuse/attach/conflict/重建),

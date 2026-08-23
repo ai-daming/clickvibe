@@ -42,15 +42,8 @@ import {
   runCommand,
   taskId,
 } from '../infra/runtime.ts'
-import {
-  applyDevRunOutcome,
-  type IssueWorkflow,
-  issueKey,
-  loadWorkflow,
-  resetLog,
-  saveWorkflow,
-  withWorkflowLock,
-} from '../infra/state.ts'
+import { applyDevRunOutcome, type IssueWorkflow, issueKey, loadWorkflow, saveWorkflow } from '../infra/state.ts'
+import { withWorkflowLock } from '../infra/workflow-lock.ts'
 import { deriveAutoDevelopment } from './auto-development.ts'
 import { deriveWorkflowState } from './derive.ts'
 import { checkIssueContract } from './issue-contract.ts'
@@ -224,7 +217,7 @@ export async function startDevelop(
       const taskIdValue = taskId('dryrun')
       let live: LiveTask
       try {
-        live = createLiveTask(taskIdValue, workflow.key, 'dev', agent, null)
+        live = createLiveTask(taskIdValue, workflow, 'dev', agent, null)
       } catch (error) {
         return { ok: false, error: String(error instanceof Error ? error.message : error) }
       }
@@ -260,13 +253,12 @@ export async function startDevelop(
     const taskIdValue = taskId('dev')
     let live: LiveTask
     try {
-      live = createLiveTask(taskIdValue, workflow.key, 'dev', agent, null)
+      live = createLiveTask(taskIdValue, workflow, 'dev', agent, null)
     } catch (error) {
       return { ok: false, error: String(error instanceof Error ? error.message : error) }
     }
-    // Rotate only after both worktree preparation and LiveTask creation succeed;
-    // failed start attempts must not destroy the previous authoritative history.
-    await resetLog(workflow.key, 'dev')
+    // LiveTask creation opened a new immutable JSONL generation. Previous task
+    // files remain queryable and are never truncated.
     workflow.devAgent = agent
     workflow.devTaskId = taskIdValue
     workflow.devInterrupted = false

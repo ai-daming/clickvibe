@@ -8,13 +8,14 @@ import test from 'node:test'
 import { pushTaskLine } from '../src/agent/task-supervisor.ts'
 import { LineLog } from '../src/infra/develop-core.ts'
 import { type LiveTask, liveTasks, liveWaiters } from '../src/infra/runtime.ts'
-import { loadWorkflow, saveWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
+import { loadWorkflow, saveWorkflow, startTaskLog, type IssueWorkflow } from '../src/infra/state.ts'
 import { getTaskHistory, handleStream, pollDevelop, resolveHistoryTarget, stopTask } from '../src/workflow/task-api.ts'
 
 function liveTask(overrides: Partial<LiveTask> = {}): LiveTask {
   return {
     taskId: 'dev-direct',
     workflowKey: 'o-r-1',
+    workflow: workflow('o-r-1'),
     kind: 'dev',
     agent: 'codex',
     log: new LineLog(20),
@@ -97,11 +98,13 @@ test('poll and history resolve live, persisted and invalid task targets', async 
       key: live.workflowKey,
       kind: 'dev',
       live,
+      workflow: live.workflow,
     })
 
     await mkdir(join(home, '.clickvibe'), { recursive: true })
     const stored = workflow('o-r-2')
     await saveWorkflow(stored)
+    await startTaskLog(stored, 'review', 'review-stored')
     const reviewTarget = await resolveHistoryTarget('review-stored', '', '')
     assert.equal(reviewTarget?.kind, 'review')
     assert.equal(reviewTarget?.live, null)

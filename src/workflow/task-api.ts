@@ -2,7 +2,15 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { finishTask, pushTaskLine } from '../agent/task-supervisor.ts'
 import { decodeLiveLogLine, type LiveLogEvent } from '../infra/live-output.ts'
 import { type LiveTask, liveTasks, liveWaiters } from '../infra/runtime.ts'
-import { loadAllWorkflows, loadWorkflow, readLogHistory, saveWorkflow } from '../infra/state.ts'
+import {
+  findTaskHistory,
+  findWorkflowByIssue,
+  type IssueWorkflow,
+  loadWorkflow,
+  readTaskLog,
+  saveWorkflow,
+} from '../infra/state.ts'
+import type { TaskMetrics } from '../infra/task-log-store.ts'
 
 /** Consume incremental dev log/status for one task. */
 export async function pollDevelop(payload: unknown): Promise<
@@ -49,16 +57,14 @@ export async function resolveHistoryTarget(
   key: string
   kind: HistoryKind
   live: LiveTask | null
+  workflow: IssueWorkflow
 } | null> {
   if (taskIdValue !== '') {
     const live = liveTasks.get(taskIdValue) ?? null
-    if (live) return { taskId: taskIdValue, key: live.workflowKey, kind: live.kind, live }
-    const workflow = (await loadAllWorkflows()).find(
-      (item) => item.devTaskId === taskIdValue || item.reviewTaskId === taskIdValue,
-    )
-    if (!workflow) return null
-    const kind: HistoryKind = workflow.reviewTaskId === taskIdValue ? 'review' : 'dev'
-    return { taskId: taskIdValue, key: workflow.key, kind, live: null }
+    if (live) return { taskId: taskIdValue, key: live.workflowKey, kind: live.kind, live, workflow: live.workflow }
+    const stored = await findTaskHistory(taskIdValue)
+    if (!stored) return null
+    return { taskId: taskIdValue, key: stored.workflow.key, kind: stored.kind, live: null, workflow: stored.workflow }
   }
   if (!/^[A-Za-z0-9_.-]+$/.test(requestedKey)) return null
   if (requestedKind !== 'dev' && requestedKind !== 'review') return null
@@ -66,7 +72,7 @@ export async function resolveHistoryTarget(
   if (!workflow) return null
   const storedTaskId = requestedKind === 'dev' ? workflow.devTaskId : workflow.reviewTaskId
   const live = storedTaskId ? (liveTasks.get(storedTaskId) ?? null) : null
-  return { taskId: storedTaskId, key: requestedKey, kind: requestedKind, live }
+  return { taskId: storedTaskId, key: requestedKey, kind: requestedKind, live, workflow }
 }
 
 /** Complete disk history plus the exact cursor where SSE increments begin. */
@@ -80,32 +86,51 @@ export async function getTaskHistory(req: IncomingMessage): Promise<
       events: LiveLogEvent[]
       cursor: number
       active: boolean
+      metrics: TaskMetrics
     }
   | { ok: false; error: string }
 > {
   const url = new URL(req.url ?? '/', 'http://clickvibe.internal')
-  const target = await resolveHistoryTarget(
-    url.searchParams.get('taskId')?.trim() ?? '',
-    url.searchParams.get('key')?.trim() ?? '',
-    url.searchParams.get('kind')?.trim() ?? '',
-  )
+  const taskIdValue = url.searchParams.get('taskId')?.trim() ?? url.searchParams.get('round')?.trim() ?? ''
+  let requestedKey = url.searchParams.get('key')?.trim() ?? ''
+  const owner = url.searchParams.get('owner')?.trim() ?? ''
+  const repo = url.searchParams.get('repo')?.trim() ?? ''
+  const issue = url.searchParams.get('issue')?.trim() ?? ''
+  if (requestedKey === '' && taskIdValue === '') {
+    const workflow = await findWorkflowByIssue(`${owner}/${repo}`, issue)
+    if (workflow) requestedKey = workflow.key
+  }
+  const target = await resolveHistoryTarget(taskIdValue, requestedKey, url.searchParams.get('kind')?.trim() ?? '')
   if (!target) return { ok: false, error: '找不到对应任务历史' }
+  if (owner !== '' || repo !== '' || issue !== '') {
+    const targetIssue = target.workflow.url.match(/\/(?:issues|pull)\/(\d+)(?:[/?#]|$)/)?.[1]
+    if (`${owner}/${repo}` !== target.workflow.repoKey || issue !== targetIssue) {
+      return { ok: false, error: '找不到对应任务历史' }
+    }
+  }
 
   // Capture the live sequence before enqueueing the ordered disk read. No
   // await may occur between these operations: that is the history/SSE fence.
   const cursor = target.live?.log.read(Number.MAX_SAFE_INTEGER).cursor ?? 0
-  const historyPromise = readLogHistory(target.key, target.kind)
-  const lines = await historyPromise
-  const events = lines.map(decodeLiveLogLine)
+  const history = target.taskId
+    ? await readTaskLog(target.workflow, target.kind, target.taskId)
+    : {
+        encodedLines: [],
+        events: [],
+        lines: [],
+        metrics: { startedAt: null, endedAt: null, durationMs: null, status: null, exitCode: null },
+      }
+  const events = history.events
   return {
     ok: true,
     taskId: target.taskId,
     key: target.key,
     kind: target.kind,
-    lines: events.map((event) => event.text),
+    lines: history.lines,
     events,
     cursor,
     active: target.live !== null && !target.live.closed,
+    metrics: history.metrics,
   }
 }
 
