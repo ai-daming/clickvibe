@@ -244,6 +244,8 @@ export interface AgentAuthorizationInput {
     maxRounds: number
     budgetHours: number
   }
+  /** Manual choice to abandon the resumable session while preserving git artifacts. */
+  freshSession?: true
   target?: {
     prNumber: string
     branch: string
@@ -364,6 +366,7 @@ export function makeAuthorizationInput(value: {
   url?: unknown
   agent?: unknown
   context?: unknown
+  freshSession?: unknown
   target?: unknown
   override?: unknown
   autoRun?: unknown
@@ -376,6 +379,10 @@ export function makeAuthorizationInput(value: {
   if (parsedAgent === 'dryrun') throw new Error('dryrun 不需要高权限授权')
   const url = String(value.url ?? '').trim()
   if (!parseGithubUrl(url)) throw new Error('GitHub URL 无效')
+  const freshSession = value.freshSession === true
+  if (freshSession && action !== 'resume' && action !== 'review') {
+    throw new Error('新开会话只支持 resume 或 review')
+  }
   let target: AgentAuthorizationInput['target']
   if (action === 'merge' && value.target !== undefined) {
     const raw = value.target as Record<string, unknown>
@@ -425,6 +432,7 @@ export function makeAuthorizationInput(value: {
     agent: parsedAgent,
     context: typeof value.context === 'string' ? value.context.trim() : '',
     ...(autoRun ? { autoRun } : {}),
+    ...(freshSession ? { freshSession: true } : {}),
     ...(target ? { target } : {}),
     ...(override ? { override } : {}),
   }

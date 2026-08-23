@@ -40,6 +40,7 @@ import {
   saveWorkflow,
 } from '../infra/state.ts'
 import { recordDevDelivery } from './review-flow.ts'
+import { deriveFreshSessionAvailability, selectSessionLaunch } from './fresh-session.ts'
 import { workflowBaseBranch } from './state-view.ts'
 import { notifyAutoRunCompletion } from './auto-run-signal.ts'
 
@@ -50,9 +51,10 @@ export async function resumeDevelop(
   ctx: Context,
   payload: unknown,
 ): Promise<{ ok: true; taskId: string } | { ok: false; error: string }> {
-  const body = (payload ?? {}) as { url?: unknown; context?: unknown }
+  const body = (payload ?? {}) as { url?: unknown; context?: unknown; freshSession?: unknown }
   const url = String(body.url ?? '').trim()
   const extraContext = typeof body.context === 'string' ? body.context.trim() : ''
+  const freshSession = body.freshSession === true
   const parsed = parseUrl(url)
   if (!parsed || parsed.kind !== 'issue') {
     return { ok: false, error: '请输入形如 https://github.com/owner/repo/issues/123 的链接' }
@@ -63,14 +65,30 @@ export async function resumeDevelop(
     return { ok: false, error: '该 issue 尚无开发记录,无法续会话' }
   }
 
+  const availability = deriveFreshSessionAvailability(
+    workflow.events,
+    workflow.devSessionId !== null && workflow.devSessionAgent === workflow.devAgent,
+    workflow.reviewSessionId !== null && workflow.reviewSessionAgent === workflow.reviewAgent,
+  )
+  if (freshSession && !availability.develop) {
+    return { ok: false, error: '当前轮次未超过阈值,或没有可放弃的开发会话' }
+  }
+
   const oldLive = liveTasks.get(workflow.devTaskId)
   if (oldLive && !oldLive.closed) {
     return { ok: true, taskId: oldLive.taskId }
   }
 
   const agent = workflow.devAgent ?? 'codex'
-  const ownedDevSession = resolveSessionForAgent(workflow, 'dev', agent)
-  const sessionId = ownedDevSession.sessionId
+  const ownedDevSession = freshSession
+    ? { sessionId: null, invalid: false }
+    : resolveSessionForAgent(workflow, 'dev', agent)
+  const launch = selectSessionLaunch(freshSession, ownedDevSession)
+  const sessionId = launch.sessionId
+  if (freshSession) {
+    workflow.devSessionId = null
+    workflow.devSessionAgent = null
+  }
   // Reserve synchronously before the snapshot's GitHub awaits. This is the
   // per-workflow invariant preventing double-clicked resume requests from
   // launching multiple agents against the same git worktree.
@@ -101,7 +119,7 @@ export async function resumeDevelop(
   // 用精确会话 id 续会话(不能用 --last/--continue:worktree 里可能有多个
   // agent 会话,--last 续的是"最近那个",不一定是我们这个)。
   // sessionId 缺失时回退 --last/--continue(尽力而为)。
-  const command = ownedDevSession.invalid ? buildFreshAgentCommand(agent) : buildResumeAgentCommand(agent, sessionId)
+  const command = launch.startsFresh ? buildFreshAgentCommand(agent) : buildResumeAgentCommand(agent, sessionId)
   // 续会话前也同步远端(并行开发时 base 会变化)
   try {
     await runCommand(ctx, 'git fetch origin', {
@@ -121,7 +139,12 @@ export async function resumeDevelop(
 
   const prompt = await buildResumePrompt(ctx, workflow, resolvedSnapshot, extraContext, mergePreface, sessionId)
 
-  pushTaskLine(live, `[clickvibe] 恢复 ${agent} 会话${sessionId ? `(${sessionId})` : ''}…`)
+  pushTaskLine(
+    live,
+    freshSession
+      ? `[clickvibe] 新开 ${agent} 开发会话,保留当前 worktree/分支/commit…`
+      : `[clickvibe] 恢复 ${agent} 会话${sessionId ? `(${sessionId})` : ''}…`,
+  )
   attachAgentProcess(
     ctx,
     live,

@@ -164,6 +164,7 @@ export function authorizationInputFromPayload(
     target?: unknown
     override?: unknown
     autoRun?: unknown
+    freshSession?: unknown
   }
   return makeAuthorizationInput({ ...body, action })
 }
