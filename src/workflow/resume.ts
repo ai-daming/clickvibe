@@ -128,6 +128,7 @@ export async function resumeDevelop(
     workflow.worktree,
     prompt,
     async (exitCode, newSessionId) => {
+      const durationMs = Math.max(0, Date.now() - live.startedAt)
       pushTaskLine(live, `[clickvibe] ${agent} 恢复结束,退出码 ${exitCode}`)
       const reloaded = await loadWorkflow(workflow.key)
       if (reloaded) {
@@ -136,7 +137,7 @@ export async function resumeDevelop(
           // rework 完成:旧的 review 结论已归档到 events,回到"待 review",
           // 不能继续显示"Review 未通过"让用户无限重复点
           const head = await readWorktreeHead(ctx, workflow.worktree)
-          await recordDevDelivery(ctx, reloaded, agent, head, fixedIssues, 'rework', extraContext)
+          await recordDevDelivery(ctx, reloaded, agent, head, fixedIssues, 'rework', extraContext, durationMs)
         }
         await saveWorkflow(reloaded)
       }

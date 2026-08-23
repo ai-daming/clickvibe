@@ -47,7 +47,7 @@ export async function enrichWorkflowStates(
   ctx: Context,
   workflows: IssueWorkflow[],
   configOverride?: ClickVibeConfig,
-): Promise<Array<IssueWorkflow & { derived: WorkflowDerived }>> {
+): Promise<Array<IssueWorkflow & { runStartedAt: number | null; derived: WorkflowDerived }>> {
   const config = configOverride ?? (await loadConfig())
   return Promise.all(
     workflows.map(async (workflow) => {

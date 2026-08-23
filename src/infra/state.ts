@@ -82,6 +82,7 @@ export interface IssueWorkflow {
 export interface WorkflowEvent {
   kind: 'dev' | 'review' | 'rework' | 'resume' | 'note' | 'merge-override'
   at: string
+  durationMs?: number
   /** commit hash 短码(dev/review 锚定的提交)。 */
   hash?: string
   /** review 结论(仅 review 事件)。 */
