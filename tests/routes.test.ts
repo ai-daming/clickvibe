@@ -221,6 +221,144 @@ test('/develop rejects a real agent before any shell command without server auth
   assert.match(result.body.error ?? '', /授权请求头/)
 })
 
+test('/auto authorization binds the frozen issue and all five configuration values', async () => {
+  const item = {
+    url: 'https://github.com/ai-daming/clickvibe/issues/74',
+    number: 74,
+    title: 'Auto delivery',
+    body: '## 目标\nship\n## 验收标准\n- [ ] done\n## 依赖\n无',
+    state: 'OPEN',
+    updatedAt: '2026-08-23T13:31:14Z',
+    comments: [],
+  }
+  const handler = createHandler(async (spec) => {
+    const response = githubApi(spec.command, { item })
+    if (response) return response
+    throw new Error(`unexpected command: ${spec.command}`)
+  })
+  const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+  const expectedSnapshot = {
+    url: item.url,
+    title: item.title,
+    body: item.body,
+    state: item.state,
+    updatedAt: item.updatedAt,
+    comments: [],
+  }
+  const autoRun = {
+    autoMerge: false,
+    devAgent: 'codex',
+    reviewAgent: 'claude',
+    maxRounds: 20,
+    budgetHours: 24,
+  }
+  const preview = (await post(
+    handler,
+    '/clickvibe/api/authorize',
+    { action: 'auto', url: item.url, autoRun, expectedSnapshot },
+    headers,
+  )) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
+  assert.equal(preview.status, 200)
+  const tampered = await post(
+    handler,
+    '/clickvibe/api/auto',
+    {
+      url: item.url,
+      autoRun: { ...autoRun, autoMerge: true },
+      authorizationId: preview.body.authorizationId,
+      authorizationDigest: preview.body.authorizationDigest,
+    },
+    headers,
+  )
+  assert.equal(tampered.status, 403)
+  assert.match(tampered.body.error ?? '', /授权无效/)
+  const replay = await post(
+    handler,
+    '/clickvibe/api/auto',
+    {
+      url: item.url,
+      autoRun,
+      authorizationId: preview.body.authorizationId,
+      authorizationDigest: preview.body.authorizationDigest,
+    },
+    headers,
+  )
+  assert.equal(replay.status, 403)
+})
+
+test('/clickvibe auto command previews the five settings through the shared backend action', async () => {
+  const item = {
+    url: 'https://github.com/o/r/issues/74',
+    number: 74,
+    title: 'auto command',
+    body: '## 目标\nship\n## 验收标准\n- [ ] done\n## 依赖\n无',
+    state: 'OPEN',
+    updatedAt: '2026-08-23T13:31:14Z',
+    comments: [],
+  }
+  const handler = createHandler(async (spec) => {
+    const response = githubApi(spec.command, { item })
+    if (response) return response
+    throw new Error(`unexpected command: ${spec.command}`)
+  })
+  const preview = (await post(
+    handler,
+    '/clickvibe/api/command',
+    {
+      command: `/clickvibe auto ${item.url} dev=claude review=codex rounds=7 budget=12 merge=on`,
+    },
+    { origin: 'same-origin', 'x-clickvibe-request': '1' },
+  )) as { status: number; body: Record<string, unknown> }
+  assert.equal(preview.status, 200, JSON.stringify(preview.body))
+  assert.equal(preview.body.needsConfirmation, true)
+  assert.match(String(preview.body.text), /开发 agent:claude · Review agent:codex/)
+  assert.match(String(preview.body.text), /轮次上限:7 · 总预算:12 小时/)
+  assert.match(String(preview.body.text), /自动合并:开/)
+})
+
+test('/create-pr uses a one-use privileged authorization before the shared handler', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-create-pr-auth-'))
+  process.env.HOME = tempHome
+  try {
+    const handler = createHandler()
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+    const url = 'https://github.com/ai-daming/clickvibe/issues/74'
+    const preview = (await post(handler, '/clickvibe/api/authorize', { action: 'create-pr', url }, headers)) as {
+      status: number
+      body: { authorizationId?: string; authorizationDigest?: string }
+    }
+    assert.equal(preview.status, 200)
+    const first = await post(
+      handler,
+      '/clickvibe/api/create-pr',
+      {
+        url,
+        authorizationId: preview.body.authorizationId,
+        authorizationDigest: preview.body.authorizationDigest,
+      },
+      headers,
+    )
+    assert.equal(first.status, 400)
+    assert.match(first.body.error ?? '', /workflow/)
+    const replay = await post(
+      handler,
+      '/clickvibe/api/create-pr',
+      {
+        url,
+        authorizationId: preview.body.authorizationId,
+        authorizationDigest: preview.body.authorizationDigest,
+      },
+      headers,
+    )
+    assert.equal(replay.status, 403)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
 test('/authorize rejects cross-origin requests before fetching issue content', async () => {
   const result = await post(
     createHandler(),
@@ -393,6 +531,20 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
     workflow.branch = 'r-issue-23'
     workflow.stage = 'passed'
     workflow.reviewResult = { passed: true, issues: [] }
+    workflow.autoRun = {
+      status: 'running',
+      autoMerge: true,
+      devAgent: 'codex',
+      reviewAgent: 'claude',
+      maxRounds: 20,
+      budgetHours: 24,
+      startedAt: '2026-08-22T00:00:00Z',
+      deadline: '2026-08-23T00:00:00Z',
+      rounds: 1,
+      unresolved: [],
+      lastObservedAt: null,
+      pausedReason: null,
+    }
     const reviewedBody = '## 验收标准\n- merge contract'
     workflow.events = [
       {
@@ -522,6 +674,11 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
     const archived = await loadAllArchivedWorkflows()
     assert.equal(archived.length, 1)
     assert.equal(archived[0].delivery?.status, 'archived')
+    assert.equal(archived[0].autoRun?.status, 'completed')
+    assert.equal(
+      archived[0].events.some((event) => event.kind === 'auto-run' && /自动合并.*收敛/.test(event.note ?? '')),
+      true,
+    )
     assert.deepEqual(archived[0].delivery?.cleanup, {
       worktree: true,
       localBranch: true,

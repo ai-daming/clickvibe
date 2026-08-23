@@ -52,6 +52,7 @@ import { deriveFreshSessionAvailability, selectSessionLaunch } from './fresh-ses
 import { extractGithubCommentId, extractGithubCommentUrl } from './delivery-publication.ts'
 import { type ReviewIssueContract } from './merge-gates.ts'
 import { workflowBaseBranch } from './state-view.ts'
+import { notifyAutoRunCompletion } from './auto-run-signal.ts'
 
 /** Start a review task on the dev branch with codex/claude. */
 export async function startReview(
@@ -225,6 +226,7 @@ export async function startReview(
           interrupted.stage = 'review-ready'
           await saveWorkflow(interrupted)
         }
+        notifyAutoRunCompletion(ctx, workflow.key, live.status === 'running' ? 'failed' : live.status)
         return
       }
       const lines = (await readLogTail(workflow.key, 'review', 200)).map((line) => decodeLiveLogLine(line).text)
@@ -238,6 +240,7 @@ export async function startReview(
           invalid.stage = 'review-ready'
           await saveWorkflow(invalid)
         }
+        notifyAutoRunCompletion(ctx, workflow.key, 'failed')
         return
       }
       if (resolved.source === 'file') {
@@ -308,6 +311,7 @@ export async function startReview(
           pushTaskLine(live, '[clickvibe] GitHub 原生 Approve 失败(继续,不影响 Review 结论与评论)')
         }
       }
+      notifyAutoRunCompletion(ctx, workflow.key, 'done')
     },
     sessionId
       ? {

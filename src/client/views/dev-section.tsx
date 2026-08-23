@@ -4,6 +4,8 @@ import { type GhIssue } from './issue-view.tsx'
 import { LiveTerminal } from './live-terminal.tsx'
 import { useDevSection } from '../dev-state.ts'
 import { DeliveryTimeline } from './delivery-timeline.tsx'
+import { AutoRunForm } from './auto-run-form.tsx'
+import { apiCall } from '../domain.ts'
 import { contextToSubmit } from '../action-context.ts'
 import { freshSessionEntry } from '../fresh-session.ts'
 
@@ -76,6 +78,15 @@ export function DevSection({
         ) : null}
         {derived?.hasNewCommits ? <span className="cv-stage cv-stage-new">有未 review 的新提交</span> : null}
       </div>
+      <AutoRunForm
+        url={url}
+        issue={issue}
+        workflow={workflow}
+        onStarted={async () => {
+          const state = await apiCall<{ ok: true; workflows: Workflow[] }>('state', { url })
+          if (state.ok) onWorkflow(state.workflows.find((item) => item.url === url) ?? null)
+        }}
+      />
       {workflow?.worktree ? <div className="cv-dev-path">{workflow.worktree}</div> : null}
       {workflow?.prNumber ? (
         <div className="cv-dev-path">

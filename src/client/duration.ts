@@ -1,6 +1,6 @@
 import React from 'react'
 
-type DeliveryKind = 'dev' | 'review' | 'rework' | 'resume' | 'note' | 'merge-override'
+type DeliveryKind = 'dev' | 'review' | 'rework' | 'resume' | 'note' | 'merge-override' | 'auto-run'
 
 /** Fixed-width live counter used by both issue detail and repository rows. */
 export function runningDurationLabel(milliseconds: number): string {
