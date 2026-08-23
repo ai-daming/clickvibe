@@ -196,6 +196,56 @@ test('an ordinary resource read started during a force refresh shares the author
   assert.equal(ordinaryLoads, 0)
 })
 
+test('overlapping forced resource reads each reload and only the later call may populate the cache', async () => {
+  const reader = new GithubRestReader({} as never)
+  let releaseFirst: (() => void) | undefined
+  let firstStarted: (() => void) | undefined
+  const started = new Promise<void>((resolve) => {
+    firstStarted = resolve
+  })
+  const held = new Promise<void>((resolve) => {
+    releaseFirst = resolve
+  })
+  let loads = 0
+  const first = reader.cachedResource(
+    'o/r/pulls/4',
+    null,
+    async () => {
+      loads += 1
+      firstStarted?.()
+      await held
+      return { updated_at: 'v1', base: 'release/a' }
+    },
+    { force: true, versionOf: (value) => value.updated_at },
+  )
+  await started
+  const second = reader.cachedResource(
+    'o/r/pulls/4',
+    null,
+    async () => {
+      loads += 1
+      return { updated_at: 'v2', base: 'release/b' }
+    },
+    { force: true, versionOf: (value) => value.updated_at },
+  )
+  await new Promise((resolve) => setImmediate(resolve))
+  const overlappingLoads = loads
+  releaseFirst?.()
+
+  assert.equal((await first).base, 'release/a')
+  assert.equal((await second).base, 'release/b')
+  assert.equal(overlappingLoads, 2)
+  const cached = await reader.cachedResource(
+    'o/r/pulls/4',
+    'v2',
+    async () => {
+      throw new Error('the later force result must remain cached')
+    },
+    { versionOf: (value) => value.updated_at },
+  )
+  assert.equal(cached.base, 'release/b')
+})
+
 test('REST reader opens a circuit after rate limiting and reports the reset time without another request', async () => {
   const resetAt = 1_800_000_000
   const fake = shellWith([
