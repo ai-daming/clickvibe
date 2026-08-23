@@ -20,7 +20,7 @@
 | **硬** | worktree 有无、registered branch | 本地 git | `git worktree list --porcelain` 交叉约定路径 |
 | **硬** | 目标分支有无(本地/远端) | 本地 git | `git show-ref` / `for-each-ref` |
 | **硬** | 内容更新(不管是否 commit) | 本地 git | `git status --porcelain` + `git log <fork点>..HEAD` |
-| **硬** | fork 点(baseline 曾经是什么) | 本地 git | `workflow.baseRef` 中冻结的远端分支与 hash |
+| **硬** | 开发基线身份与最后已知 tip | 本地 git | `workflow.baseRef` 中不可变的远端分支与最近一次成功同步持久化的 hash |
 | **硬** | 应同步基线(现在该是什么) | 本地 git | `baseRef` 对应 `origin/<branch>` 的当前 tip(默认 origin/HEAD) |
 | **硬** | PR 存在 / open / merged / closed | GitHub | `gh pr list --head <branch>` + `gh pr view` |
 | **硬** | GitHub 原生 review(APPROVED/CHANGES_REQUESTED/COMMENTED) | GitHub | `gh pr view --json reviews`(受控词表,字段保证存在) |
@@ -138,8 +138,8 @@
 📍 基线        origin/main @ 8715172                                (从哪出发,定格不变)
 ```
 
-- 基线 = 首次开发选择的 fetch 后 `origin/*` 分支(默认 `origin/HEAD`，兼容回退 `origin/main`)+ 当时 hash
-- 基线**永远不变**,主干怎么前进它都定格
+- 基线 = 首次开发选择的 fetch 后 `origin/*` 分支(默认 `origin/HEAD`，兼容回退 `origin/main`)+ 最近一次成功同步持久化的 tip；分支身份定格不变，显式同步时只推进 tip
+- 基线的**分支身份永远不变**；`@ tip` 只在显式同步成功 fetch 后前进
 
 ### 派生信号(按需出现)
 

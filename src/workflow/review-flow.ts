@@ -163,7 +163,15 @@ export async function startReview(
     workflow.prNumber = parsed.number
     await saveWorkflow(workflow)
   }
-  const reviewBase = await resolveReviewBaseTarget(ctx, workflow)
+  let reviewBase: Awaited<ReturnType<typeof resolveReviewBaseTarget>>
+  try {
+    reviewBase = await resolveReviewBaseTarget(ctx, workflow)
+  } catch (error) {
+    const message = String(error instanceof Error ? error.message : error)
+    pushTaskLine(live, `[clickvibe] 无法冻结 review 基线: ${message}`)
+    finishTask(live, 'failed', 1)
+    return { ok: false, error: message }
+  }
 
   // A prior run's file must never become the next run's verdict.
   try {

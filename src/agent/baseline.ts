@@ -30,10 +30,22 @@ export function frozenRemoteBase(baseRef: string | null | undefined): string | n
   return requestedRemoteBase(raw.replace(/^refs\/remotes\//, ''))
 }
 
-/** Extract the immutable fork commit, usable after the remote branch is deleted. */
+/** Extract the last durably observed tip, usable after the remote branch is deleted. */
 export function frozenBaseHash(baseRef: string | null | undefined): string | null {
   const match = String(baseRef ?? '').match(/\s+@\s+([0-9a-f]{4,64})\s*$/i)
   return match?.[1] ?? null
+}
+
+/** Advance only the selected branch's durable tip; the branch identity never changes. */
+export function updateBaseTip(baseRef: string | null | undefined, remoteBase: string, hash: string): string {
+  const selected = frozenRemoteBase(baseRef)
+  const requested = requestedRemoteBase(remoteBase)
+  if (selected && selected !== requested) {
+    throw new Error(`基线分支身份已定格为 ${selected},拒绝更新为 ${requested}`)
+  }
+  const tip = hash.trim()
+  if (!/^[0-9a-f]{4,64}$/i.test(tip)) throw new Error('无法记录无效的基线提交')
+  return `${selected ?? requested} @ ${tip}`
 }
 
 export function resolveSelectedRemoteBase(input: {

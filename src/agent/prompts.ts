@@ -85,13 +85,11 @@ export function sameSnapshot(left: PromptSnapshot, right: PromptSnapshot): boole
   return JSON.stringify(left) === JSON.stringify(right)
 }
 
-export const DEVELOPMENT_REQUIREMENTS = [
-  '先执行 git fetch origin 同步远端,并检查 base(默认 origin/main)是否有更新;若已有更新,先合并或变基到最新再继续。',
+const COMMON_DEVELOPMENT_REQUIREMENTS = [
   '先理解当前需求快照;如有歧义可自行判断或提问。',
   '实现代码改动,并保留现有 worktree 中尚未提交的有效工作。',
   '运行相关测试。',
   '完成后 git commit 并推送当前分支。',
-  '用 gh 创建或更新 PR(若适用)。',
 ]
 
 function developmentRequirements(baseRef: string | null): string[] {
@@ -99,7 +97,7 @@ function developmentRequirements(baseRef: string | null): string[] {
   const baseBranch = remoteBase.replace(/^origin\//, '')
   return [
     `先执行 git fetch origin 同步远端,并检查开发基线(${remoteBase})是否有更新;若已有更新,先合并或变基到最新再继续。`,
-    ...DEVELOPMENT_REQUIREMENTS.slice(1, -1),
+    ...COMMON_DEVELOPMENT_REQUIREMENTS,
     `用 gh 创建或更新 PR(若适用);首次创建必须显式执行 gh pr create --base ${baseBranch},不得依赖仓库默认分支。`,
   ]
 }
@@ -128,32 +126,37 @@ export function buildDevelopPrompt(
 export interface ReviewBaseTarget {
   ref: string
   sha: string
-  diffBase: string
+}
+
+function exactCommitHash(value: string): string {
+  const hash = value.trim()
+  return /^[0-9a-f]{4,64}$/i.test(hash) ? hash : ''
 }
 
 export async function resolveReviewBaseTarget(ctx: Context, workflow: IssueWorkflow): Promise<ReviewBaseTarget> {
   let ref = (frozenRemoteBase(workflow.baseRef) ?? 'origin/main').replace(/^origin\//, '')
   let sha = frozenBaseHash(workflow.baseRef) ?? ''
+  let prSha = ''
   if (workflow.prNumber) {
     const target = await fetchPrBaseTarget(ctx, workflow.repoKey, workflow.prNumber)
-    if (target) {
-      ref = target.ref
-      sha = target.sha ?? sha
-    }
+    if (!target) throw new Error(`无法读取 PR #${workflow.prNumber} 的基线身份,拒绝启动可能审错范围的 review`)
+    ref = target.ref
+    prSha = exactCommitHash(target.sha ?? '')
+    if (target.sha && !prSha) throw new Error(`PR #${workflow.prNumber} 返回了无效的基线 commit,拒绝启动 review`)
   }
   const remote = `origin/${ref}`
-  const available = await runCommand(ctx, `git show-ref --verify --quiet ${shellQuote(`refs/remotes/${remote}`)}`, {
+  if (prSha) return { ref, sha: prSha }
+  if (!workflow.baseRef && !workflow.prNumber) return { ref, sha: '' }
+  const localSha = await runCommand(ctx, `git rev-parse --verify ${shellQuote(`${remote}^{commit}`)}`, {
     workdir: workflow.worktree,
     timeoutMs: 10_000,
     sandboxPolicy: { mode: 'read-only', workspaceRoot: workflow.worktree },
-  })
-    .then(() => true)
-    .catch(() => false)
-  return { ref, sha, diffBase: available || sha === '' ? remote : sha }
+  }).catch(() => '')
+  sha = exactCommitHash(localSha) || exactCommitHash(sha)
+  return { ref, sha }
 }
 
-/** Build the review prompt: review `git diff base...HEAD` against the issue.
- *  A live PR base wins while available; a deleted remote ref falls back to the frozen hash. */
+/** Build the review prompt against one exact base SHA; the ref is display identity only. */
 export async function buildReviewPrompt(
   ctx: Context,
   workflow: IssueWorkflow,
@@ -164,7 +167,9 @@ export async function buildReviewPrompt(
   frozenReviewBase?: ReviewBaseTarget,
 ): Promise<string> {
   const reviewBase = frozenReviewBase ?? (await resolveReviewBaseTarget(ctx, workflow))
-  const base = reviewBase.diffBase
+  // The persisted review identity and the executed diff share this exact SHA.
+  // Keeping a second caller-provided diff field would permit recording B while reviewing A.
+  const base = reviewBase.sha || `origin/${reviewBase.ref}`
   const prUrl = workflow.prNumber ? `https://github.com/${workflow.repoKey}/pull/${workflow.prNumber}` : '未关联'
   const contractHash = issueBodyHash(resolved.snapshot.body)
   return buildStagePrompt({
@@ -236,7 +241,7 @@ export async function buildResumePrompt(
         ? ['优先利用当前会话记忆继续工作,但记忆与当前需求快照冲突时以快照为准。']
         : ['先读取 git diff 和未提交改动,再按当前需求快照继续;不要依赖已失效会话的旧记忆。']),
       ...(rework ? ['逐条处理“当前状态”中的 Review 意见,完成后重新验证。'] : []),
-      ...DEVELOPMENT_REQUIREMENTS,
+      ...developmentRequirements(workflow.baseRef),
     ],
   })
 }

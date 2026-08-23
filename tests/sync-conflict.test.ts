@@ -110,7 +110,7 @@ async function setupSyncableRepo(baseBranch = 'main') {
   await writeFile(join(repo, 'base.md'), 'base B\n')
   await git('add', '.')
   await git('commit', '-m', 'parallel base B')
-  await git('push', 'origin', 'main')
+  await git('push', 'origin', baseBranch)
   return { root, remote, worktree, branch, wt, remoteGit, remoteHeadBeforeSync }
 }
 
@@ -215,6 +215,7 @@ test('sync merges and records the frozen custom baseline', async () => {
       const releaseHead = (await wt('rev-parse', 'origin/release/2.0')).stdout.trim()
       assert.equal(parents.includes(releaseHead), true)
       const saved = await loadWorkflow(item.key)
+      assert.equal(saved?.baseRef, `origin/release/2.0 @ ${releaseHead}`)
       assert.match(saved?.events.at(-1)?.note ?? '', /origin\/release\/2\.0/)
     })
   } finally {

@@ -232,7 +232,7 @@ export function deriveNextAction(facts: WorkflowFacts): NextAction {
       return action(
         'restore-base',
         '恢复基线并创建 PR',
-        `远端基线 origin/${facts.baseBranch} 已删除;确认后按冻结提交恢复同名分支,再创建 PR`,
+        `远端基线 origin/${facts.baseBranch} 已删除;确认后按最后已知 tip 恢复同名分支,再创建 PR`,
       )
     }
     return action('create-pr', '创建 PR', '开发分支已有提交,推送并创建 PR 后 Review')

@@ -24,6 +24,6 @@ test('a missing frozen baseline must be explicitly restored before creating a PR
   assert.deepEqual(next, {
     kind: 'restore-base',
     label: '恢复基线并创建 PR',
-    hint: '远端基线 origin/release/deleted 已删除;确认后按冻结提交恢复同名分支,再创建 PR',
+    hint: '远端基线 origin/release/deleted 已删除;确认后按最后已知 tip 恢复同名分支,再创建 PR',
   })
 })

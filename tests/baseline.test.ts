@@ -7,6 +7,7 @@ import {
   frozenRemoteBase,
   requestedRemoteBase,
   resolveSelectedRemoteBase,
+  updateBaseTip,
 } from '../src/workflow/baseline.ts'
 import { githubCompareUrl, workflowBaseBranch } from '../src/workflow/state-view.ts'
 
@@ -25,6 +26,18 @@ test('frozen baseRef resolves to its exact remote branch', () => {
   assert.equal(frozenRemoteBase(null), null)
   assert.equal(frozenBaseHash('origin/release/2.0 @ abc123'), 'abc123')
   assert.equal(frozenBaseHash(null), null)
+})
+
+test('base tip may advance while its selected branch identity stays immutable', () => {
+  assert.equal(
+    updateBaseTip('origin/release/2.0 @ aaa1111', 'origin/release/2.0', 'bbb2222'),
+    'origin/release/2.0 @ bbb2222',
+  )
+  assert.throws(
+    () => updateBaseTip('origin/release/2.0 @ aaa1111', 'origin/integration', 'bbb2222'),
+    /基线分支身份.*拒绝更新/,
+  )
+  assert.throws(() => updateBaseTip('origin/release/2.0 @ aaa1111', 'origin/release/2.0', 'not-a-sha'), /提交/)
 })
 
 test('first selection resolves origin/HEAD while a frozen baseline rejects replacement', () => {

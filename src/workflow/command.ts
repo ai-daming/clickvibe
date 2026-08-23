@@ -195,7 +195,7 @@ export const COMMAND_HELP_TEXT = [
   '  rework <目标> [context=…]           按 review 意见返工',
   '  resume <目标> [context=…]           恢复中断的开发会话',
   '  sync <目标>                         同步 worktree 到远端基线',
-  '  restore-base <目标>                 按冻结提交恢复已删除的远端基线(需二次确认)',
+  '  restore-base <目标>                 按最后已知 tip 恢复已删除的远端基线(需二次确认)',
   '  stop <目标>                         停止运行中的任务',
   '  merge <目标>                        合并 PR 并清理(需二次确认)',
   '  merge <目标> override=<放行原因>    门禁拒绝后的人工放行(跳过项与原因写入审计)',
@@ -363,7 +363,7 @@ export function formatConfirmationPreview(
     return [
       '即将恢复远端基线后继续创建 PR:',
       `- 基线:${preview.baseline ?? '?'}`,
-      `- 冻结提交:${preview.baselineRef ?? '?'}`,
+      `- 最后已知 tip:${preview.baselineRef ?? '?'}`,
       '- 安全条件:仅当远端同名分支仍不存在时创建;若已恢复到不同提交则拒绝覆盖。',
       '',
       '请用户明确确认后携带授权原样重发命令。',

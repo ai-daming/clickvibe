@@ -1,7 +1,13 @@
 /** Workflow-only baseline preview and issue dependency guidance. */
 import { requestedRemoteBase } from '../agent/baseline.ts'
 
-export { frozenBaseHash, frozenRemoteBase, requestedRemoteBase, resolveSelectedRemoteBase } from '../agent/baseline.ts'
+export {
+  frozenBaseHash,
+  frozenRemoteBase,
+  requestedRemoteBase,
+  resolveSelectedRemoteBase,
+  updateBaseTip,
+} from '../agent/baseline.ts'
 
 /** Default sentinel first; remaining fetched remote branches are stable and unique. */
 export function baselinePreviewOptions(actualDefault: string, remoteRefs: string[]): string[] {
