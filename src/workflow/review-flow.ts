@@ -49,8 +49,11 @@ import {
   recordSessionId,
   resolveSessionForAgent,
   saveWorkflow,
+  saveWorkflowStrict,
   type WorkflowEvent,
 } from '../infra/state.ts'
+import { withWorkflowLock } from '../infra/workflow-lock.ts'
+import { mutateWorkflowStrict } from '../infra/workflow-mutation.ts'
 import { buildDevComment, buildReviewComment } from './delivery-comment.ts'
 import { deriveEventRound } from './delivery-audit.ts'
 import { extractGithubCommentId, extractGithubCommentUrl } from './delivery-publication.ts'
@@ -97,22 +100,24 @@ export async function startReview(
   if (!existsSync(workflow.worktree)) {
     return { ok: false, error: `worktree 不存在: ${workflow.worktree}` }
   }
-  const ownedReviewSession = resolveSessionForAgent(workflow, 'review', agent)
-  const sessionId = ownedReviewSession.sessionId
+  let activeWorkflow: IssueWorkflow = workflow
+  const workflowKey = activeWorkflow.key
+  const ownedReviewSession = resolveSessionForAgent(activeWorkflow, 'review', agent)
+  let sessionId = ownedReviewSession.sessionId
   // workflow 校验后、冻结契约/HEAD 等任何 await 之前同步占位。重复请求会立即
   // 复用 taskId,不会重复支付 GitHub 刷新超时,也不会交错清理结论文件并双开 review。
   let reservation: { task: LiveTask; created: boolean }
   try {
-    reservation = reviewTaskGate.reserve(workflow.key, () => {
+    reservation = reviewTaskGate.reserve(workflowKey, () => {
       const id = taskId('review')
-      return createLiveTask(id, workflow, 'review', agent, sessionId)
+      return createLiveTask(id, activeWorkflow, 'review', agent, sessionId)
     })
   } catch (error) {
     return { ok: false, error: String(error instanceof Error ? error.message : error) }
   }
   if (!reservation.created) return { ok: true, taskId: reservation.task.taskId }
   const live = reservation.task
-  const resolvedSnapshot = await resolvePromptSnapshot(ctx, workflow)
+  const resolvedSnapshot = await resolvePromptSnapshot(ctx, activeWorkflow)
   if ('error' in resolvedSnapshot) {
     finishTask(live, 'failed', 1)
     return { ok: false, error: resolvedSnapshot.error }
@@ -127,109 +132,109 @@ export async function startReview(
       updatedAt: resolvedSnapshot.snapshot.updatedAt,
     },
   }
-  // Review must inspect the branch against current remote refs. Keep review
-  // available during an outage, but make the degraded input explicit in its log.
-  try {
-    await runCommand(ctx, 'git fetch origin --prune', {
-      workdir: workflow.worktree,
-      timeoutMs: 60_000,
-      sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: workflow.worktree },
-    })
-    pushTaskLine(live, '[clickvibe] review 前已同步远端(origin)')
-  } catch (error) {
-    pushTaskLine(
-      live,
-      `[clickvibe] review 前 git fetch 失败(继续): ${String(error instanceof Error ? error.message : error)}`,
-    )
-  }
-
   if (reviewIssue.state !== 'OPEN') {
     finishTask(live, 'failed', 1)
     return { ok: false, error: '只有 OPEN Issue 可以启动 review' }
   }
-  const reviewedHead = await readWorktreeHead(ctx, workflow.worktree)
-  if (!reviewedHead) {
-    finishTask(live, 'failed', 1)
-    return { ok: false, error: '无法冻结被审 HEAD,请检查 worktree 后重试' }
-  }
-
-  if (ownedReviewSession.invalid) {
-    await saveWorkflow(workflow)
-    pushTaskLine(live, '[clickvibe] review sessionId 归属缺失或与当前 agent 不一致,已清除并启动全新会话')
-  }
-
-  // 记录关联 PR(若 review 的是 PR 且未记录)
-  if (parsed.kind === 'pr' && !workflow.prNumber) {
-    workflow.prNumber = parsed.number
-    await saveWorkflow(workflow)
-  }
-  let reviewBase: Awaited<ReturnType<typeof resolveReviewBaseTarget>>
+  let prepared:
+    | {
+        workflow: IssueWorkflow
+        reviewedHead: string
+        sessionId: string | null
+        reviewBase: Awaited<ReturnType<typeof resolveReviewBaseTarget>>
+      }
+    | undefined
   try {
-    reviewBase = await resolveReviewBaseTarget(ctx, workflow)
+    prepared = await withWorkflowLock(workflowKey, async () => {
+      const current = await loadWorkflow(workflowKey)
+      if (!current) throw new Error('workflow 已不存在')
+      // Review preflight and sync share one lock: the frozen HEAD/base pair can
+      // never be sampled across a concurrent worktree merge.
+      try {
+        await runCommand(ctx, 'git fetch origin --prune', {
+          workdir: current.worktree,
+          timeoutMs: 60_000,
+          sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: current.worktree },
+        })
+        pushTaskLine(live, '[clickvibe] review 前已同步远端(origin)')
+      } catch (error) {
+        pushTaskLine(
+          live,
+          `[clickvibe] review 前 git fetch 失败(继续): ${String(error instanceof Error ? error.message : error)}`,
+        )
+      }
+      const reviewedHead = (await readWorktreeHead(ctx, current.worktree)) ?? ''
+      if (!reviewedHead) throw new Error('无法冻结被审 HEAD,请检查 worktree 后重试')
+      const owned = resolveSessionForAgent(current, 'review', agent)
+      if (owned.invalid) {
+        pushTaskLine(live, '[clickvibe] review sessionId 归属缺失或与当前 agent 不一致,已清除并启动全新会话')
+      }
+      if (parsed.kind === 'pr' && !current.prNumber) current.prNumber = parsed.number
+      const reviewBase = await resolveReviewBaseTarget(ctx, current)
+      try {
+        await clearReviewResultFile(current.worktree)
+      } catch (error) {
+        throw new Error(`无法清除旧 review 结论文件: ${String(error instanceof Error ? error.message : error)}`)
+      }
+      current.reviewAgent = agent
+      current.reviewTaskId = live.taskId
+      current.stage = 'reviewing'
+      await saveWorkflowStrict(current)
+      return { workflow: current, reviewedHead, sessionId: owned.sessionId, reviewBase }
+    })
   } catch (error) {
     const message = String(error instanceof Error ? error.message : error)
-    pushTaskLine(live, `[clickvibe] 无法冻结 review 基线: ${message}`)
+    pushTaskLine(live, `[clickvibe] review 启动前置失败: ${message}`)
     finishTask(live, 'failed', 1)
     return { ok: false, error: message }
   }
-
-  // A prior run's file must never become the next run's verdict.
-  try {
-    await clearReviewResultFile(workflow.worktree)
-  } catch (error) {
-    const message = String(error instanceof Error ? error.message : error)
-    pushTaskLine(live, `[clickvibe] 无法清除旧 review 结论文件: ${message}`)
+  if (!prepared) {
     finishTask(live, 'failed', 1)
-    return { ok: false, error: `无法清除旧 review 结论文件: ${message}` }
+    return { ok: false, error: '无法冻结 review 基线' }
   }
-
-  workflow.reviewAgent = agent
-  workflow.reviewTaskId = live.taskId
-  workflow.stage = 'reviewing'
-  await saveWorkflow(workflow)
+  activeWorkflow = prepared.workflow
+  const reviewedHead = prepared.reviewedHead
+  const frozenReviewBase = prepared.reviewBase
+  const exactSessionId = prepared.sessionId
 
   // 仅续接归属匹配的精确会话;旧状态无 owner 或跨 agent 时直接全新 review。
-  const agentCommand = sessionId ? buildResumeAgentCommand(agent, sessionId) : buildFreshAgentCommand(agent)
+  const agentCommand = exactSessionId ? buildResumeAgentCommand(agent, exactSessionId) : buildFreshAgentCommand(agent)
   const prompt = await buildReviewPrompt(
     ctx,
-    workflow,
+    activeWorkflow,
     resolvedSnapshot,
     reviewedHead,
-    sessionId,
+    exactSessionId,
     extraContext,
-    reviewBase,
+    frozenReviewBase,
   )
 
-  pushTaskLine(live, `[clickvibe] 启动 ${agent} review${sessionId ? `(续会话 ${sessionId})` : ''}…`)
+  pushTaskLine(live, `[clickvibe] 启动 ${agent} review${exactSessionId ? `(续会话 ${exactSessionId})` : ''}…`)
   attachAgentProcess(
     ctx,
     live,
     agentCommand,
-    workflow.worktree,
+    activeWorkflow.worktree,
     prompt,
     async (exitCode, newSessionId) => {
       const durationMs = Math.max(0, Date.now() - live.startedAt)
       pushTaskLine(live, `[clickvibe] review 结束,退出码 ${exitCode}`)
       if (live.status !== 'done' || exitCode !== 0) {
-        const interrupted = await loadWorkflow(workflow.key)
-        if (interrupted) {
+        await mutateWorkflowStrict(workflowKey, (interrupted) => {
           recordSessionId(interrupted, 'review', newSessionId, agent)
           interrupted.stage = 'review-ready'
-          await saveWorkflow(interrupted)
-        }
+        }).catch(() => undefined)
         return
       }
-      const lines = (await readLogTail(workflow.key, 'review', 200)).map((line) => decodeLiveLogLine(line).text)
-      const resolved = await loadReviewResult(workflow.worktree, lines)
+      const lines = (await readLogTail(workflowKey, 'review', 200)).map((line) => decodeLiveLogLine(line).text)
+      const resolved = await loadReviewResult(activeWorkflow.worktree, lines)
       if (!resolved.result) {
         pushTaskLine(live, `[clickvibe] review 结论解析异常:${resolved.parseError ?? '原因未知'},需要重新 Review`)
-        const invalid = await loadWorkflow(workflow.key)
-        if (invalid) {
+        await mutateWorkflowStrict(workflowKey, (invalid) => {
           recordSessionId(invalid, 'review', newSessionId, agent)
           invalid.reviewResult = null
           invalid.stage = 'review-ready'
-          await saveWorkflow(invalid)
-        }
+        }).catch(() => undefined)
         return
       }
       if (resolved.source === 'file') {
@@ -241,8 +246,9 @@ export async function startReview(
         )
       }
       const { passed, issues } = resolved.result
-      const reloaded = await loadWorkflow(workflow.key)
-      if (reloaded) {
+      await withWorkflowLock(workflowKey, async () => {
+        const reloaded = await loadWorkflow(workflowKey)
+        if (!reloaded) return
         const round = deriveEventRound(reloaded.events)
         const stats = await readDeliveryStats(
           ctx,
@@ -265,7 +271,7 @@ export async function startReview(
           taskId: live.taskId,
           verdict: { passed, issues },
           issueContract: reviewIssue.contract,
-          ...(reviewBase.sha ? { reviewBase: { ref: reviewBase.ref, sha: reviewBase.sha } } : {}),
+          ...(frozenReviewBase.sha ? { reviewBase: { ref: frozenReviewBase.ref, sha: frozenReviewBase.sha } } : {}),
           note: `${agent} review${passed ? ' 通过' : ` 发现 ${issues.length} 个问题`}`,
           // 用户附加说明只进本地事件时间线,不进 GitHub 评论(issue #54)。
           ...(extraContext !== '' ? { userContext: extraContext } : {}),
@@ -300,24 +306,25 @@ export async function startReview(
         } else if (approval === 'failed') {
           pushTaskLine(live, '[clickvibe] GitHub 原生 Approve 失败(继续,不影响 Review 结论与评论)')
         }
-      }
+      })
     },
-    sessionId
+    exactSessionId
       ? {
-          staleSessionId: sessionId,
+          staleSessionId: exactSessionId,
           prepare: async () => {
-            const reloaded = await loadWorkflow(workflow.key)
-            if (reloaded && clearStaleSessionId(reloaded, 'review', sessionId)) await saveWorkflow(reloaded)
+            await mutateWorkflowStrict(workflowKey, (reloaded) => {
+              clearStaleSessionId(reloaded, 'review', exactSessionId)
+            }).catch(() => undefined)
             return {
               command: buildFreshAgentCommand(agent),
               prompt: await buildReviewPrompt(
                 ctx,
-                workflow,
+                activeWorkflow,
                 resolvedSnapshot,
                 reviewedHead,
                 null,
                 extraContext,
-                reviewBase,
+                frozenReviewBase,
               ),
             }
           },

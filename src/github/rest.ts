@@ -250,7 +250,8 @@ export class GithubRestReader {
     if (
       !options.force &&
       cached &&
-      ((knownVersion !== null && cached.version === knownVersion) || (knownVersion === null && cached.expiresAt > now))
+      cached.expiresAt > now &&
+      (knownVersion === null || cached.version === knownVersion)
     )
       return cached.value
     return this.deduplicate(`resource:${key}`, async () => {

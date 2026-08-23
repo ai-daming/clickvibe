@@ -34,11 +34,14 @@ import {
 import {
   applyDevRunOutcome,
   clearStaleSessionId,
+  type IssueWorkflow,
   issueKey,
   loadWorkflow,
   resolveSessionForAgent,
   saveWorkflow,
 } from '../infra/state.ts'
+import { mutateWorkflowStrict } from '../infra/workflow-mutation.ts'
+import { withWorkflowLock } from '../infra/workflow-lock.ts'
 import { recordDevDelivery } from './review-flow.ts'
 import { workflowBaseBranch } from './state-view.ts'
 
@@ -57,19 +60,22 @@ export async function resumeDevelop(
     return { ok: false, error: '请输入形如 https://github.com/owner/repo/issues/123 的链接' }
   }
   const key = issueKey(`${parsed.owner}/${parsed.repo}`, parsed.number)
-  const workflow = await loadWorkflow(key)
-  if (!workflow || !workflow.devTaskId) {
+  const loadedWorkflow = await loadWorkflow(key)
+  if (!loadedWorkflow || !loadedWorkflow.devTaskId) {
     return { ok: false, error: '该 issue 尚无开发记录,无法续会话' }
   }
+  let workflow: IssueWorkflow = loadedWorkflow
+  const previousTaskId = loadedWorkflow.devTaskId
 
-  const oldLive = liveTasks.get(workflow.devTaskId)
+  const oldLive = liveTasks.get(previousTaskId)
   if (oldLive && !oldLive.closed) {
     return { ok: true, taskId: oldLive.taskId }
   }
 
   const agent = workflow.devAgent ?? 'codex'
   const ownedDevSession = resolveSessionForAgent(workflow, 'dev', agent)
-  const sessionId = ownedDevSession.sessionId
+  let sessionId = ownedDevSession.sessionId
+  let invalidSession = ownedDevSession.invalid
   // Reserve synchronously before the snapshot's GitHub awaits. This is the
   // per-workflow invariant preventing double-clicked resume requests from
   // launching multiple agents against the same git worktree.
@@ -89,18 +95,28 @@ export async function resumeDevelop(
     finishTask(live, 'failed', 1)
     return { ok: false, error: resolvedSnapshot.error }
   }
-  workflow.devTaskId = live.taskId
-  workflow.devInterrupted = false
-  workflow.stage = 'developing'
-  await saveWorkflow(workflow)
-  if (ownedDevSession.invalid) {
+  try {
+    workflow = await mutateWorkflowStrict(workflow.key, (current) => {
+      const owned = resolveSessionForAgent(current, 'dev', agent)
+      sessionId = owned.sessionId
+      invalidSession = owned.invalid
+      current.devTaskId = live.taskId
+      current.devInterrupted = false
+      current.stage = 'developing'
+    })
+  } catch (error) {
+    finishTask(live, 'failed', 1)
+    return { ok: false, error: `无法持久化恢复任务:${String(error instanceof Error ? error.message : error)}` }
+  }
+  if (invalidSession) {
     pushTaskLine(live, '[clickvibe] dev sessionId 归属缺失或与当前 agent 不一致,已清除并启动全新会话')
   }
+  const exactSessionId = sessionId
 
   // 用精确会话 id 续会话(不能用 --last/--continue:worktree 里可能有多个
   // agent 会话,--last 续的是"最近那个",不一定是我们这个)。
   // sessionId 缺失时回退 --last/--continue(尽力而为)。
-  const command = ownedDevSession.invalid ? buildFreshAgentCommand(agent) : buildResumeAgentCommand(agent, sessionId)
+  const command = invalidSession ? buildFreshAgentCommand(agent) : buildResumeAgentCommand(agent, exactSessionId)
   // 续会话前也同步远端(并行开发时 base 会变化)
   try {
     await runCommand(ctx, 'git fetch origin', {
@@ -118,9 +134,9 @@ export async function resumeDevelop(
   // 被同步门禁挡住送不进来。
   const mergePreface = await buildMergePreface(ctx, workflow.worktree, workflowBaseBranch(workflow.baseRef))
 
-  const prompt = await buildResumePrompt(ctx, workflow, resolvedSnapshot, extraContext, mergePreface, sessionId)
+  const prompt = await buildResumePrompt(ctx, workflow, resolvedSnapshot, extraContext, mergePreface, exactSessionId)
 
-  pushTaskLine(live, `[clickvibe] 恢复 ${agent} 会话${sessionId ? `(${sessionId})` : ''}…`)
+  pushTaskLine(live, `[clickvibe] 恢复 ${agent} 会话${exactSessionId ? `(${exactSessionId})` : ''}…`)
   attachAgentProcess(
     ctx,
     live,
@@ -130,8 +146,9 @@ export async function resumeDevelop(
     async (exitCode, newSessionId) => {
       const durationMs = Math.max(0, Date.now() - live.startedAt)
       pushTaskLine(live, `[clickvibe] ${agent} 恢复结束,退出码 ${exitCode}`)
-      const reloaded = await loadWorkflow(workflow.key)
-      if (reloaded) {
+      await withWorkflowLock(workflow.key, async () => {
+        const reloaded = await loadWorkflow(workflow.key)
+        if (!reloaded) return
         const fixedIssues = reloaded.reviewResult?.passed === false ? [...reloaded.reviewResult.issues] : []
         if (applyDevRunOutcome(reloaded, live.status, exitCode, newSessionId, agent)) {
           // rework 完成:旧的 review 结论已归档到 events,回到"待 review",
@@ -150,14 +167,15 @@ export async function resumeDevelop(
           )
         }
         await saveWorkflow(reloaded)
-      }
+      })
     },
-    sessionId
+    exactSessionId
       ? {
-          staleSessionId: sessionId,
+          staleSessionId: exactSessionId,
           prepare: async () => {
-            const reloaded = await loadWorkflow(workflow.key)
-            if (reloaded && clearStaleSessionId(reloaded, 'dev', sessionId)) await saveWorkflow(reloaded)
+            await mutateWorkflowStrict(workflow.key, (reloaded) => {
+              clearStaleSessionId(reloaded, 'dev', exactSessionId)
+            }).catch(() => undefined)
             return {
               command: buildFreshAgentCommand(agent),
               prompt: await buildResumePrompt(ctx, workflow, resolvedSnapshot, extraContext, mergePreface, null),

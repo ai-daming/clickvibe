@@ -23,7 +23,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { updateBaseTip } from '../agent/baseline.ts'
 import { shellQuote } from '../infra/develop-core.ts'
 import { conflictFileSuffix, hasMergeConflict, listConflictFiles } from '../infra/git.ts'
-import { parseUrl, readWorktreeHead, runCommand } from '../infra/runtime.ts'
+import { liveTasks, parseUrl, readWorktreeHead, runCommand } from '../infra/runtime.ts'
 import { appendEvent, appendLog, issueKey, loadWorkflow, saveWorkflowStrict } from '../infra/state.ts'
 import { withWorkflowLock } from '../infra/workflow-lock.ts'
 import { workflowBaseBranch } from './state-view.ts'
@@ -52,6 +52,11 @@ async function syncWorktreeLocked(ctx: Context, key: string): Promise<SyncResult
   if (!workflow || !existsSync(workflow.worktree)) {
     return { ok: false, error: '该 issue 尚无 worktree,无法同步' }
   }
+  const activeTask = [workflow.devTaskId, workflow.reviewTaskId].some((id) => {
+    const task = id ? liveTasks.get(id) : undefined
+    return task !== undefined && !task.closed
+  })
+  if (activeTask) return { ok: false, error: 'Agent 任务运行中,拒绝并发修改 worktree;请等待任务结束后同步' }
   const policy = { mode: 'danger-full-access' as const, workspaceRoot: workflow.worktree }
   const remoteBase = `origin/${workflowBaseBranch(workflow.baseRef)}`
   try {
@@ -80,10 +85,11 @@ async function syncWorktreeLocked(ctx: Context, key: string): Promise<SyncResult
     }).catch(() => {
       throw new Error(`基线分支已不存在: ${remoteBase}`)
     })
-    const current = await loadWorkflow(workflow.key)
-    if (!current) throw new Error('同步期间 workflow 已不存在')
-    current.baseRef = updateBaseTip(current.baseRef, remoteBase, baseTip)
-    await saveWorkflowStrict(current)
+    const beforeMerge = await runCommand(ctx, 'git rev-parse --verify HEAD', {
+      workdir: workflow.worktree,
+      timeoutMs: 10_000,
+      sandboxPolicy: policy,
+    })
     await appendLog(workflow.key, 'dev', `[clickvibe] 同步:合并 ${remoteBase}…`)
     try {
       await runCommand(ctx, `git merge --no-edit ${shellQuote(remoteBase)}`, {
@@ -118,6 +124,31 @@ async function syncWorktreeLocked(ctx: Context, key: string): Promise<SyncResult
         }
       }
       throw error
+    }
+    try {
+      const current = await loadWorkflow(workflow.key)
+      if (!current) throw new Error('同步期间 workflow 已不存在')
+      current.baseRef = updateBaseTip(current.baseRef, remoteBase, baseTip)
+      await saveWorkflowStrict(current)
+    } catch (persistError) {
+      try {
+        await runCommand(ctx, `git reset --hard ${shellQuote(beforeMerge)}`, {
+          workdir: workflow.worktree,
+          timeoutMs: 30_000,
+          sandboxPolicy: policy,
+        })
+      } catch (rollbackError) {
+        throw new Error(
+          `基线 tip 持久化失败且无法回滚同步提交:${String(
+            persistError instanceof Error ? persistError.message : persistError,
+          )};回滚失败:${String(rollbackError instanceof Error ? rollbackError.message : rollbackError)}`,
+        )
+      }
+      throw new Error(
+        `基线 tip 持久化失败,已回滚同步提交:${String(
+          persistError instanceof Error ? persistError.message : persistError,
+        )}`,
+      )
     }
     const head = await readWorktreeHead(ctx, workflow.worktree)
     await appendLog(workflow.key, 'dev', `[clickvibe] 同步:推送 ${workflow.branch} 到 origin…`)

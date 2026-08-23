@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
+import { fetchGithubPrFact } from '../src/github/facts.ts'
 import { GithubRateLimitError, GithubRestReader, deriveReviewDecision, githubRest } from '../src/github/rest.ts'
 
 function shellWith(responses: Array<{ exitCode: number; stdout: string; stderr?: string }>) {
@@ -49,6 +50,61 @@ test('REST reader only invokes gh api and reuses a resource while its known vers
   assert.equal(second, first)
   assert.equal(fake.commands.length, 1)
   assert.match(fake.commands[0], /^gh api /)
+})
+
+test('a known resource version never bypasses TTL expiry', async () => {
+  const reader = new GithubRestReader({} as never)
+  let loads = 0
+  const first = await reader.cachedResource(
+    'o/r/pulls/1',
+    'v1',
+    async () => ({ updated_at: 'v1', base: 'release/a', load: ++loads }),
+    { ttlMs: 1, versionOf: (value) => value.updated_at },
+  )
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  const second = await reader.cachedResource(
+    'o/r/pulls/1',
+    'v1',
+    async () => ({ updated_at: 'v2', base: 'release/b', load: ++loads }),
+    { ttlMs: 1, versionOf: (value) => value.updated_at },
+  )
+
+  assert.equal(first.base, 'release/a')
+  assert.equal(second.base, 'release/b')
+  assert.equal(loads, 2)
+})
+
+test('critical PR fact reads force a fresh base identity', async () => {
+  const fake = shellWith([
+    {
+      exitCode: 0,
+      stdout: included({
+        number: 1,
+        state: 'open',
+        updated_at: 'v1',
+        head: { ref: 'feature', sha: 'fff1111' },
+        base: { ref: 'release/a', sha: 'aaa1111' },
+      }),
+    },
+    {
+      exitCode: 0,
+      stdout: included({
+        number: 1,
+        state: 'open',
+        updated_at: 'v2',
+        head: { ref: 'feature', sha: 'fff1111' },
+        base: { ref: 'release/b', sha: 'bbb2222' },
+      }),
+    },
+  ])
+
+  const first = await fetchGithubPrFact(fake as never, 'o/r', 'feature', '1', false, true)
+  const second = await fetchGithubPrFact(fake as never, 'o/r', 'feature', '1', false, true)
+
+  assert.equal(first.pr?.baseRefName, 'release/a')
+  assert.equal(second.pr?.baseRefName, 'release/b')
+  assert.equal(second.pr?.baseRefOid, 'bbb2222')
+  assert.equal(fake.commands.length, 2)
 })
 
 test('REST reader opens a circuit after rate limiting and reports the reset time without another request', async () => {

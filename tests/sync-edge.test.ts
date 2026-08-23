@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { saveWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
+import { liveTasks } from '../src/infra/runtime.ts'
+import { loadWorkflow, saveWorkflow, statePath, type IssueWorkflow } from '../src/infra/state.ts'
 import { syncWorktree } from '../src/workflow/sync.ts'
 
 test('sync rejects malformed targets and issues without a worktree before git access', async () => {
@@ -85,6 +86,199 @@ test('concurrent sync requests serialize one workflow baseline-tip update', asyn
     )
     assert.equal(maxActive, 1)
   } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a failed merge does not advance the durable baseline tip', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'clickvibe-sync-failed-merge-'))
+  const previousHome = process.env.HOME
+  process.env.HOME = root
+  try {
+    const worktree = join(root, 'worktree')
+    await mkdir(worktree, { recursive: true })
+    const workflow = {
+      key: 'o-r-10',
+      url: 'https://github.com/o/r/issues/10',
+      repoKey: 'o/r',
+      worktree,
+      branch: 'r-issue-10',
+      stage: 'review-ready',
+      devAgent: 'codex',
+      devTaskId: null,
+      devSessionId: null,
+      devSessionAgent: null,
+      devInterrupted: false,
+      reviewAgent: null,
+      reviewTaskId: null,
+      reviewSessionId: null,
+      reviewSessionAgent: null,
+      reviewResult: null,
+      prNumber: null,
+      issueState: 'OPEN',
+      baseRef: 'origin/main @ aaa0000',
+      updatedAt: 0,
+      events: [],
+    } satisfies IssueWorkflow
+    await saveWorkflow(workflow)
+    const ctx = {
+      shell: {
+        resolve(spec: unknown) {
+          return spec
+        },
+        async run(spec: { command: string }) {
+          if (spec.command.includes('MERGE_HEAD')) {
+            return { exitCode: 1, stdout: { text: '' }, stderr: { text: '' } }
+          }
+          if (spec.command.includes('origin/main^{commit}')) {
+            return { exitCode: 0, stdout: { text: 'bbb1111' }, stderr: { text: '' } }
+          }
+          if (spec.command.startsWith('git merge --no-edit')) {
+            return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'merge failed' } }
+          }
+          return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+        },
+      },
+    }
+
+    const result = await syncWorktree(ctx as never, { url: workflow.url })
+    assert.equal(result.ok, false)
+    assert.equal((await loadWorkflow(workflow.key))?.baseRef, 'origin/main @ aaa0000')
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('sync rejects a concurrent live agent before touching git', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'clickvibe-sync-live-agent-'))
+  const previousHome = process.env.HOME
+  process.env.HOME = root
+  try {
+    const worktree = join(root, 'worktree')
+    await mkdir(worktree, { recursive: true })
+    const workflow = {
+      key: 'o-r-11',
+      url: 'https://github.com/o/r/issues/11',
+      repoKey: 'o/r',
+      worktree,
+      branch: 'r-issue-11',
+      stage: 'developing',
+      devAgent: 'codex',
+      devTaskId: 'dev-live-11',
+      devSessionId: null,
+      devSessionAgent: null,
+      devInterrupted: false,
+      reviewAgent: null,
+      reviewTaskId: null,
+      reviewSessionId: null,
+      reviewSessionAgent: null,
+      reviewResult: null,
+      prNumber: null,
+      issueState: 'OPEN',
+      baseRef: 'origin/main @ aaa0000',
+      updatedAt: 0,
+      events: [],
+    } satisfies IssueWorkflow
+    await saveWorkflow(workflow)
+    liveTasks.set(workflow.devTaskId, { closed: false } as never)
+    let gitCalls = 0
+    const result = await syncWorktree(
+      {
+        shell: {
+          resolve(spec: unknown) {
+            return spec
+          },
+          async run() {
+            gitCalls += 1
+            return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+          },
+        },
+      } as never,
+      { url: workflow.url },
+    )
+    assert.equal(result.ok, false)
+    if (!result.ok) assert.match(result.error, /Agent 任务运行中/)
+    assert.equal(gitCalls, 0)
+  } finally {
+    liveTasks.delete('dev-live-11')
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('sync rolls git back when baseline-tip persistence fails after merge', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'clickvibe-sync-persist-failure-'))
+  const previousHome = process.env.HOME
+  process.env.HOME = root
+  let workflowFile = ''
+  try {
+    const worktree = join(root, 'worktree')
+    await mkdir(worktree, { recursive: true })
+    const workflow = {
+      key: 'o-r-12',
+      url: 'https://github.com/o/r/issues/12',
+      repoKey: 'o/r',
+      worktree,
+      branch: 'r-issue-12',
+      stage: 'review-ready',
+      devAgent: 'codex',
+      devTaskId: null,
+      devSessionId: null,
+      devSessionAgent: null,
+      devInterrupted: false,
+      reviewAgent: null,
+      reviewTaskId: null,
+      reviewSessionId: null,
+      reviewSessionAgent: null,
+      reviewResult: null,
+      prNumber: null,
+      issueState: 'OPEN',
+      baseRef: 'origin/main @ aaa0000',
+      updatedAt: 0,
+      events: [],
+    } satisfies IssueWorkflow
+    await saveWorkflow(workflow)
+    workflowFile = statePath(workflow)
+    const commands: string[] = []
+    const ctx = {
+      shell: {
+        resolve(spec: unknown) {
+          return spec
+        },
+        async run(spec: { command: string }) {
+          commands.push(spec.command)
+          if (spec.command.includes('MERGE_HEAD')) {
+            return { exitCode: 1, stdout: { text: '' }, stderr: { text: '' } }
+          }
+          if (spec.command.includes('origin/main^{commit}')) {
+            return { exitCode: 0, stdout: { text: 'bbb1111' }, stderr: { text: '' } }
+          }
+          if (spec.command === 'git rev-parse --verify HEAD') {
+            return { exitCode: 0, stdout: { text: 'before222' }, stderr: { text: '' } }
+          }
+          if (spec.command.startsWith('git merge --no-edit')) {
+            await chmod(workflowFile, 0o400)
+          }
+          if (spec.command.startsWith('git reset --hard')) {
+            await chmod(workflowFile, 0o600)
+          }
+          return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+        },
+      },
+    }
+
+    const result = await syncWorktree(ctx as never, { url: workflow.url })
+    assert.equal(result.ok, false)
+    if (!result.ok) assert.match(result.error, /持久化失败,已回滚同步提交/)
+    assert.equal(commands.includes("git reset --hard 'before222'"), true)
+    assert.equal((await loadWorkflow(workflow.key))?.baseRef, 'origin/main @ aaa0000')
+  } finally {
+    if (workflowFile) await chmod(workflowFile, 0o600).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(root, { recursive: true, force: true })

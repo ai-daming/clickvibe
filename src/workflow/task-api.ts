@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { finishTask, pushTaskLine } from '../agent/task-supervisor.ts'
 import { decodeLiveLogLine, type LiveLogEvent } from '../infra/live-output.ts'
 import { type LiveTask, liveTasks, liveWaiters } from '../infra/runtime.ts'
+import { mutateWorkflowStrict } from '../infra/workflow-mutation.ts'
 import {
   findTaskHistory,
   findWorkflowByIssue,
@@ -221,16 +222,13 @@ export function stopTask(
   task.status = 'stopped'
   const stopped = task.process?.kill() ?? false
   if (!task.process) finishTask(task, 'stopped', null)
-  void (async () => {
-    const workflow = await loadWorkflow(task.workflowKey)
-    if (!workflow) return
+  void mutateWorkflowStrict(task.workflowKey, (workflow) => {
     if (task.kind === 'dev') {
       workflow.stage = 'developing'
       workflow.devInterrupted = true
     } else {
       workflow.stage = 'review-ready'
     }
-    await saveWorkflow(workflow)
-  })()
+  }).catch(() => undefined)
   return { ok: true, taskId, stopped }
 }

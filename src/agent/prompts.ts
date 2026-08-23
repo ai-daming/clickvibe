@@ -23,7 +23,8 @@ import { fetchPrRestDetail, type GithubCommentRest } from '../github/reads.ts'
 import { githubRest, isGithubRateLimitError } from '../github/rest.ts'
 import { REVIEW_RESULT_RELATIVE_PATH } from '../infra/review-result.ts'
 import { readWorktreeHead, runCommand } from '../infra/runtime.ts'
-import { type IssueWorkflow, issueBodyHash, saveWorkflow } from '../infra/state.ts'
+import { type IssueWorkflow, issueBodyHash } from '../infra/state.ts'
+import { mutateWorkflowStrict } from '../infra/workflow-mutation.ts'
 import { frozenBaseHash, frozenRemoteBase } from './baseline.ts'
 import { shellQuote } from './develop.ts'
 import { buildStagePrompt, type PromptSnapshot, type SnapshotFreshness, selectReviewFeedback } from './prompt.ts'
@@ -69,7 +70,10 @@ export async function resolvePromptSnapshot(
     if (prComments) snapshot.comments.push(...prComments)
     workflow.issueSnapshot = snapshot
     if (snapshot.state === 'OPEN' || snapshot.state === 'CLOSED') workflow.issueState = snapshot.state
-    await saveWorkflow(workflow)
+    await mutateWorkflowStrict(workflow.key, (current) => {
+      current.issueSnapshot = snapshot
+      if (snapshot.state === 'OPEN' || snapshot.state === 'CLOSED') current.issueState = snapshot.state
+    }).catch(() => undefined)
     return { snapshot, freshness: 'current' }
   }
   const snapshot = workflow.issueSnapshot
@@ -77,7 +81,9 @@ export async function resolvePromptSnapshot(
     return { error: `无法刷新 Issue,且没有可回退的持久化需求快照: ${fetched.error}` }
   }
   workflow.issueSnapshot = snapshot
-  await saveWorkflow(workflow)
+  await mutateWorkflowStrict(workflow.key, (current) => {
+    current.issueSnapshot = snapshot
+  }).catch(() => undefined)
   return { snapshot, freshness: 'persisted', fetchError: fetched.error.slice(0, 500) }
 }
 
@@ -257,7 +263,7 @@ async function fetchPrBaseTarget(
   prNumber: string,
 ): Promise<{ ref: string; sha: string | null } | null> {
   try {
-    const pr = await fetchPrRestDetail(ctx, repoKey, prNumber)
+    const pr = await fetchPrRestDetail(ctx, repoKey, prNumber, true)
     const ref = String(pr.base?.ref ?? '').trim()
     const sha = String(pr.base?.sha ?? '').trim()
     return ref === '' ? null : { ref, sha: sha === '' ? null : sha }

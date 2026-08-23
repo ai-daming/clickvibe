@@ -46,6 +46,7 @@ import { collectMergeGateFailures, type MergeGateFailure, mergeGateRejection } f
 import { workflowBaseBranch } from './state-view.ts'
 import { baselineRestorePreview } from './baseline-restore.ts'
 import { type DevelopBaselinePreview, developBaselinePreview } from './develop-baseline-preview.ts'
+import { withWorkflowLock } from '../infra/workflow-lock.ts'
 
 export type MergeAuthorizationPreview =
   | {
@@ -72,7 +73,7 @@ export async function mergeAuthorizationPreview(ctx: Context, url: string): Prom
   const repoKey = `${parsed.owner}/${parsed.repo}`
   const workflow = await loadWorkflow(issueKey(repoKey, parsed.number))
   if (!workflow || !workflow.prNumber) throw new Error('未找到可合并的 workflow 或关联 PR')
-  const lookup = await fetchGithubPrFact(ctx, repoKey, workflow.branch, workflow.prNumber)
+  const lookup = await fetchGithubPrFact(ctx, repoKey, workflow.branch, workflow.prNumber, true, true)
   if (!lookup.known || !lookup.pr) throw new Error('无法读取实时 PR 状态,请稍后重试')
   if (lookup.pr.state === 'CLOSED') throw new Error('PR 已关闭且未合并,不能执行合并')
   if (lookup.pr.headRefName !== workflow.branch) throw new Error('实时 PR 分支与 workflow 不一致,拒绝合并')
@@ -108,6 +109,7 @@ export async function authorizeAgent(
       expiresAt: number
       preview: unknown
       target?: AgentAuthorizationInput['target']
+      restoreTarget?: AgentAuthorizationInput['restoreTarget']
       override?: AgentAuthorizationInput['override']
     }
   | { ok: false; error: string; gateFailures?: MergeGateFailure[] }
@@ -176,7 +178,12 @@ export async function authorizeAgent(
           },
           ...(mergeOverride ? { override: mergeOverride } : {}),
         }
-      : input
+      : restorePreview
+        ? {
+            ...input,
+            restoreTarget: { branch: restorePreview.baseBranch, hash: restorePreview.baseHash },
+          }
+        : input
     const authorization = authorizations.issue(authorizationInput, snapshot)
     // 预览沿用量剔除 ok 判别字段,保持既有合并预览结构不变。
     const mergePreviewBody = mergePreview ? (({ ok, ...fields }) => fields)(mergePreview) : null
@@ -210,6 +217,7 @@ export async function authorizeAgent(
             }
           : { action: input.action, agent: input.agent, url: input.url, digest: authorization.digest }),
       ...(mergePreview ? { target: authorizationInput.target } : {}),
+      ...(restorePreview ? { restoreTarget: authorizationInput.restoreTarget } : {}),
       ...(mergeOverride ? { override: mergeOverride } : {}),
     }
   } catch (error) {
@@ -230,7 +238,7 @@ export async function mergeAndCleanup(ctx: Context, payload: unknown): Promise<M
   if (mergingWorkflows.has(key)) return { ok: false, error: '该 PR 正在合并或清理,请等待当前请求完成' }
   mergingWorkflows.add(key)
   try {
-    return await mergeAndCleanupUnlocked(ctx, payload)
+    return await withWorkflowLock(key, async () => mergeAndCleanupUnlocked(ctx, payload))
   } finally {
     mergingWorkflows.delete(key)
   }
@@ -256,7 +264,7 @@ export async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): P
   }
   if (workflow.branch.trim() === '') return { ok: false, error: 'workflow 分支无效,拒绝清理' }
 
-  let lookup = await fetchGithubPrFact(ctx, repoKey, workflow.branch, workflow.prNumber)
+  let lookup = await fetchGithubPrFact(ctx, repoKey, workflow.branch, workflow.prNumber, true, true)
   if (!lookup.known || !lookup.pr) return { ok: false, error: '无法读取实时 PR 状态,状态未改变' }
   let pr = lookup.pr
   if (pr.state === 'CLOSED') return { ok: false, error: 'PR 已关闭且未合并,状态未改变' }
@@ -323,7 +331,7 @@ export async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): P
       } catch (error) {
         return { ok: false, error: `PR 合并失败: ${String(error instanceof Error ? error.message : error)}` }
       }
-      lookup = await fetchGithubPrFact(ctx, repoKey, workflow.branch, workflow.prNumber)
+      lookup = await fetchGithubPrFact(ctx, repoKey, workflow.branch, workflow.prNumber, true, true)
       if (!lookup.known || !lookup.pr || lookup.pr.state !== 'MERGED') {
         return { ok: false, error: 'gh pr merge 已返回,但实时 PR 状态尚未确认 MERGED;未开始清理' }
       }

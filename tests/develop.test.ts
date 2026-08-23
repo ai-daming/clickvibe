@@ -344,17 +344,33 @@ test('develop authorization binds the selected remote baseline', () => {
   )
 })
 
-test('restore-base authorization is a non-agent one-use action', () => {
+test('restore-base authorization binds the exact branch and hash', () => {
   const input = makeAuthorizationInput({
     action: 'restore-base',
     url: 'https://github.com/ai-daming/clickvibe/issues/60',
+    restoreTarget: { branch: 'release/deleted', hash: 'abc1234' },
   })
   assert.deepEqual(input, {
     action: 'restore-base',
     url: 'https://github.com/ai-daming/clickvibe/issues/60',
     agent: null,
     context: '',
+    restoreTarget: { branch: 'release/deleted', hash: 'abc1234' },
   })
+  const store = new AuthorizationStore()
+  const authorization = store.issue(input, null)
+  assert.equal(
+    store.consume(
+      authorization.id,
+      makeAuthorizationInput({
+        action: 'restore-base',
+        url: input.url,
+        restoreTarget: { branch: 'release/deleted', hash: 'def5678' },
+      }),
+      authorization.digest,
+    ),
+    null,
+  )
 })
 
 test('merge authorization input accepts only a well-formed manual override', () => {

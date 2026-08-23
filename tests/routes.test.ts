@@ -673,12 +673,20 @@ test('missing baseline restoration requires and consumes an exact one-use author
       headers,
     )) as {
       status: number
-      body: { authorizationId: string; authorizationDigest: string; preview: { baseline: string; baselineRef: string } }
+      body: {
+        authorizationId: string
+        authorizationDigest: string
+        restoreTarget: { branch: string; hash: string }
+        preview: { baseline: string; baselineRef: string }
+      }
     }
     assert.equal(authorized.status, 200)
     assert.equal(authorized.body.preview.baseline, 'origin/release/deleted')
     assert.equal(authorized.body.preview.baselineRef, 'abc1234')
-    const restored = await post(
+    assert.deepEqual(authorized.body.restoreTarget, { branch: 'release/deleted', hash: 'abc1234' })
+    workflow.baseRef = 'origin/release/deleted @ def5678'
+    await saveWorkflow(workflow)
+    const stale = await post(
       handler,
       '/clickvibe/api/sync',
       {
@@ -686,6 +694,32 @@ test('missing baseline restoration requires and consumes an exact one-use author
         restoreBase: true,
         authorizationId: authorized.body.authorizationId,
         authorizationDigest: authorized.body.authorizationDigest,
+        restoreTarget: authorized.body.restoreTarget,
+      },
+      headers,
+    )
+    assert.equal(stale.status, 400)
+    assert.equal(
+      commands.some((command) => command.startsWith('git push --force-with-lease=')),
+      false,
+    )
+
+    const refreshed = (await post(
+      handler,
+      '/clickvibe/api/authorize',
+      { action: 'restore-base', url: workflow.url },
+      headers,
+    )) as typeof authorized
+    assert.deepEqual(refreshed.body.restoreTarget, { branch: 'release/deleted', hash: 'def5678' })
+    const restored = await post(
+      handler,
+      '/clickvibe/api/sync',
+      {
+        url: workflow.url,
+        restoreBase: true,
+        authorizationId: refreshed.body.authorizationId,
+        authorizationDigest: refreshed.body.authorizationDigest,
+        restoreTarget: refreshed.body.restoreTarget,
       },
       headers,
     )
@@ -697,8 +731,9 @@ test('missing baseline restoration requires and consumes an exact one-use author
       {
         url: workflow.url,
         restoreBase: true,
-        authorizationId: authorized.body.authorizationId,
-        authorizationDigest: authorized.body.authorizationDigest,
+        authorizationId: refreshed.body.authorizationId,
+        authorizationDigest: refreshed.body.authorizationDigest,
+        restoreTarget: refreshed.body.restoreTarget,
       },
       headers,
     )

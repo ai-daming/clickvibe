@@ -204,12 +204,14 @@ export async function handleCommand(
     authorizationId?: unknown
     authorizationDigest?: unknown
     target?: unknown
+    restoreTarget?: unknown
     override?: unknown
   }
   const authorization = {
     ...(confirm.authorizationId !== undefined ? { authorizationId: String(confirm.authorizationId) } : {}),
     ...(confirm.authorizationDigest !== undefined ? { authorizationDigest: String(confirm.authorizationDigest) } : {}),
     ...(confirm.target !== undefined ? { target: confirm.target } : {}),
+    ...(confirm.restoreTarget !== undefined ? { restoreTarget: confirm.restoreTarget } : {}),
     ...(confirm.override !== undefined ? { override: confirm.override } : {}),
   }
   const execute = (method: string, body: Record<string, unknown>) =>
@@ -380,6 +382,7 @@ export async function handleCommand(
         authorizationDigest: authorized.authorizationDigest,
         expiresAt: authorized.expiresAt,
         ...(authorized.target ? { target: authorized.target } : {}),
+        ...(authorized.restoreTarget ? { restoreTarget: authorized.restoreTarget } : {}),
         ...(authorized.override ? { override: authorized.override } : {}),
       },
     },

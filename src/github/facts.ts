@@ -44,13 +44,14 @@ export async function fetchGithubPrFact(
   branch: string,
   prNumber: string | number | null,
   includeReviews = true,
+  force = false,
 ): Promise<GithubPrLookup> {
   const hasPrNumber = prNumber !== null && prNumber !== undefined
   try {
     const rest = githubRest(ctx)
     let raw: GithubPrDetailRest | undefined
     if (hasPrNumber) {
-      raw = await fetchPrRestDetail(ctx, repoKey, String(prNumber), false, 5_000)
+      raw = await fetchPrRestDetail(ctx, repoKey, String(prNumber), force, 5_000)
     } else {
       const owner = repoKey.split('/')[0]
       raw = await rest.cachedResource(
@@ -64,6 +65,7 @@ export async function fetchGithubPrFact(
               5_000,
             )
           )[0],
+        { force },
       )
     }
     if (!raw) return { known: true, pr: null }

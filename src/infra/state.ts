@@ -64,7 +64,7 @@ export interface IssueWorkflow {
   prNumber: string | null
   /** 最近一次从 GitHub 看到的 issue 状态(推导『已关闭→无动作』,issue #5)。 */
   issueState: 'OPEN' | 'CLOSED'
-  /** 开发基线:不可变远端分支 + 最近一次持久化的已 fetch tip。 */
+  /** 开发基线:不可变远端分支 + 最近一次成功合入 worktree 并持久化的 tip。 */
   baseRef: string | null
   /** GitHub merge 已确认后的不可逆事实与幂等清理进度。 */
   delivery?: WorkflowDelivery

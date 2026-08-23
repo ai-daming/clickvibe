@@ -84,7 +84,10 @@ test('authorized recovery recreates only the frozen missing base branch at its f
       events: [],
     } satisfies IssueWorkflow)
 
-    const restored = await restoreBaseBranch(realShellCtx() as never, { url: 'https://github.com/o/r/issues/60' })
+    const restored = await restoreBaseBranch(realShellCtx() as never, {
+      url: 'https://github.com/o/r/issues/60',
+      restoreTarget: { branch: 'release/deleted', hash: frozen },
+    })
     assert.deepEqual(restored, { ok: true, baseBranch: 'release/deleted', baseHash: frozen })
     const remoteHash = (
       await execFileAsync('git', [`--git-dir=${remote}`, 'rev-parse', 'refs/heads/release/deleted'])
@@ -160,7 +163,10 @@ test('sync advances the durable baseline tip before a deleted branch is restored
     assert.equal((await loadWorkflow(workflow.key))?.baseRef, `origin/release/deleted @ ${latest}`)
     await git('push', 'origin', '--delete', 'release/deleted')
 
-    const restored = await restoreBaseBranch(realShellCtx() as never, { url: workflow.url })
+    const restored = await restoreBaseBranch(realShellCtx() as never, {
+      url: workflow.url,
+      restoreTarget: { branch: 'release/deleted', hash: latest },
+    })
     assert.deepEqual(restored, { ok: true, baseBranch: 'release/deleted', baseHash: latest })
     const remoteHash = (
       await execFileAsync('git', [`--git-dir=${remote}`, 'rev-parse', 'refs/heads/release/deleted'])

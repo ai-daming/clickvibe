@@ -30,13 +30,13 @@ export function frozenRemoteBase(baseRef: string | null | undefined): string | n
   return requestedRemoteBase(raw.replace(/^refs\/remotes\//, ''))
 }
 
-/** Extract the last durably observed tip, usable after the remote branch is deleted. */
+/** Extract the last durably integrated tip, usable after the remote branch is deleted. */
 export function frozenBaseHash(baseRef: string | null | undefined): string | null {
   const match = String(baseRef ?? '').match(/\s+@\s+([0-9a-f]{4,64})\s*$/i)
   return match?.[1] ?? null
 }
 
-/** Advance only the selected branch's durable tip; the branch identity never changes. */
+/** Advance only the selected branch's durably integrated tip; the branch identity never changes. */
 export function updateBaseTip(baseRef: string | null | undefined, remoteBase: string, hash: string): string {
   const selected = frozenRemoteBase(baseRef)
   const requested = requestedRemoteBase(remoteBase)

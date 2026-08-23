@@ -282,8 +282,9 @@ export async function startDevelop(
         attachAgentProcess(ctx, live, agentCommand, workflow.worktree, prompt, async (exitCode, sessionId) => {
           const durationMs = Math.max(0, Date.now() - live.startedAt)
           pushTaskLine(live, `[clickvibe] ${agent} 结束,退出码 ${exitCode}`)
-          const reloaded = await loadWorkflow(workflow.key)
-          if (reloaded) {
+          await withWorkflowLock(workflow.key, async () => {
+            const reloaded = await loadWorkflow(workflow.key)
+            if (!reloaded) return
             const fixedIssues = reloaded.reviewResult?.passed === false ? [...reloaded.reviewResult.issues] : []
             if (applyDevRunOutcome(reloaded, live.status, exitCode, sessionId, agent)) {
               // 开发完成(含 rework):旧的 review 结论已归档到 events 历史,
@@ -302,16 +303,17 @@ export async function startDevelop(
               )
             }
             await saveWorkflow(reloaded)
-          }
+          })
         })
       } catch (error) {
         pushTaskLine(live, `[clickvibe] 失败: ${String(error instanceof Error ? error.message : error)}`)
-        const reloaded = await loadWorkflow(workflow.key)
-        if (reloaded) {
+        await withWorkflowLock(workflow.key, async () => {
+          const reloaded = await loadWorkflow(workflow.key)
+          if (!reloaded) return
           reloaded.stage = 'developing'
           reloaded.devInterrupted = true
           await saveWorkflow(reloaded)
-        }
+        })
         finishTask(live, 'failed', 1)
       }
     })()

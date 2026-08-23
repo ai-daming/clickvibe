@@ -27,14 +27,29 @@ export async function restoreBaseBranch(
   payload: unknown,
 ): Promise<{ ok: true; baseBranch: string; baseHash: string } | { ok: false; error: string }> {
   try {
-    const url = String((payload as { url?: unknown } | undefined)?.url ?? '').trim()
+    const body = (payload ?? {}) as { url?: unknown; restoreTarget?: unknown }
+    const url = String(body.url ?? '').trim()
     const parsed = parseUrl(url)
     if (!parsed || parsed.kind !== 'issue') throw new Error('恢复基线目标必须是 GitHub Issue URL')
     const repoKey = `${parsed.owner}/${parsed.repo}`
     const config = await loadConfig()
     const configured = config.repos[repoKey]
     if (!configured) throw new Error(`未配置项目 ${repoKey}`)
+    const rawTarget = body.restoreTarget as Record<string, unknown> | undefined
+    const authorizedTarget = {
+      baseBranch: String(rawTarget?.branch ?? '').trim(),
+      baseHash: String(rawTarget?.hash ?? '').trim(),
+    }
+    if (
+      !/^[A-Za-z0-9._/-]+$/.test(authorizedTarget.baseBranch) ||
+      !/^[0-9a-f]{4,64}$/i.test(authorizedTarget.baseHash)
+    ) {
+      throw new Error('恢复基线缺少精确授权目标')
+    }
     const target = await baselineRestorePreview(url)
+    if (target.baseBranch !== authorizedTarget.baseBranch || target.baseHash !== authorizedTarget.baseHash) {
+      throw new Error('恢复基线目标已变化,请刷新预览并重新确认')
+    }
     await restoreMissingOriginBranch(ctx, expandHome(configured), target.baseBranch, target.baseHash)
     return { ok: true, ...target }
   } catch (error) {

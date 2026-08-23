@@ -1,12 +1,12 @@
 import { createHash, randomBytes } from 'node:crypto'
+import { type RestoreAuthorizationTarget, restoreAuthorizationTarget } from './authorization-target.ts'
 import type { PromptSnapshot } from './contracts.ts'
 
 export type DevelopAgent = 'codex' | 'claude' | 'dryrun'
 export type AgentAction = 'develop' | 'review' | 'resume' | 'merge' | 'restore-base'
 
 /**
- * ClickVibe 自身合并门禁项(issue #49)。门禁拒绝时可由用户人工放行逐项跳过;
- * GitHub 侧保护(protected branch / required reviews)不在其中,永远不可跳过。
+ * ClickVibe 自身合并门禁项(issue #49);GitHub 侧保护永远不可跳过。
  */
 export const MERGE_OVERRIDE_GATES = [
   'review-hash', // 实时 PR HEAD 与最近一次通过的 review 结论哈希不一致
@@ -252,7 +252,6 @@ export interface AgentAuthorizationInput {
   url: string
   agent: 'codex' | 'claude' | null
   context: string
-  /** First-development remote baseline; when present it is bound into the one-use digest. */
   baseline?: string
   target?: {
     prNumber: string
@@ -260,6 +259,7 @@ export interface AgentAuthorizationInput {
     head: string
     mergeFlag: '--merge'
   }
+  restoreTarget?: RestoreAuthorizationTarget
   /** 人工放行(仅 merge):被用户二次确认跳过的门禁项与放行原因;计入授权摘要,不可篡改。 */
   override?: {
     skipped: MergeOverrideGate[]
@@ -376,6 +376,7 @@ export function makeAuthorizationInput(value: {
   context?: unknown
   baseline?: unknown
   target?: unknown
+  restoreTarget?: unknown
   override?: unknown
 }): AgentAuthorizationInput {
   const action = String(value.action ?? '') as AgentAction
@@ -410,6 +411,10 @@ export function makeAuthorizationInput(value: {
     }
     target = { prNumber, branch, head, mergeFlag: '--merge' }
   }
+  let restoreTarget: AgentAuthorizationInput['restoreTarget']
+  if (action === 'restore-base' && value.restoreTarget !== undefined) {
+    restoreTarget = restoreAuthorizationTarget(value.restoreTarget)
+  }
   let override: AgentAuthorizationInput['override']
   if (
     action === 'merge' &&
@@ -436,6 +441,7 @@ export function makeAuthorizationInput(value: {
     context: typeof value.context === 'string' ? value.context.trim() : '',
     ...(baseline ? { baseline } : {}),
     ...(target ? { target } : {}),
+    ...(restoreTarget ? { restoreTarget } : {}),
     ...(override ? { override } : {}),
   }
 }

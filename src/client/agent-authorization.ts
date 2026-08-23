@@ -8,6 +8,7 @@ export interface AuthorizationCapability {
   authorizationDigest: string
   baseline?: string
   target?: { prNumber: string; branch: string; head: string; mergeFlag: '--merge' }
+  restoreTarget?: { branch: string; hash: string }
 }
 
 export interface PendingDevelopAuthorization extends AuthorizationCapability {
