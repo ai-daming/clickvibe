@@ -3,7 +3,7 @@ import { clearedContext, contextToSubmit, toggledContext } from './action-contex
 import { type AuthorizationPreview, authorizationSummary, expectedDevelopSnapshot } from './dev-authorization.ts'
 import { useDevStream } from './dev-stream.ts'
 import { type MergeGateFailure, type NextAction, OVERRIDE_REASON_MAX, type Workflow, apiCall } from './domain.ts'
-import { githubCompareUrl } from './runtime.ts'
+import { githubCompareUrl, latestDevelopmentEvent } from './runtime.ts'
 import { type GhIssue } from './views/issue-view.tsx'
 export function useDevSection({
   url,
@@ -35,7 +35,7 @@ export function useDevSection({
   const stage = derived?.status ?? workflow?.stage ?? 'idle'
   const nextAction = derived?.nextAction
   const workflowEvents = workflow?.events ?? []
-  const lastDelivery = [...workflowEvents].reverse().find((event) => event.kind === 'dev' || event.kind === 'rework')
+  const lastDelivery = latestDevelopmentEvent(workflowEvents)
   const refresh = async () => {
     const res = await apiCall<{ ok: true; workflows: Workflow[] }>('state', { url })
     if (res.ok) onWorkflow(res.workflows.find((item) => item.url === url) ?? null)
@@ -451,8 +451,7 @@ export function useDevSection({
             : busy === 'developing'
               ? '启动中…'
               : null
-  // 人工放行入口(issue #49):合并尝试被门禁拒绝后(动态),或 review 已通过
-  // 但结论/契约过期、面板停留在「重新 Review」/「无法读取契约」时(静态)。
+  // 人工放行入口(issue #49):门禁拒绝,或 review 已通过但结论/契约过期时。
   const overrideEntryVisible =
     overrideGates !== null ||
     Boolean(
@@ -484,6 +483,7 @@ export function useDevSection({
     mergeWithOverride,
     overrideEntryVisible,
     overrideGates,
+    openStream,
     runAction,
     setAgentChoice,
     setContextText,

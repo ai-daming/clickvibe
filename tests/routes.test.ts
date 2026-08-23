@@ -1480,10 +1480,24 @@ test('invalid exact dev session falls back once to a fresh session on the same t
     await mkdir(worktree, { recursive: true })
     const workflow = interruptedWorkflow('o-r-917', 'https://github.com/o/r/issues/917', worktree)
     workflow.reviewResult = { passed: false, issues: ['修复竞态', '补充失败测试'] }
+    workflow.events.push({
+      kind: 'review',
+      at: '2026-08-22T00:00:00Z',
+      hash: 'old123',
+      round: 1,
+      agent: 'claude',
+      verdict: { passed: false, issues: ['修复竞态', '补充失败测试'] },
+      publication: {
+        target: 'pr',
+        status: 'posted',
+        url: 'https://github.com/o/r/pull/29#issuecomment-99',
+      },
+    })
     await saveWorkflow(workflow)
     await appendLog(workflow.key, 'dev', 'prior run must be rotated')
     const starts: Array<{ command: string; workdir?: string; prompt: string }> = []
     const comments: Array<{ command: string; body: string }> = []
+    const reviewUpdates: Array<{ command: string; body: string }> = []
     const currentIssue = {
       url: workflow.url,
       title: 'resume issue',
@@ -1500,10 +1514,20 @@ test('invalid exact dev session falls back once to a fresh session on the same t
     ]
     const handler = createHandler(
       async (spec) => {
+        if (spec.command.includes('/issues/comments/99') && spec.command.includes('PATCH')) {
+          reviewUpdates.push({ command: spec.command, body: spec.stdin ?? '' })
+          return { exitCode: 0, stdout: { text: '{}' }, stderr: { text: '' } }
+        }
         const api = githubApi(spec.command, { item: currentIssue, prComments: reviewComments })
         if (api) return api
         if (spec.command === 'git rev-parse --short HEAD')
           return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
+        if (spec.command.startsWith('git merge-base '))
+          return { exitCode: 0, stdout: { text: 'base123\n' }, stderr: { text: '' } }
+        if (spec.command.startsWith('git log '))
+          return { exitCode: 0, stdout: { text: 'abc123\u001f修复 review 意见\n' }, stderr: { text: '' } }
+        if (spec.command.startsWith('git diff --numstat '))
+          return { exitCode: 0, stdout: { text: '12\t3\tsrc/fix.ts\n' }, stderr: { text: '' } }
         if (spec.command.startsWith('gh issue comment')) {
           comments.push({ command: spec.command, body: spec.stdin ?? '' })
           return {
@@ -1585,11 +1609,28 @@ test('invalid exact dev session falls back once to a fresh session on the same t
     assert.equal(reloaded?.devSessionId, 'new-session')
     assert.equal(reloaded?.devSessionAgent, 'codex')
     assert.equal(comments.length, 1)
+    assert.equal(reviewUpdates.length, 1)
+    assert.match(JSON.parse(reviewUpdates[0].body).body, /- \[已于第 2 轮修复\] 修复竞态/)
+    assert.match(JSON.parse(reviewUpdates[0].body).body, /- \[已于第 2 轮修复\] 补充失败测试/)
     assert.match(comments[0].command, /github\.com\/o\/r\/pull\/29/)
     assert.match(comments[0].body, /^== Dev Meta ==\n- event: dev\n- commit: abc123\n- issue: #917\n- fixed: 2/m)
-    assert.match(comments[0].body, /- 修复竞态\n- 补充失败测试/)
-    assert.equal(reloaded?.events.at(-1)?.publication?.status, 'posted')
-    assert.equal(reloaded?.events.at(-1)?.publication?.target, 'pr')
+    assert.match(comments[0].body, /- round: 2\n- stats: commits=1 filesChanged=1 insertions=12 deletions=3/)
+    assert.match(comments[0].body, /- \[已于第 2 轮修复\] 修复竞态\n- \[已于第 2 轮修复\] 补充失败测试/)
+    const delivery = reloaded?.events.at(-1)
+    assert.equal(delivery?.kind, 'resume')
+    assert.equal(delivery?.round, 2)
+    assert.equal(delivery?.agent, 'codex')
+    assert.equal(delivery?.taskId, resumed.body.taskId)
+    assert.equal(typeof delivery?.durationMs, 'number')
+    assert.deepEqual(delivery?.stats, {
+      commits: [{ hash: 'abc123', subject: '修复 review 意见' }],
+      filesChanged: 1,
+      insertions: 12,
+      deletions: 3,
+      diffstat: [{ path: 'src/fix.ts', insertions: 12, deletions: 3 }],
+    })
+    assert.equal(delivery?.publication?.status, 'posted')
+    assert.equal(delivery?.publication?.target, 'pr')
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
@@ -1928,6 +1969,12 @@ test('invalid exact review session clears the stale id and falls back to a fresh
         if (api) return api
         if (spec.command === 'git rev-parse --short HEAD')
           return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
+        if (spec.command.startsWith('git merge-base '))
+          return { exitCode: 0, stdout: { text: 'base123\n' }, stderr: { text: '' } }
+        if (spec.command.startsWith('git log '))
+          return { exitCode: 0, stdout: { text: 'abc123\u001f完成实现\n' }, stderr: { text: '' } }
+        if (spec.command.startsWith('git diff --numstat '))
+          return { exitCode: 0, stdout: { text: '8\t1\tsrc/reviewed.ts\n' }, stderr: { text: '' } }
         if (spec.command.startsWith('gh issue comment')) {
           comments.push({ command: spec.command, body: spec.stdin ?? '' })
           return {
@@ -2020,6 +2067,10 @@ test('invalid exact review session clears the stale id and falls back to a fresh
       bodyHash: issueBodyHash(reviewedBody),
       updatedAt: reviewedUpdatedAt,
     })
+    assert.equal(reloaded?.events.at(-1)?.round, 1)
+    assert.equal(reloaded?.events.at(-1)?.agent, 'codex')
+    assert.equal(reloaded?.events.at(-1)?.taskId, reviewed.body.taskId)
+    assert.equal(reloaded?.events.at(-1)?.stats?.filesChanged, 1)
     assert.ok(completed.delta.some((line) => line.includes('review 结束,退出码 0')))
     assert.ok(completed.delta.some((line) => line.includes('review 结论来源')))
     assert.equal(reloaded?.reviewResult?.commentUrl, 'https://github.com/o/r/pull/29#issuecomment-2')
@@ -3437,7 +3488,7 @@ test('resume (rework) carries the user context next to the review feedback and a
     assert.match(prompts[0], /修复竞态/)
     assert.match(prompts[0], /重点先修竞态,再补并发测试/)
     const reloaded = await loadWorkflow(workflow.key)
-    assert.equal(reloaded?.events.at(-1)?.kind, 'rework')
+    assert.equal(reloaded?.events.at(-1)?.kind, 'resume')
     assert.equal(reloaded?.events.at(-1)?.userContext, userContext)
     assert.equal(typeof reloaded?.events.at(-1)?.durationMs, 'number')
   } finally {

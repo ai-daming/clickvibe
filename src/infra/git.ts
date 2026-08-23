@@ -21,10 +21,65 @@ import type { Context } from '@deepseek-ai/cordis'
 import { shellQuote } from './develop-core.ts'
 import { runCommand } from './runtime.ts'
 import { type IssueContractSnapshot } from './state.ts'
+import type { DeliveryStats } from './contracts.ts'
 
 export interface GitCompare {
   behind: number
   ahead: number
+}
+
+/** Freeze commit and per-file numstat facts for fork-point..head. */
+export async function readDeliveryStats(
+  ctx: Context,
+  workdir: string,
+  baseBranch: string,
+  head: string,
+): Promise<DeliveryStats | undefined> {
+  try {
+    const policy = { mode: 'read-only' as const, workspaceRoot: workdir }
+    const execute = async (command: string): Promise<string | null> => {
+      const spec = ctx.shell.resolve({ command, workdir, timeoutMs: 10_000, sandboxPolicy: policy })
+      const result = await ctx.shell.run(spec)
+      return result.exitCode === 0 ? result.stdout.text : null
+    }
+    const base = (await execute(`git merge-base ${shellQuote(`origin/${baseBranch}`)} ${shellQuote(head)}`))?.trim()
+    if (!base) return undefined
+    const range = `${base}..${head}`
+    const [logOutput, numstatOutput] = await Promise.all([
+      execute(`git log --format='%h%x1f%s' ${shellQuote(range)}`),
+      execute(`git diff --numstat --no-renames ${shellQuote(range)}`),
+    ])
+    if (logOutput === null || numstatOutput === null) return undefined
+    const commits = logOutput
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => {
+        const separator = line.indexOf('\u001f')
+        return separator < 0
+          ? { hash: line.trim(), subject: '' }
+          : { hash: line.slice(0, separator), subject: line.slice(separator + 1) }
+      })
+    const diffstat = numstatOutput
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => {
+        const [added, removed, ...pathParts] = line.split('\t')
+        return {
+          path: pathParts.join('\t'),
+          insertions: added === '-' ? null : Number(added),
+          deletions: removed === '-' ? null : Number(removed),
+        }
+      })
+    return {
+      commits,
+      filesChanged: diffstat.length,
+      insertions: diffstat.reduce((total, file) => total + (file.insertions ?? 0), 0),
+      deletions: diffstat.reduce((total, file) => total + (file.deletions ?? 0), 0),
+      diffstat,
+    }
+  } catch {
+    return undefined
+  }
 }
 
 interface PrFactForDerivation {

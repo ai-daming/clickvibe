@@ -15,6 +15,11 @@ export function extractGithubCommentUrl(output: string): string | undefined {
     .find((line) => GITHUB_COMMENT_URL.test(line))
 }
 
+export function extractGithubCommentId(url: string): string | undefined {
+  if (!GITHUB_COMMENT_URL.test(url)) return undefined
+  return url.match(/#issuecomment-(\d+)$/)?.[1]
+}
+
 /** Keep publication wording in one tested place for the delivery timeline UI. */
 export function deliveryPublicationLabel(publication: DeliveryPublication | undefined): string {
   if (!publication) return '本地事件'

@@ -137,7 +137,17 @@ export async function resumeDevelop(
           // rework 完成:旧的 review 结论已归档到 events,回到"待 review",
           // 不能继续显示"Review 未通过"让用户无限重复点
           const head = await readWorktreeHead(ctx, workflow.worktree)
-          await recordDevDelivery(ctx, reloaded, agent, head, fixedIssues, 'rework', extraContext, durationMs)
+          await recordDevDelivery(
+            ctx,
+            reloaded,
+            agent,
+            head,
+            fixedIssues,
+            'resume',
+            extraContext,
+            live.taskId,
+            durationMs,
+          )
         }
         await saveWorkflow(reloaded)
       }

@@ -1,9 +1,9 @@
-import { deliveryPublicationLabel } from '../runtime.ts'
-import { DeliveryDuration, RunningDuration } from '../duration.ts'
-import { type Workflow, fmtTime, stageLabel } from '../domain.ts'
+import { RunningDuration } from '../duration.ts'
+import { type Workflow, stageLabel } from '../domain.ts'
 import { type GhIssue } from './issue-view.tsx'
 import { LiveTerminal } from './live-terminal.tsx'
 import { useDevSection } from '../dev-state.ts'
+import { DeliveryTimeline } from './delivery-timeline.tsx'
 
 export function DevSection({
   url,
@@ -41,6 +41,7 @@ export function DevSection({
     mergeWithOverride,
     overrideEntryVisible,
     overrideGates,
+    openStream,
     runAction,
     setAgentChoice,
     setContextText,
@@ -293,67 +294,7 @@ export function DevSection({
         </details>
       ) : null}
 
-      {/* 交付流水:本地事件与其公开 GitHub 评论状态,按时间倒序 */}
-      {workflowEvents.length > 0 ? (
-        <div className="cv-timeline">
-          <div className="cv-timeline-head">📜 交付流水 · 本地事件 / GitHub 评论</div>
-          {[...workflowEvents].reverse().map((ev, i) => (
-            <div key={i} className="cv-tl-row">
-              <span className={`cv-tl-kind cv-tl-kind-${ev.kind}`}>
-                {ev.kind === 'dev'
-                  ? '开发'
-                  : ev.kind === 'rework'
-                    ? '返工'
-                    : ev.kind === 'review'
-                      ? 'Review'
-                      : ev.kind === 'resume'
-                        ? '恢复'
-                        : ev.kind === 'merge-override'
-                          ? '人工放行'
-                          : '备注'}
-              </span>
-              <span className="cv-tl-time">{fmtTime(ev.at)}</span>
-              <DeliveryDuration kind={ev.kind} durationMs={ev.durationMs} />
-              {ev.hash ? <code className="cv-tl-hash">{ev.hash}</code> : null}
-              {ev.kind === 'merge-override' ? (
-                <span className="cv-tl-note" title={ev.reason}>
-                  跳过 {(ev.skippedLabels ?? ev.skipped ?? []).join('、')} · 操作者 @{ev.operator ?? '?'} · 原因:
-                  {ev.reason ?? '?'}
-                </span>
-              ) : null}
-              {ev.kind === 'review' && ev.verdict ? (
-                <span className={ev.verdict.passed ? 'cv-tl-verdict cv-tl-pass' : 'cv-tl-verdict cv-tl-fail'}>
-                  {ev.verdict.passed ? '✅ 通过' : `❌ ${ev.verdict.issues.length} 个问题`}
-                </span>
-              ) : null}
-              {(ev.kind === 'dev' || ev.kind === 'rework') && ev.fixed !== undefined ? (
-                <span className="cv-tl-note">修复 {ev.fixed} 个问题</span>
-              ) : null}
-              {ev.note ? <span className="cv-tl-note">{ev.note}</span> : null}
-              {ev.userContext ? (
-                <span className="cv-tl-user-context" title={ev.userContext}>
-                  用户附加说明:{ev.userContext.length > 80 ? `${ev.userContext.slice(0, 80)}…` : ev.userContext}
-                </span>
-              ) : null}
-              {ev.publication?.status === 'posted' ? (
-                ev.publication.url ? (
-                  <a className="cv-tl-public" href={ev.publication.url} target="_blank" rel="noreferrer">
-                    {deliveryPublicationLabel(ev.publication)}
-                  </a>
-                ) : (
-                  <span className="cv-tl-public">{deliveryPublicationLabel(ev.publication)}</span>
-                )
-              ) : ev.publication?.status === 'failed' ? (
-                <span className="cv-tl-publish-fail" title={ev.publication.error}>
-                  {deliveryPublicationLabel(ev.publication)}
-                </span>
-              ) : (
-                <span className="cv-tl-local">{deliveryPublicationLabel(ev.publication)}</span>
-              )}
-            </div>
-          ))}
-        </div>
-      ) : null}
+      <DeliveryTimeline events={workflowEvents} onOpenLog={(taskId) => void openStream(taskId, false)} />
     </div>
   )
 }
