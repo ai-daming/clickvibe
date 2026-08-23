@@ -24,7 +24,13 @@ import { githubRest, isGithubRateLimitError } from '../github/rest.ts'
 import { REVIEW_RESULT_RELATIVE_PATH } from '../infra/review-result.ts'
 import { readWorktreeHead } from '../infra/runtime.ts'
 import { type IssueWorkflow, issueBodyHash, saveWorkflow } from '../infra/state.ts'
-import { buildStagePrompt, type PromptSnapshot, type SnapshotFreshness, selectReviewFeedback } from './prompt.ts'
+import {
+  buildStagePrompt,
+  type PromptSnapshot,
+  type SnapshotFreshness,
+  selectReviewFeedback,
+  snapshotWithoutReviewFeedback,
+} from './prompt.ts'
 
 export interface ResolvedPromptSnapshot {
   snapshot: PromptSnapshot
@@ -122,6 +128,7 @@ export async function buildReviewPrompt(
   reviewedHead: string,
   sessionId: string | null = null,
   extraContext = '',
+  freshSession = false,
 ): Promise<string> {
   // 解析 base:PR 有 baseRefName(若记录过),否则尝试 origin/HEAD 主干
   let base = 'origin/main'
@@ -131,9 +138,11 @@ export async function buildReviewPrompt(
   }
   const prUrl = workflow.prNumber ? `https://github.com/${workflow.repoKey}/pull/${workflow.prNumber}` : '未关联'
   const contractHash = issueBodyHash(resolved.snapshot.body)
+  const promptSnapshot = freshSession ? snapshotWithoutReviewFeedback(resolved.snapshot) : resolved.snapshot
   return buildStagePrompt({
     stage: 'review',
     ...resolved,
+    snapshot: promptSnapshot,
     worktree: workflow.worktree,
     status: [
       `分支: ${workflow.branch}`,
