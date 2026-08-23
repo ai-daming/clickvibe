@@ -146,7 +146,10 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 .cv-terminal-detach { border: 0; border-radius: 4px; padding: 3px 6px; background: #21262d; color: #c9d1d9; cursor: pointer; font: inherit; }
 .cv-terminal-detach:hover { background: #30363d; }
 .cv-dev-log { min-height: 72px; max-height: 200px; overflow: auto; overscroll-behavior: contain; padding: 8px 10px; font: 11px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; scrollbar-color: #30363d #0d1117; }
-.cv-terminal-line { min-height: 1.55em; }
+.cv-terminal-line, .cv-terminal-block { min-height: 1.55em; }
+.cv-terminal-block-text { white-space: pre-wrap; }
+.cv-terminal-block-toggle { margin: 3px 0 5px 12px; padding: 2px 7px; border: 1px solid #30363d; border-radius: 4px; background: #161b22; color: #8b949e; cursor: pointer; font: inherit; }
+.cv-terminal-block-toggle:hover { border-color: #484f58; color: #c9d1d9; background: #21262d; }
 .cv-terminal-line-system { margin: 2px 0; padding: 1px 5px; border-left: 2px solid #58a6ff; color: #79c0ff; background: rgb(56 139 253 / 9%); }
 .cv-terminal-line-stage { color: #d2a8ff; }
 .cv-terminal-line-command { color: #7ee787; font-weight: 600; }
