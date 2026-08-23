@@ -448,15 +448,15 @@ export function PanelContent() {
                               }
                             />
                             <span className={`cv-stage cv-stage-${status}`}>{stageLabel(status, issue.workflow)}</span>
-                            {(status === 'developing' || status === 'reviewing') &&
-                            issue.workflow.runStartedAt !== null &&
-                            issue.workflow.runStartedAt !== undefined ? (
-                              <RunningDuration startedAt={issue.workflow.runStartedAt} />
-                            ) : null}
                             <div className="cv-issue-row-main">
                               <span className="cv-issue-row-title" onClick={() => void openIssue(issue)}>
                                 #{issue.number} {issue.title}
                               </span>
+                              {(status === 'developing' || status === 'reviewing') &&
+                              issue.workflow.runStartedAt !== null &&
+                              issue.workflow.runStartedAt !== undefined ? (
+                                <RunningDuration startedAt={issue.workflow.runStartedAt} />
+                              ) : null}
                               <div className="cv-issue-row-meta">
                                 <span>分支: {issue.workflow.branch}</span>
                                 {(derived?.behindBase ?? 0) > 0 ? (

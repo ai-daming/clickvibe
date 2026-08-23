@@ -48,6 +48,7 @@
     "react-dom": "^18.2.0"
   },
   "dependencies": {
+    "marked": "^18.0.10",
     "yaml": "^2.9.0"
   },
   "devDependencies": {

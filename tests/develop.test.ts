@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { parseAgentChunk } from '../src/agent/agent-stream.ts'
 import {
   AuthorizationStore,
   LineLog,
@@ -17,6 +18,7 @@ import {
   parseDependencies,
   validatePrivilegedRequest,
 } from '../src/agent/develop.ts'
+import { LineBuffer } from '../src/infra/line-buffer.ts'
 
 test('parseAgent accepts only the three supported agents', () => {
   assert.equal(parseAgent('codex'), 'codex')
@@ -369,16 +371,34 @@ test('merge authorization input accepts only a well-formed manual override', () 
   )
 })
 
-test('LineLog bounds a never-terminated line and handles CRLF split across chunks', () => {
+test('LineLog preserves a never-terminated long line and handles CRLF split across chunks', () => {
   const log = new LineLog(4)
-  log.appendChunk('x'.repeat(LineLog.MAX_LINE_CHARS + 10))
-  log.appendChunk('discarded\r')
+  const longLine = `${'x'.repeat(70_000)} with /Users/example/project and /tmp/clickvibe`
+  log.appendChunk(longLine.slice(0, 65_000))
+  log.appendChunk(`${longLine.slice(65_000)}\r`)
   log.appendChunk('\nnext\r')
   log.appendChunk('\n')
   const read = log.read(0)
   assert.equal(read.lines.length, 2)
-  assert.match(read.lines[0], /单行日志已截断/)
+  assert.equal(read.lines[0], longLine)
   assert.equal(read.lines[1], 'next')
+})
+
+test('LineBuffer consumes complete raw events while retaining only the partial line', () => {
+  const buffer = new LineBuffer()
+  const events = Array.from({ length: 2001 }, (_, index) =>
+    JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: `m${index}` } }),
+  )
+  const lines = buffer.appendChunk(`${events.join('\n')}\npartial`)
+  const parsed = parseAgentChunk('codex', lines.join('\n'))
+  assert.equal(parsed.lines.length, 2001)
+  assert.equal(parsed.lines[0].text, '💬 m0')
+  assert.equal(parsed.lines[2000].text, '💬 m2000')
+  assert.deepEqual(buffer.appendChunk(' tail\r'), [])
+  assert.deepEqual(buffer.appendChunk('\nnext\r'), ['partial tail'])
+  assert.deepEqual(buffer.appendChunk('\nfinal'), ['next'])
+  assert.deepEqual(buffer.flush(), ['final'])
+  assert.deepEqual(buffer.flush(), [])
 })
 
 test('parseDependencies extracts Blocked by numbers from the 依赖 section', () => {
