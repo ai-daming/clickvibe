@@ -140,6 +140,7 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 .cv-stage-review-ready { background: #fff8c5; color: #9a6700; }
 .cv-stage-reviewing { background: #fbefff; color: #8250df; }
 .cv-stage-passed { background: #dafbe1; color: #1a7f37; }
+.cv-running-duration { color: #57606a; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; white-space: nowrap; }
 .cv-dev-btn.cv-dev-warn { background: #d4a72c; color: #ffffff; }
 .cv-dev-btn.cv-dev-review { background: #8250df; color: #ffffff; }
 .cv-review-fail { display: flex; flex-direction: column; gap: 6px; }
@@ -180,6 +181,7 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 .cv-override-entry { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; margin: 4px 0; }
 .cv-override-gates { margin: 0; padding-left: 18px; font-size: 11.5px; color: #9a6700; }
 .cv-tl-time { color: #8c959f; }
+.cv-tl-duration { color: #57606a; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; }
 .cv-tl-hash { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; background: #eff1f3; padding: 0 4px; border-radius: 4px; }
 .cv-tl-verdict { font-weight: 600; }
 .cv-tl-pass { color: #1a7f37; }

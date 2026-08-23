@@ -6,6 +6,8 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
 import { deriveWorkflowState, enrichWorkflowStates, type IssueWorkflow } from '../src/index.ts'
+import { LineLog } from '../src/infra/develop-core.ts'
+import { liveTasks } from '../src/infra/runtime.ts'
 import { issueBodyHash } from '../src/infra/state.ts'
 
 const execFileAsync = promisify(execFile)
@@ -91,6 +93,33 @@ function workflow(overrides: Partial<IssueWorkflow> = {}): IssueWorkflow {
     ...overrides,
   }
 }
+
+test('state exposes only the current in-memory task start time', async () => {
+  const wf = workflow({ stage: 'developing', devTaskId: 'dev-live' })
+  liveTasks.set('dev-live', {
+    taskId: 'dev-live',
+    workflowKey: wf.key,
+    workflow: wf,
+    kind: 'dev',
+    agent: 'codex',
+    startedAt: 1_720_000_000_000,
+    log: new LineLog(10),
+    rawLog: new LineLog(10),
+    rawCursor: 0,
+    closed: false,
+    status: 'running',
+    exitCode: null,
+    sessionId: null,
+  })
+  try {
+    assert.equal((await deriveWorkflowState(ctx, wf)).runStartedAt, 1_720_000_000_000)
+    liveTasks.get('dev-live')!.closed = true
+    assert.equal((await deriveWorkflowState(ctx, wf)).runStartedAt, null)
+  } finally {
+    liveTasks.delete('dev-live')
+  }
+  assert.equal((await deriveWorkflowState(ctx, wf)).runStartedAt, null)
+})
 
 test('state view derives worktree/main/remote hashes, ahead-behind and sync need', async () => {
   const { root, worktree, git, wt, baseA } = await setupRepo()
