@@ -60,6 +60,7 @@ function fakeShell(scenario: Scenario, commands: string[]) {
 function createHandler(run: (spec: { command: string; workdir?: string }) => Promise<unknown>): RequestListener {
   let handler: RequestListener | null = null
   apply({
+    skills: { register: () => () => {} },
     webServer: {
       register(route: { handler: RequestListener }) {
         handler = route.handler
