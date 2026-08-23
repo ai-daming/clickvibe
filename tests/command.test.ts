@@ -11,7 +11,6 @@ import { issueBodyHash, saveWorkflow, type IssueWorkflow } from '../src/infra/st
 function included(body: unknown, status = 200): string {
   return [`HTTP/2.0 ${status} ${status === 200 ? 'OK' : 'Error'}`, '', JSON.stringify(body)].join('\n')
 }
-
 function restIssue(item: Record<string, unknown>): Record<string, unknown> {
   const url = String(item.url ?? '')
   return {
@@ -55,6 +54,7 @@ function createHandler(
 ): RequestListener {
   let handler: RequestListener | null = null
   const ctx = {
+    skills: { register: () => () => {} },
     webServer: {
       register(route: { handler: RequestListener }) {
         handler = route.handler

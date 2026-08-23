@@ -111,6 +111,7 @@ function createHandler(
 ): RequestListener {
   let handler: RequestListener | null = null
   const ctx = {
+    skills: { register: () => () => {} },
     webServer: {
       register(route: { handler: RequestListener }) {
         handler = route.handler

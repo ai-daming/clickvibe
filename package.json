@@ -23,6 +23,7 @@
     "lib/client.js",
     "lib/types/**/*.d.ts",
     "src",
+    "skills",
     "cordis.patch.yml",
     "README.md"
   ],
@@ -33,6 +34,7 @@
     "client": {
       "inject": [
         "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-client-ui-slots",
         "@deepseek-ai/dsh-client-ui-layout",
         "@deepseek-ai/dsh-client-ui-sidebar"
@@ -52,6 +54,7 @@
     "@biomejs/biome": "2.5.10",
     "@deepseek-ai/cordis": "^4.0.0-rc.8",
     "@deepseek-ai/dsh-client-runtime": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-client-ui-conversation": "0.1.0-rc.8",
     "@deepseek-ai/dsh-client-ui-layout": "0.1.0-rc.8",
     "@deepseek-ai/dsh-client-ui-sidebar": "0.1.0-rc.8",
     "@deepseek-ai/dsh-client-ui-slots": "0.1.0-rc.8",
