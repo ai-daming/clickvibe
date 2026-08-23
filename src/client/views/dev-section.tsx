@@ -1,5 +1,6 @@
 import { RunningDuration } from '../duration.ts'
 import { type Workflow, stageLabel } from '../domain.ts'
+import { reviewVerdictView } from '../runtime.ts'
 import { type GhIssue } from './issue-view.tsx'
 import { LiveTerminal } from './live-terminal.tsx'
 import { useDevSection } from '../dev-state.ts'
@@ -66,6 +67,26 @@ export function DevSection({
     if (freshEntry === 'develop') void resume(userContext, true)
     if (freshEntry === 'review') void startReview(agentChoice, userContext, true)
   }
+  // 合并已完成:delivery 落盘,或动作已离开 merge/进入清理;任务仍在跑时不算(detail 会同时计时)。
+  const merged =
+    workflow?.delivery !== undefined ||
+    ((derived?.nextAction?.kind === 'none' || derived?.nextAction?.kind === 'cleanup') &&
+      derived?.status !== 'developing' &&
+      derived?.status !== 'reviewing')
+  // review 结论横幅:合并归「已合并」;通过时随行备注照常列出(不冒充阻塞问题)。
+  const reviewView = workflow?.reviewResult
+    ? reviewVerdictView({
+        reviewResult: workflow.reviewResult,
+        derived: {
+          verdictCurrent: derived?.verdictCurrent ?? false,
+          reviewedHash: derived?.reviewedHash ?? null,
+          head: derived?.head ?? null,
+          issueContractStatus: derived?.issueContractStatus ?? 'unknown',
+          issueContractUnknownReason: derived?.issueContractUnknownReason ?? null,
+        },
+        merged,
+      })
+    : null
   return (
     <div className="cv-dev">
       {/* 状态卡:当前状态 + 关键事实 */}
@@ -162,38 +183,31 @@ export function DevSection({
         </div>
       ) : null}
 
-      {/* review 结论同时绑定 HEAD 与 Issue 正文契约；任一变化都不冒充当前结论。 */}
-      {workflow?.reviewResult ? (
+      {/* review 结论同时绑定 HEAD 与 Issue 正文契约;任一变化都不冒充当前结论。
+          已合并的不再显示「可合并」;通过时随行备注照常列出。 */}
+      {reviewView ? (
         <div
           className={
-            derived?.verdictCurrent
-              ? workflow.reviewResult.passed
-                ? 'cv-dev-done'
-                : 'cv-review-fail'
-              : 'cv-review-stale'
+            merged
+              ? 'cv-dev-done'
+              : derived?.verdictCurrent
+                ? workflow?.reviewResult?.passed
+                  ? 'cv-dev-done'
+                  : 'cv-review-fail'
+                : 'cv-review-stale'
           }
         >
-          {derived?.verdictCurrent
-            ? workflow.reviewResult.passed
-              ? `✅ Review 通过(针对提交 ${derived.reviewedHash ?? '?'})`
-              : `❌ Review 发现 ${workflow.reviewResult.issues.length} 个问题(针对提交 ${derived.reviewedHash ?? '?'})`
-            : derived?.issueContractStatus === 'changed'
-              ? `⏳ 验收已变更,需重新 Review(原契约 ${derived.reviewedIssueBodyHash?.slice(0, 12) ?? '?'},当前 ${derived.currentIssueBodyHash?.slice(0, 12) ?? '?'})`
-              : derived?.issueContractUnknownReason === 'missing-review-snapshot'
-                ? '⏳ 现有 Review 结论缺少验收契约快照,需重新 Review'
-                : derived?.issueContractUnknownReason === 'current-contract-unavailable'
-                  ? '⏸ 暂时无法读取当前验收契约,合并已暂停;请刷新后重试'
-                  : `⏳ Review 结论针对旧提交 ${derived?.reviewedHash ?? '?'},当前 HEAD ${derived?.head ?? '?'} 已变化,结论已过期`}
+          {reviewView.headline}
         </div>
       ) : null}
-      {workflow?.reviewResult && !workflow.reviewResult.passed && derived?.verdictCurrent ? (
+      {reviewView?.showNotes && workflow?.reviewResult ? (
         <ul className="cv-review-issues">
-          {workflow.reviewResult.issues.map((issue, i) => (
+          {reviewView.notes.map((issue, i) => (
             <li key={i}>{issue}</li>
           ))}
         </ul>
       ) : null}
-      {workflow?.reviewResult && derived?.verdictCurrent ? (
+      {workflow?.reviewResult && derived?.verdictCurrent && !merged ? (
         <div className={`cv-review-next ${workflow.reviewResult.passed ? 'cv-tl-pass' : 'cv-tl-fail'}`}>
           下一步:{workflow.reviewResult.passed ? '可合并' : '请重新开发'}
         </div>

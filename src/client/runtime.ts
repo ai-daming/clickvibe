@@ -129,6 +129,64 @@ export function githubCompareUrl(
   return `https://github.com/${repoKey}/compare/${encodeURIComponent(base)}...${encodeURIComponent(branch)}?expand=1`
 }
 
+export interface ReviewVerdictInput {
+  reviewResult: { passed: boolean; issues: string[] } | null
+  derived: {
+    verdictCurrent: boolean
+    reviewedHash: string | null
+    head: string | null
+    issueContractStatus: 'current' | 'changed' | 'unknown'
+    issueContractUnknownReason: 'missing-review-snapshot' | 'current-contract-unavailable' | null
+  }
+  merged: boolean
+}
+
+export interface ReviewVerdictView {
+  /** 主文案;空串表示不渲染结论横幅。 */
+  headline: string
+  /** 随行展示的条目:通过的备注或未通过的问题。 */
+  notes: string[]
+  showNotes: boolean
+}
+
+/** 详情页 review 结论横幅:合并完成的归「已合并」,不再可供合并;通过也不隐藏随行备注。 */
+export function reviewVerdictView(input: ReviewVerdictInput): ReviewVerdictView {
+  const { reviewResult, derived, merged } = input
+  if (merged) return { headline: '✅ 已合并', notes: [], showNotes: false }
+  if (!reviewResult) return { headline: '', notes: [], showNotes: false }
+  const notes = reviewResult.issues
+  if (derived.verdictCurrent) {
+    if (reviewResult.passed) {
+      return {
+        headline: `✅ Review 通过(针对提交 ${derived.reviewedHash ?? '?'})`,
+        notes,
+        showNotes: notes.length > 0,
+      }
+    }
+    return {
+      headline: `❌ Review 发现 ${notes.length} 个问题(针对提交 ${derived.reviewedHash ?? '?'})`,
+      notes,
+      showNotes: true,
+    }
+  }
+  if (derived.issueContractStatus === 'changed') {
+    return { headline: '⏳ 验收已变更,需重新 Review', notes: [], showNotes: false }
+  }
+  if (derived.issueContractStatus === 'unknown') {
+    if (derived.issueContractUnknownReason === 'missing-review-snapshot') {
+      return { headline: '⏳ 现有 Review 结论缺少验收契约快照,需重新 Review', notes: [], showNotes: false }
+    }
+    if (derived.issueContractUnknownReason === 'current-contract-unavailable') {
+      return { headline: '⏸ 暂时无法读取当前验收契约,合并已暂停;请刷新后重试', notes: [], showNotes: false }
+    }
+  }
+  return {
+    headline: `⏳ Review 结论针对旧提交 ${derived.reviewedHash ?? '?'},当前 HEAD ${derived.head ?? '?'} 已变化,结论已过期`,
+    notes: [],
+    showNotes: false,
+  }
+}
+
 export function workflowStatusLabel(
   status: 'idle' | 'developing' | 'review-ready' | 'reviewing' | 'passed',
   reviewPassed: boolean | null,
