@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import type { PromptSnapshot } from './contracts.ts'
 
 export type DevelopAgent = 'codex' | 'claude' | 'dryrun'
-export type AgentAction = 'develop' | 'review' | 'resume' | 'merge'
+export type AgentAction = 'develop' | 'review' | 'resume' | 'create-pr' | 'merge' | 'auto'
 
 /**
  * ClickVibe 自身合并门禁项(issue #49)。门禁拒绝时可由用户人工放行逐项跳过;
@@ -237,6 +237,13 @@ export interface AgentAuthorizationInput {
   url: string
   agent: 'codex' | 'claude' | null
   context: string
+  autoRun?: {
+    autoMerge: boolean
+    devAgent: 'codex' | 'claude'
+    reviewAgent: 'codex' | 'claude'
+    maxRounds: number
+    budgetHours: number
+  }
   target?: {
     prNumber: string
     branch: string
@@ -359,12 +366,13 @@ export function makeAuthorizationInput(value: {
   context?: unknown
   target?: unknown
   override?: unknown
+  autoRun?: unknown
 }): AgentAuthorizationInput {
   const action = String(value.action ?? '') as AgentAction
-  if (action !== 'develop' && action !== 'review' && action !== 'resume' && action !== 'merge') {
+  if (!['develop', 'review', 'resume', 'create-pr', 'merge', 'auto'].includes(action)) {
     throw new Error('不支持的 Agent 操作')
   }
-  const parsedAgent = action === 'merge' ? null : parseAgent(value.agent)
+  const parsedAgent = action === 'merge' || action === 'create-pr' || action === 'auto' ? null : parseAgent(value.agent)
   if (parsedAgent === 'dryrun') throw new Error('dryrun 不需要高权限授权')
   const url = String(value.url ?? '').trim()
   if (!parseGithubUrl(url)) throw new Error('GitHub URL 无效')
@@ -398,11 +406,25 @@ export function makeAuthorizationInput(value: {
     }
     override = { skipped: skipped as MergeOverrideGate[], reason }
   }
+  let autoRun: AgentAuthorizationInput['autoRun']
+  if (action === 'auto') {
+    const raw = (value.autoRun ?? {}) as Record<string, unknown>
+    const devAgent = String(raw.devAgent ?? '')
+    const reviewAgent = String(raw.reviewAgent ?? '')
+    const maxRounds = Number(raw.maxRounds)
+    const budgetHours = Number(raw.budgetHours)
+    if (devAgent !== 'codex' && devAgent !== 'claude') throw new Error('开发 agent 无效')
+    if (reviewAgent !== 'codex' && reviewAgent !== 'claude') throw new Error('Review agent 无效')
+    if (!Number.isInteger(maxRounds) || maxRounds <= 0) throw new Error('轮次上限必须是正整数')
+    if (!Number.isFinite(budgetHours) || budgetHours <= 0) throw new Error('总预算必须是正数')
+    autoRun = { autoMerge: raw.autoMerge === true, devAgent, reviewAgent, maxRounds, budgetHours }
+  }
   return {
     action,
     url,
     agent: parsedAgent,
     context: typeof value.context === 'string' ? value.context.trim() : '',
+    ...(autoRun ? { autoRun } : {}),
     ...(target ? { target } : {}),
     ...(override ? { override } : {}),
   }

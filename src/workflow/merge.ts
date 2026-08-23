@@ -115,7 +115,7 @@ export async function authorizeAgent(
     let snapshot: IssuePromptSnapshot | null = null
     let mergePreview: Extract<Awaited<ReturnType<typeof mergeAuthorizationPreview>>, { ok: true }> | null = null
     let mergeOverride: AgentAuthorizationInput['override']
-    if (input.action === 'develop') {
+    if (input.action === 'develop' || input.action === 'auto') {
       const fetched = await fetchIssue(ctx, { url: input.url })
       if (!fetched.ok) return fetched
       snapshot = issueSnapshot(fetched.data.item as Record<string, unknown>)
@@ -182,6 +182,7 @@ export async function authorizeAgent(
               updatedAt: snapshot.updatedAt,
               commentCount: snapshot.comments.length,
               digest: authorization.digest,
+              ...(input.action === 'auto' ? { autoRun: input.autoRun } : {}),
             }
           : { action: input.action, agent: input.agent, url: input.url, digest: authorization.digest }),
       ...(mergePreview ? { target: authorizationInput.target } : {}),

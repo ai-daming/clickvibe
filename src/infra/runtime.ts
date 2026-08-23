@@ -15,6 +15,8 @@ import { join, resolve } from 'node:path'
  * - `/clickvibe/api/history`        — complete disk-backed task history
  * - `/clickvibe/api/stream`         — SSE live status stream for a task
  * - `/clickvibe/api/review`         — review the dev branch with codex/claude
+ * - `/clickvibe/api/auto`           — reconcile one issue through review convergence
+ * - `/clickvibe/api/create-pr`      — push and create/reuse the workflow PR
  * - `/clickvibe/api/resume`         — resume an interrupted dev session
  * - `/clickvibe/api/sync`           — sync the worktree with the remote base (issue #5)
  *
@@ -155,7 +157,14 @@ export function authorizationInputFromPayload(
   action: AgentAuthorizationInput['action'],
   payload: unknown,
 ): AgentAuthorizationInput {
-  const body = (payload ?? {}) as { url?: unknown; agent?: unknown; context?: unknown; target?: unknown }
+  const body = (payload ?? {}) as {
+    url?: unknown
+    agent?: unknown
+    context?: unknown
+    target?: unknown
+    override?: unknown
+    autoRun?: unknown
+  }
   return makeAuthorizationInput({ ...body, action })
 }
 

@@ -47,6 +47,28 @@ export interface Workflow {
     cleanup: { worktree: boolean; localBranch: boolean; remoteBranch: boolean; issue: boolean }
     lastError?: string
   }
+  autoRun?: {
+    status: 'running' | 'paused' | 'completed'
+    autoMerge: boolean
+    devAgent: 'codex' | 'claude'
+    reviewAgent: 'codex' | 'claude'
+    maxRounds: number
+    budgetHours: number
+    startedAt: string
+    deadline: string
+    rounds: number
+    unresolved: { round: number; issues: string[] }[]
+    lastObservedAt: string | null
+    pausedReason:
+      | 'session-interrupted'
+      | 'authorization-denied'
+      | 'sync-conflict'
+      | 'merge-gate-rejected'
+      | 'task-timeout'
+      | 'budget-exhausted'
+      | 'rounds-exhausted'
+      | null
+  }
   updatedAt: number
   events?: WorkflowEvent[]
   derived?: {
@@ -99,7 +121,7 @@ export interface NextAction {
 }
 
 export interface WorkflowEvent {
-  kind: 'dev' | 'review' | 'rework' | 'resume' | 'note' | 'merge-override'
+  kind: 'dev' | 'review' | 'rework' | 'resume' | 'note' | 'merge-override' | 'auto-run'
   at: string
   durationMs?: number
   hash?: string

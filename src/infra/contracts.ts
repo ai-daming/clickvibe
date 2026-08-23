@@ -42,3 +42,52 @@ export interface IssueContractCheck {
   ok: boolean
   missing: string[]
 }
+
+export type AutoRunPausedReason =
+  | 'session-interrupted'
+  | 'authorization-denied'
+  | 'sync-conflict'
+  | 'merge-gate-rejected'
+  | 'task-timeout'
+  | 'budget-exhausted'
+  | 'rounds-exhausted'
+
+export interface AutoRunUnresolvedRound {
+  /** Auto-run-local review number; a restart begins again at one. */
+  round: number
+  issues: string[]
+}
+
+/** Durable enhancement only; absence always means manual workflow mode. */
+export interface AutoRunState {
+  status: 'running' | 'paused' | 'completed'
+  autoMerge: boolean
+  devAgent: AgentKind
+  reviewAgent: AgentKind
+  maxRounds: number
+  budgetHours: number
+  startedAt: string
+  deadline: string
+  rounds: number
+  unresolved: AutoRunUnresolvedRound[]
+  lastObservedAt: string | null
+  pausedReason: AutoRunPausedReason | null
+}
+
+export function isAutoRunState(value: unknown): value is AutoRunState {
+  if (value === undefined) return true
+  if (!value || typeof value !== 'object') return false
+  const state = value as Partial<AutoRunState>
+  return (
+    (state.status === 'running' || state.status === 'paused' || state.status === 'completed') &&
+    (state.devAgent === 'codex' || state.devAgent === 'claude') &&
+    (state.reviewAgent === 'codex' || state.reviewAgent === 'claude') &&
+    Number.isInteger(state.maxRounds) &&
+    Number(state.maxRounds) > 0 &&
+    Number.isFinite(state.budgetHours) &&
+    Number(state.budgetHours) > 0 &&
+    typeof state.startedAt === 'string' &&
+    typeof state.deadline === 'string' &&
+    Array.isArray(state.unresolved)
+  )
+}

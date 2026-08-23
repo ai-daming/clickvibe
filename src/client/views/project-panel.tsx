@@ -2,13 +2,13 @@
 import React from 'react'
 import { useProjectPanel } from '../project-state.ts'
 import { RunningDuration } from '../duration.ts'
-import { githubCompareUrl } from '../runtime.ts'
 import { type RepositoryIssue, apiCall, fetchIssue, stageLabel } from '../domain.ts'
 import { MAX_BATCH_ISSUES, setPanelOpen } from '../panel-state.ts'
 import { deriveProjectSelection } from '../project-sources.ts'
 import { type Dependencies, type GhIssue, IssueView, type TimelineEvent, repoOf } from './issue-view.tsx'
 import { ProjectSelector } from './project-selector.tsx'
 import { RepositoryAdvanceBanner } from './repository-advance-banner.tsx'
+import { AutoRunForm } from './auto-run-form.tsx'
 
 export function PanelContent() {
   const {
@@ -71,19 +71,6 @@ export function PanelContent() {
   const rowAction = (issue: RepositoryIssue) => {
     const action = issue.workflow.derived?.nextAction
     if (!action || action.kind === 'none') return
-    if (action.kind === 'create-pr') {
-      window.open(
-        githubCompareUrl(
-          issue.workflow.repoKey,
-          issue.workflow.branch,
-          issue.workflow.baseRef,
-          issue.workflow.derived?.baseBranch,
-        ),
-        '_blank',
-        'noopener',
-      )
-      return
-    }
     void openIssue(issue, true)
   }
 
@@ -490,6 +477,13 @@ export function PanelContent() {
                                 ) : null}
                               </div>
                             </div>
+                            <AutoRunForm
+                              compact
+                              url={String(issue.url ?? '')}
+                              issue={issue}
+                              workflow={issue.workflow}
+                              onStarted={() => loadRepo(repoKey, true)}
+                            />
                             <button
                               className={`cv-row-action${shownAction.kind === 'none' ? (shownAction.label === '任务进行中' ? ' cv-row-running' : ' cv-row-none') : ''}`}
                               disabled={shownAction.kind === 'none'}

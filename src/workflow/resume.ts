@@ -41,6 +41,7 @@ import {
 } from '../infra/state.ts'
 import { recordDevDelivery } from './review-flow.ts'
 import { workflowBaseBranch } from './state-view.ts'
+import { notifyAutoRunCompletion } from './auto-run-signal.ts'
 
 /** Resume (or continue) a dev session with an exact session id; `context`
  *  carries extra instructions (e.g. review issues for a rework).
@@ -151,6 +152,7 @@ export async function resumeDevelop(
         }
         await saveWorkflow(reloaded)
       }
+      notifyAutoRunCompletion(ctx, workflow.key, live.status === 'running' ? 'failed' : live.status)
     },
     sessionId
       ? {
