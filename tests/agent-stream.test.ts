@@ -50,6 +50,19 @@ test('codex preserves complete reasoning, commands, errors and tool arguments', 
   )
 })
 
+test('codex preserves command output whitespace as one complete event', () => {
+  const output = 'first line\n\n  indented with trailing spaces  \nlast line\n'
+  assert.deepEqual(
+    parseCodexEvent(
+      JSON.stringify({
+        type: 'item.completed',
+        item: { type: 'command_execution', aggregated_output: output },
+      }),
+    ),
+    [{ kind: 'command_output', text: output }],
+  )
+})
+
 test('claude preserves complete thinking and tool arguments', () => {
   const thinking = `inspect\n  ${'t'.repeat(5000)}`
   const input = { command: `cd /Users/example/project\n${'z'.repeat(300)}`, workdir: '/tmp/clickvibe' }
@@ -103,8 +116,7 @@ test('codex renders command execution, reasoning and token_count with its own sc
     ),
     [
       { kind: 'command', text: '$ pnpm test' },
-      { kind: 'command_output', text: 'one' },
-      { kind: 'command_output', text: 'two' },
+      { kind: 'command_output', text: 'one\ntwo\n' },
     ],
   )
   assert.equal(

@@ -119,11 +119,7 @@ export function parseCodexEvent(line: string): StatusLine[] {
         }
         case 'command_execution':
           if (item.command) out.push({ kind: 'command', text: `$ ${item.command}` })
-          if (item.aggregated_output) {
-            for (const output of item.aggregated_output.replace(/\s+$/, '').split(/\r?\n/)) {
-              if (output !== '') out.push({ kind: 'command_output', text: output })
-            }
-          }
+          if (item.aggregated_output) out.push({ kind: 'command_output', text: item.aggregated_output })
           break
         case 'reasoning':
           if (item.text) out.push({ kind: 'reasoning', text: `◌ ${item.text}` })

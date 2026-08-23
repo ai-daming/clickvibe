@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { parseAgentChunk } from '../src/agent/agent-stream.ts'
 import {
   AuthorizationStore,
   LineLog,
@@ -380,6 +381,22 @@ test('LineLog preserves a never-terminated long line and handles CRLF split acro
   assert.equal(read.lines.length, 2)
   assert.equal(read.lines[0], longLine)
   assert.equal(read.lines[1], 'next')
+})
+
+test('an unbounded raw LineLog preserves every event before parsing', () => {
+  const log = new LineLog()
+  for (let index = 0; index < 2001; index += 1) {
+    log.appendChunk(
+      `${JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: `m${index}` } })}\n`,
+    )
+  }
+
+  const read = log.read(0)
+  const parsed = parseAgentChunk('codex', read.lines.join('\n'))
+  assert.equal(read.truncated, false)
+  assert.equal(parsed.lines.length, 2001)
+  assert.equal(parsed.lines[0].text, '💬 m0')
+  assert.equal(parsed.lines[2000].text, '💬 m2000')
 })
 
 test('parseDependencies extracts Blocked by numbers from the 依赖 section', () => {

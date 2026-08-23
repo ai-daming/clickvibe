@@ -60,7 +60,7 @@ export function createLiveTask(
     agent,
     startedAt: Date.now(),
     log: new LineLog(TASK_LOG_LINES),
-    rawLog: new LineLog(TASK_LOG_LINES),
+    rawLog: new LineLog(),
     rawCursor: 0,
     closed: false,
     status: 'running',
