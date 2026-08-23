@@ -195,6 +195,21 @@ export interface RepositoryFreshness {
   error?: string
 }
 
+export interface RepositoryAdvanceSignal {
+  defaultBranch: string
+  remoteRef: string
+  mainBehind: number | null
+  checkoutBranch: string | null
+  checkoutBehind: number | null
+  fetchedAt: number | null
+}
+
 export type WorkflowStateResponse =
-  | { ok: true; workflows: Workflow[]; freshness: RepositoryFreshness | null; dependenciesRefreshDue: boolean }
+  | {
+      ok: true
+      workflows: Workflow[]
+      freshness: RepositoryFreshness | null
+      dependenciesRefreshDue: boolean
+      repoAdvance: RepositoryAdvanceSignal | null
+    }
   | { ok: false; error: string }

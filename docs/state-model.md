@@ -127,7 +127,7 @@
 ### 原则
 
 1. **基础事实常驻,派生信号按需**——客观存在的信息常显;对比算出来的信息"有情况才显示,没情况不显示"。
-2. **对比对象只有一个:冻结基线对应的 origin/<branch>(远端)**。默认选择 origin/HEAD，解析后行为与原 origin/main 路径一致。
+2. **worktree 对比对象只有一个:冻结基线对应的 origin/<branch>(远端)**。默认选择 origin/HEAD，解析后行为与原 origin/main 路径一致;worktree 推导不使用本地 main，本地 main 只出现在下述独立的主仓库本体信号中。
 3. **数字必须带语义**,不能裸数字:"落后 2"要能读成"主干有 2 个新提交我还没有"。
 
 ### 基础事实(常驻 3 项)
@@ -150,6 +150,20 @@
 | 领先 M > 0 | 领先 M | 比主干多 M 个提交(开发成果/待 review 量) | 无(状态徽章已表达"有内容") |
 | 领先 M · 落后 N(分叉) | 领先 M · 落后 N | 分支与主干分叉,同步将 merge 主干进来 | 「同步 worktree」 |
 | 契约已变 | 📋 issue 契约已改 | issue 正文目标/验收与结论绑定指纹不符,结论过期 | 「重新 Review」 |
+
+### 主仓库本体信号(列表头部)
+
+主仓库每次沿用既有 TTL fetch 后的 refs 派生独立横幅,不新增轮询,也不改变上述 worktree 判断:
+
+```
+远端 origin/main 领先本地 main 4 · 上次 fetch 2026/8/23 15:30
+当前分支 feature/x 落后 origin/main 2
+```
+
+- 默认分支取 `origin/HEAD`,不可读时回退 `origin/main`;无可比 ref 或落后数为 0 时隐藏对应行。
+- checkout 等于默认分支时隐藏第二行;非默认分支落后时提供「安全同步」。
+- 安全同步对纯落后 checkout 做 ff-only,对分叉 checkout 做真实 merge;工作区脏或 detached HEAD 拒绝 checkout 目标。冲突现场保留,不自动 stash/rebase/push。
+- 未被 checkout 的本地 main 纯落后时只移动 ref 到远端默认分支;checkout 与 main 两个目标独立判定、独立报告。
 
 配套出现项:
 

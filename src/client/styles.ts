@@ -50,6 +50,7 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 .cv-fetch:disabled { opacity: 0.6; }
 .cv-error { margin: 0 14px 10px; padding: 8px 10px; border-radius: 6px; background: #ffebe9; color: #cf222e; border: 1px solid #ff8182; flex-shrink: 0; }
 .cv-stale { margin: 8px 12px 0; padding: 6px 8px; border-radius: 6px; background: #fff8c5; color: #9a6700; border: 1px solid #d4a72c; font-size: 11.5px; flex-shrink: 0; }
+.cv-repo-advance { margin: 8px 12px 0; padding: 7px 8px; border-radius: 6px; background: #fff8c5; color: #7d4e00; border: 1px solid #d4a72c; font-size: 11.5px; flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .cv-hint { padding: 20px 14px; color: #8c959f; text-align: center; }
 .cv-loading { padding: 20px 14px; color: #57606a; text-align: center; }
 .cv-issue { padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; flex: 1; overflow-y: auto; }
