@@ -72,6 +72,25 @@ test('developing without matching completion facts remains development in progre
   assert.equal(deriveNextAction(developing).kind, 'resume')
 })
 
+test('an interrupted rework resumes even when unchanged delivery facts still match', () => {
+  const interrupted = facts({
+    stage: 'developing',
+    devInterrupted: true,
+    branchExists: true,
+    worktreeExists: true,
+    hasCommits: true,
+    prNumber: '105',
+    prState: 'OPEN',
+    deliveryHash: 'abc1234567890',
+  })
+
+  assert.deepEqual(deriveReviewStartDecision(interrupted), {
+    allowed: false,
+    reason: 'development-in-progress',
+  })
+  assert.equal(deriveNextAction(interrupted).kind, 'resume')
+})
+
 test('a short ambiguous hash or stale worktree cannot satisfy completion facts', () => {
   for (const overrides of [{ deliveryHash: 'abc' }, { deliveryHash: 'abc1234', needsSync: true }]) {
     assert.equal(

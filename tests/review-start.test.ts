@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { loadWorkflow } from '../src/infra/state.ts'
+import { loadWorkflow, saveWorkflow } from '../src/infra/state.ts'
 import { resolveReviewStartWorkflow, reviewStartError } from '../src/workflow/review-start.ts'
 
 function included(body: unknown): string {
@@ -41,19 +41,18 @@ test('review start recovers a missing workflow from matching branch, commit, and
         },
         async run(spec: { command: string; workdir?: string }) {
           if (spec.command.startsWith('gh api ')) {
+            const pr = {
+              number: 105,
+              state: 'open',
+              merged_at: null,
+              html_url: 'https://github.com/o/r/pull/105',
+              head: { ref: 'r-issue-106', sha: head },
+              base: { ref: 'main' },
+            }
             return {
               exitCode: 0,
               stdout: {
-                text: included([
-                  {
-                    number: 105,
-                    state: 'open',
-                    merged_at: null,
-                    html_url: 'https://github.com/o/r/pull/105',
-                    head: { ref: 'r-issue-106', sha: head },
-                    base: { ref: 'main' },
-                  },
-                ]),
+                text: included(spec.command.includes('/pulls/105') ? pr : [pr]),
               },
               stderr: { text: '' },
             }
@@ -100,6 +99,23 @@ test('review start recovers a missing workflow from matching branch, commit, and
     assert.equal(resolved.workflow.stage, 'review-ready')
     assert.equal(resolved.workflow.prNumber, '105')
     assert.equal((await loadWorkflow('o-r-106'))?.stage, 'review-ready')
+
+    resolved.workflow.stage = 'developing'
+    resolved.workflow.devInterrupted = true
+    resolved.workflow.reviewResult = { passed: false, issues: ['resume this rework'] }
+    await saveWorkflow(resolved.workflow)
+    const interrupted = await resolveReviewStartWorkflow(
+      ctx as never,
+      { kind: 'issue', owner: 'o', repo: 'r', number: '106' },
+      resolved.workflow,
+    )
+    assert.equal(interrupted.ok, false)
+    if (interrupted.ok) return
+    assert.match(interrupted.error, /开发仍在进行/)
+    const preserved = await loadWorkflow('o-r-106')
+    assert.equal(preserved?.stage, 'developing')
+    assert.equal(preserved?.devInterrupted, true)
+    assert.deepEqual(preserved?.reviewResult, { passed: false, issues: ['resume this rework'] })
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome

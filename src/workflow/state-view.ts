@@ -116,6 +116,11 @@ function sameCommit(left: string | null | undefined, right: string | null | unde
 export function deriveReviewStartDecision(facts: WorkflowFacts): ReviewStartDecision {
   if (facts.taskRunning) return { allowed: false, reason: 'task-running' }
   if (!facts.issueOpen || facts.prMerged) return { allowed: false, reason: 'no-completion-facts' }
+  // An explicitly interrupted development/rework must retain its resumable
+  // session even when HEAD still matches the previous delivered PR commit.
+  if (facts.stage === 'developing' && facts.devInterrupted) {
+    return { allowed: false, reason: 'development-in-progress' }
+  }
 
   const completedByFacts =
     facts.branchExists === true &&
