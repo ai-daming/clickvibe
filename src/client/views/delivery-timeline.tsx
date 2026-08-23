@@ -5,13 +5,16 @@ import { DeliveryDuration } from '../duration.ts'
 import type { WorkflowEvent } from '../domain.ts'
 import { fmtTime } from '../domain.ts'
 import { deliveryPublicationLabel } from '../runtime.ts'
+import { CollapsibleSection } from './collapsible-section.ts'
 
 export function DeliveryTimeline({
   events,
   onOpenLog,
+  sectionStorageKey,
 }: {
   events: WorkflowEvent[]
   onOpenLog: (taskId: string) => void
+  sectionStorageKey: string
 }) {
   const [selected, setSelected] = React.useState<WorkflowEvent | null>(null)
   React.useEffect(() => {
@@ -26,30 +29,32 @@ export function DeliveryTimeline({
   const selectedItem = selected ? deriveDeliveryTimelineItem(selected) : null
   return (
     <>
-      <div className="cv-timeline">
-        <div className="cv-timeline-head">📜 交付流水 · 本地事件 / GitHub 评论</div>
-        {[...events].reverse().map((event, index) => {
-          const item = deriveDeliveryTimelineItem(event)
-          return (
-            <div key={`${event.at}-${index}`} className="cv-tl-row">
-              <button type="button" className="cv-tl-open" onClick={() => setSelected(event)}>
-                <span className={`cv-tl-kind cv-tl-kind-${event.kind}`}>{item.kindLabel}</span>
-                <span className="cv-tl-time">{fmtTime(event.at)}</span>
-                <DeliveryDuration kind={event.kind} durationMs={event.durationMs} />
-                {event.hash ? <code className="cv-tl-hash">{event.hash}</code> : null}
-                {item.summary ? <span className="cv-tl-summary">{item.summary}</span> : null}
-                {event.kind === 'review' && event.verdict ? (
-                  <span className={event.verdict.passed ? 'cv-tl-verdict cv-tl-pass' : 'cv-tl-verdict cv-tl-fail'}>
-                    {event.verdict.passed ? '✅ 通过' : `❌ ${event.verdict.issues.length} 个问题`}
-                  </span>
-                ) : null}
-                {event.note ? <span className="cv-tl-note">{event.note}</span> : null}
-              </button>
-              <Publication publication={event.publication} />
-            </div>
-          )
-        })}
-      </div>
+      <CollapsibleSection storageKey={sectionStorageKey} title="交付流水" defaultExpanded={true}>
+        <div className="cv-timeline">
+          <div className="cv-timeline-head">本地事件 / GitHub 评论</div>
+          {[...events].reverse().map((event, index) => {
+            const item = deriveDeliveryTimelineItem(event)
+            return (
+              <div key={`${event.at}-${index}`} className="cv-tl-row">
+                <button type="button" className="cv-tl-open" onClick={() => setSelected(event)}>
+                  <span className={`cv-tl-kind cv-tl-kind-${event.kind}`}>{item.kindLabel}</span>
+                  <span className="cv-tl-time">{fmtTime(event.at)}</span>
+                  <DeliveryDuration kind={event.kind} durationMs={event.durationMs} />
+                  {event.hash ? <code className="cv-tl-hash">{event.hash}</code> : null}
+                  {item.summary ? <span className="cv-tl-summary">{item.summary}</span> : null}
+                  {event.kind === 'review' && event.verdict ? (
+                    <span className={event.verdict.passed ? 'cv-tl-verdict cv-tl-pass' : 'cv-tl-verdict cv-tl-fail'}>
+                      {event.verdict.passed ? '✅ 通过' : `❌ ${event.verdict.issues.length} 个问题`}
+                    </span>
+                  ) : null}
+                  {event.note ? <span className="cv-tl-note">{event.note}</span> : null}
+                </button>
+                <Publication publication={event.publication} />
+              </div>
+            )
+          })}
+        </div>
+      </CollapsibleSection>
       {selected && selectedItem
         ? createPortal(
             <div className="cv-audit-backdrop" role="presentation" onMouseDown={() => setSelected(null)}>

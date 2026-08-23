@@ -195,6 +195,11 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 .cv-refresh { padding: 6px 10px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 6px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-secondary); cursor: pointer; font-size: 14px; line-height: 1; }
 .cv-refresh:hover { background: var(--dsw-alias-interactive-bg-hover-solid); color: var(--dsw-alias-label-primary); }
 .cv-links { display: flex; flex-direction: column; gap: 4px; }
+.cv-section { min-width: 0; border: 1px solid var(--dsw-alias-border-l2); border-radius: 6px; overflow: clip; }
+.cv-section-head { position: sticky; top: 0; z-index: 1; background: var(--dsw-alias-bg-base); }
+.cv-section-toggle { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px; border: 0; padding: 7px 9px; background: transparent; color: var(--dsw-alias-label-secondary); font: inherit; font-size: 12px; font-weight: 600; text-align: left; cursor: pointer; }
+.cv-section-toggle:hover { background: var(--dsw-alias-interactive-bg-hover-solid); color: var(--dsw-alias-label-primary); }
+.cv-section-content { max-height: min(360px, 55vh); overflow: auto; overscroll-behavior: contain; padding: 7px 9px 9px; border-top: 1px solid var(--dsw-alias-border-l1); }
 .cv-dep-block { display: flex; flex-direction: column; gap: 4px; }
 .cv-dep-label { font-size: 12px; font-weight: 600; color: var(--dsw-alias-label-secondary); }
 .cv-link-row { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dsw-alias-label-secondary); flex-wrap: wrap; }

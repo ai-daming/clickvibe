@@ -1,6 +1,7 @@
 import { RunningDuration } from '../duration.ts'
 import { type Workflow, stageLabel } from '../domain.ts'
 import { reviewVerdictView } from '../runtime.ts'
+import { sectionStorageKey } from './collapsible-section.ts'
 import { type GhIssue } from './issue-view.tsx'
 import { LiveTerminal } from './live-terminal.tsx'
 import { useDevSection } from '../dev-state.ts'
@@ -339,7 +340,11 @@ export function DevSection({
         </details>
       ) : null}
 
-      <DeliveryTimeline events={workflowEvents} onOpenLog={(taskId) => void openStream(taskId, false)} />
+      <DeliveryTimeline
+        events={workflowEvents}
+        onOpenLog={(taskId) => void openStream(taskId, false)}
+        sectionStorageKey={sectionStorageKey(url, 'delivery')}
+      />
     </div>
   )
 }
