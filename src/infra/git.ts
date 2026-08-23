@@ -22,7 +22,7 @@ import { shellQuote } from './develop-core.ts'
 import { runCommand } from './runtime.ts'
 import { type IssueContractSnapshot } from './state.ts'
 
-interface GitCompare {
+export interface GitCompare {
   behind: number
   ahead: number
 }
