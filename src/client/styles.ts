@@ -84,6 +84,8 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 .cv-comment-date { color: #8c959f; }
 .cv-toggle { border: 1px solid #d0d7de; background: #ffffff; border-radius: 6px; padding: 3px 8px; font-size: 12px; cursor: pointer; color: #1f2328; }
 .cv-toggle:hover { background: #f6f8fa; }
+.cv-issue-organizer { border: 0; border-radius: 6px; padding: 4px 8px; background: transparent; color: var(--ds-color-text-secondary, #57606a); font: inherit; white-space: nowrap; cursor: pointer; }
+.cv-issue-organizer:hover { background: var(--ds-color-bg-secondary, #f6f8fa); color: var(--ds-color-text, #1f2328); }
 .cv-md { font-size: 13px; line-height: 1.6; color: #1f2328; word-break: break-word; }
 .cv-md-p { margin: 0 0 8px; }
 .cv-md-h { margin: 10px 0 6px; font-weight: 600; }
