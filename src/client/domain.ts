@@ -182,6 +182,8 @@ export interface ProjectOption {
   repoKey: string
   path: string
   available: boolean
+  /** false only for a DSH workspace that is not yet in config.yaml repos. */
+  configured?: boolean
 }
 
 export interface RepositoryIssue extends GhIssue {
