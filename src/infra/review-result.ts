@@ -18,6 +18,14 @@ export interface ResolvedReviewResult {
 
 type ParsedReviewResult = { result: ReviewResult; error?: never } | { result: null; error: string }
 
+/**
+ * 区分「人工验收备注」与阻塞问题:吻合 Issue 契约里 [人工] 标记的备注
+ * (含 人工 且 无法验证/非缺陷)不构成缺陷,不阻塞 passed 结论。
+ */
+export function isManualAcceptanceNote(issue: string): boolean {
+  return issue.includes('人工') && (issue.includes('无法验证') || issue.includes('非缺陷'))
+}
+
 function validateReviewResult(value: unknown): ParsedReviewResult {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return { result: null, error: 'schema 非 {passed:boolean,issues:string[]}' }
@@ -27,9 +35,14 @@ function validateReviewResult(value: unknown): ParsedReviewResult {
   if (!Array.isArray(record.issues) || !record.issues.every((issue) => typeof issue === 'string')) {
     return { result: null, error: 'issues 不是 string[]' }
   }
-  if (record.passed && record.issues.length > 0) return { result: null, error: '通过结论不能包含问题' }
-  if (!record.passed && record.issues.length === 0) return { result: null, error: '未通过结论必须包含至少一个问题' }
-  return { result: { passed: record.passed, issues: record.issues } }
+  if (record.passed) {
+    const blocking = record.issues.filter((issue) => !isManualAcceptanceNote(issue))
+    if (blocking.length > 0) return { result: null, error: '通过结论不能包含问题' }
+    // 通过结论里只有 [人工] 验收备注:归一为无阻塞问题的通过。
+    return { result: { passed: true, issues: [] } }
+  }
+  if (record.issues.length === 0) return { result: null, error: '未通过结论必须包含至少一个问题' }
+  return { result: { passed: false, issues: record.issues } }
 }
 
 function parseMaterializedResult(raw: string): ParsedReviewResult {
