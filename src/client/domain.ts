@@ -79,6 +79,7 @@ export interface Workflow {
     status: 'idle' | 'developing' | 'review-ready' | 'reviewing' | 'passed'
     baseBranch: string
     baseRefAvailable: boolean
+    freshSession: { round: number; develop: boolean; review: boolean }
   }
 }
 

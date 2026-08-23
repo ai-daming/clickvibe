@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildStagePrompt, selectReviewFeedback, type PromptSnapshot } from '../src/agent/prompt.ts'
+import {
+  buildStagePrompt,
+  selectReviewFeedback,
+  snapshotWithoutReviewFeedback,
+  type PromptSnapshot,
+} from '../src/agent/prompt.ts'
 import { buildDevelopPrompt, buildResumePrompt, buildReviewPrompt } from '../src/agent/prompts.ts'
 
 const snapshot: PromptSnapshot = {
@@ -425,4 +430,16 @@ test('legacy review without a persisted baseline retains origin/main without pro
     'abc123',
   )
   assert.match(prompt, /git diff origin\/main\.\.\.HEAD/)
+})
+
+test('fresh review removes ClickVibe review lists but preserves ordinary requirement comments', () => {
+  const sanitized = snapshotWithoutReviewFeedback({
+    ...snapshot,
+    comments: [
+      { author: 'owner', body: '新增验收要求' },
+      { author: 'bot', body: '== Review Meta ==\n- event: review\n- passed: false\n\n- old issue' },
+    ],
+  })
+  assert.deepEqual(sanitized.comments, [{ author: 'owner', body: '新增验收要求' }])
+  assert.deepEqual(snapshot.comments, [{ author: 'owner', body: '相关评论正文' }])
 })

@@ -57,6 +57,7 @@ import { withWorkflowLock } from '../infra/workflow-lock.ts'
 import { mutateWorkflowStrict } from '../infra/workflow-mutation.ts'
 import { buildDevComment, buildReviewComment } from './delivery-comment.ts'
 import { deriveEventRound } from './delivery-audit.ts'
+import { deriveFreshSessionAvailability, selectSessionLaunch } from './fresh-session.ts'
 import { extractGithubCommentId, extractGithubCommentUrl } from './delivery-publication.ts'
 import { type ReviewIssueContract } from './merge-gates.ts'
 import { workflowBaseBranch } from './state-view.ts'
@@ -66,9 +67,10 @@ export async function startReview(
   ctx: Context,
   payload: unknown,
 ): Promise<{ ok: true; taskId: string } | { ok: false; error: string }> {
-  const body = (payload ?? {}) as { url?: unknown; agent?: unknown; context?: unknown }
+  const body = (payload ?? {}) as { url?: unknown; agent?: unknown; context?: unknown; freshSession?: unknown }
   const url = String(body.url ?? '').trim()
   const extraContext = typeof body.context === 'string' ? body.context.trim() : ''
+  const freshSession = body.freshSession === true
   const parsedAgent = parseAgent(body.agent)
   if (parsedAgent === 'dryrun') return { ok: false, error: 'review 不支持 dryrun' }
   const agent: AgentKind = parsedAgent
@@ -103,8 +105,23 @@ export async function startReview(
   }
   let activeWorkflow: IssueWorkflow = workflow
   const workflowKey = activeWorkflow.key
-  const ownedReviewSession = resolveSessionForAgent(activeWorkflow, 'review', agent)
-  let sessionId = ownedReviewSession.sessionId
+  const availability = deriveFreshSessionAvailability(
+    workflow.events,
+    workflow.devSessionId !== null && workflow.devSessionAgent === workflow.devAgent,
+    workflow.reviewSessionId !== null && workflow.reviewSessionAgent === workflow.reviewAgent,
+  )
+  if (freshSession && !availability.review) {
+    return { ok: false, error: '当前轮次未超过阈值,或没有可放弃的 review 会话' }
+  }
+  const ownedReviewSession = freshSession
+    ? { sessionId: null, invalid: false }
+    : resolveSessionForAgent(workflow, 'review', agent)
+  const launch = selectSessionLaunch(freshSession, ownedReviewSession)
+  let sessionId = launch.sessionId
+  if (freshSession) {
+    workflow.reviewSessionId = null
+    workflow.reviewSessionAgent = null
+  }
   // workflow 校验后、冻结契约/HEAD 等任何 await 之前同步占位。重复请求会立即
   // 复用 taskId,不会重复支付 GitHub 刷新超时,也不会交错清理结论文件并双开 review。
   let reservation: { task: LiveTask; created: boolean }
@@ -166,7 +183,13 @@ export async function startReview(
       }
       const reviewedHead = (await readWorktreeHead(ctx, current.worktree)) ?? ''
       if (!reviewedHead) throw new Error('无法冻结被审 HEAD,请检查 worktree 后重试')
-      const owned = resolveSessionForAgent(current, 'review', agent)
+      const owned = freshSession
+        ? { sessionId: null, invalid: false }
+        : resolveSessionForAgent(current, 'review', agent)
+      if (freshSession) {
+        current.reviewSessionId = null
+        current.reviewSessionAgent = null
+      }
       if (owned.invalid) {
         pushTaskLine(live, '[clickvibe] review sessionId 归属缺失或与当前 agent 不一致,已清除并启动全新会话')
       }
@@ -199,7 +222,11 @@ export async function startReview(
   const exactSessionId = prepared.sessionId
 
   // 仅续接归属匹配的精确会话;旧状态无 owner 或跨 agent 时直接全新 review。
-  const agentCommand = exactSessionId ? buildResumeAgentCommand(agent, exactSessionId) : buildFreshAgentCommand(agent)
+  const agentCommand = launch.startsFresh
+    ? buildFreshAgentCommand(agent)
+    : exactSessionId
+      ? buildResumeAgentCommand(agent, exactSessionId)
+      : buildFreshAgentCommand(agent)
   const prompt = await buildReviewPrompt(
     ctx,
     activeWorkflow,
@@ -208,9 +235,15 @@ export async function startReview(
     exactSessionId,
     extraContext,
     frozenReviewBase,
+    freshSession,
   )
 
-  pushTaskLine(live, `[clickvibe] 启动 ${agent} review${exactSessionId ? `(续会话 ${exactSessionId})` : ''}…`)
+  pushTaskLine(
+    live,
+    freshSession
+      ? `[clickvibe] 新开 ${agent} review 会话,按 base...HEAD 全量审查…`
+      : `[clickvibe] 启动 ${agent} review${exactSessionId ? `(续会话 ${exactSessionId})` : ''}…`,
+  )
   attachAgentProcess(
     ctx,
     live,

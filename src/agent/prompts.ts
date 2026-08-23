@@ -27,7 +27,13 @@ import { type IssueWorkflow, issueBodyHash } from '../infra/state.ts'
 import { mutateWorkflowStrict } from '../infra/workflow-mutation.ts'
 import { frozenBaseHash, frozenRemoteBase } from './baseline.ts'
 import { shellQuote } from './develop.ts'
-import { buildStagePrompt, type PromptSnapshot, type SnapshotFreshness, selectReviewFeedback } from './prompt.ts'
+import {
+  buildStagePrompt,
+  type PromptSnapshot,
+  type SnapshotFreshness,
+  selectReviewFeedback,
+  snapshotWithoutReviewFeedback,
+} from './prompt.ts'
 
 export interface ResolvedPromptSnapshot {
   snapshot: PromptSnapshot
@@ -171,6 +177,7 @@ export async function buildReviewPrompt(
   sessionId: string | null = null,
   extraContext = '',
   frozenReviewBase?: ReviewBaseTarget,
+  freshSession = false,
 ): Promise<string> {
   const reviewBase = frozenReviewBase ?? (await resolveReviewBaseTarget(ctx, workflow))
   // The persisted review identity and the executed diff share this exact SHA.
@@ -178,9 +185,11 @@ export async function buildReviewPrompt(
   const base = reviewBase.sha || `origin/${reviewBase.ref}`
   const prUrl = workflow.prNumber ? `https://github.com/${workflow.repoKey}/pull/${workflow.prNumber}` : '未关联'
   const contractHash = issueBodyHash(resolved.snapshot.body)
+  const promptSnapshot = freshSession ? snapshotWithoutReviewFeedback(resolved.snapshot) : resolved.snapshot
   return buildStagePrompt({
     stage: 'review',
     ...resolved,
+    snapshot: promptSnapshot,
     worktree: workflow.worktree,
     status: [
       `分支: ${workflow.branch}`,

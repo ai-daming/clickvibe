@@ -48,6 +48,7 @@ export function useAgentAuthorization(options: {
     agent: 'codex' | 'claude' | null,
     context: string,
     baseline?: string,
+    freshSession = false,
   ): Promise<AuthorizationResponse | null> => {
     const expectedSnapshot = expectedDevelopSnapshot(url, issue)
     const res = await apiCall<AuthorizationResponse | { ok: false; error: string; gateFailures?: MergeGateFailure[] }>(
@@ -57,6 +58,7 @@ export function useAgentAuthorization(options: {
         url,
         ...(agent ? { agent } : {}),
         context,
+        ...(freshSession ? { freshSession: true } : {}),
         ...(action === 'develop' ? { expectedSnapshot, baseline: baseline ?? frozenBaseline(workflowBaseRef) } : {}),
       },
     )
@@ -72,8 +74,9 @@ export function useAgentAuthorization(options: {
     action: 'develop' | 'review' | 'resume' | 'merge' | 'restore-base',
     agent: 'codex' | 'claude' | null,
     context = '',
+    freshSession = false,
   ): Promise<AuthorizationCapability | null> => {
-    const prepared = await request(action, agent, context)
+    const prepared = await request(action, agent, context, undefined, freshSession)
     if (!prepared) return null
     if (action === 'develop' && agent) {
       return new Promise((resolve) => {
@@ -87,6 +90,7 @@ export function useAgentAuthorization(options: {
       url,
       authorizationDigest: prepared.authorizationDigest,
       preview: prepared.preview,
+      freshSession,
     })
     return window.confirm(summary) ? prepared : null
   }

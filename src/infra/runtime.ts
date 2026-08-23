@@ -162,6 +162,7 @@ export function authorizationInputFromPayload(
     baseline?: unknown
     target?: unknown
     restoreTarget?: unknown
+    freshSession?: unknown
   }
   return makeAuthorizationInput({ ...body, action })
 }

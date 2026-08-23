@@ -70,6 +70,37 @@ test('fresh commands never retry the stale session', () => {
   )
 })
 
+test('fresh-session choice is bound into resume and review authorizations', () => {
+  const resume = makeAuthorizationInput({
+    action: 'resume',
+    url: 'https://github.com/o/r/issues/101',
+    agent: 'codex',
+    freshSession: true,
+  })
+  const review = makeAuthorizationInput({
+    action: 'review',
+    url: 'https://github.com/o/r/issues/101',
+    agent: 'claude',
+    freshSession: true,
+  })
+  assert.equal(resume.freshSession, true)
+  assert.equal(review.freshSession, true)
+  assert.notEqual(authorizationDigest(resume, null), authorizationDigest({ ...resume, freshSession: undefined }, null))
+  const store = new AuthorizationStore()
+  const issued = store.issue(resume, null)
+  assert.equal(store.consume(issued.id, { ...resume, freshSession: undefined }, issued.digest), null)
+  assert.throws(
+    () =>
+      makeAuthorizationInput({
+        action: 'develop',
+        url: 'https://github.com/o/r/issues/101',
+        agent: 'codex',
+        freshSession: true,
+      }),
+    /新开会话只支持 resume 或 review/,
+  )
+})
+
 test('only a quick exact-resume failure before session initialization falls back', () => {
   const rejected = {
     hadExactSessionId: true,

@@ -122,6 +122,38 @@ test('state exposes only the current in-memory task start time', async () => {
   assert.equal((await deriveWorkflowState(ctx, wf)).runStartedAt, null)
 })
 
+test('state exposes round and only owned continuation sessions as fresh-session capabilities', async () => {
+  const events = Array.from({ length: 5 }, (_, index) => ({
+    kind: 'review' as const,
+    at: `2026-08-23T0${index}:00:00Z`,
+    verdict: { passed: false, issues: [`issue ${index + 1}`] },
+  }))
+  const owned = await deriveWorkflowState(
+    ctx,
+    workflow({
+      events,
+      devAgent: 'codex',
+      devSessionId: 'dev-session',
+      devSessionAgent: 'codex',
+      reviewAgent: 'claude',
+      reviewSessionId: 'review-session',
+      reviewSessionAgent: 'claude',
+    }),
+  )
+  assert.deepEqual(owned.derived.freshSession, { round: 6, develop: true, review: true })
+
+  const staleOwner = await deriveWorkflowState(
+    ctx,
+    workflow({
+      events,
+      devAgent: 'codex',
+      devSessionId: 'legacy-session',
+      devSessionAgent: null,
+    }),
+  )
+  assert.deepEqual(staleOwner.derived.freshSession, { round: 6, develop: false, review: false })
+})
+
 test('state view derives worktree/main/remote hashes, ahead-behind and sync need', async () => {
   const { root, worktree, git, wt, baseA } = await setupRepo()
   try {

@@ -240,6 +240,8 @@ export interface AgentAuthorizationInput {
   agent: 'codex' | 'claude' | null
   context: string
   baseline?: string
+  /** Manual choice to abandon the resumable session while preserving git artifacts. */
+  freshSession?: true
   target?: {
     prNumber: string
     branch: string
@@ -362,6 +364,7 @@ export function makeAuthorizationInput(value: {
   agent?: unknown
   context?: unknown
   baseline?: unknown
+  freshSession?: unknown
   target?: unknown
   restoreTarget?: unknown
   override?: unknown
@@ -386,6 +389,10 @@ export function makeAuthorizationInput(value: {
     if (!/^origin\/[A-Za-z0-9._/-]+$/.test(baseline)) {
       throw new Error('开发基线只接受 origin/* 远端分支')
     }
+  }
+  const freshSession = value.freshSession === true
+  if (freshSession && action !== 'resume' && action !== 'review') {
+    throw new Error('新开会话只支持 resume 或 review')
   }
   let target: AgentAuthorizationInput['target']
   if (action === 'merge' && value.target !== undefined) {
@@ -427,6 +434,7 @@ export function makeAuthorizationInput(value: {
     agent: parsedAgent,
     context: typeof value.context === 'string' ? value.context.trim() : '',
     ...(baseline ? { baseline } : {}),
+    ...(freshSession ? { freshSession: true } : {}),
     ...(target ? { target } : {}),
     ...(restoreTarget ? { restoreTarget } : {}),
     ...(override ? { override } : {}),
