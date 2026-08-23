@@ -41,13 +41,21 @@ import { deriveAutoDevelopment } from './auto-development.ts'
 import { deriveWorkflowState } from './derive.ts'
 import { checkIssueContract } from './issue-contract.ts'
 import { firstDevelopmentFor, maintainCompletedDependencyLedger } from './repository-state.ts'
+import { readConfiguredRepositoryAdvance, type RepositoryAdvanceSignal } from './repository-sync.ts'
 
 export async function fetchRepositoryIssues(
   ctx: Context,
   payload: unknown,
   overrides: { config?: ClickVibeConfig; workflows?: IssueWorkflow[] } = {},
 ): Promise<
-  { ok: true; repoKey: string; issues: unknown[]; freshness: RepositoryFreshness | null } | { ok: false; error: string }
+  | {
+      ok: true
+      repoKey: string
+      issues: unknown[]
+      freshness: RepositoryFreshness | null
+      repoAdvance: RepositoryAdvanceSignal | null
+    }
+  | { ok: false; error: string }
 > {
   const repoKey = String((payload as { repoKey?: unknown } | undefined)?.repoKey ?? '').trim()
   const config = overrides.config ?? (await loadConfig())
@@ -58,9 +66,10 @@ export async function fetchRepositoryIssues(
 
   try {
     const rest = githubRest(ctx)
-    const [githubSnapshot, allWorkflows] = await Promise.all([
+    const [githubSnapshot, allWorkflows, repoAdvance] = await Promise.all([
       fetchGithubRepoSnapshot(ctx, repoKey, fetchTtlMs(config), forceRefresh),
       overrides.workflows ? Promise.resolve(overrides.workflows) : loadAllWorkflows(),
+      readConfiguredRepositoryAdvance(ctx, config, repoKey, freshness?.lastSuccessAt ?? null),
     ])
     const allIssues = githubSnapshot.issues
       .filter((issue) => issue.pull_request === undefined)
@@ -247,7 +256,7 @@ export async function fetchRepositoryIssues(
       }),
     )
     dependencyRefreshClock.mark(repoKey)
-    return { ok: true, repoKey, issues, freshness }
+    return { ok: true, repoKey, issues, freshness, repoAdvance }
   } catch (error) {
     return {
       ok: false,

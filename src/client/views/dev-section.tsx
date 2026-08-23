@@ -1,3 +1,4 @@
+import { RunningDuration } from '../duration.ts'
 import { type Workflow, stageLabel } from '../domain.ts'
 import { type GhIssue } from './issue-view.tsx'
 import { LiveTerminal } from './live-terminal.tsx'
@@ -58,6 +59,11 @@ export function DevSection({
       {/* 状态卡:当前状态 + 关键事实 */}
       <div className="cv-dev-head">
         🚀 开发流程 <span className={`cv-stage cv-stage-${stage}`}>{stageLabel(stage, workflow)}</span>
+        {workflow?.runStartedAt !== null &&
+        workflow?.runStartedAt !== undefined &&
+        (derived?.status === 'developing' || derived?.status === 'reviewing') ? (
+          <RunningDuration startedAt={workflow.runStartedAt} />
+        ) : null}
         {derived?.hasNewCommits ? <span className="cv-stage cv-stage-new">有未 review 的新提交</span> : null}
       </div>
       {workflow?.worktree ? <div className="cv-dev-path">{workflow.worktree}</div> : null}

@@ -79,6 +79,7 @@ export interface IssueWorkflow {
 export interface WorkflowEvent {
   kind: 'dev' | 'review' | 'rework' | 'resume' | 'note' | 'merge-override'
   at: string
+  durationMs?: number
   hash?: string // dev/review 锚定 commit 的短码
   round?: number // Review 结论落地轮次;旧事件缺失时降级展示
   agent?: SessionAgent // 动作实际使用的 agent 快照

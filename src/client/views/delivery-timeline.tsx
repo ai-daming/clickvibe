@@ -1,6 +1,7 @@
 import React from 'react'
 import { createPortal } from 'react-dom'
 import { deriveDeliveryTimelineItem } from '../delivery-timeline.ts'
+import { DeliveryDuration } from '../duration.ts'
 import type { WorkflowEvent } from '../domain.ts'
 import { fmtTime } from '../domain.ts'
 import { deliveryPublicationLabel } from '../runtime.ts'
@@ -34,6 +35,7 @@ export function DeliveryTimeline({
               <button type="button" className="cv-tl-open" onClick={() => setSelected(event)}>
                 <span className={`cv-tl-kind cv-tl-kind-${event.kind}`}>{item.kindLabel}</span>
                 <span className="cv-tl-time">{fmtTime(event.at)}</span>
+                <DeliveryDuration kind={event.kind} durationMs={event.durationMs} />
                 {event.hash ? <code className="cv-tl-hash">{event.hash}</code> : null}
                 {item.summary ? <span className="cv-tl-summary">{item.summary}</span> : null}
                 {event.kind === 'review' && event.verdict ? (

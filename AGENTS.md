@@ -6,6 +6,10 @@
 
 ClickVibe 是一个 DSH Web 插件:右侧面板把 GitHub issue 变成「开发 → review → 返工 → 合并」的异步流水线,git + GitHub 是唯一事实源,merge 留给人拍板。宿主侧(server)与客户端(client)分居 `src/index.ts` 与 `src/client/index.tsx` 两个 bundle 入口(构建与产物见 `tsdown.config.ts`)。
 
+### 主仓库开发守则
+
+直接在主仓库 checkout 工作的 agent,开始任务前必须先执行 `git fetch origin --prune`,检查遗留冲突(`MERGE_HEAD`)、工作区状态与本地分支落后情况;先同步最新代码并解决冲突,再开始任务。禁止用自动 stash、rebase 或丢弃改动绕过现场。
+
 ## 1. 结构三规则(issue #61,机器门禁守护)
 
 **规则一:每文件 ≤500 行(>800 无条件拆)。**

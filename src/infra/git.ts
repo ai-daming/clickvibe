@@ -23,7 +23,7 @@ import { runCommand } from './runtime.ts'
 import { type IssueContractSnapshot } from './state.ts'
 import type { DeliveryStats } from './contracts.ts'
 
-interface GitCompare {
+export interface GitCompare {
   behind: number
   ahead: number
 }
