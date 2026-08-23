@@ -83,11 +83,11 @@ export interface WorkflowEvent {
   durationMs?: number
   hash?: string // dev/review 锚定 commit 的短码
   round?: number // Review 结论落地轮次;旧事件缺失时降级展示
+  step?: number // 仅 auto-run 事件:本次自动跑已推进的步数(自动动作数);缺失为旧事件
   agent?: SessionAgent // 动作实际使用的 agent 快照
   stats?: DeliveryStats // fork point..锚定 HEAD 的 git 事实
   taskId?: string // 结构化任务日志锚点
-  /** review 结论(仅 review 事件)。 */
-  verdict?: { passed: boolean; issues: string[] }
+  verdict?: { passed: boolean; issues: string[] } // review 结论(仅 review 事件)
   /** review 启动时冻结的 Issue 验收契约。旧事件缺失时按过期处理。 */
   issueContract?: IssueContractSnapshot
   /** 本次开发完成前仍待修复的上一轮 review 问题数。 */

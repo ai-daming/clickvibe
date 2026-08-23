@@ -56,6 +56,8 @@ export interface Workflow {
     budgetHours: number
     startedAt: string
     deadline: string
+    /** 本次自动跑已触发的自动动作数;旧状态缺失按 0 起算。 */
+    step?: number
     rounds: number
     unresolved: { round: number; issues: string[] }[]
     lastObservedAt: string | null
@@ -128,6 +130,8 @@ export interface WorkflowEvent {
   durationMs?: number
   hash?: string
   round?: number
+  /** 仅 auto-run 事件:本次自动跑已推进的步数(自动动作数);缺失表示旧事件。 */
+  step?: number
   agent?: 'codex' | 'claude'
   stats?: {
     commits: { hash: string; subject: string }[]
