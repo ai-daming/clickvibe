@@ -3305,6 +3305,8 @@ test('develop with user context stays a first development and records the note i
     let reloaded = await loadWorkflow('o-r-54')
     assert.equal(reloaded?.events.at(-1)?.kind, 'dev')
     assert.equal(reloaded?.events.at(-1)?.userContext, firstContext)
+    assert.equal(typeof reloaded?.events.at(-1)?.durationMs, 'number')
+    assert.ok((reloaded?.events.at(-1)?.durationMs ?? -1) >= 0)
     // 附加说明只进本地时间线,不进 GitHub 评论。
     assert.equal(comments[0].body.includes(firstContext), false)
 
@@ -3342,6 +3344,7 @@ test('develop with user context stays a first development and records the note i
     reloaded = await loadWorkflow('o-r-54')
     assert.equal(reloaded?.events.at(-1)?.kind, 'rework')
     assert.equal(reloaded?.events.at(-1)?.userContext, secondContext)
+    assert.equal(typeof reloaded?.events.at(-1)?.durationMs, 'number')
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
@@ -3436,6 +3439,7 @@ test('resume (rework) carries the user context next to the review feedback and a
     const reloaded = await loadWorkflow(workflow.key)
     assert.equal(reloaded?.events.at(-1)?.kind, 'rework')
     assert.equal(reloaded?.events.at(-1)?.userContext, userContext)
+    assert.equal(typeof reloaded?.events.at(-1)?.durationMs, 'number')
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
@@ -3543,6 +3547,7 @@ test('review with user context appends it to the prompt and audits it in the rev
     const reloaded = await loadWorkflow(workflow.key)
     assert.equal(reloaded?.events.at(-1)?.kind, 'review')
     assert.equal(reloaded?.events.at(-1)?.userContext, userContext)
+    assert.equal(typeof reloaded?.events.at(-1)?.durationMs, 'number')
     // 附加说明不自动发布为 GitHub 评论。
     const comments = await readLogHistory(workflow.key, 'review')
     assert.equal(

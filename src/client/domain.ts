@@ -37,6 +37,8 @@ export interface Workflow {
   prNumber: string | null
   issueState?: 'OPEN' | 'CLOSED'
   baseRef: string | null
+  /** Present only while this host process still owns the active task. */
+  runStartedAt: number | null
   delivery?: {
     status: 'merged' | 'cleanup-pending' | 'archived'
     mergedAt: string
@@ -99,6 +101,7 @@ export interface NextAction {
 export interface WorkflowEvent {
   kind: 'dev' | 'review' | 'rework' | 'resume' | 'note' | 'merge-override'
   at: string
+  durationMs?: number
   hash?: string
   verdict?: { passed: boolean; issues: string[] }
   issueContract?: { bodyHash: string; updatedAt: string }
@@ -191,6 +194,21 @@ export interface RepositoryFreshness {
   error?: string
 }
 
+export interface RepositoryAdvanceSignal {
+  defaultBranch: string
+  remoteRef: string
+  mainBehind: number | null
+  checkoutBranch: string | null
+  checkoutBehind: number | null
+  fetchedAt: number | null
+}
+
 export type WorkflowStateResponse =
-  | { ok: true; workflows: Workflow[]; freshness: RepositoryFreshness | null; dependenciesRefreshDue: boolean }
+  | {
+      ok: true
+      workflows: Workflow[]
+      freshness: RepositoryFreshness | null
+      dependenciesRefreshDue: boolean
+      repoAdvance: RepositoryAdvanceSignal | null
+    }
   | { ok: false; error: string }

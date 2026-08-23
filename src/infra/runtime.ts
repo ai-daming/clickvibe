@@ -66,6 +66,8 @@ export interface LiveTask {
   workflow: IssueWorkflow
   kind: 'dev' | 'review'
   agent: DevelopAgent
+  /** In-memory start of this exact run; a resumed run creates a new task/time. */
+  startedAt: number
   process?: ReturnType<Context['shell']['start']>
   log: LineLog
   rawLog: LineLog
