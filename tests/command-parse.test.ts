@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { parseCommand } from '../src/workflow/command.ts'
+import { applyPreviousAutoRunAgents, parseCommand } from '../src/workflow/command.ts'
 
 test('parseCommand understands the canonical Chinese phrasing and strict grammar', () => {
   const canonical = parseCommand('把 #8 下单开发')
@@ -40,6 +40,31 @@ test('parseCommand understands the canonical Chinese phrasing and strict grammar
   assert.ok(prReview.ok)
   assert.equal(prReview.command.action, 'review')
   assert.equal(prReview.command.agent, 'claude')
+
+  const auto = parseCommand('/clickvibe auto #74 dev=claude review=codex rounds=7 budget=12 merge=on')
+  assert.ok(auto.ok)
+  assert.equal(auto.command.action, 'auto')
+  assert.deepEqual(auto.command.autoRun, {
+    autoMerge: true,
+    devAgent: 'claude',
+    reviewAgent: 'codex',
+    maxRounds: 7,
+    budgetHours: 12,
+  })
+
+  assert.equal(parseCommand('auto #74 rounds=0').ok, false)
+  assert.equal(parseCommand('auto #74 merge=yes').ok, false)
+  assert.equal(parseCommand('develop #74 dev=claude').ok, false)
+
+  const defaults = parseCommand('auto #74')
+  assert.ok(defaults.ok)
+  assert.deepEqual(
+    applyPreviousAutoRunAgents(defaults.command.autoRun!, defaults.command.autoRunAgentOverrides!, {
+      devAgent: 'claude',
+      reviewAgent: 'codex',
+    }),
+    { autoMerge: false, devAgent: 'claude', reviewAgent: 'codex', maxRounds: 20, budgetHours: 24 },
+  )
 
   for (const bad of ['', 'foo bar', 'develop', 'develop #8 agent=gpt', 'develop #8 context=']) {
     const rejected = parseCommand(bad)

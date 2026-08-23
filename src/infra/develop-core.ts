@@ -4,10 +4,11 @@ import {
   type RestoreAuthorizationTarget,
   restoreAuthorizationTarget,
 } from './authorization-target.ts'
+import { type AutoRunAuthorizationConfig, parseAutoRunAuthorization } from './auto-run-authorization.ts'
 import type { PromptSnapshot } from './contracts.ts'
 
 export type DevelopAgent = 'codex' | 'claude' | 'dryrun'
-export type AgentAction = 'develop' | 'review' | 'resume' | 'merge' | 'restore-base'
+export type AgentAction = 'develop' | 'review' | 'resume' | 'create-pr' | 'merge' | 'auto' | 'restore-base'
 
 /**
  * ClickVibe 自身合并门禁项(issue #49);GitHub 侧保护永远不可跳过。
@@ -237,13 +238,13 @@ export class LineLog {
 }
 
 export type IssuePromptSnapshot = PromptSnapshot
-
 export interface AgentAuthorizationInput {
   action: AgentAction
   url: string
   agent: 'codex' | 'claude' | null
   context: string
   baseline?: string
+  autoRun?: AutoRunAuthorizationConfig
   /** Manual choice to abandon the resumable session while preserving git artifacts. */
   freshSession?: true
   target?: {
@@ -372,18 +373,16 @@ export function makeAuthorizationInput(value: {
   target?: unknown
   restoreTarget?: unknown
   override?: unknown
+  autoRun?: unknown
 }): AgentAuthorizationInput {
   const action = String(value.action ?? '') as AgentAction
-  if (
-    action !== 'develop' &&
-    action !== 'review' &&
-    action !== 'resume' &&
-    action !== 'merge' &&
-    action !== 'restore-base'
-  ) {
+  if (!['develop', 'review', 'resume', 'create-pr', 'merge', 'auto', 'restore-base'].includes(action)) {
     throw new Error('不支持的 Agent 操作')
   }
-  const parsedAgent = action === 'merge' || action === 'restore-base' ? null : parseAgent(value.agent)
+  const parsedAgent =
+    action === 'merge' || action === 'create-pr' || action === 'auto' || action === 'restore-base'
+      ? null
+      : parseAgent(value.agent)
   if (parsedAgent === 'dryrun') throw new Error('dryrun 不需要高权限授权')
   const url = String(value.url ?? '').trim()
   if (!parseGithubUrl(url)) throw new Error('GitHub URL 无效')
@@ -432,12 +431,14 @@ export function makeAuthorizationInput(value: {
     }
     override = { skipped: skipped as MergeOverrideGate[], reason }
   }
+  const autoRun = action === 'auto' ? parseAutoRunAuthorization(value.autoRun) : undefined
   return {
     action,
     url,
     agent: parsedAgent,
     context: typeof value.context === 'string' ? value.context.trim() : '',
     ...(baseline ? { baseline } : {}),
+    ...(autoRun ? { autoRun } : {}),
     ...(freshSession ? { freshSession: true } : {}),
     ...(target ? { target } : {}),
     ...(restoreTarget ? { restoreTarget } : {}),

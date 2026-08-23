@@ -128,7 +128,7 @@ export async function authorizeAgent(
     let mergePreview: Extract<Awaited<ReturnType<typeof mergeAuthorizationPreview>>, { ok: true }> | null = null
     let restorePreview: Awaited<ReturnType<typeof baselineRestorePreview>> | null = null
     let mergeOverride: AgentAuthorizationInput['override']
-    if (input.action === 'develop') {
+    if (input.action === 'develop' || input.action === 'auto') {
       const fetched = await fetchIssue(ctx, { url: input.url })
       if (!fetched.ok) return fetched
       snapshot = issueSnapshot(fetched.data.item as Record<string, unknown>)
@@ -136,7 +136,7 @@ export async function authorizeAgent(
       if (JSON.stringify(body.expectedSnapshot) !== JSON.stringify(snapshot)) {
         return { ok: false, error: 'Issue 内容已变化或未提供完整预览快照,请刷新面板并重新确认' }
       }
-      baselinePreview = await developBaselinePreview(ctx, input.url, input.baseline)
+      if (input.action === 'develop') baselinePreview = await developBaselinePreview(ctx, input.url, input.baseline)
     } else if (input.action === 'restore-base') {
       restorePreview = await baselineRestorePreview(ctx, input.url)
     } else if (input.action === 'merge') {
@@ -213,7 +213,8 @@ export async function authorizeAgent(
               updatedAt: snapshot.updatedAt,
               commentCount: snapshot.comments.length,
               digest: authorization.digest,
-              ...baselinePreview,
+              ...(baselinePreview ?? {}),
+              ...(input.action === 'auto' ? { autoRun: input.autoRun } : {}),
             }
           : { action: input.action, agent: input.agent, url: input.url, digest: authorization.digest }),
       ...(mergePreview ? { target: authorizationInput.target } : {}),
@@ -451,11 +452,33 @@ export async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): P
     }
   }
 
+  const completingAutoRun = workflow.autoRun?.status === 'running' && workflow.autoRun.autoMerge
+  const priorObservedAt = workflow.autoRun?.lastObservedAt ?? null
+  const completionAt = new Date().toISOString()
+  if (completingAutoRun && workflow.autoRun) {
+    workflow.autoRun.status = 'completed'
+    workflow.autoRun.pausedReason = null
+    workflow.autoRun.lastObservedAt = completionAt
+    workflow.events.push({
+      kind: 'auto-run',
+      at: completionAt,
+      round: workflow.autoRun.rounds,
+      note: '自动跑到底已自动合并并完成清理,交付收敛',
+    })
+  }
   try {
     delivery.status = 'archived'
     delete delivery.lastError
     await archiveWorkflow(workflow)
   } catch (error) {
+    if (completingAutoRun && workflow.autoRun) {
+      workflow.autoRun.status = 'running'
+      workflow.autoRun.lastObservedAt = priorObservedAt
+      const eventIndex = workflow.events.findIndex(
+        (event) => event.kind === 'auto-run' && event.at === completionAt && event.note?.includes('自动合并'),
+      )
+      if (eventIndex >= 0) workflow.events.splice(eventIndex, 1)
+    }
     return failCleanup('归档 workflow', error)
   }
   return { ok: true, merged: true, archived: true, prNumber: pr.number }

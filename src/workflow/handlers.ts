@@ -49,6 +49,7 @@ import {
   formatProjects,
   formatStatus,
   type ParsedCommand,
+  applyPreviousAutoRunAgents,
   parseCommand,
 } from './command.ts'
 import { authorizeAgent } from './merge.ts'
@@ -56,6 +57,7 @@ import { importDshProject } from './project-import.ts'
 import { fetchRepositoryIssues } from './repository-issues.ts'
 import { enrichWorkflowStates } from './repository-state.ts'
 import { readConfiguredRepositoryAdvance } from './repository-sync.ts'
+import { pauseOrphanedAutoRuns } from './auto-run.ts'
 
 /** `/state` implementation, shared by the route and the `status` command (issue #13). */
 export async function stateWorkflows(
@@ -66,8 +68,10 @@ export async function stateWorkflows(
   const repoKey = String(filter?.repoKey ?? '')
   const config = await loadConfig()
   const active = await loadAllWorkflows()
+  await pauseOrphanedAutoRuns(active)
+  const currentActive = await loadAllWorkflows()
   const archived = url === '' ? [] : await loadAllArchivedWorkflows()
-  const workflows = [...active, ...archived].filter(
+  const workflows = [...currentActive, ...archived].filter(
     (workflow) => (url === '' || workflow.url === url) && (repoKey === '' || workflow.repoKey === repoKey),
   )
   const parsedRepo = parseUrl(url)
@@ -130,17 +134,19 @@ export async function resolveCommandTarget(command: ParsedCommand): Promise<{ ur
 }
 
 /** Map a write command onto the same POST method the panel UI uses. */
-export const WRITE_METHOD: Partial<Record<CommandAction, 'develop' | 'review' | 'resume' | 'stop' | 'sync' | 'merge'>> =
-  {
-    develop: 'develop',
-    review: 'review',
-    rework: 'resume',
-    resume: 'resume',
-    stop: 'stop',
-    sync: 'sync',
-    'restore-base': 'sync',
-    merge: 'merge',
-  }
+export const WRITE_METHOD: Partial<
+  Record<CommandAction, 'develop' | 'review' | 'resume' | 'auto' | 'stop' | 'sync' | 'merge'>
+> = {
+  develop: 'develop',
+  review: 'review',
+  rework: 'resume',
+  resume: 'resume',
+  auto: 'auto',
+  stop: 'stop',
+  sync: 'sync',
+  'restore-base': 'sync',
+  merge: 'merge',
+}
 
 /** Render one executed write result as conversation-readable text. */
 export function formatWriteOutcome(
@@ -168,15 +174,17 @@ export function formatWriteOutcome(
   const text =
     action === 'develop'
       ? `已下单开发:任务 ${String(body.taskId ?? '')}(分支 ${String(body.branch ?? '')},worktree ${String(body.worktree ?? '')})。${followUp}`
-      : action === 'review'
-        ? `已启动 review:任务 ${String(body.taskId ?? '')}。${followUp}`
-        : action === 'rework' || action === 'resume'
-          ? `已恢复开发会话:任务 ${String(body.taskId ?? '')}。${followUp}`
-          : action === 'merge'
-            ? `PR #${String(body.prNumber ?? '')} 已合并,worktree/分支/Issue 清理与归档完成。`
-            : action === 'restore-base'
-              ? `已恢复远端基线 origin/${String(body.baseBranch ?? '')} @ ${String(body.baseHash ?? '')},可继续创建 PR。`
-              : action === 'sync'
+      : action === 'auto'
+        ? `自动跑到底已启动(workflow ${String(body.workflowKey ?? '')})。系统会在每步完成后重新观察权威事实,直到待合并或明确暂停。`
+        : action === 'review'
+          ? `已启动 review:任务 ${String(body.taskId ?? '')}。${followUp}`
+          : action === 'rework' || action === 'resume'
+            ? `已恢复开发会话:任务 ${String(body.taskId ?? '')}。${followUp}`
+           : action === 'merge'
+             ? `PR #${String(body.prNumber ?? '')} 已合并,worktree/分支/Issue 清理与归档完成。`
+             : action === 'restore-base'
+               ? `已恢复远端基线 origin/${String(body.baseBranch ?? '')} @ ${String(body.baseHash ?? '')},可继续创建 PR。`
+               : action === 'sync'
                 ? `已同步 ${String(body.branch ?? '')} 到远端基线,HEAD ${String(body.head ?? '未知')}。`
                 : `已请求停止任务 ${String(body.taskId ?? '')}${body.stopped === false ? '(任务此前已结束)' : ''}。`
   return { status: result.status, body: { ok: true, action, text, ...body } }
@@ -286,6 +294,14 @@ export async function handleCommand(
   const target = await resolveCommandTarget(command)
   if ('error' in target) return { status: 400, body: { ok: false, action: command.action, error: target.error } }
   const { url } = target
+  let autoRun = command.autoRun
+  if (command.action === 'auto' && autoRun && command.autoRunAgentOverrides) {
+    const parsedTarget = parseUrl(url)
+    const previous = parsedTarget
+      ? await loadWorkflow(issueKey(`${parsedTarget.owner}/${parsedTarget.repo}`, parsedTarget.number))
+      : null
+    autoRun = applyPreviousAutoRunAgents(autoRun, command.autoRunAgentOverrides, previous)
+  }
 
   // 直接执行类:sync/stop 不需要一次性授权;dryrun 只需回环校验(在 develop 分支内)
   if (command.action === 'sync') {
@@ -318,6 +334,7 @@ export async function handleCommand(
       command.action,
       await execute(method, {
         url,
+        ...(command.action === 'auto' && autoRun ? { autoRun } : {}),
         ...(agent && agent !== 'dryrun' ? { agent } : {}),
         ...(command.context !== '' ? { context: command.context } : {}),
         ...(command.action === 'restore-base' ? { restoreBase: true } : {}),
@@ -333,7 +350,7 @@ export async function handleCommand(
         ? await resolveResumeAgent(url)
         : null
   let expectedSnapshot: IssuePromptSnapshot | undefined
-  if (command.action === 'develop') {
+  if (command.action === 'develop' || command.action === 'auto') {
     const fetched = await fetchIssue(ctx, { url, forceRefresh: true })
     if (!fetched.ok) return { status: 400, body: { ok: false, action: command.action, error: fetched.error } }
     expectedSnapshot = issueSnapshot(fetched.data.item as Record<string, unknown>)
@@ -343,6 +360,7 @@ export async function handleCommand(
     url,
     ...(agent && agent !== 'dryrun' ? { agent } : {}),
     ...(command.context !== '' ? { context: command.context } : {}),
+    ...(command.action === 'auto' && autoRun ? { autoRun } : {}),
     ...(expectedSnapshot ? { expectedSnapshot } : {}),
     ...(command.action === 'merge' && command.overrideReason !== ''
       ? { override: true, overrideReason: command.overrideReason }

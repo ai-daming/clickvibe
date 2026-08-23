@@ -44,7 +44,7 @@ export function useAgentAuthorization(options: {
   const resolver = React.useRef<((value: AuthorizationCapability | null) => void) | null>(null)
 
   const request = async (
-    action: 'develop' | 'review' | 'resume' | 'merge' | 'restore-base',
+    action: 'develop' | 'review' | 'resume' | 'create-pr' | 'merge' | 'restore-base',
     agent: 'codex' | 'claude' | null,
     context: string,
     baseline?: string,
@@ -71,7 +71,7 @@ export function useAgentAuthorization(options: {
   }
 
   const authorize = async (
-    action: 'develop' | 'review' | 'resume' | 'merge' | 'restore-base',
+    action: 'develop' | 'review' | 'resume' | 'create-pr' | 'merge' | 'restore-base',
     agent: 'codex' | 'claude' | null,
     context = '',
     freshSession = false,

@@ -41,7 +41,7 @@ export function expectedDevelopSnapshot(url: string, issue: GhIssue) {
 }
 
 export function authorizationSummary(input: {
-  action: 'develop' | 'review' | 'resume' | 'merge' | 'restore-base'
+  action: 'develop' | 'review' | 'resume' | 'create-pr' | 'merge' | 'restore-base'
   agent: 'codex' | 'claude' | null
   url: string
   authorizationDigest: string

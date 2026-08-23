@@ -51,6 +51,7 @@ import { checkIssueContract } from './issue-contract.ts'
 import { firstDevelopmentFor } from './repository-state.ts'
 import { recordDevDelivery } from './review-flow.ts'
 import { workflowBaseBranch } from './state-view.ts'
+import { notifyAutoRunCompletion } from './auto-run-signal.ts'
 
 export async function resolveAutomaticFirstDevelopment(
   ctx: Context,
@@ -304,6 +305,7 @@ export async function startDevelop(
             }
             await saveWorkflow(reloaded)
           })
+          notifyAutoRunCompletion(ctx, workflow.key, live.status === 'running' ? 'failed' : live.status)
         })
       } catch (error) {
         pushTaskLine(live, `[clickvibe] 失败: ${String(error instanceof Error ? error.message : error)}`)
@@ -314,6 +316,7 @@ export async function startDevelop(
           reloaded.devInterrupted = true
           await saveWorkflow(reloaded)
         })
+        notifyAutoRunCompletion(ctx, workflow.key, 'failed')
         finishTask(live, 'failed', 1)
       }
     })()

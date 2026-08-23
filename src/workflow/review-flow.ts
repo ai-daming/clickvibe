@@ -1,16 +1,7 @@
 /**
  * clickvibe host half — routes:
- * - `/clickvibe/api/fetch`          — fetch GitHub issue/PR data via gh
- * - `/clickvibe/api/command`        — text-command entry (issue #13): conversation
- *                                      triggers reuse the same action handlers below
- * - `/clickvibe/api/state`          — restore panel context (all workflows)
- * - `/clickvibe/api/develop`        — start dev: worktree+branch+agent
- * - `/clickvibe/api/develop/poll`   — incremental dev log/status (JSON)
- * - `/clickvibe/api/history`        — complete disk-backed task history
- * - `/clickvibe/api/stream`         — SSE live status stream for a task
- * - `/clickvibe/api/review`         — review the dev branch with codex/claude
- * - `/clickvibe/api/resume`         — resume an interrupted dev session
- * - `/clickvibe/api/sync`           — sync the worktree with the remote base (issue #5)
+ * Routes cover state, development, review, resume, sync, task logs and streams.
+ * Text commands reuse these same action handlers.
  *
  * Workflow per issue (persisted under ~/.clickvibe/state/):
  *   developing → review-ready → reviewing → passed
@@ -61,6 +52,7 @@ import { deriveFreshSessionAvailability, selectSessionLaunch } from './fresh-ses
 import { extractGithubCommentId, extractGithubCommentUrl } from './delivery-publication.ts'
 import { type ReviewIssueContract } from './merge-gates.ts'
 import { workflowBaseBranch } from './state-view.ts'
+import { notifyAutoRunCompletion } from './auto-run-signal.ts'
 
 /** Start a review task on the dev branch with codex/claude. */
 export async function startReview(
@@ -255,6 +247,7 @@ export async function startReview(
           recordSessionId(interrupted, 'review', newSessionId, agent)
           interrupted.stage = 'review-ready'
         }).catch(() => undefined)
+        notifyAutoRunCompletion(ctx, workflow.key, live.status === 'running' ? 'failed' : live.status)
         return
       }
       const lines = (await readLogTail(workflowKey, 'review', 200)).map((line) => decodeLiveLogLine(line).text)
@@ -266,6 +259,7 @@ export async function startReview(
           invalid.reviewResult = null
           invalid.stage = 'review-ready'
         }).catch(() => undefined)
+        notifyAutoRunCompletion(ctx, workflow.key, 'failed')
         return
       }
       if (resolved.source === 'file') {
@@ -338,6 +332,7 @@ export async function startReview(
           pushTaskLine(live, '[clickvibe] GitHub 原生 Approve 失败(继续,不影响 Review 结论与评论)')
         }
       })
+      notifyAutoRunCompletion(ctx, workflow.key, 'done')
     },
     exactSessionId
       ? {

@@ -11,6 +11,8 @@
 3. **comment meta = 增强器**。允许缺失;缺失时走降级链(GitHub 原生 review → 人工确认),**永不因缺 meta 而卡死,也永不因缺判据而瞎猜**。
 4. **入口从 GitHub issue 出发**:枚举 repo 的 open issue,用约定(config 的 repo 路径 + worktreeRoot + issue 号)算出候选 worktree/分支,再用 git 查真相;workflow 文件存在时只叠加缓存信息。
 
+`workflow.autoRun` 同样只是可选的自动推进配置与审计缓存,不替代 git/GitHub 事实。字段缺失或结构无效时直接退回手动模式;`running` 只消费实时 `deriveNextAction`。Host 重启后若没有对应 live task,降级为 `paused / session-interrupted`,绝不从本地游标猜测下一步。
+
 ## 二、事实分级
 
 | 级别 | 事实 | 来源 | 获取手段 |
