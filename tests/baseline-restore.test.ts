@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
 import { issueKey, loadWorkflow, saveWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
+import { mutateWorkflowStrict } from '../src/infra/workflow-mutation.ts'
 import { restoreBaseBranch } from '../src/workflow/baseline-restore.ts'
 import { recordDevDelivery } from '../src/workflow/review-flow.ts'
 import { syncWorktree } from '../src/workflow/sync.ts'
@@ -98,6 +99,184 @@ test('authorized recovery recreates only the frozen missing base branch at its f
     ).stdout.trim()
     assert.equal(remoteHash, frozen)
   } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('restore rejects an authorization made stale by a queued baseline-tip mutation', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'clickvibe-restore-stale-authorization-'))
+  const home = join(root, 'home')
+  const repo = join(root, 'repo')
+  const previousHome = process.env.HOME
+  process.env.HOME = home
+  let releaseFetch = () => undefined
+  const fetchReleased = new Promise<void>((resolve) => {
+    releaseFetch = resolve
+  })
+  let markFetchStarted = () => undefined
+  const fetchStarted = new Promise<void>((resolve) => {
+    markFetchStarted = resolve
+  })
+  const commands: string[] = []
+  const ctx = {
+    shell: {
+      resolve(spec: unknown) {
+        return spec
+      },
+      async run(spec: { command: string }) {
+        commands.push(spec.command)
+        if (spec.command === 'git fetch origin --prune') {
+          markFetchStarted()
+          await fetchReleased
+        }
+        if (spec.command.startsWith('git rev-parse --verify refs/remotes/origin/')) {
+          return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'missing' } }
+        }
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      },
+    },
+  }
+  const workflow = {
+    key: issueKey('o/r', '63'),
+    url: 'https://github.com/o/r/issues/63',
+    repoKey: 'o/r',
+    worktree: join(root, 'worktree'),
+    branch: 'repo-issue-63',
+    stage: 'review-ready',
+    devAgent: 'codex',
+    devTaskId: null,
+    devSessionId: null,
+    devSessionAgent: null,
+    devInterrupted: false,
+    reviewAgent: null,
+    reviewTaskId: null,
+    reviewSessionId: null,
+    reviewSessionAgent: null,
+    reviewResult: null,
+    prNumber: null,
+    issueState: 'OPEN',
+    baseRef: 'origin/release/deleted @ aaa1111',
+    updatedAt: 0,
+    events: [],
+  } satisfies IssueWorkflow
+  try {
+    await mkdir(join(home, '.clickvibe'), { recursive: true })
+    await writeFile(
+      join(home, '.clickvibe', 'config.yaml'),
+      ['repos:', `  o/r: ${repo}`, `worktreeRoot: ${join(root, 'worktrees')}`, ''].join('\n'),
+    )
+    await saveWorkflow(workflow)
+
+    const advancing = mutateWorkflowStrict(workflow.key, async (current) => {
+      await Promise.race([fetchStarted, new Promise((resolve) => setTimeout(resolve, 100))])
+      current.baseRef = 'origin/release/deleted @ bbb2222'
+    })
+    const restoring = restoreBaseBranch(ctx as never, {
+      url: workflow.url,
+      restoreTarget: { branch: 'release/deleted', hash: 'aaa1111' },
+    })
+    await advancing
+    releaseFetch()
+
+    const restored = await restoring
+    assert.equal(restored.ok, false)
+    if (!restored.ok) assert.match(restored.error, /目标已变化/)
+    assert.equal((await loadWorkflow(workflow.key))?.baseRef, 'origin/release/deleted @ bbb2222')
+    assert.equal(
+      commands.some((command) => command.startsWith('git push ')),
+      false,
+    )
+  } finally {
+    releaseFetch()
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('restore holds the workflow lock through the remote push', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'clickvibe-restore-lock-scope-'))
+  const home = join(root, 'home')
+  const previousHome = process.env.HOME
+  process.env.HOME = home
+  let releaseFetch = () => undefined
+  const fetchReleased = new Promise<void>((resolve) => {
+    releaseFetch = resolve
+  })
+  let markFetchStarted = () => undefined
+  const fetchStarted = new Promise<void>((resolve) => {
+    markFetchStarted = resolve
+  })
+  const ctx = {
+    shell: {
+      resolve(spec: unknown) {
+        return spec
+      },
+      async run(spec: { command: string }) {
+        if (spec.command === 'git fetch origin --prune') {
+          markFetchStarted()
+          await fetchReleased
+        }
+        if (spec.command.startsWith('git rev-parse --verify refs/remotes/origin/')) {
+          return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'missing' } }
+        }
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      },
+    },
+  }
+  const workflow = {
+    key: issueKey('o/r', '64'),
+    url: 'https://github.com/o/r/issues/64',
+    repoKey: 'o/r',
+    worktree: join(root, 'worktree'),
+    branch: 'repo-issue-64',
+    stage: 'review-ready',
+    devAgent: 'codex',
+    devTaskId: null,
+    devSessionId: null,
+    devSessionAgent: null,
+    devInterrupted: false,
+    reviewAgent: null,
+    reviewTaskId: null,
+    reviewSessionId: null,
+    reviewSessionAgent: null,
+    reviewResult: null,
+    prNumber: null,
+    issueState: 'OPEN',
+    baseRef: 'origin/release/deleted @ aaa1111',
+    updatedAt: 0,
+    events: [],
+  } satisfies IssueWorkflow
+  try {
+    await mkdir(join(home, '.clickvibe'), { recursive: true })
+    await writeFile(
+      join(home, '.clickvibe', 'config.yaml'),
+      ['repos:', `  o/r: ${join(root, 'repo')}`, `worktreeRoot: ${join(root, 'worktrees')}`, ''].join('\n'),
+    )
+    await saveWorkflow(workflow)
+
+    const restoring = restoreBaseBranch(ctx as never, {
+      url: workflow.url,
+      restoreTarget: { branch: 'release/deleted', hash: 'aaa1111' },
+    })
+    await fetchStarted
+    const mutation = mutateWorkflowStrict(workflow.key, (current) => {
+      current.stage = 'reviewing'
+    })
+    const race = await Promise.race([
+      mutation.then(() => 'completed'),
+      new Promise((resolve) => setTimeout(() => resolve('waiting'), 20)),
+    ])
+    assert.equal(race, 'waiting')
+    releaseFetch()
+
+    assert.equal((await restoring).ok, true)
+    await mutation
+    assert.equal((await loadWorkflow(workflow.key))?.stage, 'reviewing')
+  } finally {
+    releaseFetch()
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(root, { recursive: true, force: true })

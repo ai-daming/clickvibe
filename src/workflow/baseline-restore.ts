@@ -3,6 +3,7 @@ import { frozenBaseHash, frozenRemoteBase } from '../agent/baseline.ts'
 import { restoreMissingOriginBranch } from '../infra/baseline-restore-git.ts'
 import { expandHome, loadConfig, parseUrl } from '../infra/runtime.ts'
 import { issueKey, loadWorkflow } from '../infra/state.ts'
+import { withWorkflowLock } from '../infra/workflow-lock.ts'
 
 export interface BaselineRestorePreview {
   baseBranch: string
@@ -46,12 +47,18 @@ export async function restoreBaseBranch(
     ) {
       throw new Error('恢复基线缺少精确授权目标')
     }
-    const target = await baselineRestorePreview(url)
-    if (target.baseBranch !== authorizedTarget.baseBranch || target.baseHash !== authorizedTarget.baseHash) {
-      throw new Error('恢复基线目标已变化,请刷新预览并重新确认')
-    }
-    await restoreMissingOriginBranch(ctx, expandHome(configured), target.baseBranch, target.baseHash)
-    return { ok: true, ...target }
+    const key = issueKey(repoKey, parsed.number)
+    return await withWorkflowLock(key, async () => {
+      // The authorization check and remote restoration are one serialized
+      // transaction. A concurrent sync/delivery tip update must finish first
+      // (making this authorization stale) or wait until this exact push ends.
+      const target = await baselineRestorePreview(url)
+      if (target.baseBranch !== authorizedTarget.baseBranch || target.baseHash !== authorizedTarget.baseHash) {
+        throw new Error('恢复基线目标已变化,请刷新预览并重新确认')
+      }
+      await restoreMissingOriginBranch(ctx, expandHome(configured), target.baseBranch, target.baseHash)
+      return { ok: true as const, ...target }
+    })
   } catch (error) {
     return { ok: false, error: String(error instanceof Error ? error.message : error) }
   }

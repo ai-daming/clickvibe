@@ -218,7 +218,7 @@ test('codex parser covers lifecycle, tool families and defensive event shapes', 
         item: { type: 'command_execution', aggregated_output: '\nvalue\r\n\n' },
       }),
     ),
-    [{ kind: 'command_output', text: 'value' }],
+    [{ kind: 'command_output', text: '\nvalue\r\n\n' }],
   )
   assert.deepEqual(parseCodexEvent(JSON.stringify({ type: 'item.completed', item: { type: 'reasoning' } })), [])
   assert.deepEqual(parseCodexEvent(JSON.stringify({ type: 'item.completed', item: { type: 'token_count' } })), [])
