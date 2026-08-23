@@ -24,6 +24,7 @@ import { type DeriveOptions, hasMergeConflict, readBranch, readRefShort, readRev
 import { liveTasks, readWorktreeHead, runCommand } from '../infra/runtime.ts'
 import { type IssueContractSnapshot, type IssueWorkflow } from '../infra/state.ts'
 import { latestDevelopmentHash } from './delivery-audit.ts'
+import { deriveFreshSessionAvailability, type FreshSessionAvailability } from './fresh-session.ts'
 import {
   deriveNextAction,
   deriveWorkflowStatus,
@@ -69,6 +70,7 @@ export interface WorkflowDerived {
   nextAction: NextAction
   status: 'idle' | 'developing' | 'review-ready' | 'reviewing' | 'passed'
   baseBranch: string
+  freshSession: FreshSessionAvailability
 }
 
 /**
@@ -225,6 +227,11 @@ export async function deriveWorkflowState(
   const nextAction = deriveNextAction(facts)
   const baseBranch = workflowBaseBranch(workflow.baseRef, options.defaultBranch ?? 'main')
   const status = deriveWorkflowStatus(facts)
+  const freshSession = deriveFreshSessionAvailability(
+    events,
+    workflow.devSessionId !== null && workflow.devSessionAgent === workflow.devAgent,
+    workflow.reviewSessionId !== null && workflow.reviewSessionAgent === workflow.reviewAgent,
+  )
 
   return {
     ...workflow,
@@ -264,6 +271,7 @@ export async function deriveWorkflowState(
       nextAction,
       status,
       baseBranch,
+      freshSession,
     },
   }
 }
