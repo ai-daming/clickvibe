@@ -78,40 +78,27 @@ test('invalid materialized JSON logs a reason and falls back without accepting a
   })
 })
 
-test('a passing materialized verdict cannot carry contradictory issues', async () => {
+test('a passing materialized verdict is trusted: notes ride along without blocking', async () => {
   await withWorktree(async (worktree) => {
     await mkdir(join(worktree, '.clickvibe'))
-    await writeFile(join(worktree, REVIEW_RESULT_RELATIVE_PATH), '{"passed":true,"issues":["still broken"]}')
-    const resolved = await loadReviewResult(worktree, ['💬 ❌ Review 发现问题'])
-    assert.equal(resolved.source, 'parse-error')
-    assert.match(resolved.fileError ?? '', /通过结论不能包含问题/)
-    assert.equal(resolved.result, null)
-    assert.match(resolved.parseError ?? '', /问题列表/)
-  })
-})
-
-test('a passing verdict with only manual acceptance notes passes with empty issues', async () => {
-  await withWorktree(async (worktree) => {
-    await mkdir(join(worktree, '.clickvibe'))
-    const manualOnly = [
-      '[无法验证] 验收标准第3条『窄面板下可读性』为 Issue 中标注的 [人工] 视觉验收项(非缺陷),需人工确认',
-    ]
-    await writeFile(join(worktree, REVIEW_RESULT_RELATIVE_PATH), JSON.stringify({ passed: true, issues: manualOnly }))
+    const notes = ['[无法验证] [人工] 视觉验收项(非缺陷),需人工确认', 'src/a.ts:10 可优化(不阻塞合并)']
+    await writeFile(join(worktree, REVIEW_RESULT_RELATIVE_PATH), JSON.stringify({ passed: true, issues: notes }))
     const resolved = await loadReviewResult(worktree, ['💬 ❌ Review 发现问题'])
     assert.equal(resolved.source, 'file')
-    assert.deepEqual(resolved.result, { passed: true, issues: [] })
+    assert.deepEqual(resolved.result, { passed: true, issues: notes })
   })
 })
 
-test('a passing verdict still blocks when a real issue rides along with manual notes', async () => {
+test('a passing stdout JSON with notes is accepted and preserves the notes', async () => {
   await withWorktree(async (worktree) => {
-    await mkdir(join(worktree, '.clickvibe'))
-    const mixed = ['[无法验证] [人工] 视觉验收项(非缺陷)', 'src/a.ts:10 存在竞态']
-    await writeFile(join(worktree, REVIEW_RESULT_RELATIVE_PATH), JSON.stringify({ passed: true, issues: mixed }))
-    const resolved = await loadReviewResult(worktree, ['💬 ❌ Review 发现问题'])
-    assert.equal(resolved.source, 'parse-error')
-    assert.match(resolved.fileError ?? '', /通过结论不能包含问题/)
-    assert.equal(resolved.result, null)
+    const notes = ['[无法验证] 窄面板可读性为 [人工] 验收项(非缺陷)']
+    const parsed = parseAgentChunk('claude', agentOutput('claude', JSON.stringify({ passed: true, issues: notes })))
+    const resolved = await loadReviewResult(
+      worktree,
+      parsed.lines.map((line) => line.text),
+    )
+    assert.equal(resolved.source, 'stdout-json')
+    assert.deepEqual(resolved.result, { passed: true, issues: notes })
   })
 })
 

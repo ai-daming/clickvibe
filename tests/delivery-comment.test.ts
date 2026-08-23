@@ -79,6 +79,22 @@ test('passed review comment points to merge', () => {
   assert.match(body, /下一步:可合并当前提交。/)
 })
 
+test('passed review comment keeps non-blocking notes visible without blocking merge', () => {
+  const body = buildReviewComment({
+    commit: '3fb7db6',
+    issueNumber: '20',
+    passed: true,
+    issues: ['[无法验证] 窄面板可读性为 [人工] 验收项(非缺陷)'],
+    agent: 'claude',
+    round: 1,
+    at: '2026-08-22T10:00:00Z',
+  })
+  assert.match(body, /✅ ClickVibe Review 通过/)
+  assert.match(body, /未发现阻塞问题\(随行备注 1 条,不影响合并\)/)
+  assert.ok(body.includes('- [无法验证] 窄面板可读性为 [人工] 验收项(非缺陷)'))
+  assert.match(body, /下一步:可合并当前提交。/)
+})
+
 test('failed review comment lists every issue and points to rework', () => {
   const body = buildReviewComment({
     commit: '3fb7db6',
