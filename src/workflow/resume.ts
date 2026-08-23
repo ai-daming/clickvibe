@@ -36,7 +36,6 @@ import {
   clearStaleSessionId,
   issueKey,
   loadWorkflow,
-  resetLog,
   resolveSessionForAgent,
   saveWorkflow,
 } from '../infra/state.ts'
@@ -78,7 +77,7 @@ export async function resumeDevelop(
   try {
     reservation = resumeTaskGate.reserve(workflow.key, () => {
       const id = taskId('dev')
-      return createLiveTask(id, workflow.key, 'dev', agent, sessionId)
+      return createLiveTask(id, workflow, 'dev', agent, sessionId)
     })
   } catch (error) {
     return { ok: false, error: String(error instanceof Error ? error.message : error) }
@@ -90,7 +89,6 @@ export async function resumeDevelop(
     finishTask(live, 'failed', 1)
     return { ok: false, error: resolvedSnapshot.error }
   }
-  await resetLog(workflow.key, 'dev')
   workflow.devTaskId = live.taskId
   workflow.devInterrupted = false
   workflow.stage = 'developing'

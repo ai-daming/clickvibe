@@ -5,11 +5,14 @@ import { join } from 'node:path'
 import test from 'node:test'
 import {
   appendLog,
+  appendTaskLog,
   applyDevRunOutcome,
   clearStaleSessionId,
   readLogHistory,
+  readTaskLog,
   recordSessionId,
-  resetLog,
+  saveWorkflow,
+  startTaskLog,
   resolveSessionForAgent,
   type IssueWorkflow,
 } from '../src/infra/state.ts'
@@ -19,7 +22,15 @@ test('persistent log snapshots preserve append order without truncating history'
   const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-log-order-'))
   process.env.HOME = tempHome
   try {
-    const writes = Array.from({ length: 2100 }, (_, index) => appendLog('o-r-3', 'dev', `line-${index}`))
+    const state = workflow()
+    state.key = 'o-r-3'
+    state.url = 'https://github.com/o/r/issues/3'
+    state.devTaskId = 'dev-1720000000000-order'
+    await saveWorkflow(state)
+    await startTaskLog(state, 'dev', state.devTaskId)
+    const writes = Array.from({ length: 2100 }, (_, index) =>
+      appendTaskLog(state, 'dev', state.devTaskId!, index + 1, `line-${index}`),
+    )
     await Promise.all(writes)
     const lines = await readLogHistory('o-r-3', 'dev')
     assert.equal(lines.length, 2100)
@@ -32,16 +43,26 @@ test('persistent log snapshots preserve append order without truncating history'
   }
 })
 
-test('a new task log generation bounds multi-run growth without truncating the current run', async () => {
+test('a new task log generation preserves the prior run and selects the current run', async () => {
   const previousHome = process.env.HOME
   const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-log-reset-'))
   process.env.HOME = tempHome
   try {
-    await appendLog('o-r-4', 'dev', 'prior run')
-    await resetLog('o-r-4', 'dev')
-    await appendLog('o-r-4', 'dev', 'current one')
-    await appendLog('o-r-4', 'dev', 'current two')
-    assert.deepEqual(await readLogHistory('o-r-4', 'dev'), ['current one', 'current two'])
+    const state = workflow()
+    state.key = 'o-r-4'
+    state.url = 'https://github.com/o/r/issues/4'
+    state.devTaskId = 'dev-1720000000000-prior'
+    await saveWorkflow(state)
+    await startTaskLog(state, 'dev', state.devTaskId)
+    await appendTaskLog(state, 'dev', state.devTaskId, 1, 'prior run')
+    const priorTaskId = state.devTaskId
+    state.devTaskId = 'dev-1720000005000-current'
+    await saveWorkflow(state)
+    await startTaskLog(state, 'dev', state.devTaskId)
+    await appendLog(state.key, 'dev', 'current one')
+    await appendLog(state.key, 'dev', 'current two')
+    assert.deepEqual(await readLogHistory(state.key, 'dev'), ['current one', 'current two'])
+    assert.deepEqual((await readTaskLog(state, 'dev', priorTaskId)).lines, ['prior run'])
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
