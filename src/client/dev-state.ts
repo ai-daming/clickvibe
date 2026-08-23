@@ -3,7 +3,7 @@ import { clearedContext, contextToSubmit, toggledContext } from './action-contex
 import { type AuthorizationPreview, authorizationSummary, expectedDevelopSnapshot } from './dev-authorization.ts'
 import { useDevStream } from './dev-stream.ts'
 import { type MergeGateFailure, type NextAction, OVERRIDE_REASON_MAX, type Workflow, apiCall } from './domain.ts'
-import { githubCompareUrl } from './runtime.ts'
+import { githubCompareUrl, latestDevelopmentEvent } from './runtime.ts'
 import { type GhIssue } from './views/issue-view.tsx'
 export function useDevSection({
   url,
@@ -35,7 +35,7 @@ export function useDevSection({
   const stage = derived?.status ?? workflow?.stage ?? 'idle'
   const nextAction = derived?.nextAction
   const workflowEvents = workflow?.events ?? []
-  const lastDelivery = [...workflowEvents].reverse().find((event) => event.kind === 'dev' || event.kind === 'rework')
+  const lastDelivery = latestDevelopmentEvent(workflowEvents)
   const refresh = async () => {
     const res = await apiCall<{ ok: true; workflows: Workflow[] }>('state', { url })
     if (res.ok) onWorkflow(res.workflows.find((item) => item.url === url) ?? null)

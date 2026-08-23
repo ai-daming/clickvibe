@@ -44,6 +44,7 @@ import {
 } from '../infra/runtime.ts'
 import { applyDevRunOutcome, type IssueWorkflow, issueKey, loadWorkflow, saveWorkflow } from '../infra/state.ts'
 import { deriveAutoDevelopment } from './auto-development.ts'
+import { deriveDevelopmentEventKind } from './delivery-audit.ts'
 import { deriveWorkflowState } from './derive.ts'
 import { checkIssueContract } from './issue-contract.ts'
 import { firstDevelopmentFor } from './repository-state.ts'
@@ -278,7 +279,7 @@ export async function startDevelop(
               agent,
               head,
               fixedIssues,
-              firstDevelopment ? 'dev' : 'rework',
+              deriveDevelopmentEventKind(firstDevelopment, extraContext),
               extraContext,
               live.taskId,
               durationMs,

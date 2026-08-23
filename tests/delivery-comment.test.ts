@@ -93,3 +93,19 @@ test('failed review comment lists every issue and points to rework', () => {
   assert.match(body, /- 竞态\n- 缺测试/)
   assert.match(body, /下一步:请重新开发并处理上述问题。/)
 })
+
+test('failed review comment can be updated to mark every issue fixed in a later round', () => {
+  const body = buildReviewComment({
+    commit: '3fb7db6',
+    issueNumber: '20',
+    passed: false,
+    issues: ['竞态', '缺测试'],
+    agent: 'claude',
+    round: 1,
+    fixedRound: 2,
+    at: '2026-08-22T10:00:00Z',
+  })
+  assert.match(body, /- fixed-round: 2/)
+  assert.match(body, /- \[已于第 2 轮修复\] 竞态\n- \[已于第 2 轮修复\] 缺测试/)
+  assert.match(body, /第 2 轮修复已交付，请 Review 当前提交。/)
+})

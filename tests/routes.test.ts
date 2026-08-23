@@ -1484,12 +1484,20 @@ test('invalid exact dev session falls back once to a fresh session on the same t
       kind: 'review',
       at: '2026-08-22T00:00:00Z',
       hash: 'old123',
+      round: 1,
+      agent: 'claude',
       verdict: { passed: false, issues: ['修复竞态', '补充失败测试'] },
+      publication: {
+        target: 'pr',
+        status: 'posted',
+        url: 'https://github.com/o/r/pull/29#issuecomment-99',
+      },
     })
     await saveWorkflow(workflow)
     await appendLog(workflow.key, 'dev', 'prior run must be rotated')
     const starts: Array<{ command: string; workdir?: string; prompt: string }> = []
     const comments: Array<{ command: string; body: string }> = []
+    const reviewUpdates: Array<{ command: string; body: string }> = []
     const currentIssue = {
       url: workflow.url,
       title: 'resume issue',
@@ -1506,6 +1514,10 @@ test('invalid exact dev session falls back once to a fresh session on the same t
     ]
     const handler = createHandler(
       async (spec) => {
+        if (spec.command.includes('/issues/comments/99') && spec.command.includes('PATCH')) {
+          reviewUpdates.push({ command: spec.command, body: spec.stdin ?? '' })
+          return { exitCode: 0, stdout: { text: '{}' }, stderr: { text: '' } }
+        }
         const api = githubApi(spec.command, { item: currentIssue, prComments: reviewComments })
         if (api) return api
         if (spec.command === 'git rev-parse --short HEAD')
@@ -1597,6 +1609,9 @@ test('invalid exact dev session falls back once to a fresh session on the same t
     assert.equal(reloaded?.devSessionId, 'new-session')
     assert.equal(reloaded?.devSessionAgent, 'codex')
     assert.equal(comments.length, 1)
+    assert.equal(reviewUpdates.length, 1)
+    assert.match(JSON.parse(reviewUpdates[0].body).body, /- \[已于第 2 轮修复\] 修复竞态/)
+    assert.match(JSON.parse(reviewUpdates[0].body).body, /- \[已于第 2 轮修复\] 补充失败测试/)
     assert.match(comments[0].command, /github\.com\/o\/r\/pull\/29/)
     assert.match(comments[0].body, /^== Dev Meta ==\n- event: dev\n- commit: abc123\n- issue: #917\n- fixed: 2/m)
     assert.match(comments[0].body, /- round: 2\n- stats: commits=1 filesChanged=1 insertions=12 deletions=3/)

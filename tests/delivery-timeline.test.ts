@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { deriveDeliveryTimelineItem } from '../src/client/delivery-timeline.ts'
+import { latestDevelopmentEvent } from '../src/client/runtime.ts'
 
 test('dev timeline projection exposes frozen summary, diffstat and log anchor', () => {
   const item = deriveDeliveryTimelineItem({
@@ -50,4 +51,16 @@ test('review projection preserves historical issue text and legacy events degrad
   const legacy = deriveDeliveryTimelineItem({ kind: 'dev', at: '2026-08-22T01:00:00Z', hash: 'old123' })
   assert.equal(legacy.summary, '')
   assert.equal(legacy.detail.kind, 'development')
+})
+
+test('resume delivery remains the latest development summary', () => {
+  const resumed = { kind: 'resume', at: '2026-08-23T03:00:00Z', hash: 'def456', fixed: 2 } as const
+  assert.equal(
+    latestDevelopmentEvent([
+      { kind: 'dev', at: '2026-08-23T01:00:00Z', hash: 'abc123' },
+      { kind: 'review', at: '2026-08-23T02:00:00Z', verdict: { passed: false, issues: ['竞态'] } },
+      resumed,
+    ]),
+    resumed,
+  )
 })

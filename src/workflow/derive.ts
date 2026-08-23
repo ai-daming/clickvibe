@@ -23,6 +23,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { type DeriveOptions, hasMergeConflict, readBranch, readRefShort, readRevCount } from '../infra/git.ts'
 import { liveTasks, readWorktreeHead, runCommand } from '../infra/runtime.ts'
 import { type IssueContractSnapshot, type IssueWorkflow } from '../infra/state.ts'
+import { latestDevelopmentHash } from './delivery-audit.ts'
 import {
   deriveNextAction,
   deriveWorkflowStatus,
@@ -88,11 +89,10 @@ export async function deriveWorkflowState(
   const worktree = workflow.worktree
   const exists = existsSync(worktree)
   const events = workflow.events ?? []
-  let lastDevHash: string | null = null
+  const lastDevHash = latestDevelopmentHash(events) ?? null
   let lastReviewHash: string | null = null
   let lastReviewContract: IssueContractSnapshot | null = null
   for (const ev of events) {
-    if (ev.kind === 'dev' || ev.kind === 'rework') lastDevHash = ev.hash ?? lastDevHash
     if (ev.kind === 'review') {
       lastReviewHash = ev.hash ?? lastReviewHash
       lastReviewContract = ev.issueContract ?? null
@@ -150,7 +150,7 @@ export async function deriveWorkflowState(
     }
   }
 
-  // 有新提交 = worktree HEAD 不在已记录的任何 dev/rework 事件哈希里
+  // 有新提交 = worktree HEAD 不等于最近一次 dev/rework/resume 交付哈希
   const hasNewCommits = head !== null && lastDevHash !== null && head !== lastDevHash
   // worktree 落后远端基线(origin/main 或远端同名分支)→ 需要同步
   const needsSync = behindBase > 0 || (behindUpstream ?? 0) > 0

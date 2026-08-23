@@ -48,7 +48,7 @@ import {
 } from '../infra/state.ts'
 import { buildDevComment, buildReviewComment } from './delivery-comment.ts'
 import { deriveEventRound } from './delivery-audit.ts'
-import { extractGithubCommentUrl } from './delivery-publication.ts'
+import { extractGithubCommentId, extractGithubCommentUrl } from './delivery-publication.ts'
 import { type ReviewIssueContract } from './merge-gates.ts'
 import { workflowBaseBranch } from './state-view.ts'
 
@@ -221,7 +221,7 @@ export async function startReview(
       const { passed, issues } = resolved.result
       const reloaded = await loadWorkflow(workflow.key)
       if (reloaded) {
-        const round = deriveEventRound(reloaded.events, 'review')
+        const round = deriveEventRound(reloaded.events)
         const stats = await readDeliveryStats(
           ctx,
           reloaded.worktree,
@@ -313,7 +313,7 @@ export async function recordDevDelivery(
     const pr = await detectLinkedPr(ctx, workflow.repoKey, workflow.branch)
     if (pr) workflow.prNumber = pr
   }
-  const round = deriveEventRound(workflow.events, kind)
+  const round = deriveEventRound(workflow.events)
   const stats = head
     ? await readDeliveryStats(ctx, workflow.worktree, workflowBaseBranch(workflow.baseRef), head)
     : undefined
@@ -343,6 +343,45 @@ export async function recordDevDelivery(
     at: event.at,
   })
   await publishDeliveryComment(ctx, workflow, event, body)
+  if (fixedIssues.length > 0 && kind !== 'dev') await markPreviousReviewFixed(ctx, workflow, round, agent)
+}
+
+async function markPreviousReviewFixed(
+  ctx: Context,
+  workflow: IssueWorkflow,
+  fixedRound: number,
+  fallbackAgent: 'codex' | 'claude',
+): Promise<void> {
+  const reviewEvent = [...workflow.events]
+    .reverse()
+    .find((candidate) => candidate.kind === 'review' && candidate.verdict?.passed === false)
+  if (!reviewEvent?.verdict) return
+  const commentUrl = reviewEvent.publication?.url ?? workflow.reviewResult?.commentUrl
+  const commentId = commentUrl ? extractGithubCommentId(commentUrl) : undefined
+  if (!commentId) return
+  const issueNumber = parseUrl(workflow.url)?.number ?? 'unknown'
+  const body = buildReviewComment({
+    commit: reviewEvent.hash ?? 'unknown',
+    issueNumber,
+    passed: false,
+    issues: reviewEvent.verdict.issues,
+    agent: reviewEvent.agent ?? workflow.reviewAgent ?? fallbackAgent,
+    round: reviewEvent.round ?? Math.max(1, fixedRound - 1),
+    fixedRound,
+    stats: reviewEvent.stats,
+    at: reviewEvent.at,
+  })
+  try {
+    await runCommand(
+      ctx,
+      `gh api ${shellQuote(`repos/${workflow.repoKey}/issues/comments/${commentId}`)} --method PATCH --input -`,
+      { stdin: JSON.stringify({ body }), timeoutMs: 30000 },
+    )
+    await appendLog(workflow.key, 'dev', `[clickvibe] 已标注上一轮 Review 评论:第 ${fixedRound} 轮已修复`)
+  } catch (error) {
+    const message = String(error instanceof Error ? error.message : error).slice(0, 500)
+    await appendLog(workflow.key, 'dev', `[clickvibe] Review 评论修复标注失败(不影响交付): ${message}`)
+  }
 }
 
 /** Publish a public delivery node without pretending a failed write succeeded. */

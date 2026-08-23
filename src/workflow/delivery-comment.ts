@@ -17,6 +17,7 @@ export interface ReviewCommentInput {
   issues: string[]
   agent: 'codex' | 'claude'
   round: number
+  fixedRound?: number
   stats?: DeliveryStats
   at: string
 }
@@ -66,9 +67,13 @@ export function buildReviewComment(input: ReviewCommentInput): string {
     : [
         `## ❌ ClickVibe Review 发现问题(${input.issues.length} 条)`,
         '',
-        ...input.issues.map((issue) => `- ${issue}`),
+        ...input.issues.map((issue) =>
+          input.fixedRound === undefined ? `- ${issue}` : `- [已于第 ${input.fixedRound} 轮修复] ${issue}`,
+        ),
         '',
-        '下一步:请重新开发并处理上述问题。',
+        input.fixedRound === undefined
+          ? '下一步:请重新开发并处理上述问题。'
+          : `第 ${input.fixedRound} 轮修复已交付，请 Review 当前提交。`,
       ]
   return [
     '== Review Meta ==',
@@ -78,6 +83,7 @@ export function buildReviewComment(input: ReviewCommentInput): string {
     `- passed: ${input.passed}`,
     `- next: ${input.passed ? 'merge' : 'rework'}`,
     `- round: ${input.round}`,
+    ...(input.fixedRound === undefined ? [] : [`- fixed-round: ${input.fixedRound}`]),
     `- stats: ${statsMeta(input.stats)}`,
     `- agent: ${input.agent}`,
     `- at: ${input.at}`,
