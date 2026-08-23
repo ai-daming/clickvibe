@@ -10,6 +10,8 @@ import {
   apiCall,
   fetchIssue,
 } from './domain.ts'
+import { getClientContext } from './panel-state.ts'
+import { mergeProjectSources, readDshWorkspaceSnapshot, resolveDshWorkspaceSource } from './project-sources.ts'
 import type { Dependencies, GhIssue, TimelineEvent } from './views/issue-view.tsx'
 
 export function useProjectPanel() {
@@ -38,7 +40,19 @@ export function useProjectPanel() {
   const [batchAgent, setBatchAgent] = React.useState<'codex' | 'claude'>('codex')
   const [batchBusy, setBatchBusy] = React.useState(false)
   const [batchStatus, setBatchStatus] = React.useState<string | null>(null)
+  const [importBusy, setImportBusy] = React.useState(false)
+  const [dshWorkspaceError, setDshWorkspaceError] = React.useState<string | null>(null)
   const workflowRefreshInFlight = React.useRef(false)
+  const configuredProjects = React.useRef<ProjectOption[]>([])
+  const dshWorkspacePaths = React.useRef<string[]>([])
+
+  const refreshProjects = React.useCallback(async (): Promise<ProjectOption[]> => {
+    const response = await apiCall<{ ok: true; projects: ProjectOption[] }>('projects', {})
+    configuredProjects.current = response.projects
+    const merged = mergeProjectSources(response.projects, dshWorkspacePaths.current)
+    setProjects(merged)
+    return merged
+  }, [])
 
   const mergeWorkflowStates = React.useCallback((workflows: Workflow[]) => {
     const byUrl = new Map(workflows.map((item) => [item.url, item]))
@@ -60,7 +74,8 @@ export function useProjectPanel() {
   )
 
   const refreshWorkflowStates = React.useCallback(async () => {
-    if (!repoKey || workflowRefreshInFlight.current) return
+    if (!repoKey || projects.find((project) => project.repoKey === repoKey)?.configured === false) return
+    if (workflowRefreshInFlight.current) return
     workflowRefreshInFlight.current = true
     try {
       const response = await apiCall<WorkflowStateResponse>('state', { repoKey }, 8_000)
@@ -113,7 +128,7 @@ export function useProjectPanel() {
     } finally {
       workflowRefreshInFlight.current = false
     }
-  }, [mergeWorkflowStates, repoKey, result])
+  }, [mergeWorkflowStates, projects, repoKey, result])
 
   const loadRepo = async (selected: string, forceRefresh = false) => {
     if (!selected) return
@@ -153,15 +168,33 @@ export function useProjectPanel() {
   }
 
   React.useEffect(() => {
+    const ctx = getClientContext()
+    const source = ctx ? resolveDshWorkspaceSource(ctx) : null
+    if (!source) {
+      setDshWorkspaceError('DSH workspace 服务不可用，当前仅显示 config.yaml 项目')
+      return
+    }
+    const sync = () => {
+      const snapshot = readDshWorkspaceSnapshot(source)
+      dshWorkspacePaths.current = snapshot.paths
+      setDshWorkspaceError(snapshot.error)
+      setProjects(mergeProjectSources(configuredProjects.current, snapshot.paths))
+    }
+    sync()
+    return source.subscribe(sync)
+  }, [])
+
+  React.useEffect(() => {
     let cancelled = false
     void (async () => {
       try {
-        const response = await apiCall<{ ok: true; projects: ProjectOption[] }>('projects', {})
+        const nextProjects = await refreshProjects()
         if (cancelled) return
-        setProjects(response.projects)
-        const first = response.projects[0]?.repoKey ?? ''
+        const first =
+          nextProjects.find((project) => project.configured !== false)?.repoKey ?? nextProjects[0]?.repoKey ?? ''
         setRepoKey(first)
-        if (first) await loadRepo(first)
+        if (nextProjects.find((project) => project.repoKey === first)?.configured !== false && first)
+          await loadRepo(first)
       } catch (reason) {
         if (!cancelled) setError(`项目配置加载失败: ${String(reason)}`)
       }
@@ -169,7 +202,7 @@ export function useProjectPanel() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [refreshProjects])
 
   React.useEffect(() => {
     if (!repoKey) return
@@ -247,6 +280,32 @@ export function useProjectPanel() {
     }
   }
 
+  const importProject = async (project: ProjectOption) => {
+    if (project.configured !== false || importBusy) return
+    setImportBusy(true)
+    setError(null)
+    try {
+      const response = await apiCall<
+        { ok: true; action: 'projects'; projects: ProjectOption[] } | { ok: false; action?: 'projects'; error: string }
+      >('command', { command: 'projects', importPath: project.path }, 20_000)
+      if (!response.ok) {
+        setError(`项目导入失败: ${response.error}`)
+        return
+      }
+      const nextProjects = await refreshProjects()
+      const imported = nextProjects.find(
+        (candidate) => candidate.configured !== false && candidate.path === project.path,
+      )
+      if (!imported) throw new Error('配置已写入，但刷新后未找到对应项目')
+      setRepoKey(imported.repoKey)
+      await loadRepo(imported.repoKey, true)
+    } catch (reason) {
+      setError(`项目导入失败: ${String(reason instanceof Error ? reason.message : reason)}`)
+    } finally {
+      setImportBusy(false)
+    }
+  }
+
   const safeSyncRepository = async () => {
     if (!repoKey || repoSyncBusy) return
     setRepoSyncBusy(true)
@@ -293,9 +352,12 @@ export function useProjectPanel() {
     batchStatus,
     dependencyFilter,
     dependencyRefreshError,
+    dshWorkspaceError,
     error,
     freshness,
     groupBy,
+    importBusy,
+    importProject,
     issues,
     loadRepo,
     loading,
@@ -317,6 +379,8 @@ export function useProjectPanel() {
     setError,
     setGroupBy,
     setRepoKey,
+    setRepoAdvance,
+    setRepoSyncMessage,
     setResult,
     setSelectedIssues,
     safeSyncRepository,
