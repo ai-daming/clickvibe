@@ -21,6 +21,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
+import { loadEmbeddedGhIssueSkill } from './infra/embedded-skill.ts'
 import { ROUTE } from './infra/http-contract.ts'
 import { readJsonBody, writeJson } from './infra/runtime.ts'
 import { handleApiPost } from './workflow/dispatch.ts'
@@ -56,6 +57,9 @@ declare module '@deepseek-ai/cordis' {
         kill(): boolean
       }
     }
+    skills: {
+      register(skill: { name: string; description: string; source: string; content: string }): () => void
+    }
   }
 }
 
@@ -63,9 +67,10 @@ export { ROUTE } from './infra/http-contract.ts'
 
 export const name = 'clickvibe'
 
-export const inject = ['webServer', 'shell']
+export const inject = ['webServer', 'shell', 'skills']
 
 export function apply(ctx: Context): void {
+  ctx.skills.register(loadEmbeddedGhIssueSkill())
   ctx.webServer.register({
     kind: 'prefix',
     path: ROUTE,
