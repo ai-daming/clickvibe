@@ -369,15 +369,16 @@ test('merge authorization input accepts only a well-formed manual override', () 
   )
 })
 
-test('LineLog bounds a never-terminated line and handles CRLF split across chunks', () => {
+test('LineLog preserves a never-terminated long line and handles CRLF split across chunks', () => {
   const log = new LineLog(4)
-  log.appendChunk('x'.repeat(LineLog.MAX_LINE_CHARS + 10))
-  log.appendChunk('discarded\r')
+  const longLine = `${'x'.repeat(70_000)} with /Users/example/project and /tmp/clickvibe`
+  log.appendChunk(longLine.slice(0, 65_000))
+  log.appendChunk(`${longLine.slice(65_000)}\r`)
   log.appendChunk('\nnext\r')
   log.appendChunk('\n')
   const read = log.read(0)
   assert.equal(read.lines.length, 2)
-  assert.match(read.lines[0], /单行日志已截断/)
+  assert.equal(read.lines[0], longLine)
   assert.equal(read.lines[1], 'next')
 })
 
