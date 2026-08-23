@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { appendFile, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import type { DeliveryPublication, PromptSnapshot } from './contracts.ts'
+import type { DeliveryPublication, DeliveryStats, PromptSnapshot } from './contracts.ts'
 import { issueKey, legacyIssueKey, taskLogPath, workflowPath, type WorkflowStorageIdentity } from './state-layout.ts'
 import {
   appendTaskLog as appendTaskLogRecord,
@@ -18,7 +18,6 @@ import {
 } from './task-log-store.ts'
 
 export { issueKey } from './state-layout.ts'
-
 /** The workflow stage of one issue. */
 export type WorkflowStage =
   | 'idle' // 未开始开发
@@ -28,14 +27,12 @@ export type WorkflowStage =
   | 'passed' // review 通过
 
 export type SessionAgent = 'codex' | 'claude'
-
 export interface DeliveryCleanup {
   worktree: boolean
   localBranch: boolean
   remoteBranch: boolean
   issue: boolean
 }
-
 /** Durable, irreversible delivery fact plus the retryable cleanup cursor. */
 export interface WorkflowDelivery {
   status: 'merged' | 'cleanup-pending' | 'archived'
@@ -82,8 +79,11 @@ export interface IssueWorkflow {
 export interface WorkflowEvent {
   kind: 'dev' | 'review' | 'rework' | 'resume' | 'note' | 'merge-override'
   at: string
-  /** commit hash 短码(dev/review 锚定的提交)。 */
-  hash?: string
+  hash?: string // dev/review 锚定 commit 的短码
+  round?: number // Review 结论落地轮次;旧事件缺失时降级展示
+  agent?: SessionAgent // 动作实际使用的 agent 快照
+  stats?: DeliveryStats // fork point..锚定 HEAD 的 git 事实
+  taskId?: string // 结构化任务日志锚点
   /** review 结论(仅 review 事件)。 */
   verdict?: { passed: boolean; issues: string[] }
   /** review 启动时冻结的 Issue 验收契约。旧事件缺失时按过期处理。 */

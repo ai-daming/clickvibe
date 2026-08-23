@@ -451,8 +451,7 @@ export function useDevSection({
             : busy === 'developing'
               ? '启动中…'
               : null
-  // 人工放行入口(issue #49):合并尝试被门禁拒绝后(动态),或 review 已通过
-  // 但结论/契约过期、面板停留在「重新 Review」/「无法读取契约」时(静态)。
+  // 人工放行入口(issue #49):门禁拒绝,或 review 已通过但结论/契约过期时。
   const overrideEntryVisible =
     overrideGates !== null ||
     Boolean(
@@ -484,6 +483,7 @@ export function useDevSection({
     mergeWithOverride,
     overrideEntryVisible,
     overrideGates,
+    openStream,
     runAction,
     setAgentChoice,
     setContextText,

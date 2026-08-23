@@ -100,6 +100,16 @@ export interface WorkflowEvent {
   kind: 'dev' | 'review' | 'rework' | 'resume' | 'note' | 'merge-override'
   at: string
   hash?: string
+  round?: number
+  agent?: 'codex' | 'claude'
+  stats?: {
+    commits: { hash: string; subject: string }[]
+    filesChanged: number
+    insertions: number
+    deletions: number
+    diffstat: { path: string; insertions: number | null; deletions: number | null }[]
+  }
+  taskId?: string
   verdict?: { passed: boolean; issues: string[] }
   issueContract?: { bodyHash: string; updatedAt: string }
   fixed?: number

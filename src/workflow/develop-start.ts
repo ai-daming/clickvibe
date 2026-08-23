@@ -193,7 +193,9 @@ export async function startDevelop(
   workflow.issueState = 'OPEN'
   if (launchSnapshot) workflow.issueSnapshot = launchSnapshot.snapshot
   // 首次开工 = 本地无任何开发/返工交付记录;带附加说明也不得误判为返工(issue #54)。
-  const firstDevelopment = !workflow.events.some((event) => event.kind === 'dev' || event.kind === 'rework')
+  const firstDevelopment = !workflow.events.some(
+    (event) => event.kind === 'dev' || event.kind === 'rework' || event.kind === 'resume',
+  )
 
   if (agent === 'dryrun') {
     // A safety probe is not a new durable development generation: never
@@ -275,8 +277,9 @@ export async function startDevelop(
               agent,
               head,
               fixedIssues,
-              extraContext !== '' && !firstDevelopment ? 'rework' : 'dev',
+              firstDevelopment ? 'dev' : 'rework',
               extraContext,
+              live.taskId,
             )
           }
           await saveWorkflow(reloaded)
