@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { parseAgentChunk } from '../src/agent/agent-stream.ts'
 import { authorizationDigest, makeAuthorizationInput, parseDependencies } from '../src/agent/develop.ts'
+import { isValidGitBranchName, restoreAuthorizationTarget } from '../src/infra/authorization-target.ts'
 import { LineBuffer } from '../src/infra/line-buffer.ts'
 
 test('develop authorization accepts a valid Unicode origin branch', () => {
@@ -14,6 +15,34 @@ test('develop authorization accepts a valid Unicode origin branch', () => {
     }).baseline,
     'origin/发布/二期',
   )
+})
+
+test('authorization branch validation follows git ref syntax without excluding Unicode', () => {
+  for (const branch of ['main', 'release/2.0', '发布/二期']) assert.equal(isValidGitBranchName(branch), true)
+  for (const branch of [
+    '',
+    '@',
+    '/main',
+    'main/',
+    'main.',
+    'release..next',
+    'release//next',
+    'release@{next',
+    'release next',
+    'release~next',
+    'release\\next',
+    '.hidden/main',
+    'release/main.lock',
+  ]) {
+    assert.equal(isValidGitBranchName(branch), false, branch)
+  }
+  assert.deepEqual(restoreAuthorizationTarget({ branch: '发布/二期', hash: 'abcdef1' }), {
+    branch: '发布/二期',
+    hash: 'abcdef1',
+  })
+  for (const target of [undefined, { branch: 'main', hash: 'xyz' }, { branch: 'bad..ref', hash: 'abcdef1' }]) {
+    assert.throws(() => restoreAuthorizationTarget(target), /恢复基线授权目标无效/)
+  }
 })
 
 test('merge authorization binds the exact PR base and a well-formed manual override', () => {
@@ -41,7 +70,16 @@ test('merge authorization binds the exact PR base and a well-formed manual overr
   const changedBase = makeAuthorizationInput({ ...base, target: { ...base.target, baseSha: 'fedcba0987654321' } })
   assert.notEqual(authorizationDigest(parsed, null), authorizationDigest(changedBase, null))
   assert.equal(makeAuthorizationInput({ ...base, override: true }).override, undefined)
-  assert.throws(() => makeAuthorizationInput({ ...base, target: { ...base.target, baseSha: '' } }), /合并授权目标无效/)
+  for (const target of [
+    { ...base.target, prNumber: 'x' },
+    { ...base.target, branch: '' },
+    { ...base.target, head: 'short' },
+    { ...base.target, baseRef: 'bad..ref' },
+    { ...base.target, baseSha: '' },
+    { ...base.target, mergeFlag: '--squash' },
+  ]) {
+    assert.throws(() => makeAuthorizationInput({ ...base, target }), /合并授权目标无效/)
+  }
   assert.throws(
     () => makeAuthorizationInput({ ...base, override: { skipped: ['github-protection'], reason: 'x' } }),
     /门禁项无效/,
