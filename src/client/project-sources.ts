@@ -44,6 +44,14 @@ export function mergeProjectSources(configured: ProjectOption[], dshPaths: reado
   return projects
 }
 
+export function deriveProjectSelection(
+  project: ProjectOption,
+): { loadRepository: true } | { loadRepository: false; repoAdvance: null; repoSyncMessage: null } {
+  return project.configured === false
+    ? { loadRepository: false, repoAdvance: null, repoSyncMessage: null }
+    : { loadRepository: true }
+}
+
 function normalizeProjectPath(path: string): string {
   const normalized = path.trim().replace(/[\\/]+$/, '')
   return normalized === '' && /^[\\/]+$/.test(path.trim()) ? path.trim().slice(0, 1) : normalized

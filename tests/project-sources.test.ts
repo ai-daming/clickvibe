@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { ProjectOption } from '../src/client/domain.ts'
 import {
+  deriveProjectSelection,
   mergeProjectSources,
   readDshWorkspaceSnapshot,
   resolveDshWorkspaceSource,
@@ -25,6 +26,24 @@ test('project source union keeps configured repos and adds each DSH path once', 
       configured: false,
     },
   ])
+})
+
+test('selecting an unconfigured DSH project clears repository sync state and stays read-only', () => {
+  assert.deepEqual(
+    deriveProjectSelection({
+      repoKey: 'dsh:/work/new-project',
+      path: '/work/new-project',
+      available: true,
+      configured: false,
+    }),
+    {
+      loadRepository: false,
+      repoAdvance: null,
+      repoSyncMessage: null,
+    },
+  )
+
+  assert.deepEqual(deriveProjectSelection(configured[0]), { loadRepository: true })
 })
 
 test('DSH workspace source reads the public list snapshot and reports host failures', () => {

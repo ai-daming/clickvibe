@@ -5,6 +5,7 @@ import { RunningDuration } from '../duration.ts'
 import { githubCompareUrl } from '../runtime.ts'
 import { type RepositoryIssue, apiCall, fetchIssue, stageLabel } from '../domain.ts'
 import { MAX_BATCH_ISSUES, setPanelOpen } from '../panel-state.ts'
+import { deriveProjectSelection } from '../project-sources.ts'
 import { type Dependencies, type GhIssue, IssueView, type TimelineEvent, repoOf } from './issue-view.tsx'
 import { ProjectSelector } from './project-selector.tsx'
 import { RepositoryAdvanceBanner } from './repository-advance-banner.tsx'
@@ -44,6 +45,8 @@ export function PanelContent() {
     setError,
     setGroupBy,
     setRepoKey,
+    setRepoAdvance,
+    setRepoSyncMessage,
     setResult,
     setSelectedIssues,
     safeSyncRepository,
@@ -276,12 +279,15 @@ export function PanelContent() {
               selected={selectedProject}
               importBusy={importBusy}
               onSelect={(project) => {
+                const selection = deriveProjectSelection(project)
                 setRepoKey(project.repoKey)
-                if (project.configured === false) {
+                if (!selection.loadRepository) {
                   setResult(null)
                   updateWorkflow(null)
                   setSelectedIssues(new Set())
                   setBatchStatus(null)
+                  setRepoAdvance(selection.repoAdvance)
+                  setRepoSyncMessage(selection.repoSyncMessage)
                 } else {
                   void loadRepo(project.repoKey)
                 }

@@ -379,6 +379,8 @@ export function useProjectPanel() {
     setError,
     setGroupBy,
     setRepoKey,
+    setRepoAdvance,
+    setRepoSyncMessage,
     setResult,
     setSelectedIssues,
     safeSyncRepository,
