@@ -1,7 +1,7 @@
 import React from 'react'
 import { formatElapsed } from './runtime.ts'
 
-type DeliveryKind = 'dev' | 'review' | 'rework' | 'resume' | 'note' | 'merge-override'
+type DeliveryKind = 'dev' | 'review' | 'rework' | 'resume' | 'note' | 'merge-override' | 'auto-run'
 
 /** Compact completed-run duration; hour-scale entries intentionally omit seconds. */
 export function deliveryDurationLabel(milliseconds: number): string {

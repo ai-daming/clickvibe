@@ -3,7 +3,9 @@ import { createHash } from 'node:crypto'
 import { appendFile, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import type { DeliveryPublication, DeliveryStats, PromptSnapshot } from './contracts.ts'
+import { isAutoRunState } from './contracts.ts'
+import type { AutoRunState, DeliveryPublication, DeliveryStats, PromptSnapshot } from './contracts.ts'
+export type { AutoRunPausedReason, AutoRunState, AutoRunUnresolvedRound } from './contracts.ts'
 import { issueKey, legacyIssueKey, taskLogPath, workflowPath, type WorkflowStorageIdentity } from './state-layout.ts'
 import {
   appendTaskLog as appendTaskLogRecord,
@@ -16,7 +18,6 @@ import {
   type TaskLogKind,
   type TaskLogRead,
 } from './task-log-store.ts'
-
 export { issueKey } from './state-layout.ts'
 /** The workflow stage of one issue. */
 export type WorkflowStage =
@@ -25,7 +26,6 @@ export type WorkflowStage =
   | 'review-ready' // 开发完成,待 review
   | 'reviewing' // review 中
   | 'passed' // review 通过
-
 export type SessionAgent = 'codex' | 'claude'
 export interface DeliveryCleanup {
   worktree: boolean
@@ -33,7 +33,6 @@ export interface DeliveryCleanup {
   remoteBranch: boolean
   issue: boolean
 }
-/** Durable, irreversible delivery fact plus the retryable cleanup cursor. */
 export interface WorkflowDelivery {
   status: 'merged' | 'cleanup-pending' | 'archived'
   mergedAt: string
@@ -42,7 +41,6 @@ export interface WorkflowDelivery {
   cleanup: DeliveryCleanup
   lastError?: string
 }
-
 export interface IssueWorkflow {
   key: string
   url: string
@@ -70,6 +68,8 @@ export interface IssueWorkflow {
   delivery?: WorkflowDelivery
   /** 最近一次成功抓取或启动授权确认的完整 Issue 需求快照。 */
   issueSnapshot?: PromptSnapshot
+  /** Optional controller cache; missing or invalid state never blocks manual actions. */
+  autoRun?: AutoRunState
   updatedAt: number
   /** 完整历史事件链:每次开发提交/review/恢复各一条,按时间追加。 */
   events: WorkflowEvent[]
@@ -77,7 +77,7 @@ export interface IssueWorkflow {
 
 /** One historical event in an issue's workflow timeline. */
 export interface WorkflowEvent {
-  kind: 'dev' | 'review' | 'rework' | 'resume' | 'note' | 'merge-override'
+  kind: 'dev' | 'review' | 'rework' | 'resume' | 'note' | 'merge-override' | 'auto-run'
   at: string
   durationMs?: number
   hash?: string // dev/review 锚定 commit 的短码
@@ -112,7 +112,6 @@ export interface IssueContractSnapshot {
   /** GitHub 在冻结快照时返回的 updatedAt，保留作审计证据。 */
   updatedAt: string
 }
-
 /** Hash the exact GitHub issue body; updatedAt is evidence, bodyHash is identity. */
 export function issueBodyHash(body: string): string {
   return createHash('sha256').update(body, 'utf8').digest('hex')
@@ -194,6 +193,7 @@ function normalizeWorkflow(workflow: IssueWorkflow): IssueWorkflow {
   if (raw.reviewSessionAgent !== 'codex' && raw.reviewSessionAgent !== 'claude') workflow.reviewSessionAgent = null
   if (!workflow.devSessionId) workflow.devSessionAgent = null
   if (!workflow.reviewSessionId) workflow.reviewSessionAgent = null
+  if (!isAutoRunState(workflow.autoRun)) delete workflow.autoRun
   return workflow
 }
 
