@@ -29,11 +29,18 @@ import {
   type LiveLogEvent,
 } from '../live-output.ts'
 import { resolveDesktopPanelWidth, resolvePanelLayout } from './panel-layout.ts'
+import { openDshConversationDraft, resolveDshConversationDeps } from './dsh-conversation.ts'
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 type _SlotLoaders = [typeof LayoutController, SidebarFooterActionOwnerProps]
 
 const PANEL_ID = 'clickvibe'
 const MAX_BATCH_ISSUES = 10
+
+/**
+ * DSH 客户端上下文:apply 时捕获。「在 DSH 对话中打开」按钮经它解析
+ * workspaces / sessions / conversation 服务(运行时由宿主注入)。
+ */
+let clientCtx: ClientContext | null = null
 
 /** Panel open state shared between the footer toggle and the overlay. */
 const panelState: {
@@ -118,6 +125,11 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 .cv-badge-kind { background: #f6f8fa; color: #57606a; }
 .cv-issue-title { font-size: 15px; font-weight: 700; color: #0969da; text-decoration: none; }
 .cv-issue-title:hover { text-decoration: underline; }
+.cv-dsh-open-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cv-dsh-open-btn { border: 1px solid #d0d7de; background: #f6f8fa; border-radius: 6px; padding: 4px 10px; font-size: 12px; color: #1f2328; cursor: pointer; }
+.cv-dsh-open-btn:hover:not(:disabled) { background: #eff1f3; }
+.cv-dsh-open-btn:disabled { opacity: .55; cursor: not-allowed; }
+.cv-dsh-open-status { font-size: 11px; color: #9a6700; word-break: break-all; }
 .cv-issue-labels { display: flex; flex-wrap: wrap; gap: 4px; font-size: 11px; }
 .cv-issue-labels span { padding: 1px 6px; border-radius: 10px; background: #ddf4ff; color: #0969da; }
 .cv-issue-assignees { font-size: 12px; color: #57606a; }
@@ -530,7 +542,55 @@ function repoOf(url: string | undefined): string {
   return match ? match[1] : ''
 }
 
-function IssueView({ issue, kind, workflow, onWorkflow, timeline, dependencies, autoAction, onAutoActionHandled, onDelivered }: {
+/**
+ * 「在 DSH 对话中打开」按钮(issue #53):在仓库本地路径对应的 DSH
+ * workspace 新开空白对话并预填 issue 链接草稿,回车前不发送。
+ * 远程配置(无本机路径)或 DSH 服务缺失时禁用并给出原因,不静默失败。
+ */
+function DshOpenButton({ project, issueUrl }: { project: ProjectOption | null; issueUrl: string }) {
+  const [busy, setBusy] = React.useState(false)
+  const [status, setStatus] = React.useState<string | null>(null)
+  const disabledReason = !project
+    ? '该仓库未在 ~/.clickvibe/config.yaml 配置,无法定位本地路径'
+    : !project.available
+      ? '该仓库为远程配置(无本机路径),无法打开 DSH 对话'
+      : null
+
+  const onClick = async () => {
+    if (!project?.available || !clientCtx || busy) return
+    setBusy(true)
+    setStatus(null)
+    try {
+      const deps = resolveDshConversationDeps(clientCtx)
+      if ('missing' in deps) {
+        setStatus(`DSH 服务不可用(缺 ${deps.missing.join('、')}),无法打开对话`)
+        return
+      }
+      const result = await openDshConversationDraft(deps, project.path, issueUrl)
+      setStatus(result.ok ? result.warning ?? null : result.error)
+    } catch (reason) {
+      setStatus(`DSH 对话打开失败: ${reason instanceof Error ? reason.message : String(reason)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="cv-dsh-open-row">
+      <button
+        className="cv-dsh-open-btn"
+        onClick={() => { void onClick() }}
+        disabled={disabledReason !== null || busy}
+        title={disabledReason ?? '在该仓库对应的 DSH 项目新开空白对话,并预填此 issue 链接(回车前不会发送)'}
+      >
+        {busy ? 'DSH 打开中…' : '💬 在 DSH 对话中打开'}
+      </button>
+      {status ? <span className="cv-dsh-open-status" role="status">{status}</span> : null}
+    </div>
+  )
+}
+
+function IssueView({ issue, kind, workflow, onWorkflow, timeline, dependencies, autoAction, onAutoActionHandled, onDelivered, project }: {
   issue: GhIssue
   kind: 'issue' | 'pr'
   workflow: Workflow | null
@@ -540,6 +600,8 @@ function IssueView({ issue, kind, workflow, onWorkflow, timeline, dependencies, 
   autoAction?: boolean
   onAutoActionHandled?: () => void
   onDelivered?: () => void
+  /** 当前 issue 所属仓库的本地配置;PR 详情不传,「在 DSH 对话中打开」随之不渲染。 */
+  project?: ProjectOption | null
 }) {
   const isPR = kind === 'pr'
   const state = String(issue.state || '').toUpperCase()
@@ -574,6 +636,7 @@ function IssueView({ issue, kind, workflow, onWorkflow, timeline, dependencies, 
         <span className="cv-badge cv-badge-kind">{isPR ? `PR #${issue.number}` : `Issue #${issue.number}`}</span>
       </div>
       <a className="cv-issue-title" href={issue.url} target="_blank" rel="noreferrer">{issue.title}</a>
+      {!isPR && issue.url ? <DshOpenButton project={project ?? null} issueUrl={String(issue.url)} /> : null}
       {labels ? <div className="cv-issue-labels">{labels.split(' ').map((l, i) => <span key={i}>{l}</span>)}</div> : null}
       {assignees ? <div className="cv-issue-assignees">👤 {assignees}</div> : null}
       <table className="cv-meta">
@@ -2041,6 +2104,7 @@ function PanelContent() {
           onWorkflow={updateWorkflow}
           timeline={result.timeline}
           dependencies={result.dependencies}
+          project={result.kind === 'issue' ? projects.find((p) => p.repoKey === repoOf(String(result.item.url ?? ''))) ?? null : null}
           autoAction={autoAction}
           onAutoActionHandled={() => setAutoAction(false)}
           onDelivered={() => {
@@ -2306,6 +2370,7 @@ export const inject = ['slots']
 export function apply(ctx: ClientContext): void {
   const slots = ctx.get('slots')
   if (slots === undefined) return
+  clientCtx = ctx
 
   ctx.effect(() => {
     const disposers: (() => void)[] = [installStyles()]
