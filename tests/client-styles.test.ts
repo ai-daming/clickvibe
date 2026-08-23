@@ -47,6 +47,13 @@ function between(start: string, end: string): string {
   return PANEL_CSS.slice(startIndex, endIndex)
 }
 
+function declarations(selector: string): string {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const match = new RegExp(`^${escaped} \\{([^}]*)\\}`, 'm').exec(PANEL_CSS)
+  assert.notEqual(match, null, `missing ${selector}`)
+  return match?.[1] ?? ''
+}
+
 test('panel common materials use only real DSH theme tokens', () => {
   const namedTokens = [...PANEL_CSS.matchAll(/var\((--dsw-[a-z0-9-]+)/g)].map((match) => match[1] ?? '')
   assert.ok(namedTokens.length > 20, 'the panel must materially consume the DSH theme')
@@ -70,6 +77,14 @@ test('only the minimal ClickVibe semantic palette follows the DSH body theme fla
     /body\[data-ds-dark-theme\]\s+\.cv-panel-slot\s*\{[^}]*--cv-review-primary:[^}]*--cv-review-tertiary:/s,
   )
   assert.doesNotMatch(PANEL_CSS, /prefers-color-scheme|MutationObserver|ui-theme\.preference/)
+})
+
+test('every text entry surface explicitly binds its background, text and placeholder to DSH', () => {
+  for (const selector of ['.cv-input', '.cv-context-input']) {
+    assert.match(declarations(selector), /background:\s*var\(--dsw-/)
+    assert.match(declarations(selector), /color:\s*var\(--dsw-/)
+    assert.match(declarations(`${selector}::placeholder`), /color:\s*var\(--dsw-/)
+  }
 })
 
 test('terminal keeps an explicit fixed dark palette outside theme overrides', () => {

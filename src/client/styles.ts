@@ -242,7 +242,8 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 .cv-context-toggle { border: none; background: transparent; color: var(--dsw-alias-state-business-primary); font-size: 11.5px; cursor: pointer; padding: 2px 0; text-decoration: underline; }
 .cv-context-toggle:hover { opacity: 0.8; }
 .cv-context-toggle:disabled { opacity: 0.45; cursor: not-allowed; }
-.cv-context-input { width: 100%; box-sizing: border-box; border: 1px solid var(--dsw-alias-border-l2); border-radius: 6px; padding: 6px 8px; font-size: 12px; font-family: inherit; line-height: 1.5; resize: vertical; }
+.cv-context-input { width: 100%; box-sizing: border-box; border: 1px solid var(--dsw-alias-border-l2); border-radius: 6px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); padding: 6px 8px; font-size: 12px; font-family: inherit; line-height: 1.5; resize: vertical; }
+.cv-context-input::placeholder { color: var(--dsw-alias-label-caption); }
 .cv-tl-user-context { color: var(--dsw-alias-label-secondary); word-break: break-all; }
 `
 
