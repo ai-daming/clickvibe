@@ -1,5 +1,6 @@
+import { RunningDuration } from '../duration.ts'
 import { LogBlocks } from '../log-block-view.ts'
-import { formatElapsed, latestTokenUsage, taskStartedAt, type LiveLogEvent } from '../runtime.ts'
+import { latestTokenUsage, taskStartedAt, type LiveLogEvent } from '../runtime.ts'
 /** Live and detached terminal presentation for one agent task. */
 import React from 'react'
 import { createPortal } from 'react-dom'
@@ -18,18 +19,10 @@ export function LiveTerminal({
   agent?: 'codex' | 'claude' | null
 }) {
   const [detached, setDetached] = React.useState(false)
-  const [now, setNow] = React.useState(() => Date.now())
   const logRef = React.useRef<HTMLDivElement | null>(null)
   const startedAt = taskStartedAt(taskId)
   const usage = latestTokenUsage(events)
   const agent = [...events].reverse().find((event) => event.agent)?.agent ?? fallbackAgent ?? undefined
-
-  React.useEffect(() => {
-    if (!active) return
-    setNow(Date.now())
-    const timer = window.setInterval(() => setNow(Date.now()), 1000)
-    return () => window.clearInterval(timer)
-  }, [active, taskId])
 
   React.useEffect(() => {
     const node = logRef.current
@@ -64,9 +57,7 @@ export function LiveTerminal({
           {agent ?? 'agent'}
         </span>
         <span>{stateLabel}</span>
-        {active && startedAt !== null ? (
-          <span aria-label="任务已运行时长">{formatElapsed(now - startedAt)}</span>
-        ) : null}
+        {active && startedAt !== null ? <RunningDuration startedAt={startedAt} compact /> : null}
         {tokenLabel ? <span>{tokenLabel}</span> : null}
         <span className="cv-terminal-spacer" />
         <button
