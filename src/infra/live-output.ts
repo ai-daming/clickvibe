@@ -31,7 +31,6 @@ export interface LiveLogEvent {
 }
 
 const EVENT_PREFIX = '[clickvibe:event]'
-const EVENT_TEXT_MAX_CHARS = 6_000
 
 function finiteToken(value: unknown): number | undefined {
   const number = Number(value)
@@ -67,11 +66,7 @@ export function tokenUsage(value: unknown): TokenUsage | undefined {
 
 /** Durable wire format. Percent encoding keeps agent JSON out of verdict regexes. */
 export function encodeLiveLogEvent(event: LiveLogEvent): string {
-  const bounded =
-    event.text.length > EVENT_TEXT_MAX_CHARS
-      ? { ...event, text: `${event.text.slice(0, EVENT_TEXT_MAX_CHARS)}… [clickvibe] 单条事件已截断` }
-      : event
-  return `${EVENT_PREFIX}${encodeURIComponent(JSON.stringify(bounded))}`
+  return `${EVENT_PREFIX}${encodeURIComponent(JSON.stringify(event))}`
 }
 
 /** Read new structured records and legacy plain-text logs without migration. */

@@ -35,6 +35,7 @@ import {
   parseGithubUrl,
   validatePrivilegedRequest,
 } from './develop-core.ts'
+import { LineBuffer } from './line-buffer.ts'
 import { type RepositoryFreshness, RepositoryFreshnessGate, RepositoryRefreshClock } from './repo-freshness.ts'
 import { ExclusiveTaskGate } from './task-gate.ts'
 import type { IssueWorkflow } from './state.ts'
@@ -70,8 +71,7 @@ export interface LiveTask {
   startedAt: number
   process?: ReturnType<Context['shell']['start']>
   log: LineLog
-  rawLog: LineLog
-  rawCursor: number
+  rawLog: LineBuffer
   closed: boolean
   status: 'running' | 'done' | 'failed' | 'stopped' | 'timed_out'
   exitCode: number | null
