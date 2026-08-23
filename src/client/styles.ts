@@ -91,6 +91,8 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 .cv-comment-author { font-weight: 600; color: var(--dsw-alias-state-business-primary); }
 .cv-comment-date { color: var(--dsw-alias-label-caption); }
 .cv-toggle { border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-base); border-radius: 6px; padding: 3px 8px; font-size: 12px; cursor: pointer; color: var(--dsw-alias-label-primary); }
+:where(.cv-panel, .cv-terminal-overlay, .cv-audit-drawer) :is(button, select, input, textarea, a, summary):focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary); outline-offset: 1px; border-radius: 4px; }
+:where(.cv-toggle, .cv-issue-organizer):focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary); outline-offset: 1px; border-radius: 4px; }
 .cv-toggle:hover { background: var(--dsw-alias-interactive-bg-hover-solid); }
 .cv-issue-organizer { border: 0; border-radius: 6px; padding: 4px 8px; background: transparent; color: var(--dsw-alias-label-secondary); font: inherit; white-space: nowrap; cursor: pointer; }
 .cv-issue-organizer:hover { background: var(--dsw-alias-interactive-bg-hover-solid); color: var(--dsw-alias-label-primary); }

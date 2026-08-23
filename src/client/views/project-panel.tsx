@@ -197,11 +197,12 @@ export function PanelContent() {
               onClick={() => void refreshDetail()}
               disabled={loading}
               title="强制同步远端并刷新详情"
+              aria-label="强制同步远端并刷新详情"
             >
               ⟳
             </button>
           ) : null}
-          <button className="cv-close" onClick={() => setPanelOpen(false)}>
+          <button className="cv-close" onClick={() => setPanelOpen(false)} aria-label="关闭 ClickVibe 面板">
             ✕
           </button>
         </span>
@@ -304,6 +305,7 @@ export function PanelContent() {
                 onClick={() => void loadRepo(repoKey, true)}
                 disabled={loading}
                 title="刷新 GitHub 与 git 状态"
+                aria-label="刷新 GitHub 与 git 状态"
               >
                 ⟳
               </button>
