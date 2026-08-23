@@ -21,7 +21,7 @@ export async function baselineRestorePreview(ctx: Context, url: string): Promise
   const remote = frozenRemoteBase(workflow.baseRef)
   const hash = frozenBaseHash(workflow.baseRef)
   if (!remote || !hash) throw new Error('workflow 缺少可恢复的冻结基线')
-  const relatedHashes = (await loadAllWorkflows())
+  const relatedHashes = (await loadAllWorkflows(true))
     .filter((candidate) => candidate.repoKey === repoKey && frozenRemoteBase(candidate.baseRef) === remote)
     .map((candidate) => frozenBaseHash(candidate.baseRef))
     .filter((candidate): candidate is string => candidate !== null)
@@ -55,7 +55,7 @@ export async function restoreBaseBranch(
     }
     const key = issueKey(repoKey, parsed.number)
     const remote = `origin/${authorizedTarget.baseBranch}`
-    const sharedKeys = (await loadAllWorkflows())
+    const sharedKeys = (await loadAllWorkflows(true))
       .filter((workflow) => workflow.repoKey === repoKey && frozenRemoteBase(workflow.baseRef) === remote)
       .map((workflow) => workflow.key)
     if (!sharedKeys.includes(key)) sharedKeys.push(key)

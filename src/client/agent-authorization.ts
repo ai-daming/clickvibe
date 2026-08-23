@@ -7,7 +7,7 @@ export interface AuthorizationCapability {
   authorizationId: string
   authorizationDigest: string
   baseline?: string
-  target?: { prNumber: string; branch: string; head: string; mergeFlag: '--merge' }
+  target?: { prNumber: string; branch: string; head: string; baseRef: string; baseSha: string; mergeFlag: '--merge' }
   restoreTarget?: { branch: string; hash: string }
 }
 

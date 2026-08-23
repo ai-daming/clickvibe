@@ -43,7 +43,9 @@ function included(body: unknown): string {
   return ['HTTP/2.0 200 OK', '', JSON.stringify(body)].join('\n')
 }
 
-function prCtx(options: { state?: string; head?: string; base?: string; sha?: string; fail?: boolean } = {}) {
+function prCtx(
+  options: { state?: string; head?: string; base?: string; baseSha?: string; sha?: string; fail?: boolean } = {},
+) {
   return {
     shell: {
       resolve(spec: unknown) {
@@ -60,7 +62,7 @@ function prCtx(options: { state?: string; head?: string; base?: string; sha?: st
               html_url: 'https://github.com/o/r/pull/7',
               updated_at: 'now',
               head: { ref: options.head ?? 'repo-issue-1', sha: options.sha },
-              base: { ref: options.base ?? 'main' },
+              base: { ref: options.base ?? 'main', sha: options.baseSha ?? 'abc1234' },
             }
         return { exitCode: 0, stdout: { text: included(body) }, stderr: { text: '' } }
       },
@@ -146,6 +148,42 @@ test('merge execution validates URL, exclusivity, workflow, config, worktree roo
     assert.match((await mergeAndCleanupUnlocked({} as never, { url: workflow('2').url })).error, /分支无效/)
   } finally {
     mergingWorkflows.delete(issueKey('o/r', '2'))
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('merge execution rejects an authorization whose exact PR base changed', async () => {
+  const previousHome = process.env.HOME
+  const home = await mkdtemp(join(tmpdir(), 'clickvibe-merge-base-auth-'))
+  process.env.HOME = home
+  try {
+    const repo = join(home, 'repo')
+    const worktreeRoot = join(home, 'worktrees')
+    const worktreePath = join(worktreeRoot, 'repo-issue-8')
+    await mkdir(repo, { recursive: true })
+    await mkdir(worktreePath, { recursive: true })
+    await mkdir(join(home, '.clickvibe'), { recursive: true })
+    await writeFile(join(home, '.clickvibe', 'config.yaml'), `repos:\n  o/r: ${repo}\nworktreeRoot: ${worktreeRoot}\n`)
+    const stored = workflow('8', { worktree: worktreePath, branch: 'repo-issue-8', prNumber: '8' })
+    await saveWorkflow(stored)
+    const ctx = prCtx({ head: stored.branch, sha: 'abcdef1234567890', base: 'release/2.0', baseSha: 'bbb2222' })
+    const result = await mergeAndCleanupUnlocked(ctx as never, {
+      url: stored.url,
+      target: {
+        prNumber: '8',
+        branch: stored.branch,
+        head: 'abcdef1234567890',
+        baseRef: 'release/2.0',
+        baseSha: 'aaa1111',
+        mergeFlag: '--merge',
+      },
+      override: { skipped: ['review-base'], reason: 'confirmed old base' },
+    })
+    assert.equal(result.ok, false)
+    assert.match(result.error, /PR base.*变化/)
+  } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(home, { recursive: true, force: true })

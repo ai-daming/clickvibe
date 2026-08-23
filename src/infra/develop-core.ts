@@ -1,6 +1,8 @@
 import { createHash, randomBytes } from 'node:crypto'
 import {
   isValidGitBranchName,
+  type MergeAuthorizationTarget,
+  mergeAuthorizationTarget,
   type RestoreAuthorizationTarget,
   restoreAuthorizationTarget,
 } from './authorization-target.ts'
@@ -247,12 +249,7 @@ export interface AgentAuthorizationInput {
   autoRun?: AutoRunAuthorizationConfig
   /** Manual choice to abandon the resumable session while preserving git artifacts. */
   freshSession?: true
-  target?: {
-    prNumber: string
-    branch: string
-    head: string
-    mergeFlag: '--merge'
-  }
+  target?: MergeAuthorizationTarget
   restoreTarget?: RestoreAuthorizationTarget
   /** 人工放行(仅 merge):被用户二次确认跳过的门禁项与放行原因;计入授权摘要,不可篡改。 */
   override?: {
@@ -399,14 +396,7 @@ export function makeAuthorizationInput(value: {
   }
   let target: AgentAuthorizationInput['target']
   if (action === 'merge' && value.target !== undefined) {
-    const raw = value.target as Record<string, unknown>
-    const prNumber = String(raw?.prNumber ?? '').trim()
-    const branch = String(raw?.branch ?? '').trim()
-    const head = String(raw?.head ?? '').trim()
-    if (!/^\d+$/.test(prNumber) || branch === '' || !/^[0-9a-f]{7,64}$/i.test(head) || raw?.mergeFlag !== '--merge') {
-      throw new Error('合并授权目标无效')
-    }
-    target = { prNumber, branch, head, mergeFlag: '--merge' }
+    target = mergeAuthorizationTarget(value.target)
   }
   let restoreTarget: AgentAuthorizationInput['restoreTarget']
   if (action === 'restore-base' && value.restoreTarget !== undefined) {

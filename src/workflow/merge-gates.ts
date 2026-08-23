@@ -89,6 +89,7 @@ export async function isSyncEquivalentMerge(
   reviewedHash: string,
   prHead: string,
   baseBranch = 'main',
+  baseHash?: string,
 ): Promise<boolean> {
   if (!existsSync(worktree)) return false
   const policy = { mode: 'danger-full-access' as const, workspaceRoot: worktree }
@@ -124,6 +125,7 @@ export async function isSyncEquivalentMerge(
   if (headOid !== head || parents.length !== 2) return false
   if (!parents.includes(reviewed)) return false
   const mainSide = parents[0] === reviewed ? parents[1] : parents[0]
+  if (baseHash && !sameCommitHash(mainSide, baseHash)) return false
   // 另一父必须位于当前冻结基线历史上(同步来源只能是该 base)
   const mergeBase = await gitOut(`merge-base ${mainSide} ${shellQuote(remoteBase)}`)
   if (!mergeBase || mergeBase !== mainSide) return false
@@ -166,18 +168,31 @@ export async function collectMergeGateFailures(
   prBase?: { ref: string; sha: string },
 ): Promise<MergeGateFailure[]> {
   const failures: MergeGateFailure[] = []
-  const reviewedHash = latestPassingReviewHash(workflow)
-  try {
-    await assertReviewHeadMatchesPr(ctx, workflow.worktree, reviewedHash, prHead, workflowBaseBranch(workflow.baseRef))
-  } catch (error) {
+  const review = latestPassingReview(workflow)
+  const reviewedHash = review?.hash?.trim() || null
+  const exactHead = !!reviewedHash && sameCommitHash(reviewedHash, prHead)
+  const sameBaseRef = !!prBase && review?.reviewBase?.ref === prBase.ref
+  const syncEquivalent =
+    !exactHead &&
+    !!reviewedHash &&
+    (await isSyncEquivalentMerge(
+      ctx,
+      workflow.worktree,
+      reviewedHash,
+      prHead,
+      prBase?.ref ?? workflowBaseBranch(workflow.baseRef),
+      sameBaseRef ? prBase?.sha : undefined,
+    ))
+  if (!exactHead && !syncEquivalent) {
     failures.push({
       key: 'review-hash',
-      message: String(error instanceof Error ? error.message : error).replace(/^合并门禁拒绝:/, ''),
+      message: '实时 PR HEAD 与最近一次通过的 review 结论哈希不一致,且不满足同步等价,需重新 Review',
     })
   }
   if (prBase) {
-    const reviewedBase = latestPassingReview(workflow)?.reviewBase
-    if (!reviewedBase || reviewedBase.ref !== prBase.ref || !sameCommitHash(reviewedBase.sha, prBase.sha)) {
+    const reviewedBase = review?.reviewBase
+    const exactBase = !!reviewedBase && reviewedBase.ref === prBase.ref && sameCommitHash(reviewedBase.sha, prBase.sha)
+    if (!exactBase && !(sameBaseRef && syncEquivalent)) {
       failures.push({ key: 'review-base', message: '实时 PR base 与最近一次通过的 review 基线不一致,需重新 Review' })
     }
   }

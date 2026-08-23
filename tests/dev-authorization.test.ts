@@ -44,9 +44,17 @@ test('authorization confirmation copy preserves develop, review and merge detail
       ...common,
       action: 'merge',
       agent: null,
-      preview: { ...common.preview, prNumber: '65', branch: 'issue-61', mergeFlag: '--merge', cleanup: ['worktree'] },
+      preview: {
+        ...common.preview,
+        prNumber: '65',
+        branch: 'issue-61',
+        baseRef: 'release/2.0',
+        baseSha: 'abc1234',
+        mergeFlag: '--merge',
+        cleanup: ['worktree'],
+      },
     }),
-    /PR: #65.*issue-61.*worktree/s,
+    /PR: #65.*issue-61.*release\/2\.0.*abc1234.*worktree/s,
   )
   assert.match(
     authorizationSummary({

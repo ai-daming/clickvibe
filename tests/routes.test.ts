@@ -933,6 +933,7 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
         at: '2026-08-22T00:00:00Z',
         hash: 'abcdef1',
         verdict: { passed: true, issues: [] },
+        reviewBase: { ref: 'main', sha: '1111111111111111' },
         issueContract: { bodyHash: issueBodyHash(reviewedBody), updatedAt: '2026-08-22T00:00:00Z' },
       },
     ]
@@ -957,7 +958,7 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
           state: merged ? 'closed' : 'open',
           merged_at: merged ? '2026-08-22T01:00:00Z' : null,
           head: { ref: workflow.branch, sha: 'abcdef1234567890' },
-          base: { ref: 'main' },
+          base: { ref: 'main', sha: '1111111111111111' },
           html_url: 'https://github.com/o/r/pull/29',
         },
         reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
@@ -1002,6 +1003,8 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
       prNumber: '29',
       branch: workflow.branch,
       head: 'abcdef1234567890',
+      baseRef: 'main',
+      baseSha: '1111111111111111',
       mergeFlag: '--merge',
       cleanup: ['worktree', '本地分支', '远端分支', 'Issue #23', 'workflow 归档'],
     })
@@ -1103,7 +1106,15 @@ test('/merge rejects a stale review hash before invoking gh pr merge', async () 
     workflow.branch = 'r-issue-23'
     workflow.stage = 'passed'
     workflow.reviewResult = { passed: true, issues: [] }
-    workflow.events = [{ kind: 'review', at: 'now', hash: '1111111', verdict: { passed: true, issues: [] } }]
+    workflow.events = [
+      {
+        kind: 'review',
+        at: 'now',
+        hash: '1111111',
+        verdict: { passed: true, issues: [] },
+        reviewBase: { ref: 'main', sha: '1111111111111111' },
+      },
+    ]
     await saveWorkflow(workflow)
     const commands: string[] = []
     const handler = createHandler(async (spec) => {
@@ -1114,7 +1125,7 @@ test('/merge rejects a stale review hash before invoking gh pr merge', async () 
           state: 'open',
           merged_at: null,
           head: { ref: workflow.branch, sha: '2222222222222222' },
-          base: { ref: 'main' },
+          base: { ref: 'main', sha: '1111111111111111' },
           html_url: 'https://github.com/o/r/pull/29',
         },
         reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
@@ -1153,6 +1164,7 @@ test('/merge authorization rejects a changed acceptance contract with the same P
         at: 'now',
         hash: 'abcdef1',
         verdict: { passed: true, issues: [] },
+        reviewBase: { ref: 'main', sha: '1111111111111111' },
         issueContract: {
           bodyHash: issueBodyHash('## 验收标准\n- reviewed contract'),
           updatedAt: '2026-08-22T00:00:00Z',
@@ -1177,7 +1189,7 @@ test('/merge authorization rejects a changed acceptance contract with the same P
           state: 'open',
           merged_at: null,
           head: { ref: workflow.branch, sha: 'abcdef1234567890' },
-          base: { ref: 'main' },
+          base: { ref: 'main', sha: '1111111111111111' },
           html_url: 'https://github.com/o/r/pull/29',
         },
         reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
@@ -1232,6 +1244,7 @@ test('/merge gate rejection offers manual override that merges once and audits t
         at: '2026-08-22T00:00:00Z',
         hash: '1111111',
         verdict: { passed: true, issues: [] },
+        reviewBase: { ref: 'main', sha: '1111111111111111' },
         issueContract: { bodyHash: issueBodyHash(reviewedBody), updatedAt: '2026-08-22T00:00:00Z' },
       },
     ]
@@ -1256,7 +1269,7 @@ test('/merge gate rejection offers manual override that merges once and audits t
           state: merged ? 'closed' : 'open',
           merged_at: merged ? '2026-08-22T01:00:00Z' : null,
           head: { ref: workflow.branch, sha: '2222222222222222' },
-          base: { ref: 'main' },
+          base: { ref: 'main', sha: '1111111111111111' },
           html_url: 'https://github.com/o/r/pull/29',
         },
         reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
@@ -1402,6 +1415,7 @@ test('/merge manual override refuses gate failures not covered by the confirmati
         at: 'now',
         hash: 'abcdef1',
         verdict: { passed: true, issues: [] },
+        reviewBase: { ref: 'main', sha: '1111111111111111' },
         issueContract: {
           bodyHash: issueBodyHash('## 验收标准\n- reviewed contract'),
           updatedAt: '2026-08-22T00:00:00Z',
@@ -1433,7 +1447,7 @@ test('/merge manual override refuses gate failures not covered by the confirmati
           state: 'open',
           merged_at: null,
           head: { ref: workflow.branch, sha: 'abcdef1234567890' },
-          base: { ref: 'main' },
+          base: { ref: 'main', sha: '1111111111111111' },
           html_url: 'https://github.com/o/r/pull/29',
         },
         reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
@@ -1518,6 +1532,7 @@ test('cleanup failure keeps merged terminal state and retries without merging ag
         at: 'now',
         hash: 'abcdef1',
         verdict: { passed: true, issues: [] },
+        reviewBase: { ref: 'main', sha: '1111111111111111' },
         issueContract: { bodyHash: issueBodyHash(reviewedBody), updatedAt: '2026-08-22T00:00:00Z' },
       },
     ]
@@ -1542,7 +1557,7 @@ test('cleanup failure keeps merged terminal state and retries without merging ag
           state: merged ? 'closed' : 'open',
           merged_at: merged ? '2026-08-22T01:00:00Z' : null,
           head: { ref: workflow.branch, sha: 'abcdef1234567890' },
-          base: { ref: 'main' },
+          base: { ref: 'main', sha: '1111111111111111' },
           html_url: 'https://github.com/o/r/pull/29',
         },
         reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
@@ -1638,7 +1653,7 @@ test('/state uses the live GitHub issue state instead of the stored issueState',
           state: 'open',
           merged_at: null,
           head: { ref: workflow.branch, sha: 'abcdef1234567890' },
-          base: { ref: 'main' },
+          base: { ref: 'main', sha: '1111111111111111' },
           html_url: 'https://github.com/o/r/pull/29',
         },
       })

@@ -6,6 +6,8 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
 import { assertReviewHeadMatchesPr, isSyncEquivalentMerge } from '../src/index.ts'
+import type { IssueWorkflow } from '../src/infra/state.ts'
+import { collectMergeGateFailures } from '../src/workflow/merge-gates.ts'
 
 const execFileAsync = promisify(execFile)
 
@@ -63,6 +65,7 @@ async function setupSyncScene(options: { branchEditsConflictFile?: boolean; base
     await git('push', '-u', 'origin', baseBranch)
   }
   await git('fetch', 'origin', '--prune')
+  const reviewedBase = (await git('rev-parse', `origin/${baseBranch}`)).stdout.trim()
   await git('worktree', 'add', '-b', branch, worktree, `origin/${baseBranch}`)
   // 被审提交 R:分支侧改动
   await writeFile(join(worktree, options.branchEditsConflictFile ? 'base.md' : 'feature.md'), 'dev work\n')
@@ -78,7 +81,20 @@ async function setupSyncScene(options: { branchEditsConflictFile?: boolean; base
   await git('commit', '-m', 'base advances')
   await git('push', 'origin', baseBranch)
   const remoteBranchHead = async () => (await remoteGit('rev-parse', `refs/heads/${branch}`)).stdout.trim()
-  return { root, remote, repo, worktree, branch, git, wt, remoteGit, reviewedShort, reviewedFull, remoteBranchHead }
+  return {
+    root,
+    remote,
+    repo,
+    worktree,
+    branch,
+    git,
+    wt,
+    remoteGit,
+    reviewedBase,
+    reviewedShort,
+    reviewedFull,
+    remoteBranchHead,
+  }
 }
 
 test('pure sync merge of R with origin/main is sync-equivalent (issue #48)', async () => {
@@ -114,6 +130,41 @@ test('pure sync merge follows a custom frozen baseline', async () => {
     assert.equal(parents.includes(releaseHead), true)
     assert.equal(await isSyncEquivalentMerge(ctx, scene.worktree, scene.reviewedShort, head, 'release/2.0'), true)
     await assert.doesNotReject(assertReviewHeadMatchesPr(ctx, scene.worktree, scene.reviewedShort, head, 'release/2.0'))
+  } finally {
+    await rm(scene.root, { recursive: true, force: true })
+  }
+})
+
+test('pure sync merge accepts the exact advanced PR base without a review-base failure', async () => {
+  const scene = await setupSyncScene({ baseBranch: 'release/2.0' })
+  try {
+    await scene.wt('fetch', 'origin', '--prune')
+    await scene.wt('merge', '--no-edit', 'origin/release/2.0')
+    const head = (await scene.wt('rev-parse', 'HEAD')).stdout.trim()
+    const currentBase = (await scene.wt('rev-parse', 'origin/release/2.0')).stdout.trim()
+    const workflow = {
+      url: 'https://github.com/o/r/issues/60',
+      worktree: scene.worktree,
+      baseRef: `origin/release/2.0 @ ${scene.reviewedBase}`,
+      reviewResult: { passed: true, issues: [] },
+      events: [
+        {
+          kind: 'review',
+          at: 'now',
+          hash: scene.reviewedFull,
+          verdict: { passed: true, issues: [] },
+          reviewBase: { ref: 'release/2.0', sha: scene.reviewedBase },
+        },
+      ],
+    } as unknown as IssueWorkflow
+    const failures = await collectMergeGateFailures(ctx, workflow, head, {
+      ref: 'release/2.0',
+      sha: currentBase,
+    })
+    assert.equal(
+      failures.some((failure) => failure.key === 'review-base'),
+      false,
+    )
   } finally {
     await rm(scene.root, { recursive: true, force: true })
   }

@@ -96,6 +96,45 @@ test('restore rejects an older shared-baseline authorization recorded by another
   }
 })
 
+test('restore includes an archived workflow when selecting the latest shared baseline tip', async () => {
+  const fixture = await sharedFixture()
+  fixture.latest.delivery = {
+    status: 'archived',
+    mergedAt: '2026-08-23T00:00:00Z',
+    prHead: 'feature222',
+    mergeStrategy: 'merge',
+    cleanup: { worktree: true, localBranch: true, remoteBranch: true, issue: true },
+  }
+  await saveWorkflow(fixture.latest)
+  const commands: string[] = []
+  const ctx = {
+    shell: {
+      resolve(spec: unknown) {
+        return spec
+      },
+      async run(spec: { command: string }) {
+        commands.push(spec.command)
+        if (spec.command.includes('merge-base --is-ancestor')) return ancestorResult(spec.command)
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      },
+    },
+  }
+  try {
+    const restored = await restoreBaseBranch(ctx as never, {
+      url: fixture.older.url,
+      restoreTarget: { branch: 'release/shared', hash: 'aaa1111' },
+    })
+    assert.equal(restored.ok, false)
+    if (!restored.ok) assert.match(restored.error, /目标已变化/)
+    assert.equal(
+      commands.some((command) => command.startsWith('git push ')),
+      false,
+    )
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
 test('restore holds every workflow sharing the baseline until the exact push finishes', async () => {
   const fixture = await sharedFixture()
   let releaseFetch = () => undefined

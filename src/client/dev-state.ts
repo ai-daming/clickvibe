@@ -272,11 +272,20 @@ export function useDevSection({
             ok: true
             authorizationId: string
             authorizationDigest: string
-            target?: { prNumber: string; branch: string; head: string; mergeFlag: '--merge' }
+            target?: {
+              prNumber: string
+              branch: string
+              head: string
+              baseRef: string
+              baseSha: string
+              mergeFlag: '--merge'
+            }
             override?: { skipped: string[]; reason: string }
             preview: {
               prNumber?: string
               branch?: string
+              baseRef?: string
+              baseSha?: string
               mergeFlag?: string
               cleanup?: string[]
               override?: { skipped: string[]; reason: string; gates: MergeGateFailure[] }
@@ -306,7 +315,7 @@ export function useDevSection({
         }
         const preview = res.preview
         const confirmedMerge = window.confirm(
-          `⚠️ 人工放行合并(最后确认)\n\nPR: #${preview.prNumber ?? '?'}\n分支: ${preview.branch ?? '?'}\n策略: ${preview.mergeFlag ?? '--merge'} (merge commit)\n清理: ${(preview.cleanup ?? []).join('、')}\n\n跳过的门禁项:\n${override.skipped.map((key) => `• ${gateMessage(key)}`).join('\n')}\n放行原因: ${override.reason}\n操作者: 本机用户(将写入审计时间线)\n\n注意:仅跳过 ClickVibe 自身门禁;GitHub 分支保护若拒绝合并将直接报错。\n\n确认放行并执行合并与清理?`,
+          `⚠️ 人工放行合并(最后确认)\n\nPR: #${preview.prNumber ?? '?'}\n分支: ${preview.branch ?? '?'}\nPR base: ${preview.baseRef ?? '?'} @ ${preview.baseSha ?? '?'}\n策略: ${preview.mergeFlag ?? '--merge'} (merge commit)\n清理: ${(preview.cleanup ?? []).join('、')}\n\n跳过的门禁项:\n${override.skipped.map((key) => `• ${gateMessage(key)}`).join('\n')}\n放行原因: ${override.reason}\n操作者: 本机用户(将写入审计时间线)\n\n注意:仅跳过 ClickVibe 自身门禁;GitHub 分支保护若拒绝合并将直接报错。\n\n确认放行并执行合并与清理?`,
         )
         if (!confirmedMerge) {
           setBusy(null)
@@ -316,7 +325,7 @@ export function useDevSection({
         // 确认时门禁已全部通过(此前拒绝基于过期数据):按正常合并预览确认。
         const preview = res.preview
         const confirmedMerge = window.confirm(
-          `门禁已全部通过,无需放行。ClickVibe 将执行不可逆的合并与清理:\n\nPR: #${preview.prNumber ?? '?'}\n分支: ${preview.branch ?? '?'}\n策略: ${preview.mergeFlag ?? '--merge'}\n清理: ${(preview.cleanup ?? []).join('、')}\n\n确认合并并清理?`,
+          `门禁已全部通过,无需放行。ClickVibe 将执行不可逆的合并与清理:\n\nPR: #${preview.prNumber ?? '?'}\n分支: ${preview.branch ?? '?'}\nPR base: ${preview.baseRef ?? '?'} @ ${preview.baseSha ?? '?'}\n策略: ${preview.mergeFlag ?? '--merge'}\n清理: ${(preview.cleanup ?? []).join('、')}\n\n确认合并并清理?`,
         )
         if (!confirmedMerge) {
           setBusy(null)

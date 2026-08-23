@@ -8,6 +8,8 @@ export interface AuthorizationPreview {
   digest: string
   prNumber?: string
   branch?: string
+  baseRef?: string
+  baseSha?: string
   mergeFlag?: string
   cleanup?: string[]
   baseline?: string
@@ -53,7 +55,7 @@ export function authorizationSummary(input: {
     return `${agent} 将以高权限开发以下已冻结快照:\n\n${preview.title ?? url}\n更新时间: ${preview.updatedAt || '未知'}\n评论: ${preview.commentCount ?? 0} 条\n开发基线: ${preview.baseline ?? 'origin/HEAD'}\n快照: ${preview.digest.slice(0, 12)}\n\n确认启动?`
   }
   if (action === 'merge') {
-    return `ClickVibe 将执行不可逆的合并与清理:\n\nPR: #${preview.prNumber ?? '?'}\n分支: ${preview.branch ?? '?'}\n策略: ${preview.mergeFlag ?? '--merge'} (merge commit，禁止 squash/rebase)\n清理: ${(preview.cleanup ?? []).join('、')}\n授权: ${authorizationDigest.slice(0, 12)}\n\n确认合并并清理?`
+    return `ClickVibe 将执行不可逆的合并与清理:\n\nPR: #${preview.prNumber ?? '?'}\n分支: ${preview.branch ?? '?'}\nPR base: ${preview.baseRef ?? '?'} @ ${preview.baseSha ?? '?'}\n策略: ${preview.mergeFlag ?? '--merge'} (merge commit，禁止 squash/rebase)\n清理: ${(preview.cleanup ?? []).join('、')}\n授权: ${authorizationDigest.slice(0, 12)}\n\n确认合并并清理?`
   }
   if (action === 'restore-base') {
     return `ClickVibe 将恢复远端基线后继续创建 PR:\n\n基线: ${preview.baseline ?? '?'}\n最后已知 tip: ${preview.baselineRef ?? '?'}\n授权: ${authorizationDigest.slice(0, 12)}\n\n仅当远端同名分支仍不存在时创建;若已被恢复到不同提交则拒绝覆盖。确认恢复?`

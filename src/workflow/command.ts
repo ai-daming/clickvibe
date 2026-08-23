@@ -384,6 +384,8 @@ export interface CommandAuthorizationPreview {
   prNumber?: string
   branch?: string
   head?: string
+  baseRef?: string
+  baseSha?: string
   mergeFlag?: string
   cleanup?: string[]
   baseline?: string
@@ -433,6 +435,7 @@ export function formatConfirmationPreview(
     return [
       '即将执行不可逆的合并与清理:',
       `- PR:#${preview.prNumber ?? '?'}(分支 ${preview.branch ?? '?'},HEAD ${preview.head ?? '?'})`,
+      `- PR base:${preview.baseRef ?? '?'} @ ${preview.baseSha ?? '?'}`,
       `- 策略:${preview.mergeFlag ?? '--merge'}(merge commit,禁止 squash/rebase)`,
       `- 清理:${(preview.cleanup ?? []).join('、')}`,
       ...(gates.length > 0

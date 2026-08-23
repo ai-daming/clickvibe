@@ -3,6 +3,15 @@ export interface RestoreAuthorizationTarget {
   hash: string
 }
 
+export interface MergeAuthorizationTarget {
+  prNumber: string
+  branch: string
+  head: string
+  baseRef: string
+  baseSha: string
+  mergeFlag: '--merge'
+}
+
 /** Mirror git-check-ref-format branch rules without restricting valid Unicode names. */
 export function isValidGitBranchName(branch: string): boolean {
   if (branch === '' || branch === '@' || branch.startsWith('/') || branch.endsWith('/') || branch.endsWith('.')) {
@@ -31,4 +40,26 @@ export function restoreAuthorizationTarget(value: unknown): RestoreAuthorization
     throw new Error('恢复基线授权目标无效')
   }
   return { branch, hash }
+}
+
+export function mergeAuthorizationTarget(value: unknown): MergeAuthorizationTarget {
+  const raw = value as Record<string, unknown>
+  const target = {
+    prNumber: String(raw?.prNumber ?? '').trim(),
+    branch: String(raw?.branch ?? '').trim(),
+    head: String(raw?.head ?? '').trim(),
+    baseRef: String(raw?.baseRef ?? '').trim(),
+    baseSha: String(raw?.baseSha ?? '').trim(),
+  }
+  if (
+    !/^\d+$/.test(target.prNumber) ||
+    target.branch === '' ||
+    !/^[0-9a-f]{7,64}$/i.test(target.head) ||
+    !isValidGitBranchName(target.baseRef) ||
+    !/^[0-9a-f]{7,64}$/i.test(target.baseSha) ||
+    raw?.mergeFlag !== '--merge'
+  ) {
+    throw new Error('合并授权目标无效')
+  }
+  return { ...target, mergeFlag: '--merge' }
 }

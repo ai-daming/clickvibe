@@ -342,14 +342,14 @@ export async function loadWorkflow(key: string): Promise<IssueWorkflow | null> {
   return null
 }
 
-export async function loadAllWorkflows(): Promise<IssueWorkflow[]> {
+export async function loadAllWorkflows(includeArchived = false): Promise<IssueWorkflow[]> {
   await migrateLegacyState()
   const workflows: IssueWorkflow[] = []
   for (const path of await storedWorkflowFiles()) {
     const workflow = await readWorkflowFile(path)
     if (workflow) {
       await migrateWorkflowLogs(workflow)
-      if (workflow.delivery?.status !== 'archived') workflows.push(workflow)
+      if (includeArchived || workflow.delivery?.status !== 'archived') workflows.push(workflow)
     }
   }
   return workflows.sort((a, b) => b.updatedAt - a.updatedAt)
