@@ -39,7 +39,7 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 .cv-project-meta { color: var(--dsw-alias-label-secondary); font-size: 11px; }
 .cv-project-list { flex: 1; overflow-y: auto; padding: 8px 10px 16px; }
 .cv-group-title { margin: 10px 2px 5px; color: var(--dsw-alias-label-secondary); font-size: 11px; font-weight: 700; }
-.cv-issue-row { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto auto; gap: 8px; align-items: center; padding: 9px 8px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 7px; margin-bottom: 6px; background: var(--dsw-alias-bg-base); }
+.cv-issue-row { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 9px 8px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 7px; margin-bottom: 6px; background: var(--dsw-alias-bg-base); }
 .cv-issue-row-main { min-width: 0; }
 .cv-issue-row-title { display: block; color: var(--dsw-alias-state-business-primary); font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .cv-issue-row-meta { color: var(--dsw-alias-label-secondary); font-size: 10.5px; margin-top: 3px; display: flex; gap: 7px; flex-wrap: wrap; }
@@ -122,6 +122,8 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 .cv-auto-run-form .cv-auto-run-check { justify-content: flex-start; }
 .cv-auto-run-status, .cv-auto-run-findings { margin-top: 4px; color: var(--dsw-alias-label-secondary); font-size: 10.5px; }
 .cv-auto-run-paused { color: var(--dsw-alias-state-warn-primary); }
+.cv-row-actions { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.cv-row-actions .cv-auto-run { margin: 0; }
 .cv-dev-btn { padding: 5px 12px; border: none; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; color: var(--dsw-alias-label-primary-foreground); }
 .cv-dev-codex { background: var(--dsw-alias-button-primary-fill); }
 .cv-dev-claude { background: var(--dsw-alias-state-warn-primary); }

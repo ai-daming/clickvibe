@@ -477,25 +477,27 @@ export function PanelContent() {
                                 ) : null}
                               </div>
                             </div>
-                            <AutoRunForm
-                              compact
-                              url={String(issue.url ?? '')}
-                              issue={issue}
-                              workflow={issue.workflow}
-                              onStarted={() => loadRepo(repoKey, true)}
-                            />
-                            <button
-                              className={`cv-row-action${shownAction.kind === 'none' ? (shownAction.label === '任务进行中' ? ' cv-row-running' : ' cv-row-none') : ''}`}
-                              disabled={shownAction.kind === 'none'}
-                              title={shownAction.hint}
-                              onClick={() => rowAction(issue)}
-                            >
-                              {shownAction.kind === 'none'
-                                ? status === 'passed'
-                                  ? '已交付'
-                                  : shownAction.label
-                                : shownAction.label}
-                            </button>
+                            <div className="cv-row-actions">
+                              <AutoRunForm
+                                compact
+                                url={String(issue.url ?? '')}
+                                issue={issue}
+                                workflow={issue.workflow}
+                                onStarted={() => loadRepo(repoKey, true)}
+                              />
+                              <button
+                                className={`cv-row-action${shownAction.kind === 'none' ? (shownAction.label === '任务进行中' ? ' cv-row-running' : ' cv-row-none') : ''}`}
+                                disabled={shownAction.kind === 'none'}
+                                title={shownAction.hint}
+                                onClick={() => rowAction(issue)}
+                              >
+                                {shownAction.kind === 'none'
+                                  ? status === 'passed'
+                                    ? '已交付'
+                                    : shownAction.label
+                                  : shownAction.label}
+                              </button>
+                            </div>
                           </div>
                         )
                       })}
