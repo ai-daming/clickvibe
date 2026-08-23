@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildStagePrompt, selectReviewFeedback, type PromptSnapshot } from '../src/agent/prompt.ts'
+import {
+  buildStagePrompt,
+  selectReviewFeedback,
+  snapshotWithoutReviewFeedback,
+  type PromptSnapshot,
+} from '../src/agent/prompt.ts'
 
 const snapshot: PromptSnapshot = {
   url: 'https://github.com/o/r/issues/20',
@@ -116,4 +121,16 @@ test('a current passed review never turns resume into rework from old feedback',
     localIssues: [],
   })
   assert.equal(feedback, null)
+})
+
+test('fresh review removes ClickVibe review lists but preserves ordinary requirement comments', () => {
+  const sanitized = snapshotWithoutReviewFeedback({
+    ...snapshot,
+    comments: [
+      { author: 'owner', body: '新增验收要求' },
+      { author: 'bot', body: '== Review Meta ==\n- event: review\n- passed: false\n\n- old issue' },
+    ],
+  })
+  assert.deepEqual(sanitized.comments, [{ author: 'owner', body: '新增验收要求' }])
+  assert.deepEqual(snapshot.comments, [{ author: 'owner', body: '相关评论正文' }])
 })

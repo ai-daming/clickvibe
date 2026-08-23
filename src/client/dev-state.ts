@@ -4,6 +4,7 @@ import { type AuthorizationPreview, authorizationSummary, expectedDevelopSnapsho
 import { useDevStream } from './dev-stream.ts'
 import { type MergeGateFailure, type NextAction, OVERRIDE_REASON_MAX, type Workflow, apiCall } from './domain.ts'
 import { githubCompareUrl, latestDevelopmentEvent } from './runtime.ts'
+import { effectiveActionForIssue } from './fresh-session.ts'
 import { type GhIssue } from './views/issue-view.tsx'
 export function useDevSection({
   url,
@@ -50,6 +51,7 @@ export function useDevSection({
     action: 'develop' | 'review' | 'resume' | 'merge',
     agent: 'codex' | 'claude' | null,
     context = '',
+    freshSession = false,
   ): Promise<{
     authorizationId: string
     authorizationDigest: string
@@ -70,6 +72,7 @@ export function useDevSection({
       url,
       ...(agent ? { agent } : {}),
       context,
+      ...(freshSession ? { freshSession: true } : {}),
       ...(action === 'develop' ? { expectedSnapshot } : {}),
     })
     if (!res.ok) {
@@ -83,6 +86,7 @@ export function useDevSection({
       url,
       authorizationDigest: res.authorizationDigest,
       preview: res.preview,
+      freshSession,
     })
     if (!window.confirm(summary)) return null
     return {
@@ -124,14 +128,14 @@ export function useDevSection({
       setBusy(null)
     }
   }
-  const resume = async (context?: string) => {
+  const resume = async (context?: string, freshSession = false) => {
     setBusy('resuming')
     setError(null)
     setLogEvents([])
     setHistoryKind(null)
     try {
       const agent = workflow?.devAgent ?? 'codex'
-      const authorization = await authorize('resume', agent, context ?? '')
+      const authorization = await authorize('resume', agent, context ?? '', freshSession)
       if (!authorization) {
         setBusy(null)
         return
@@ -140,6 +144,7 @@ export function useDevSection({
         url,
         agent,
         ...(context ? { context } : {}),
+        ...(freshSession ? { freshSession: true } : {}),
         ...authorization,
       })
       if (!res.ok) {
@@ -156,13 +161,13 @@ export function useDevSection({
       setBusy(null)
     }
   }
-  const startReview = async (agent: 'codex' | 'claude', context = '') => {
+  const startReview = async (agent: 'codex' | 'claude', context = '', freshSession = false) => {
     setBusy('reviewing')
     setError(null)
     setLogEvents([])
     setHistoryKind(null)
     try {
-      const authorization = await authorize('review', agent, context)
+      const authorization = await authorize('review', agent, context, freshSession)
       if (!authorization) {
         setBusy(null)
         return
@@ -171,6 +176,7 @@ export function useDevSection({
         url,
         agent,
         ...(context ? { context } : {}),
+        ...(freshSession ? { freshSession: true } : {}),
         ...authorization,
       })
       if (!res.ok) {
@@ -354,17 +360,8 @@ export function useDevSection({
       setBusy(null)
     }
   }
-  // 唯一动作:服务端由 git 事实推导;issue 已关闭时本地覆盖为无动作
   const issueClosed = String(issue.state ?? '').toUpperCase() === 'CLOSED'
-  // #5 回归修复:从未开发过(无 workflow 记录)的 OPEN issue,服务端 /api/state
-  // 只枚举已持久化 workflow,不会为其推导 nextAction(恒为 undefined),导致按钮
-  // 缺失。这里按 deriveNextAction 的 idle 分支本地兜底为『开始开发』;
-  // 有 workflow 记录时仍以服务端推导为准。
-  const idleDevelop: NextAction = { kind: 'develop', label: '开始开发', hint: '创建 worktree 并启动 agent 开发' }
-  const effectiveAction: NextAction =
-    issueClosed && nextAction?.kind !== 'cleanup'
-      ? { kind: 'none', label: '无', hint: 'issue 已关闭,无待办动作' }
-      : (nextAction ?? (workflow === null ? idleDevelop : { kind: 'none', label: '无', hint: '等待状态…' }))
+  const effectiveAction = effectiveActionForIssue(issueClosed, nextAction, workflow !== null)
   const runAction = () => {
     const userContext = contextToSubmit(contextText)
     switch (effectiveAction.kind) {
@@ -490,10 +487,12 @@ export function useDevSection({
     showAgentToggle,
     stage,
     startDev,
+    startReview,
     stop,
     streamNotice,
     streamState,
     toggleContext,
+    resume,
     workflowEvents,
   }
 }

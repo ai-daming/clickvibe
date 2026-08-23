@@ -24,6 +24,14 @@ export interface LocalReviewEvent {
   note?: string
 }
 
+/** A fresh review keeps requirement discussion but drops prior ClickVibe verdict lists. */
+export function snapshotWithoutReviewFeedback(snapshot: PromptSnapshot): PromptSnapshot {
+  return {
+    ...snapshot,
+    comments: snapshot.comments.filter((comment) => !comment.body.includes('== Review Meta ==')),
+  }
+}
+
 const STAGE_LABEL: Record<PromptStage, string> = {
   develop: '开发',
   review: 'Review',
