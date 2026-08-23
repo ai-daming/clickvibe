@@ -21,6 +21,7 @@
 import { existsSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import { type AgentKind } from '../agent/agent-stream.ts'
+import { updateBaseTip } from '../agent/baseline.ts'
 import {
   buildReviewPrompt,
   fetchPrHeadBranch,
@@ -33,7 +34,7 @@ import { githubRest } from '../github/rest.ts'
 import { approvePassedReview } from '../github/review-approval.ts'
 import { buildFreshAgentCommand, buildResumeAgentCommand, parseAgent, shellQuote } from '../infra/develop-core.ts'
 import { decodeLiveLogLine } from '../infra/live-output.ts'
-import { readDeliveryStats } from '../infra/git.ts'
+import { readDeliveryStats, readIntegratedRemoteTip } from '../infra/git.ts'
 import { clearReviewResultFile, loadReviewResult, REVIEW_RESULT_RELATIVE_PATH } from '../infra/review-result.ts'
 import { type LiveTask, parseUrl, readWorktreeHead, reviewTaskGate, runCommand, taskId } from '../infra/runtime.ts'
 import {
@@ -347,6 +348,11 @@ export async function recordDevDelivery(
   taskIdValue?: string,
   durationMs?: number,
 ): Promise<void> {
+  if (head && workflow.baseRef) {
+    const remoteBase = `origin/${workflowBaseBranch(workflow.baseRef)}`
+    const integratedTip = await readIntegratedRemoteTip(ctx, workflow.worktree, remoteBase, head)
+    if (integratedTip) workflow.baseRef = updateBaseTip(workflow.baseRef, remoteBase, integratedTip)
+  }
   if (!workflow.prNumber) {
     const pr = await detectLinkedPr(ctx, workflow.repoKey, workflow.branch)
     if (pr) workflow.prNumber = pr

@@ -226,6 +226,31 @@ export async function fetchOriginBranches(
   }
 }
 
+/** Return the current remote-tracking tip only when a completed HEAD actually contains it. */
+export async function readIntegratedRemoteTip(
+  ctx: Context,
+  worktree: string,
+  remoteBase: string,
+  head: string,
+): Promise<string | null> {
+  const policy = { mode: 'read-only' as const, workspaceRoot: worktree }
+  try {
+    const tip = await runCommand(ctx, `git rev-parse --verify ${shellQuote(`refs/remotes/${remoteBase}^{commit}`)}`, {
+      workdir: worktree,
+      timeoutMs: 10_000,
+      sandboxPolicy: policy,
+    })
+    await runCommand(ctx, `git merge-base --is-ancestor ${shellQuote(tip)} ${shellQuote(head)}`, {
+      workdir: worktree,
+      timeoutMs: 10_000,
+      sandboxPolicy: policy,
+    })
+    return tip
+  } catch {
+    return null
+  }
+}
+
 /** Preface instruction for resume/rework agents when the worktree is not on the
  *  latest base: merge origin/<base> (and resolve any conflict) before continuing
  *  (issue #26). Empty when the worktree is already up to date. */

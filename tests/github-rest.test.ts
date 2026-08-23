@@ -107,6 +107,95 @@ test('critical PR fact reads force a fresh base identity', async () => {
   assert.equal(fake.commands.length, 2)
 })
 
+test('a forced resource read never joins or gets overwritten by an older ordinary read', async () => {
+  const reader = new GithubRestReader({} as never)
+  let releaseOrdinary: (() => void) | undefined
+  let ordinaryStarted: (() => void) | undefined
+  const started = new Promise<void>((resolve) => {
+    ordinaryStarted = resolve
+  })
+  const held = new Promise<void>((resolve) => {
+    releaseOrdinary = resolve
+  })
+  let loads = 0
+
+  const ordinary = reader.cachedResource(
+    'o/r/pulls/2',
+    null,
+    async () => {
+      loads += 1
+      ordinaryStarted?.()
+      await held
+      return { updated_at: 'v1', base: 'release/a' }
+    },
+    { versionOf: (value) => value.updated_at },
+  )
+  await started
+  const forcedRead = reader.cachedResource(
+    'o/r/pulls/2',
+    null,
+    async () => {
+      loads += 1
+      return { updated_at: 'v2', base: 'release/b' }
+    },
+    { force: true, versionOf: (value) => value.updated_at },
+  )
+  await new Promise((resolve) => setImmediate(resolve))
+  releaseOrdinary?.()
+  await ordinary
+  const forced = await forcedRead
+  const cached = await reader.cachedResource(
+    'o/r/pulls/2',
+    'v2',
+    async () => {
+      throw new Error('newer forced value must remain cached')
+    },
+    { versionOf: (value) => value.updated_at },
+  )
+
+  assert.equal(loads, 2)
+  assert.equal(forced.base, 'release/b')
+  assert.equal(cached.base, 'release/b')
+})
+
+test('an ordinary resource read started during a force refresh shares the authoritative refresh', async () => {
+  const reader = new GithubRestReader({} as never)
+  let releaseForce: (() => void) | undefined
+  let forceStarted: (() => void) | undefined
+  const started = new Promise<void>((resolve) => {
+    forceStarted = resolve
+  })
+  const held = new Promise<void>((resolve) => {
+    releaseForce = resolve
+  })
+  let ordinaryLoads = 0
+  const forced = reader.cachedResource(
+    'o/r/pulls/3',
+    null,
+    async () => {
+      forceStarted?.()
+      await held
+      return { updated_at: 'v2', base: 'release/b' }
+    },
+    { force: true, versionOf: (value) => value.updated_at },
+  )
+  await started
+  const ordinary = reader.cachedResource(
+    'o/r/pulls/3',
+    null,
+    async () => {
+      ordinaryLoads += 1
+      return { updated_at: 'v1', base: 'release/a' }
+    },
+    { versionOf: (value) => value.updated_at },
+  )
+  releaseForce?.()
+
+  assert.equal((await forced).base, 'release/b')
+  assert.equal((await ordinary).base, 'release/b')
+  assert.equal(ordinaryLoads, 0)
+})
+
 test('REST reader opens a circuit after rate limiting and reports the reset time without another request', async () => {
   const resetAt = 1_800_000_000
   const fake = shellWith([

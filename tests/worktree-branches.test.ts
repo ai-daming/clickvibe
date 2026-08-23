@@ -14,6 +14,7 @@ interface Scenario {
   symbolicRef?: string | null
   mainExists?: boolean
   baseHash?: string
+  baseCommit?: string
   branchContainsBase?: boolean
   failRemove?: boolean
   frozenBase?: string
@@ -84,6 +85,12 @@ async function runScenario(number: string, scenario: Scenario = {}) {
         if (spec.command.includes('refs/remotes/') && spec.command.endsWith('; echo $?')) {
           return { exitCode: 0, stdout: { text: scenario.remoteExists === false ? '1' : '0' }, stderr: { text: '' } }
         }
+        if (spec.command.startsWith('git rev-parse --verify') && spec.command.includes('^{commit}'))
+          return {
+            exitCode: 0,
+            stdout: { text: scenario.baseCommit ?? scenario.baseHash ?? 'abc1234' },
+            stderr: { text: '' },
+          }
         if (spec.command.startsWith('git rev-parse --short'))
           return { exitCode: 0, stdout: { text: scenario.baseHash ?? 'abc1234' }, stderr: { text: '' } }
         if (spec.command.startsWith('git merge-base --is-ancestor')) {
@@ -162,6 +169,19 @@ test('first baseline selection rejects an existing issue branch that does not co
   assert.equal(mismatch.result.ok, false)
   if (!mismatch.result.ok) assert.match(mismatch.result.error, /既有开发分支.*所选基线/)
   assert.equal(mismatch.stored, null)
+})
+
+test('first baseline selection rejects the current issue development branch', async () => {
+  const self = await runScenario('60', { symbolicRef: 'origin/repo-issue-60' })
+  assert.equal(self.result.ok, false)
+  if (!self.result.ok) assert.match(self.result.error, /不能选择当前 Issue 开发分支/)
+  assert.equal(self.stored, null)
+})
+
+test('new worktree creation is rooted at the sampled immutable baseline commit', async () => {
+  const created = await runScenario('61', { symbolicRef: 'origin/release/2.0', baseHash: 'abc1234' })
+  assert.equal(created.result.ok, true)
+  assert.ok(created.commands.includes("git worktree add -b 'repo-issue-61' '" + created.target + "' 'abc1234'"))
 })
 
 test('repair rollback deletes the branch it created when baseline persistence fails', async () => {

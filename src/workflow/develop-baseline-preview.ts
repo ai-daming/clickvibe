@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { basename, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { fetchGithubIssueState } from '../github/facts.ts'
 import { fetchOriginBranches } from '../infra/git.ts'
@@ -68,7 +68,14 @@ export async function developBaselinePreview(
       baselineWarning: `远端分支刷新失败:${String(error instanceof Error ? error.message : error)}`,
     }
   }
-  const options = baselinePreviewOptions(branches.defaultRemoteBase, branches.refs)
+  const ownRemoteBase = `origin/${basename(repoPath)}-issue-${parsed.number}`
+  if (selected === 'origin/HEAD' && branches.defaultRemoteBase === ownRemoteBase) {
+    throw new Error(`origin/HEAD 默认分支指向当前 Issue 开发分支 ${ownRemoteBase},无法作为开发基线`)
+  }
+  if (selected === ownRemoteBase) throw new Error(`开发基线不能选择当前 Issue 开发分支 ${ownRemoteBase}`)
+  const options = baselinePreviewOptions(branches.defaultRemoteBase, branches.refs).filter(
+    (ref) => ref !== ownRemoteBase,
+  )
   if (!options.includes(selected)) throw new Error(`开发基线不存在或未 fetch: ${selected}`)
   return dependencyPreview(ctx, url, parsed.number, {
     baseline: selected,

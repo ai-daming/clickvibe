@@ -85,6 +85,62 @@ test('baseline preview exposes fetch failure for the default but rejects an unve
   }
 })
 
+test('baseline preview excludes and rejects the current issue development branch', async () => {
+  const previousHome = process.env.HOME
+  const home = await mkdtemp(join(tmpdir(), 'clickvibe-baseline-self-'))
+  process.env.HOME = home
+  try {
+    const repo = join(home, 'repo')
+    await mkdir(join(home, '.clickvibe'), { recursive: true })
+    await mkdir(repo, { recursive: true })
+    await writeFile(join(home, '.clickvibe', 'config.yaml'), ['repos:', `  o/r: ${repo}`, ''].join('\n'))
+    const ctx = {
+      shell: {
+        resolve(spec: unknown) {
+          return spec
+        },
+        async run(spec: { command: string }) {
+          const stdout = spec.command.startsWith('git symbolic-ref')
+            ? 'origin/main'
+            : spec.command.startsWith('git for-each-ref')
+              ? 'origin/main\norigin/release/2.0\norigin/repo-issue-60'
+              : ''
+          return { exitCode: 0, stdout: { text: stdout }, stderr: { text: '' } }
+        },
+      },
+    }
+    const preview = await developBaselinePreview(ctx as never, 'https://github.com/o/r/issues/60', undefined)
+    assert.deepEqual(preview.baselineOptions, ['origin/HEAD', 'origin/main', 'origin/release/2.0'])
+    await assert.rejects(
+      developBaselinePreview(ctx as never, 'https://github.com/o/r/issues/60', 'origin/repo-issue-60'),
+      /不能选择当前 Issue 开发分支/,
+    )
+    const selfDefaultCtx = {
+      shell: {
+        resolve(spec: unknown) {
+          return spec
+        },
+        async run(spec: { command: string }) {
+          const stdout = spec.command.startsWith('git symbolic-ref')
+            ? 'origin/repo-issue-60'
+            : spec.command.startsWith('git for-each-ref')
+              ? 'origin/repo-issue-60'
+              : ''
+          return { exitCode: 0, stdout: { text: stdout }, stderr: { text: '' } }
+        },
+      },
+    }
+    await assert.rejects(
+      developBaselinePreview(selfDefaultCtx as never, 'https://github.com/o/r/issues/60', undefined),
+      /默认分支指向当前 Issue 开发分支/,
+    )
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
 test('frozen issue-branch preview skips self-dependencies and ignores a closed parent issue', async () => {
   const previousHome = process.env.HOME
   const home = await mkdtemp(join(tmpdir(), 'clickvibe-baseline-dependency-'))

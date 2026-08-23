@@ -114,6 +114,7 @@ export class GithubRestReader {
   private readonly aggregates = new Map<string, CachedValue<unknown>>()
   private readonly inFlight = new Map<string, Promise<unknown>>()
   private readonly versions = new Map<string, string>()
+  private readonly resourceLoadSequence = new Map<string, number>()
   private circuitUntil = 0
 
   constructor(ctx: ShellContext) {
@@ -140,6 +141,11 @@ export class GithubRestReader {
       if (key === prefix || key.startsWith(`${prefix}/`)) this.aggregates.delete(key)
     }
     this.versions.delete(prefix)
+    for (const key of this.resourceLoadSequence.keys()) {
+      if (key === prefix || key.startsWith(`${prefix}/`)) {
+        this.resourceLoadSequence.set(key, (this.resourceLoadSequence.get(key) ?? 0) + 1)
+      }
+    }
   }
 
   private assertCircuitOpen(): void {
@@ -244,6 +250,8 @@ export class GithubRestReader {
     options: { ttlMs?: number; force?: boolean; versionOf?: (value: T) => string | null | undefined } = {},
   ): Promise<T> {
     this.assertCircuitOpen()
+    const forcedPending = this.inFlight.get(`resource:force:${key}`) as Promise<T> | undefined
+    if (!options.force && forcedPending) return forcedPending
     const knownVersion = version || null
     const cached = this.resources.get(key) as CachedValue<T> | undefined
     const now = Date.now()
@@ -254,15 +262,22 @@ export class GithubRestReader {
       (knownVersion === null || cached.version === knownVersion)
     )
       return cached.value
-    return this.deduplicate(`resource:${key}`, async () => {
+    const flightKind = options.force ? 'force' : 'ordinary'
+    return this.deduplicate(`resource:${flightKind}:${key}`, async () => {
+      const sequence = (this.resourceLoadSequence.get(key) ?? 0) + 1
+      this.resourceLoadSequence.set(key, sequence)
       const value = await loader()
       const loadedVersion = options.versionOf?.(value) || knownVersion
-      this.resources.set(key, {
-        value,
-        version: loadedVersion,
-        expiresAt: Date.now() + (options.ttlMs ?? 30_000),
-      })
-      if (loadedVersion) this.versions.set(key, loadedVersion)
+      // A later-started force read is authoritative. An older ordinary request
+      // may still resolve for its caller, but must never overwrite that result.
+      if (this.resourceLoadSequence.get(key) === sequence) {
+        this.resources.set(key, {
+          value,
+          version: loadedVersion,
+          expiresAt: Date.now() + (options.ttlMs ?? 30_000),
+        })
+        if (loadedVersion) this.versions.set(key, loadedVersion)
+      }
       return value
     })
   }

@@ -125,6 +125,9 @@ export async function ensureWorktree(
     return { ok: false, error: String(error instanceof Error ? error.message : error) }
   }
   const firstBaseSelection = !workflow.baseRef
+  if (firstBaseSelection && remoteBase === `origin/${branch}`) {
+    return { ok: false, error: `开发基线不能选择当前 Issue 开发分支 ${remoteBase}` }
+  }
   const remoteBaseExists =
     (
       await runCommand(ctx, `git show-ref --verify --quiet ${shellQuote(`refs/remotes/${remoteBase}`)}; echo $?`, {
@@ -198,7 +201,7 @@ export async function ensureWorktree(
     const candidateWorkdir = branchExists ? expandedRepo : normalizedTarget
     const compatible = await runCommand(
       ctx,
-      `git merge-base --is-ancestor ${shellQuote(remoteBase)} ${shellQuote(candidate)}`,
+      `git merge-base --is-ancestor ${shellQuote(remoteBaseHash ?? remoteBase)} ${shellQuote(candidate)}`,
       { workdir: candidateWorkdir, timeoutMs: 10_000, sandboxPolicy: policy },
     )
       .then(() => true)
@@ -243,7 +246,12 @@ export async function ensureWorktree(
     })
     const { mkdir } = await import('node:fs/promises')
     await mkdir(dirname(normalizedTarget), { recursive: true })
-    const command = buildWorktreeAddCommand({ path: normalizedTarget, branch, branchExists, remoteBase })
+    const command = buildWorktreeAddCommand({
+      path: normalizedTarget,
+      branch,
+      branchExists,
+      remoteBase: remoteBaseHash ?? remoteBase,
+    })
     await runCommand(ctx, command, { workdir: expandedRepo, timeoutMs: 60000, sandboxPolicy: policy })
     await appendLog(workflow.key, 'dev', `[clickvibe] stale worktree 已重建`)
   } else {
@@ -257,7 +265,7 @@ export async function ensureWorktree(
       path: normalizedTarget,
       branch,
       branchExists: recovery.kind !== 'add-new-branch',
-      remoteBase,
+      remoteBase: remoteBaseHash ?? remoteBase,
     })
     await runCommand(ctx, command, { workdir: expandedRepo, timeoutMs: 60000, sandboxPolicy: policy })
     await appendLog(

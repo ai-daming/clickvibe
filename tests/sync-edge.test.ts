@@ -153,6 +153,74 @@ test('a failed merge does not advance the durable baseline tip', async () => {
   }
 })
 
+test('sync merges the sampled immutable baseline commit instead of the mutable remote ref', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'clickvibe-sync-sampled-tip-'))
+  const previousHome = process.env.HOME
+  process.env.HOME = root
+  try {
+    const worktree = join(root, 'worktree')
+    await mkdir(worktree, { recursive: true })
+    const workflow = {
+      key: 'o-r-13',
+      url: 'https://github.com/o/r/issues/13',
+      repoKey: 'o/r',
+      worktree,
+      branch: 'r-issue-13',
+      stage: 'review-ready',
+      devAgent: 'codex',
+      devTaskId: null,
+      devSessionId: null,
+      devSessionAgent: null,
+      devInterrupted: false,
+      reviewAgent: null,
+      reviewTaskId: null,
+      reviewSessionId: null,
+      reviewSessionAgent: null,
+      reviewResult: null,
+      prNumber: null,
+      issueState: 'OPEN',
+      baseRef: 'origin/main @ aaa0000',
+      updatedAt: 0,
+      events: [],
+    } satisfies IssueWorkflow
+    await saveWorkflow(workflow)
+    const commands: string[] = []
+    const ctx = {
+      shell: {
+        resolve(spec: unknown) {
+          return spec
+        },
+        async run(spec: { command: string }) {
+          commands.push(spec.command)
+          if (spec.command.includes('MERGE_HEAD')) {
+            return { exitCode: 1, stdout: { text: '' }, stderr: { text: '' } }
+          }
+          if (spec.command.includes('origin/main^{commit}')) {
+            return { exitCode: 0, stdout: { text: 'bbb1111' }, stderr: { text: '' } }
+          }
+          if (spec.command === 'git rev-parse --verify HEAD') {
+            return { exitCode: 0, stdout: { text: 'before222' }, stderr: { text: '' } }
+          }
+          if (spec.command === 'git rev-parse --short HEAD') {
+            return { exitCode: 0, stdout: { text: 'head333' }, stderr: { text: '' } }
+          }
+          return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+        },
+      },
+    }
+
+    const result = await syncWorktree(ctx as never, { url: workflow.url })
+    assert.equal(result.ok, true)
+    assert.ok(commands.includes("git merge --no-edit 'bbb1111'"))
+    assert.equal(commands.includes("git merge --no-edit 'origin/main'"), false)
+    assert.equal((await loadWorkflow(workflow.key))?.baseRef, 'origin/main @ bbb1111')
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('sync rejects a concurrent live agent before touching git', async () => {
   const root = await mkdtemp(join(tmpdir(), 'clickvibe-sync-live-agent-'))
   const previousHome = process.env.HOME

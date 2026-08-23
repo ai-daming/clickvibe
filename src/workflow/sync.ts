@@ -92,7 +92,7 @@ async function syncWorktreeLocked(ctx: Context, key: string): Promise<SyncResult
     })
     await appendLog(workflow.key, 'dev', `[clickvibe] 同步:合并 ${remoteBase}…`)
     try {
-      await runCommand(ctx, `git merge --no-edit ${shellQuote(remoteBase)}`, {
+      await runCommand(ctx, `git merge --no-edit ${shellQuote(baseTip)}`, {
         workdir: workflow.worktree,
         timeoutMs: 60_000,
         sandboxPolicy: policy,
