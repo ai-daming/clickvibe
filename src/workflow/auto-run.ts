@@ -36,6 +36,7 @@ async function persistDecision(key: string, decision: Exclude<AutoRunDecision, {
   if (!workflow?.autoRun || workflow.autoRun.status !== 'running') return
   workflow.autoRun.rounds = decision.rounds
   workflow.autoRun.unresolved = decision.unresolved
+  if (decision.kind === 'trigger') workflow.autoRun.step = decision.step
   workflow.autoRun.lastObservedAt = new Date().toISOString()
   await saveWorkflow(workflow)
 }
@@ -50,6 +51,7 @@ async function pauseAutoRun(key: string, reason: AutoRunPausedReason): Promise<v
     kind: 'auto-run',
     at: new Date().toISOString(),
     round: workflow.autoRun.rounds,
+    step: workflow.autoRun.step,
     note: `自动跑到底已暂停:${reason}`,
   })
   clearDeadline(key)
@@ -65,6 +67,7 @@ async function completeAutoRun(key: string): Promise<void> {
     kind: 'auto-run',
     at: new Date().toISOString(),
     round: workflow.autoRun.rounds,
+    step: workflow.autoRun.step,
     note: '自动跑到底已收敛,等待人工合并',
   })
   clearDeadline(key)
@@ -250,6 +253,7 @@ export async function startAutoRun(
     ...config,
     startedAt,
     deadline: new Date(Date.parse(startedAt) + config.budgetHours * 3_600_000).toISOString(),
+    step: 0,
     rounds: 0,
     unresolved: [],
     lastObservedAt: null,

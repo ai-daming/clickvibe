@@ -63,7 +63,17 @@ export function buildDevComment(input: DevCommentInput): string {
 
 export function buildReviewComment(input: ReviewCommentInput): string {
   const result = input.passed
-    ? ['## ✅ ClickVibe Review 通过', '', '未发现阻塞问题。', '', '下一步:可合并当前提交。']
+    ? input.issues.length > 0
+      ? [
+          '## ✅ ClickVibe Review 通过',
+          '',
+          '未发现阻塞问题(随行备注 ' + input.issues.length + ' 条,不影响合并):',
+          '',
+          ...input.issues.map((issue) => `- ${issue}`),
+          '',
+          '下一步:可合并当前提交。',
+        ]
+      : ['## ✅ ClickVibe Review 通过', '', '未发现阻塞问题。', '', '下一步:可合并当前提交。']
     : [
         `## ❌ ClickVibe Review 发现问题(${input.issues.length} 条)`,
         '',
