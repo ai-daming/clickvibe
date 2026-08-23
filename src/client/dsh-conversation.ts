@@ -60,9 +60,7 @@ export function resolveDshConversationDeps(ctx: {
   }
 }
 
-export type DshOpenResult =
-  | { ok: true; warning?: string }
-  | { ok: false; error: string }
+export type DshOpenResult = { ok: true; warning?: string } | { ok: false; error: string }
 
 /**
  * 在 path 对应 workspace 的空白对话中预填 draftText(不发送)。

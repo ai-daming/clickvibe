@@ -7,7 +7,7 @@ import {
   workflowBaseBranch,
   workflowStatusLabel,
   type WorkflowFacts,
-} from '../src/state-view.ts'
+} from '../src/workflow/state-view.ts'
 
 function facts(overrides: Partial<WorkflowFacts> = {}): WorkflowFacts {
   return {
@@ -39,13 +39,15 @@ test('merged PR is terminal', () => {
 })
 
 test('merged delivery with unfinished cleanup offers only cleanup retry', () => {
-  const next = deriveNextAction(facts({
-    issueOpen: false,
-    prMerged: true,
-    cleanupPending: true,
-    stage: 'passed',
-    prNumber: '9',
-  }))
+  const next = deriveNextAction(
+    facts({
+      issueOpen: false,
+      prMerged: true,
+      cleanupPending: true,
+      stage: 'passed',
+      prNumber: '9',
+    }),
+  )
   assert.deepEqual(next, {
     kind: 'cleanup',
     label: '重试清理',
@@ -68,9 +70,15 @@ test('compare URL uses the frozen non-main workflow base', () => {
 })
 
 test('a linked PR with an unavailable live state fails closed', () => {
-  const next = deriveNextAction(facts({
-    prNumber: '9', prStatusKnown: false, stage: 'passed', reviewPassed: true, reviewedHash: 'a1b2c3d',
-  }))
+  const next = deriveNextAction(
+    facts({
+      prNumber: '9',
+      prStatusKnown: false,
+      stage: 'passed',
+      reviewPassed: true,
+      reviewedHash: 'a1b2c3d',
+    }),
+  )
   assert.equal(next.kind, 'none')
   assert.equal(next.label, '刷新 PR 状态')
 })
@@ -84,52 +92,105 @@ test('a running task has no next action until it settles', () => {
 
 test('a running development task stays developing even when a PR and old verdict exist', () => {
   const runningRework = facts({
-    stage: 'developing', taskRunning: true, prNumber: '9', reviewPassed: false,
-    reviewedHash: 'a1b2c3d', head: 'e5f6g7', hasCommits: true,
+    stage: 'developing',
+    taskRunning: true,
+    prNumber: '9',
+    reviewPassed: false,
+    reviewedHash: 'a1b2c3d',
+    head: 'e5f6g7',
+    hasCommits: true,
   })
   assert.equal(deriveWorkflowStatus(runningRework), 'developing')
 
   const runningDevWithPr = facts({
-    stage: 'developing', taskRunning: true, prNumber: '9', reviewPassed: null, hasCommits: true,
+    stage: 'developing',
+    taskRunning: true,
+    prNumber: '9',
+    reviewPassed: null,
+    hasCommits: true,
   })
   assert.equal(deriveWorkflowStatus(runningDevWithPr), 'developing')
 })
 
 test('a running review task stays reviewing even when a PR exists', () => {
-  assert.equal(deriveWorkflowStatus(facts({
-    stage: 'reviewing', taskRunning: true, prNumber: '9', hasCommits: true,
-  })), 'reviewing')
+  assert.equal(
+    deriveWorkflowStatus(
+      facts({
+        stage: 'reviewing',
+        taskRunning: true,
+        prNumber: '9',
+        hasCommits: true,
+      }),
+    ),
+    'reviewing',
+  )
 })
 
 test('a current passed verdict passes while a known changed head requires review', () => {
-  assert.equal(deriveWorkflowStatus(facts({
-    stage: 'review-ready', prNumber: '9', reviewPassed: true,
-    reviewedHash: 'a1b2c3d', head: 'a1b2c3d',
-  })), 'passed')
-  assert.equal(deriveWorkflowStatus(facts({
-    stage: 'review-ready', prNumber: '9', reviewPassed: true,
-    reviewedHash: 'a1b2c3d', head: 'e5f6g7', issueContractStatus: 'changed',
-  })), 'review-ready')
-  assert.equal(deriveWorkflowStatus(facts({
-    stage: 'review-ready', prNumber: null, reviewPassed: false,
-    reviewedHash: 'a1b2c3d', head: 'e5f6g7', hasCommits: true,
-  })), 'review-ready')
+  assert.equal(
+    deriveWorkflowStatus(
+      facts({
+        stage: 'review-ready',
+        prNumber: '9',
+        reviewPassed: true,
+        reviewedHash: 'a1b2c3d',
+        head: 'a1b2c3d',
+      }),
+    ),
+    'passed',
+  )
+  assert.equal(
+    deriveWorkflowStatus(
+      facts({
+        stage: 'review-ready',
+        prNumber: '9',
+        reviewPassed: true,
+        reviewedHash: 'a1b2c3d',
+        head: 'e5f6g7',
+        issueContractStatus: 'changed',
+      }),
+    ),
+    'review-ready',
+  )
+  assert.equal(
+    deriveWorkflowStatus(
+      facts({
+        stage: 'review-ready',
+        prNumber: null,
+        reviewPassed: false,
+        reviewedHash: 'a1b2c3d',
+        head: 'e5f6g7',
+        hasCommits: true,
+      }),
+    ),
+    'review-ready',
+  )
 })
 
 test('an unavailable worktree preserves a passed verdict without evidence of new commits', () => {
-  assert.equal(deriveWorkflowStatus(facts({
-    stage: 'review-ready', prNumber: '9', reviewPassed: true,
-    reviewedHash: 'a1b2c3d', head: null, hasNewCommits: false,
-  })), 'passed')
+  assert.equal(
+    deriveWorkflowStatus(
+      facts({
+        stage: 'review-ready',
+        prNumber: '9',
+        reviewPassed: true,
+        reviewedHash: 'a1b2c3d',
+        head: null,
+        hasNewCommits: false,
+      }),
+    ),
+    'passed',
+  )
 })
 
 test('a stale review verdict is labelled as awaiting re-review', () => {
   assert.equal(workflowStatusLabel('review-ready', false, false), '待重新 Review')
   assert.equal(workflowStatusLabel('review-ready', true, false), '待重新 Review')
   assert.equal(workflowStatusLabel('review-ready', false, true), 'Review 未通过')
-  assert.equal(workflowStatusLabel(
-    'review-ready', true, false, 'unknown', 'current-contract-unavailable',
-  ), '验收状态未知')
+  assert.equal(
+    workflowStatusLabel('review-ready', true, false, 'unknown', 'current-contract-unavailable'),
+    '验收状态未知',
+  )
 })
 
 test('interrupted development resumes the agent session', () => {
@@ -138,7 +199,6 @@ test('interrupted development resumes the agent session', () => {
 })
 
 test('development without a live task after host restart resumes the session', () => {
-  // 持久化的 stage 仍是 developing,但 liveTasks 已随 Host 重启清空
   const next = deriveNextAction(facts({ stage: 'developing', devInterrupted: false }))
   assert.equal(next.kind, 'resume')
   assert.match(next.hint, /失联/)
@@ -167,18 +227,28 @@ test('an empty branch without a worktree still starts development', () => {
 })
 
 test('uncommitted work without a resumable session starts a fresh development session', () => {
-  const next = deriveNextAction(facts({
-    stage: 'idle', branchExists: true, worktreeExists: true,
-    hasUncommittedChanges: true, hasResumeSession: false,
-  }))
+  const next = deriveNextAction(
+    facts({
+      stage: 'idle',
+      branchExists: true,
+      worktreeExists: true,
+      hasUncommittedChanges: true,
+      hasResumeSession: false,
+    }),
+  )
   assert.equal(next.kind, 'develop')
   assert.equal(next.label, '重新开发')
 })
 
 test('commits without a PR offer PR creation', () => {
-  const next = deriveNextAction(facts({
-    stage: 'idle', branchExists: true, worktreeExists: true, hasCommits: true,
-  }))
+  const next = deriveNextAction(
+    facts({
+      stage: 'idle',
+      branchExists: true,
+      worktreeExists: true,
+      hasCommits: true,
+    }),
+  )
   assert.equal(next.kind, 'create-pr')
 })
 
@@ -188,98 +258,178 @@ test('review-ready without a verdict reviews', () => {
 })
 
 test('review-ready with a failed verdict reworks with the issues', () => {
-  const next = deriveNextAction(facts({
-    stage: 'review-ready', reviewPassed: false, reviewedHash: 'a1b2c3d', head: 'a1b2c3d',
-  }))
+  const next = deriveNextAction(
+    facts({
+      stage: 'review-ready',
+      reviewPassed: false,
+      reviewedHash: 'a1b2c3d',
+      head: 'a1b2c3d',
+    }),
+  )
   assert.equal(next.kind, 'rework')
 })
 
 test('a failed verdict still reworks when the head has moved (agent re-reads the code)', () => {
-  const next = deriveNextAction(facts({
-    stage: 'review-ready', reviewPassed: false, reviewedHash: 'a1b2c3d', head: 'e5f6g7',
-  }))
+  const next = deriveNextAction(
+    facts({
+      stage: 'review-ready',
+      reviewPassed: false,
+      reviewedHash: 'a1b2c3d',
+      head: 'e5f6g7',
+    }),
+  )
   assert.equal(next.kind, 'rework')
 })
 
 test('a passed verdict on the current head merges the PR', () => {
-  const next = deriveNextAction(facts({
-    stage: 'review-ready', reviewPassed: true, reviewedHash: 'a1b2c3d', head: 'a1b2c3d', prNumber: '9',
-  }))
+  const next = deriveNextAction(
+    facts({
+      stage: 'review-ready',
+      reviewPassed: true,
+      reviewedHash: 'a1b2c3d',
+      head: 'a1b2c3d',
+      prNumber: '9',
+    }),
+  )
   assert.equal(next.kind, 'merge')
 })
 
 test('a passed verdict without a linked PR has no merge action', () => {
-  const next = deriveNextAction(facts({
-    stage: 'review-ready', reviewPassed: true, reviewedHash: 'a1b2c3d', head: 'a1b2c3d', prNumber: null,
-  }))
+  const next = deriveNextAction(
+    facts({
+      stage: 'review-ready',
+      reviewPassed: true,
+      reviewedHash: 'a1b2c3d',
+      head: 'a1b2c3d',
+      prNumber: null,
+    }),
+  )
   assert.equal(next.kind, 'none')
   assert.match(next.hint, /未关联 PR/)
 })
 
 test('a passed verdict bound to an old head must be re-reviewed', () => {
-  const next = deriveNextAction(facts({
-    stage: 'review-ready', reviewPassed: true, reviewedHash: 'a1b2c3d', head: 'e5f6g7', prNumber: '9',
-  }))
+  const next = deriveNextAction(
+    facts({
+      stage: 'review-ready',
+      reviewPassed: true,
+      reviewedHash: 'a1b2c3d',
+      head: 'e5f6g7',
+      prNumber: '9',
+    }),
+  )
   assert.equal(next.kind, 'review')
 })
 
 test('a passed verdict bound to an old issue contract must be re-reviewed', () => {
-  const next = deriveNextAction(facts({
-    stage: 'review-ready', reviewPassed: true, reviewedHash: 'a1b2c3d', head: 'a1b2c3d',
-    issueContractStatus: 'changed', prNumber: '9',
-  }))
+  const next = deriveNextAction(
+    facts({
+      stage: 'review-ready',
+      reviewPassed: true,
+      reviewedHash: 'a1b2c3d',
+      head: 'a1b2c3d',
+      issueContractStatus: 'changed',
+      prNumber: '9',
+    }),
+  )
   assert.equal(next.kind, 'review')
   assert.equal(next.label, '重新 Review')
   assert.match(next.hint, /验收已变更/)
 })
 
 test('a temporarily unavailable current contract blocks merge without claiming it changed', () => {
-  const next = deriveNextAction(facts({
-    stage: 'passed', reviewPassed: true, reviewedHash: 'a1b2c3d', head: 'a1b2c3d',
-    issueContractStatus: 'unknown', issueContractUnknownReason: 'current-contract-unavailable', prNumber: '9',
-  }))
+  const next = deriveNextAction(
+    facts({
+      stage: 'passed',
+      reviewPassed: true,
+      reviewedHash: 'a1b2c3d',
+      head: 'a1b2c3d',
+      issueContractStatus: 'unknown',
+      issueContractUnknownReason: 'current-contract-unavailable',
+      prNumber: '9',
+    }),
+  )
   assert.equal(next.kind, 'none')
   assert.equal(next.label, '刷新验收状态')
   assert.match(next.hint, /暂时无法读取/)
   assert.doesNotMatch(next.hint, /已变更/)
-  assert.equal(deriveWorkflowStatus(facts({
-    stage: 'passed', reviewPassed: true, reviewedHash: 'a1b2c3d', head: 'a1b2c3d',
-    issueContractStatus: 'unknown', issueContractUnknownReason: 'current-contract-unavailable', prNumber: '9',
-  })), 'review-ready')
+  assert.equal(
+    deriveWorkflowStatus(
+      facts({
+        stage: 'passed',
+        reviewPassed: true,
+        reviewedHash: 'a1b2c3d',
+        head: 'a1b2c3d',
+        issueContractStatus: 'unknown',
+        issueContractUnknownReason: 'current-contract-unavailable',
+        prNumber: '9',
+      }),
+    ),
+    'review-ready',
+  )
 })
 
 test('a GitHub-only approval without a review snapshot explicitly requires ClickVibe review', () => {
-  const next = deriveNextAction(facts({
-    stage: 'review-ready', reviewPassed: true, reviewedHash: 'a1b2c3d', head: 'a1b2c3d',
-    issueContractStatus: 'unknown', issueContractUnknownReason: 'missing-review-snapshot', prNumber: '9',
-  }))
+  const next = deriveNextAction(
+    facts({
+      stage: 'review-ready',
+      reviewPassed: true,
+      reviewedHash: 'a1b2c3d',
+      head: 'a1b2c3d',
+      issueContractStatus: 'unknown',
+      issueContractUnknownReason: 'missing-review-snapshot',
+      prNumber: '9',
+    }),
+  )
   assert.equal(next.kind, 'review')
   assert.match(next.hint, /缺少验收契约快照/)
 })
 
 test('passed stage with a PR merges', () => {
-  const next = deriveNextAction(facts({
-    stage: 'passed', reviewPassed: true, prNumber: '9', head: 'a1b2c3d', reviewedHash: 'a1b2c3d',
-  }))
+  const next = deriveNextAction(
+    facts({
+      stage: 'passed',
+      reviewPassed: true,
+      prNumber: '9',
+      head: 'a1b2c3d',
+      reviewedHash: 'a1b2c3d',
+    }),
+  )
   assert.equal(next.kind, 'merge')
 })
 
 test('a stale worktree syncs before review or merge', () => {
-  const reviewCase = deriveNextAction(facts({
-    stage: 'review-ready', reviewPassed: null, needsSync: true,
-  }))
+  const reviewCase = deriveNextAction(
+    facts({
+      stage: 'review-ready',
+      reviewPassed: null,
+      needsSync: true,
+    }),
+  )
   assert.equal(reviewCase.kind, 'sync')
-  const passedCase = deriveNextAction(facts({
-    stage: 'review-ready', reviewPassed: true, reviewedHash: 'a1b2c3d', head: 'a1b2c3d', needsSync: true, prNumber: '9',
-  }))
+  const passedCase = deriveNextAction(
+    facts({
+      stage: 'review-ready',
+      reviewPassed: true,
+      reviewedHash: 'a1b2c3d',
+      head: 'a1b2c3d',
+      needsSync: true,
+      prNumber: '9',
+    }),
+  )
   assert.equal(passedCase.kind, 'sync')
 })
 
 test('a failed review verdict reworks even when the worktree is stale (issue #26)', () => {
-  // 门禁降级:同步冲突不再挡住返工——agent 先合并 origin/main 解决冲突,再修意见
-  const reworkCase = deriveNextAction(facts({
-    stage: 'review-ready', reviewPassed: false, reviewedHash: 'a1b2c3d', head: 'a1b2c3d', needsSync: true,
-  }))
+  const reworkCase = deriveNextAction(
+    facts({
+      stage: 'review-ready',
+      reviewPassed: false,
+      reviewedHash: 'a1b2c3d',
+      head: 'a1b2c3d',
+      needsSync: true,
+    }),
+  )
   assert.equal(reworkCase.kind, 'rework')
   assert.match(reworkCase.hint, /合并 origin\/main/)
 })
@@ -287,19 +437,32 @@ test('a failed review verdict reworks even when the worktree is stale (issue #26
 test('a conflicted merge resumes instead of syncing across review stages (issue #26, PR #33)', () => {
   // MERGE_HEAD 存在时 sync 只会再次失败:待 review / 复审中断(reviewing)阶段
   // 也必须放行恢复,由 agent 先解决冲突,否则唯一按钮永远停在 sync(死锁)。
-  const awaitingReview = deriveNextAction(facts({
-    stage: 'review-ready', reviewPassed: null, needsSync: true, mergeConflict: true,
-  }))
+  const awaitingReview = deriveNextAction(
+    facts({
+      stage: 'review-ready',
+      reviewPassed: null,
+      needsSync: true,
+      mergeConflict: true,
+    }),
+  )
   assert.equal(awaitingReview.kind, 'resume')
   assert.match(awaitingReview.hint, /未完成的合并冲突/)
-  const reReviewing = deriveNextAction(facts({
-    stage: 'reviewing', needsSync: true, mergeConflict: true,
-  }))
+  const reReviewing = deriveNextAction(
+    facts({
+      stage: 'reviewing',
+      needsSync: true,
+      mergeConflict: true,
+    }),
+  )
   assert.equal(reReviewing.kind, 'resume')
-  // 无冲突时这些阶段仍先同步(快进/干净合并可以成功)
-  const cleanSync = deriveNextAction(facts({
-    stage: 'review-ready', reviewPassed: null, needsSync: true, mergeConflict: false,
-  }))
+  const cleanSync = deriveNextAction(
+    facts({
+      stage: 'review-ready',
+      reviewPassed: null,
+      needsSync: true,
+      mergeConflict: false,
+    }),
+  )
   assert.equal(cleanSync.kind, 'sync')
 })
 
@@ -307,16 +470,25 @@ test('an interrupted rework resumes even when the worktree is stale (issue #26)'
   // 返工启动后 stage 已变为 developing;返工 agent 失败/停止/超时/Host 重启时
   // stage 保持 developing,门禁必须同样放行恢复,否则唯一动作退回 sync 再次
   // 冲突,死锁在第一次返工中断后复现。
-  const failedCase = deriveNextAction(facts({
-    stage: 'developing', reviewPassed: false, reviewedHash: 'a1b2c3d', head: 'a1b2c3d',
-    needsSync: true, devInterrupted: true,
-  }))
+  const failedCase = deriveNextAction(
+    facts({
+      stage: 'developing',
+      reviewPassed: false,
+      reviewedHash: 'a1b2c3d',
+      head: 'a1b2c3d',
+      needsSync: true,
+      devInterrupted: true,
+    }),
+  )
   assert.equal(failedCase.kind, 'resume')
   assert.match(failedCase.hint, /合并 origin\/main/)
-  // Host 重启(devInterrupted 未标记)同样恢复
-  const lostCase = deriveNextAction(facts({
-    stage: 'developing', needsSync: true, devInterrupted: false,
-  }))
+  const lostCase = deriveNextAction(
+    facts({
+      stage: 'developing',
+      needsSync: true,
+      devInterrupted: false,
+    }),
+  )
   assert.equal(lostCase.kind, 'resume')
 })
 

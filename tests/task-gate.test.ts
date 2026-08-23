@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { ExclusiveTaskGate } from '../src/task-gate.ts'
+import { ExclusiveTaskGate } from '../src/infra/task-gate.ts'
 
 interface TestTask {
   id: string

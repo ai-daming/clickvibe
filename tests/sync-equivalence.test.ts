@@ -13,11 +13,14 @@ const execFileAsync = promisify(execFile)
 function realShellCtx() {
   return {
     shell: {
-      resolve(spec: unknown) { return spec },
+      resolve(spec: unknown) {
+        return spec
+      },
       async run(spec: { command: string; workdir?: string }) {
         try {
           const out = await execFileAsync('/bin/sh', ['-c', spec.command], {
-            cwd: spec.workdir, encoding: 'utf8',
+            cwd: spec.workdir,
+            encoding: 'utf8',
           })
           return { exitCode: 0, stdout: { text: out.stdout }, stderr: { text: out.stderr } }
         } catch (error) {
@@ -69,8 +72,7 @@ async function setupSyncScene(options: { branchEditsConflictFile?: boolean } = {
   await git('add', '.')
   await git('commit', '-m', 'main advances')
   await git('push', 'origin', 'main')
-  const remoteBranchHead = async () =>
-    (await remoteGit('rev-parse', `refs/heads/${branch}`)).stdout.trim()
+  const remoteBranchHead = async () => (await remoteGit('rev-parse', `refs/heads/${branch}`)).stdout.trim()
   return { root, remote, repo, worktree, branch, git, wt, remoteGit, reviewedShort, reviewedFull, remoteBranchHead }
 }
 
@@ -95,9 +97,7 @@ test('pure sync merge of R with origin/main is sync-equivalent (issue #48)', asy
 
 test('identical hashes pass the gate without any git access (regression, issue #48)', async () => {
   // worktree 指向不存在的路径,证明哈希相等时完全短路、不触发 git
-  await assert.doesNotReject(
-    assertReviewHeadMatchesPr(ctx, '/nonexistent/worktree', 'abc1234', 'abc1234def5678'),
-  )
+  await assert.doesNotReject(assertReviewHeadMatchesPr(ctx, '/nonexistent/worktree', 'abc1234', 'abc1234def5678'))
 })
 
 test('manual conflict resolution in the sync merge breaks equivalence (issue #48)', async () => {
@@ -112,10 +112,7 @@ test('manual conflict resolution in the sync merge breaks equivalence (issue #48
     const head = await scene.remoteBranchHead()
 
     assert.equal(await isSyncEquivalentMerge(ctx, scene.worktree, scene.reviewedShort, head), false)
-    await assert.rejects(
-      assertReviewHeadMatchesPr(ctx, scene.worktree, scene.reviewedShort, head),
-      /合并门禁拒绝/,
-    )
+    await assert.rejects(assertReviewHeadMatchesPr(ctx, scene.worktree, scene.reviewedShort, head), /合并门禁拒绝/)
   } finally {
     await rm(scene.root, { recursive: true, force: true })
   }
@@ -133,10 +130,7 @@ test('branch-side commit after the sync merge is rejected (issue #48)', async ()
     const head = await scene.remoteBranchHead()
 
     assert.equal(await isSyncEquivalentMerge(ctx, scene.worktree, scene.reviewedShort, head), false)
-    await assert.rejects(
-      assertReviewHeadMatchesPr(ctx, scene.worktree, scene.reviewedShort, head),
-      /合并门禁拒绝/,
-    )
+    await assert.rejects(assertReviewHeadMatchesPr(ctx, scene.worktree, scene.reviewedShort, head), /合并门禁拒绝/)
   } finally {
     await rm(scene.root, { recursive: true, force: true })
   }

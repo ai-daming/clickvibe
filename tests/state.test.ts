@@ -12,7 +12,7 @@ import {
   resetLog,
   resolveSessionForAgent,
   type IssueWorkflow,
-} from '../src/state.ts'
+} from '../src/infra/state.ts'
 
 test('persistent log snapshots preserve append order without truncating history', async () => {
   const previousHome = process.env.HOME
@@ -51,12 +51,27 @@ test('a new task log generation bounds multi-run growth without truncating the c
 
 function workflow(): IssueWorkflow {
   return {
-    key: 'o-r-17', url: 'https://github.com/o/r/issues/17', repoKey: 'o/r',
-    worktree: '/worktrees/r-issue-17', branch: 'r-issue-17', stage: 'developing',
-    devAgent: 'codex', devTaskId: 'dev-1', devSessionId: null, devSessionAgent: null, devInterrupted: false,
-    reviewAgent: null, reviewTaskId: null, reviewSessionId: null, reviewSessionAgent: null,
-    reviewResult: null, prNumber: null, issueState: 'OPEN', baseRef: 'origin/main @ abc',
-    updatedAt: 1, events: [],
+    key: 'o-r-17',
+    url: 'https://github.com/o/r/issues/17',
+    repoKey: 'o/r',
+    worktree: '/worktrees/r-issue-17',
+    branch: 'r-issue-17',
+    stage: 'developing',
+    devAgent: 'codex',
+    devTaskId: 'dev-1',
+    devSessionId: null,
+    devSessionAgent: null,
+    devInterrupted: false,
+    reviewAgent: null,
+    reviewTaskId: null,
+    reviewSessionId: null,
+    reviewSessionAgent: null,
+    reviewResult: null,
+    prNumber: null,
+    issueState: 'OPEN',
+    baseRef: 'origin/main @ abc',
+    updatedAt: 1,
+    events: [],
   }
 }
 
@@ -72,7 +87,10 @@ test('timed-out development keeps the captured session id for exact recovery', (
 })
 
 test('stopped and failed development also keep the captured session id', () => {
-  for (const [status, exitCode] of [['stopped', null], ['failed', 2]] as const) {
+  for (const [status, exitCode] of [
+    ['stopped', null],
+    ['failed', 2],
+  ] as const) {
     const state = workflow()
     applyDevRunOutcome(state, status, exitCode, 'thread-123', 'codex')
     assert.equal(state.devSessionId, 'thread-123')
@@ -116,10 +134,12 @@ test('session ids are bound to their agent family and legacy ownership fails clo
   const state = workflow()
   recordSessionId(state, 'dev', 'claude-session', 'claude')
   assert.deepEqual(resolveSessionForAgent(state, 'dev', 'claude'), {
-    sessionId: 'claude-session', invalid: false,
+    sessionId: 'claude-session',
+    invalid: false,
   })
   assert.deepEqual(resolveSessionForAgent(state, 'dev', 'codex'), {
-    sessionId: null, invalid: true,
+    sessionId: null,
+    invalid: true,
   })
   assert.equal(state.devSessionId, null)
   assert.equal(state.devSessionAgent, null)
@@ -127,6 +147,7 @@ test('session ids are bound to their agent family and legacy ownership fails clo
   state.reviewSessionId = 'legacy-session'
   state.reviewSessionAgent = null
   assert.deepEqual(resolveSessionForAgent(state, 'review', 'codex'), {
-    sessionId: null, invalid: true,
+    sessionId: null,
+    invalid: true,
   })
 })

@@ -6,8 +6,14 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
-import { buildMergePreface, deriveWorkflowState, resumeDevelop, syncWorktree, type IssueWorkflow } from '../src/index.ts'
-import { applyDevRunOutcome, loadWorkflow, readLogTail, saveWorkflow } from '../src/state.ts'
+import {
+  buildMergePreface,
+  deriveWorkflowState,
+  resumeDevelop,
+  syncWorktree,
+  type IssueWorkflow,
+} from '../src/index.ts'
+import { applyDevRunOutcome, loadWorkflow, readLogTail, saveWorkflow } from '../src/infra/state.ts'
 
 const execFileAsync = promisify(execFile)
 
@@ -15,11 +21,14 @@ const execFileAsync = promisify(execFile)
 function realShellCtx() {
   return {
     shell: {
-      resolve(spec: unknown) { return spec },
+      resolve(spec: unknown) {
+        return spec
+      },
       async run(spec: { command: string; workdir?: string }) {
         try {
           const out = await execFileAsync('/bin/sh', ['-c', spec.command], {
-            cwd: spec.workdir, encoding: 'utf8',
+            cwd: spec.workdir,
+            encoding: 'utf8',
           })
           return { exitCode: 0, stdout: { text: out.stdout }, stderr: { text: out.stderr } }
         } catch (error) {
@@ -103,17 +112,33 @@ async function setupSyncableRepo() {
 
 function conflictedWorkflow(worktree: string): IssueWorkflow {
   return {
-    key: 'o-r-26', url: 'https://github.com/o/r/issues/26', repoKey: 'o/r',
-    worktree, branch: 'clickvibe-issue-26', stage: 'review-ready',
-    devAgent: 'codex', devTaskId: null, devSessionId: null, devInterrupted: false,
-    reviewAgent: 'codex', reviewTaskId: null, reviewSessionId: null,
+    key: 'o-r-26',
+    url: 'https://github.com/o/r/issues/26',
+    repoKey: 'o/r',
+    worktree,
+    branch: 'clickvibe-issue-26',
+    stage: 'review-ready',
+    devAgent: 'codex',
+    devTaskId: null,
+    devSessionId: null,
+    devInterrupted: false,
+    reviewAgent: 'codex',
+    reviewTaskId: null,
+    reviewSessionId: null,
     reviewResult: { passed: false, issues: ['README 内容冲突'] },
-    prNumber: null, issueState: 'OPEN', baseRef: null,
+    prNumber: null,
+    issueState: 'OPEN',
+    baseRef: null,
     issueSnapshot: {
-      url: 'https://github.com/o/r/issues/26', title: 'conflict issue',
-      body: '## 验收标准\n- resolve conflicts', state: 'OPEN', updatedAt: '2026-08-21T00:00:00Z', comments: [],
+      url: 'https://github.com/o/r/issues/26',
+      title: 'conflict issue',
+      body: '## 验收标准\n- resolve conflicts',
+      state: 'OPEN',
+      updatedAt: '2026-08-21T00:00:00Z',
+      comments: [],
     },
-    updatedAt: Date.now(), events: [],
+    updatedAt: Date.now(),
+    events: [],
   }
 }
 
@@ -126,8 +151,12 @@ function syncableWorkflow(worktree: string, branch: string): IssueWorkflow {
     reviewResult: { passed: true, issues: [] },
     prNumber: '24',
     issueSnapshot: {
-      url: 'https://github.com/o/r/issues/45', title: 'sync then push',
-      body: '## 验收标准\n- push synced branch', state: 'OPEN', updatedAt: '2026-08-22T00:00:00Z', comments: [],
+      url: 'https://github.com/o/r/issues/45',
+      title: 'sync then push',
+      body: '## 验收标准\n- push synced branch',
+      state: 'OPEN',
+      updatedAt: '2026-08-22T00:00:00Z',
+      comments: [],
     },
   }
 }
@@ -280,11 +309,14 @@ test('an interrupted rework on a conflicted worktree resumes instead of re-synci
 function capturingShellCtx(launches: { command: string; prompt: string }[]) {
   return {
     shell: {
-      resolve(spec: unknown) { return spec },
+      resolve(spec: unknown) {
+        return spec
+      },
       async run(spec: { command: string; workdir?: string }) {
         try {
           const out = await execFileAsync('/bin/sh', ['-c', spec.command], {
-            cwd: spec.workdir, encoding: 'utf8',
+            cwd: spec.workdir,
+            encoding: 'utf8',
           })
           return { exitCode: 0, stdout: { text: out.stdout }, stderr: { text: out.stderr } }
         } catch (error) {
@@ -298,8 +330,12 @@ function capturingShellCtx(launches: { command: string; prompt: string }[]) {
           status: 'running',
           exitCode: 1,
           done: Promise.resolve(),
-          readOutput() { return { delta: '', lossy: false } },
-          kill() { return false },
+          readOutput() {
+            return { delta: '', lossy: false }
+          },
+          kill() {
+            return false
+          },
         }
       },
     },

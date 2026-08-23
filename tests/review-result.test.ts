@@ -3,12 +3,8 @@ import { lstat, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { parseAgentChunk, type AgentKind } from '../src/agent-stream.ts'
-import {
-  clearReviewResultFile,
-  loadReviewResult,
-  REVIEW_RESULT_RELATIVE_PATH,
-} from '../src/review-result.ts'
+import { parseAgentChunk, type AgentKind } from '../src/agent/agent-stream.ts'
+import { clearReviewResultFile, loadReviewResult, REVIEW_RESULT_RELATIVE_PATH } from '../src/infra/review-result.ts'
 
 function agentOutput(agent: AgentKind, text: string): string {
   return agent === 'codex'
@@ -30,14 +26,17 @@ for (const agent of ['codex', 'claude'] as const) {
     await withWorktree(async (worktree) => {
       const issues = Array.from({ length: 12 }, (_, index) => `问题 ${index + 1}: ${'长描述'.repeat(220)}`)
       await mkdir(join(worktree, '.clickvibe'))
-      await writeFile(
-        join(worktree, REVIEW_RESULT_RELATIVE_PATH),
-        JSON.stringify({ passed: false, issues }),
+      await writeFile(join(worktree, REVIEW_RESULT_RELATIVE_PATH), JSON.stringify({ passed: false, issues }))
+      const parsed = parseAgentChunk(
+        agent,
+        agentOutput(agent, `${'分析'.repeat(2500)}${JSON.stringify({ passed: true, issues: [] })}`),
       )
-      const parsed = parseAgentChunk(agent, agentOutput(agent, `${'分析'.repeat(2500)}${JSON.stringify({ passed: true, issues: [] })}`))
       assert.match(parsed.lines[0].text, /…$/)
 
-      const resolved = await loadReviewResult(worktree, parsed.lines.map((line) => line.text))
+      const resolved = await loadReviewResult(
+        worktree,
+        parsed.lines.map((line) => line.text),
+      )
       assert.equal(resolved.source, 'file')
       assert.deepEqual(resolved.result, { passed: false, issues })
     })
@@ -47,7 +46,10 @@ for (const agent of ['codex', 'claude'] as const) {
     await withWorktree(async (worktree) => {
       const expected = { passed: false, issues: ['src/a.ts:10 存在竞态'] }
       const parsed = parseAgentChunk(agent, agentOutput(agent, JSON.stringify(expected)))
-      const resolved = await loadReviewResult(worktree, parsed.lines.map((line) => line.text))
+      const resolved = await loadReviewResult(
+        worktree,
+        parsed.lines.map((line) => line.text),
+      )
       assert.equal(resolved.source, 'stdout-json')
       assert.match(resolved.fileError ?? '', /不存在/)
       assert.deepEqual(resolved.result, expected)
@@ -57,7 +59,10 @@ for (const agent of ['codex', 'claude'] as const) {
   test(`${agent}: emoji verdict remains the final fallback`, async () => {
     await withWorktree(async (worktree) => {
       const parsed = parseAgentChunk(agent, agentOutput(agent, '✅ Review 通过'))
-      const resolved = await loadReviewResult(worktree, parsed.lines.map((line) => line.text))
+      const resolved = await loadReviewResult(
+        worktree,
+        parsed.lines.map((line) => line.text),
+      )
       assert.equal(resolved.source, 'stdout-verdict')
       assert.deepEqual(resolved.result, { passed: true, issues: [] })
     })

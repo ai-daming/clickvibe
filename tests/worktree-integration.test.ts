@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
-import { buildWorktreeAddCommand } from '../src/develop.ts'
+import { buildWorktreeAddCommand } from '../src/agent/develop.ts'
 
 const execAsync = promisify(exec)
 const execFileAsync = promisify(execFile)
@@ -32,7 +32,10 @@ test('real git worktree creation uses origin/main instead of the source reposito
     const side = (await git('rev-parse', 'HEAD')).stdout.trim()
 
     const command = buildWorktreeAddCommand({
-      path: worktree, branch: 'issue-1', branchExists: false, remoteBase: 'origin/main',
+      path: worktree,
+      branch: 'issue-1',
+      branchExists: false,
+      remoteBase: 'origin/main',
     })
     await execAsync(command, { cwd: repo })
     const issue = (await execFileAsync('git', ['-C', worktree, 'rev-parse', 'HEAD'])).stdout.trim()

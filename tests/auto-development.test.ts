@@ -7,19 +7,44 @@ import {
   deriveAutoDevelopment,
   isFirstDevelopment,
   rewriteCompletedDependencySection,
-} from '../src/auto-development.ts'
-import { checkIssueContract } from '../src/issue-contract.ts'
-import { parseDependencies } from '../src/develop.ts'
+} from '../src/workflow/auto-development.ts'
+import { checkIssueContract } from '../src/workflow/issue-contract.ts'
+import { parseDependencies } from '../src/agent/develop.ts'
 
 const contract = { ok: true, missing: [] }
 
 test('auto development is ready only for a valid first development with closed dependencies', () => {
-  assert.equal(deriveAutoDevelopment({ issueState: 'OPEN', dependencyStates: [], contract, firstDevelopment: true }).status, 'ready')
-  assert.equal(deriveAutoDevelopment({ issueState: 'OPEN', dependencyStates: ['CLOSED'], contract, firstDevelopment: true }).status, 'ready')
-  assert.equal(deriveAutoDevelopment({ issueState: 'OPEN', dependencyStates: ['OPEN'], contract, firstDevelopment: true }).status, 'blocked')
-  assert.equal(deriveAutoDevelopment({ issueState: 'OPEN', dependencyStates: ['UNKNOWN'], contract, firstDevelopment: true }).status, 'dependency-unknown')
-  assert.equal(deriveAutoDevelopment({ issueState: 'OPEN', dependencyStates: [], contract: { ok: false, missing: ['验收标准'] }, firstDevelopment: true }).status, 'invalid-contract')
-  assert.equal(deriveAutoDevelopment({ issueState: 'OPEN', dependencyStates: [], contract, firstDevelopment: false }).status, 'not-startable')
+  assert.equal(
+    deriveAutoDevelopment({ issueState: 'OPEN', dependencyStates: [], contract, firstDevelopment: true }).status,
+    'ready',
+  )
+  assert.equal(
+    deriveAutoDevelopment({ issueState: 'OPEN', dependencyStates: ['CLOSED'], contract, firstDevelopment: true })
+      .status,
+    'ready',
+  )
+  assert.equal(
+    deriveAutoDevelopment({ issueState: 'OPEN', dependencyStates: ['OPEN'], contract, firstDevelopment: true }).status,
+    'blocked',
+  )
+  assert.equal(
+    deriveAutoDevelopment({ issueState: 'OPEN', dependencyStates: ['UNKNOWN'], contract, firstDevelopment: true })
+      .status,
+    'dependency-unknown',
+  )
+  assert.equal(
+    deriveAutoDevelopment({
+      issueState: 'OPEN',
+      dependencyStates: [],
+      contract: { ok: false, missing: ['验收标准'] },
+      firstDevelopment: true,
+    }).status,
+    'invalid-contract',
+  )
+  assert.equal(
+    deriveAutoDevelopment({ issueState: 'OPEN', dependencyStates: [], contract, firstDevelopment: false }).status,
+    'not-startable',
+  )
 })
 
 test('first development excludes every positive development-history fact', () => {
@@ -43,7 +68,11 @@ test('dependency unlock ledger is stable, traceable and no longer parsed as an e
   assert.deepEqual(parseDependencies(updated), [])
   assert.equal(checkIssueContract(updated).ok, true)
   assert.equal(dependencyUnlockMarker([8, 3, 8]), '<!-- clickvibe:dependency-unlock:3,8 -->')
-  const comment = buildDependencyUnlockComment({ issueNumber: 9, dependencyNumbers: [8, 3], at: '2026-08-22T00:00:00Z' })
+  const comment = buildDependencyUnlockComment({
+    issueNumber: 9,
+    dependencyNumbers: [8, 3],
+    at: '2026-08-22T00:00:00Z',
+  })
   assert.match(comment, /^== Dependency Meta ==\n- event: dependency-unlock\n- issue: #9/m)
   assert.match(comment, /依赖 #3、#8 已完成，本 issue 解锁/)
 })

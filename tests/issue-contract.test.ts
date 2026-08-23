@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { checkIssueContract } from '../src/issue-contract.ts'
+import { checkIssueContract } from '../src/workflow/issue-contract.ts'
 
 const GOOD = `## 目标
 

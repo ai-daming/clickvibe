@@ -6,20 +6,27 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
 import { deriveWorkflowState, enrichWorkflowStates, type IssueWorkflow } from '../src/index.ts'
-import { issueBodyHash } from '../src/state.ts'
+import { issueBodyHash } from '../src/infra/state.ts'
 
 const execFileAsync = promisify(execFile)
 
 /** A minimal real-shell ctx: resolve passes the spec through, run executes it. */
 function realShellCtx() {
   return {
-    webServer: { register() { return () => {} } },
+    webServer: {
+      register() {
+        return () => {}
+      },
+    },
     shell: {
-      resolve(spec: unknown) { return spec },
+      resolve(spec: unknown) {
+        return spec
+      },
       async run(spec: { command: string; workdir?: string }) {
         try {
           const out = await execFileAsync('/bin/sh', ['-c', spec.command], {
-            cwd: spec.workdir, encoding: 'utf8',
+            cwd: spec.workdir,
+            encoding: 'utf8',
           })
           return { exitCode: 0, stdout: { text: out.stdout }, stderr: { text: out.stderr } }
         } catch (error) {
@@ -27,7 +34,9 @@ function realShellCtx() {
           return { exitCode: e.code ?? 1, stdout: { text: e.stdout ?? '' }, stderr: { text: e.stderr ?? '' } }
         }
       },
-      start() { throw new Error('not used') },
+      start() {
+        throw new Error('not used')
+      },
     },
   }
 }
@@ -58,11 +67,27 @@ async function setupRepo() {
 
 function workflow(overrides: Partial<IssueWorkflow> = {}): IssueWorkflow {
   return {
-    key: 'repo-5', url: 'https://github.com/o/r/issues/5', repoKey: 'o/r',
-    worktree: '', branch: 'clickvibe-issue-5', stage: 'review-ready',
-    devAgent: 'codex', devTaskId: null, devSessionId: null, devSessionAgent: null, devInterrupted: false,
-    reviewAgent: null, reviewTaskId: null, reviewSessionId: null, reviewSessionAgent: null, reviewResult: null,
-    prNumber: null, issueState: 'OPEN', baseRef: null, updatedAt: Date.now(), events: [],
+    key: 'repo-5',
+    url: 'https://github.com/o/r/issues/5',
+    repoKey: 'o/r',
+    worktree: '',
+    branch: 'clickvibe-issue-5',
+    stage: 'review-ready',
+    devAgent: 'codex',
+    devTaskId: null,
+    devSessionId: null,
+    devSessionAgent: null,
+    devInterrupted: false,
+    reviewAgent: null,
+    reviewTaskId: null,
+    reviewSessionId: null,
+    reviewSessionAgent: null,
+    reviewResult: null,
+    prNumber: null,
+    issueState: 'OPEN',
+    baseRef: null,
+    updatedAt: Date.now(),
+    events: [],
     ...overrides,
   }
 }
@@ -78,7 +103,7 @@ test('state view derives worktree/main/remote hashes, ahead-behind and sync need
     const derived = (await deriveWorkflowState(ctx, workflow({ worktree }))).derived
     assert.equal(derived.head, headC)
     assert.equal(derived.branch, 'clickvibe-issue-5')
-    assert.equal(derived.mainHead, baseA)      // 本地 main 未动
+    assert.equal(derived.mainHead, baseA) // 本地 main 未动
     assert.equal(derived.originMainHead, baseA)
     assert.equal(derived.behindBase, 0)
     assert.equal(derived.aheadOfBase, 1)
@@ -122,7 +147,15 @@ test('review verdict binds to the reviewed HEAD and goes stale when the head mov
       worktree,
       prNumber: '9',
       reviewResult: { passed: true, issues: [] },
-      events: [{ kind: 'review', at: new Date().toISOString(), hash: headC, verdict: { passed: true, issues: [] }, issueContract }],
+      events: [
+        {
+          kind: 'review',
+          at: new Date().toISOString(),
+          hash: headC,
+          verdict: { passed: true, issues: [] },
+          issueContract,
+        },
+      ],
       stage: 'review-ready',
     })
     const current = (await deriveWorkflowState(ctx, wf, { issueContract })).derived
@@ -152,7 +185,15 @@ test('review verdict goes stale when the issue acceptance contract changes', asy
       worktree,
       prNumber: '9',
       reviewResult: { passed: true, issues: [] },
-      events: [{ kind: 'review', at: new Date().toISOString(), hash: head, verdict: { passed: true, issues: [] }, issueContract: reviewedContract }],
+      events: [
+        {
+          kind: 'review',
+          at: new Date().toISOString(),
+          hash: head,
+          verdict: { passed: true, issues: [] },
+          issueContract: reviewedContract,
+        },
+      ],
       stage: 'passed',
     })
 
@@ -174,13 +215,19 @@ test('GitHub-only approval is fail-closed with an explicit missing-snapshot reas
   try {
     await wt('commit', '--allow-empty', '-m', 'dev work C')
     const currentContract = { bodyHash: issueBodyHash('## 验收标准\n- A'), updatedAt: '2026-08-22T01:00:00Z' }
-    const derived = (await deriveWorkflowState(ctx, workflow({ worktree, prNumber: '9' }), {
-      pr: {
-        number: '9', state: 'OPEN', mergedAt: null, headRefName: 'clickvibe-issue-5',
-        url: 'https://github.com/o/r/pull/9', reviewDecision: 'APPROVED',
-      },
-      issueContract: currentContract,
-    })).derived
+    const derived = (
+      await deriveWorkflowState(ctx, workflow({ worktree, prNumber: '9' }), {
+        pr: {
+          number: '9',
+          state: 'OPEN',
+          mergedAt: null,
+          headRefName: 'clickvibe-issue-5',
+          url: 'https://github.com/o/r/pull/9',
+          reviewDecision: 'APPROVED',
+        },
+        issueContract: currentContract,
+      })
+    ).derived
     assert.equal(derived.issueContractStatus, 'unknown')
     assert.equal(derived.issueContractUnknownReason, 'missing-review-snapshot')
     assert.equal(derived.verdictCurrent, false)
@@ -199,8 +246,19 @@ test('an unavailable live issue contract blocks merge as unknown instead of chan
     const head = (await wt('rev-parse', '--short', 'HEAD')).stdout.trim()
     const reviewedContract = { bodyHash: issueBodyHash('## 验收标准\n- A'), updatedAt: '2026-08-22T00:00:00Z' }
     const wf = workflow({
-      worktree, prNumber: '9', stage: 'passed', reviewResult: { passed: true, issues: [] },
-      events: [{ kind: 'review', at: new Date().toISOString(), hash: head, verdict: { passed: true, issues: [] }, issueContract: reviewedContract }],
+      worktree,
+      prNumber: '9',
+      stage: 'passed',
+      reviewResult: { passed: true, issues: [] },
+      events: [
+        {
+          kind: 'review',
+          at: new Date().toISOString(),
+          hash: head,
+          verdict: { passed: true, issues: [] },
+          issueContract: reviewedContract,
+        },
+      ],
     })
     const derived = (await deriveWorkflowState(ctx, wf, { issueContract: null })).derived
     assert.equal(derived.issueContractStatus, 'unknown')
@@ -224,17 +282,23 @@ test('metadata-only updatedAt drift does not invalidate an unchanged issue body'
       worktree,
       prNumber: '9',
       reviewResult: { passed: true, issues: [] },
-      events: [{
-        kind: 'review', at: new Date().toISOString(), hash: head,
-        verdict: { passed: true, issues: [] },
-        issueContract: { bodyHash, updatedAt: '2026-08-22T00:00:00Z' },
-      }],
+      events: [
+        {
+          kind: 'review',
+          at: new Date().toISOString(),
+          hash: head,
+          verdict: { passed: true, issues: [] },
+          issueContract: { bodyHash, updatedAt: '2026-08-22T00:00:00Z' },
+        },
+      ],
       stage: 'passed',
     })
 
-    const current = (await deriveWorkflowState(ctx, wf, {
-      issueContract: { bodyHash, updatedAt: '2026-08-22T01:00:00Z' },
-    })).derived
+    const current = (
+      await deriveWorkflowState(ctx, wf, {
+        issueContract: { bodyHash, updatedAt: '2026-08-22T01:00:00Z' },
+      })
+    ).derived
     assert.equal(current.issueContractCurrent, true)
     assert.equal(current.verdictCurrent, true)
     assert.equal(current.nextAction.kind, 'merge')
@@ -252,7 +316,9 @@ test('/state enrichment checks configured branches and runs GitHub lookups concu
   const githubTimeouts: number[] = []
   const fakeCtx = {
     shell: {
-      resolve(spec: unknown) { return spec },
+      resolve(spec: unknown) {
+        return spec
+      },
       async run(spec: { command: string; timeoutMs?: number }) {
         if (spec.command.startsWith('gh api ') && spec.command.includes('/pulls?state=all')) {
           githubTimeouts.push(spec.timeoutMs ?? 0)
@@ -266,7 +332,8 @@ test('/state enrichment checks configured branches and runs GitHub lookups concu
           const branch = spec.command.includes('issue-6') ? 'clickvibe-issue-6' : 'clickvibe-issue-5'
           return { exitCode: 0, stdout: { text: branch }, stderr: { text: '' } }
         }
-        if (spec.command.startsWith('git symbolic-ref')) return { exitCode: 0, stdout: { text: 'origin/main' }, stderr: { text: '' } }
+        if (spec.command.startsWith('git symbolic-ref'))
+          return { exitCode: 0, stdout: { text: 'origin/main' }, stderr: { text: '' } }
         if (spec.command.startsWith('git rev-list')) return { exitCode: 0, stdout: { text: '1' }, stderr: { text: '' } }
         throw new Error(`unexpected command: ${spec.command}`)
       },
@@ -275,23 +342,37 @@ test('/state enrichment checks configured branches and runs GitHub lookups concu
   try {
     const workflows = [
       workflow({
-        worktree: join(root, 'missing-5'), branch: 'clickvibe-issue-5', stage: 'passed',
+        worktree: join(root, 'missing-5'),
+        branch: 'clickvibe-issue-5',
+        stage: 'passed',
         reviewResult: { passed: true, issues: [] },
-        events: [{
-          kind: 'review', at: new Date().toISOString(), hash: 'abc123', verdict: { passed: true, issues: [] },
-          issueContract: { bodyHash: issueBodyHash('## 验收标准\n- A'), updatedAt: '2026-08-22T00:00:00Z' },
-        }],
+        events: [
+          {
+            kind: 'review',
+            at: new Date().toISOString(),
+            hash: 'abc123',
+            verdict: { passed: true, issues: [] },
+            issueContract: { bodyHash: issueBodyHash('## 验收标准\n- A'), updatedAt: '2026-08-22T00:00:00Z' },
+          },
+        ],
       }),
-      workflow({ key: 'repo-6', url: 'https://github.com/o/r/issues/6', worktree: join(root, 'missing-6'), branch: 'clickvibe-issue-6' }),
+      workflow({
+        key: 'repo-6',
+        url: 'https://github.com/o/r/issues/6',
+        worktree: join(root, 'missing-6'),
+        branch: 'clickvibe-issue-6',
+      }),
     ]
     const enriched = await enrichWorkflowStates(fakeCtx as never, workflows, {
-      repos: { 'o/r': repo }, worktreeRoot: root,
+      repos: { 'o/r': repo },
+      worktreeRoot: root,
     })
     assert.equal(maxGithub, 2)
     assert.deepEqual(githubTimeouts, [5000, 5000])
-    assert.deepEqual(enriched.map((item) => item.derived.nextAction.label), [
-      '恢复 worktree 继续开发', '恢复 worktree 继续开发',
-    ])
+    assert.deepEqual(
+      enriched.map((item) => item.derived.nextAction.label),
+      ['恢复 worktree 继续开发', '恢复 worktree 继续开发'],
+    )
     assert.equal(enriched[0].derived.issueContractStatus, 'unknown')
     assert.equal(enriched[0].derived.issueContractUnknownReason, 'current-contract-unavailable')
   } finally {

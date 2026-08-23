@@ -40,11 +40,19 @@ function makeHarness(): Harness {
       },
     },
     sessions: {
-      open(id: string) { harness.opened.push(id) },
-      scope(id: string) { return scopeCtxBySession.get(id) },
+      open(id: string) {
+        harness.opened.push(id)
+      },
+      scope(id: string) {
+        return scopeCtxBySession.get(id)
+      },
     },
-    get conversation() { return harness.conversation },
-    set conversation(value) { harness.conversation = value },
+    get conversation() {
+      return harness.conversation
+    },
+    set conversation(value) {
+      harness.conversation = value
+    },
   }
   return harness
 }
@@ -56,7 +64,9 @@ function recordingConversation(harness: Harness): NonNullable<DshConversationDep
       for(actx: unknown) {
         const sessionId = String((actx as { scope: string }).scope)
         return {
-          setDraft(text: string) { harness.drafts.push({ sessionId, text }) },
+          setDraft(text: string) {
+            harness.drafts.push({ sessionId, text })
+          },
         }
       },
     },
@@ -78,14 +88,28 @@ test('draft is written before navigation so the target machine exists', async ()
   const calls: string[] = []
   const deps: DshConversationDeps = {
     workspaces: {
-      async create() { return { workspaceId: 'ws' } },
-      async connectWorkspace() { return 'session-blank-1' },
+      async create() {
+        return { workspaceId: 'ws' }
+      },
+      async connectWorkspace() {
+        return 'session-blank-1'
+      },
     },
     sessions: {
-      open() { calls.push('open') },
+      open() {
+        calls.push('open')
+      },
       scope: () => ({}),
     },
-    conversation: { input: { for: () => ({ setDraft() { calls.push('setDraft') } }) } },
+    conversation: {
+      input: {
+        for: () => ({
+          setDraft() {
+            calls.push('setDraft')
+          },
+        }),
+      },
+    },
   }
   await openDshConversationDraft(deps, '/repo/local', 'https://github.com/o/r/issues/53')
   assert.deepEqual(calls, ['setDraft', 'open'])
@@ -124,7 +148,9 @@ test('reports a readable error when the session scope cannot be resolved', async
 test('surfaces workspace registration failures without navigating', async () => {
   const harness = makeHarness()
   harness.conversation = recordingConversation(harness)
-  harness.deps.workspaces.create = async () => { throw new Error('no such directory') }
+  harness.deps.workspaces.create = async () => {
+    throw new Error('no such directory')
+  }
   const result = await openDshConversationDraft(harness.deps, '/repo/local', 'url')
   assert.equal(result.ok, false)
   if (!result.ok) assert.match(result.error, /workspace 注册失败.*no such directory/)
@@ -151,7 +177,10 @@ test('resolveDshConversationDeps names the missing services', () => {
   assert.deepEqual(partial, { missing: ['workspaces'] })
 
   const full = resolveDshConversationDeps({
-    get: (name: string) => (name === 'conversation' ? { input: { for: () => ({ setDraft() {} }) } } : { open() {}, scope() {}, create: async () => ({ workspaceId: 'ws' }), connectWorkspace: async () => 's' }),
+    get: (name: string) =>
+      name === 'conversation'
+        ? { input: { for: () => ({ setDraft() {} }) } }
+        : { open() {}, scope() {}, create: async () => ({ workspaceId: 'ws' }), connectWorkspace: async () => 's' },
   })
   assert.ok(!('missing' in full))
   assert.equal(full.workspaces !== undefined && full.sessions !== undefined && full.conversation !== null, true)

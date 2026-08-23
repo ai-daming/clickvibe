@@ -1,0 +1,7 @@
+[
+  {
+    "path": "tests/routes.test.ts",
+    "reason": "Existing route-contract suite is intentionally unchanged during issue #61's production-code-only split.",
+    "issueRef": "#61"
+  }
+]

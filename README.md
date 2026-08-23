@@ -111,6 +111,13 @@ curl -s http://127.0.0.1:3080/clickvibe/api/command \
 
 ## 给维护者
 
+### 代码结构门禁
+
+- `src` 的 TypeScript/TSX 文件以 500 个物理行为常规上限；500–800 行必须在 `scripts/file-size-exceptions.json` 记录原因和跟踪 Issue，超过 800 行无条件拆分。
+- `src/infra → src/github → src/agent → src/workflow` 依赖只能从上层指向同层或下层；`src/index.ts` 是合成根，客户端 `src/client` 不得导入宿主模块。运行 `pnpm run check:layers` 验证。
+- 推导、映射和格式化保持纯函数；shell、文件、网络、时间和进程句柄集中在适配层。完整原则见 [架构说明](docs/architecture.md)。
+- 本地交付链：`pnpm run typecheck && pnpm run build && pnpm test && pnpm run coverage && pnpm run lint && pnpm run format:check && pnpm run check:size && pnpm run check:layers`。`pnpm run fmt` 只用于本地写入格式，CI 使用只读的 `format:check` 拒绝噪音 diff。
+
 - [架构与状态模型](docs/state-model.md):事实分级、按钮决策表、软事实降级链
 - [命令参考](docs/command-reference.md):全部可命令化操作、两阶段确认协议、安全边界
 - [Issue 契约](docs/issue-contract.md):可自动开发的 issue 怎么写(目标/验收/依赖)

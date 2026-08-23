@@ -1,10 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import {
-  buildStagePrompt,
-  selectReviewFeedback,
-  type PromptSnapshot,
-} from '../src/prompt.ts'
+import { buildStagePrompt, selectReviewFeedback, type PromptSnapshot } from '../src/agent/prompt.ts'
 
 const snapshot: PromptSnapshot = {
   url: 'https://github.com/o/r/issues/20',
@@ -41,8 +37,13 @@ test('all agent stages share the snapshot/status/requirements/trust envelope', (
 
 test('persisted fallback is explicit about possible staleness', () => {
   const prompt = buildStagePrompt({
-    stage: 'review', snapshot, freshness: 'persisted', fetchError: 'gh unavailable',
-    worktree: '/tmp/worktree', status: ['PR: #9', 'commit: abc123'], requirements: ['逐条审查'],
+    stage: 'review',
+    snapshot,
+    freshness: 'persisted',
+    fetchError: 'gh unavailable',
+    worktree: '/tmp/worktree',
+    status: ['PR: #9', 'commit: abc123'],
+    requirements: ['逐条审查'],
   })
   assert.match(prompt, /持久化回退.*可能过期/)
   assert.match(prompt, /刷新失败: gh unavailable/)
@@ -52,7 +53,10 @@ test('persisted fallback is explicit about possible staleness', () => {
 
 test('resume keeps session memory but explicitly makes the current snapshot authoritative', () => {
   const prompt = buildStagePrompt({
-    stage: 'resume', snapshot, freshness: 'current', worktree: '/tmp/worktree',
+    stage: 'resume',
+    snapshot,
+    freshness: 'current',
+    worktree: '/tmp/worktree',
     status: ['续接精确会话: thread-1'],
     requirements: ['优先利用当前会话记忆继续工作,但记忆与需求快照冲突时以快照为准。'],
   })
@@ -84,7 +88,14 @@ test('rework falls back to local review event text without parsing comment meta'
     unresolvedReview: true,
     snapshot,
     freshness: 'persisted',
-    localEvents: [{ kind: 'review', at: '2026-08-22T05:00:00Z', hash: 'abc123', verdict: { passed: false, issues: ['race', 'missing test'] } }],
+    localEvents: [
+      {
+        kind: 'review',
+        at: '2026-08-22T05:00:00Z',
+        hash: 'abc123',
+        verdict: { passed: false, issues: ['race', 'missing test'] },
+      },
+    ],
     localIssues: ['different cache'],
   })
   assert.equal(feedback.source, 'local-event')

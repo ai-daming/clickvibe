@@ -1,19 +1,16 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import {
-  GithubRateLimitError,
-  GithubRestReader,
-  deriveReviewDecision,
-  githubRest,
-} from '../src/github-rest.ts'
+import { GithubRateLimitError, GithubRestReader, deriveReviewDecision, githubRest } from '../src/github/rest.ts'
 
 function shellWith(responses: Array<{ exitCode: number; stdout: string; stderr?: string }>) {
   const commands: string[] = []
   return {
     commands,
     shell: {
-      resolve(spec: unknown) { return spec },
+      resolve(spec: unknown) {
+        return spec
+      },
       async run(spec: { command: string }) {
         commands.push(spec.command)
         const response = responses.shift()
@@ -42,9 +39,11 @@ test('REST reader only invokes gh api and reuses a resource while its known vers
   const reader = new GithubRestReader(fake as never)
 
   const first = await reader.cachedResource('o/r/issues/1', 'v1', async () =>
-    reader.json<{ title: string }>('repos/o/r/issues/1'))
+    reader.json<{ title: string }>('repos/o/r/issues/1'),
+  )
   const second = await reader.cachedResource('o/r/issues/1', 'v1', async () =>
-    reader.json<{ title: string }>('repos/o/r/issues/1'))
+    reader.json<{ title: string }>('repos/o/r/issues/1'),
+  )
 
   assert.equal(first.title, 'first')
   assert.equal(second, first)
@@ -54,38 +53,49 @@ test('REST reader only invokes gh api and reuses a resource while its known vers
 
 test('REST reader opens a circuit after rate limiting and reports the reset time without another request', async () => {
   const resetAt = 1_800_000_000
-  const fake = shellWith([{
-    exitCode: 1,
-    stdout: [
-      'HTTP/2.0 403 Forbidden',
-      'x-ratelimit-remaining: 0',
-      `x-ratelimit-reset: ${resetAt}`,
-      '',
-      JSON.stringify({ message: 'API rate limit exceeded' }),
-    ].join('\n'),
-  }])
+  const fake = shellWith([
+    {
+      exitCode: 1,
+      stdout: [
+        'HTTP/2.0 403 Forbidden',
+        'x-ratelimit-remaining: 0',
+        `x-ratelimit-reset: ${resetAt}`,
+        '',
+        JSON.stringify({ message: 'API rate limit exceeded' }),
+      ].join('\n'),
+    },
+  ])
   const reader = new GithubRestReader(fake as never)
 
   await assert.rejects(() => reader.json('repos/o/r/issues/1'), GithubRateLimitError)
-  await assert.rejects(() => reader.json('repos/o/r/issues/2'), (error: unknown) => {
-    assert.ok(error instanceof GithubRateLimitError)
-    assert.equal(error.resetAt, resetAt * 1000)
-    assert.match(error.message, /^GitHub 额度已用完,约 \d{2}:\d{2} 恢复$/)
-    return true
-  })
+  await assert.rejects(
+    () => reader.json('repos/o/r/issues/2'),
+    (error: unknown) => {
+      assert.ok(error instanceof GithubRateLimitError)
+      assert.equal(error.resetAt, resetAt * 1000)
+      assert.match(error.message, /^GitHub 额度已用完,约 \d{2}:\d{2} 恢复$/)
+      return true
+    },
+  )
   assert.equal(fake.commands.length, 1)
 })
 
 test('review decision uses each reviewer latest decisive review', () => {
-  assert.equal(deriveReviewDecision([
-    { id: 1, user: { login: 'alice' }, state: 'CHANGES_REQUESTED', submitted_at: '2026-08-22T01:00:00Z' },
-    { id: 2, user: { login: 'alice' }, state: 'APPROVED', submitted_at: '2026-08-22T02:00:00Z' },
-    { id: 3, user: { login: 'bob' }, state: 'COMMENTED', submitted_at: '2026-08-22T03:00:00Z' },
-  ]), 'APPROVED')
-  assert.equal(deriveReviewDecision([
-    { id: 4, user: { login: 'alice' }, state: 'APPROVED', submitted_at: '2026-08-22T01:00:00Z' },
-    { id: 5, user: { login: 'bob' }, state: 'CHANGES_REQUESTED', submitted_at: '2026-08-22T02:00:00Z' },
-  ]), 'CHANGES_REQUESTED')
+  assert.equal(
+    deriveReviewDecision([
+      { id: 1, user: { login: 'alice' }, state: 'CHANGES_REQUESTED', submitted_at: '2026-08-22T01:00:00Z' },
+      { id: 2, user: { login: 'alice' }, state: 'APPROVED', submitted_at: '2026-08-22T02:00:00Z' },
+      { id: 3, user: { login: 'bob' }, state: 'COMMENTED', submitted_at: '2026-08-22T03:00:00Z' },
+    ]),
+    'APPROVED',
+  )
+  assert.equal(
+    deriveReviewDecision([
+      { id: 4, user: { login: 'alice' }, state: 'APPROVED', submitted_at: '2026-08-22T01:00:00Z' },
+      { id: 5, user: { login: 'bob' }, state: 'CHANGES_REQUESTED', submitted_at: '2026-08-22T02:00:00Z' },
+    ]),
+    'CHANGES_REQUESTED',
+  )
   assert.equal(deriveReviewDecision([]), null)
 })
 
@@ -93,13 +103,18 @@ test('REST mutation sends JSON on stdin instead of interpolating issue content i
   let resolved: { command: string; stdin?: string } | null = null
   const ctx = {
     shell: {
-      resolve(spec: { command: string; stdin?: string }) { resolved = spec; return spec },
+      resolve(spec: { command: string; stdin?: string }) {
+        resolved = spec
+        return spec
+      },
       async run() {
         return { exitCode: 0, stdout: { text: included({ updated_at: 'now' }) }, stderr: { text: '' } }
       },
     },
   }
-  const result = await githubRest(ctx).mutate<{ updated_at: string }>('repos/o/r/issues/9', 'PATCH', { body: '$(do-not-expand)' })
+  const result = await githubRest(ctx).mutate<{ updated_at: string }>('repos/o/r/issues/9', 'PATCH', {
+    body: '$(do-not-expand)',
+  })
   assert.equal(result.updated_at, 'now')
   assert.match(resolved?.command ?? '', /--method PATCH --input -/)
   assert.doesNotMatch(resolved?.command ?? '', /do-not-expand/)
