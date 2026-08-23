@@ -19,6 +19,7 @@ function running(overrides: Partial<AutoRunState> = {}): AutoRunState {
     budgetHours: 24,
     startedAt: '2026-08-23T00:00:00.000Z',
     deadline: '2026-08-24T00:00:00.000Z',
+    step: 0,
     rounds: 0,
     unresolved: [],
     lastObservedAt: null,
@@ -65,7 +66,7 @@ test('controller triggers only actions derived by the authoritative state view',
         now: Date.parse('2026-08-23T01:00:00Z'),
         reviewEvents: [],
       }),
-      { kind: 'trigger', action: kind, rounds: 0, unresolved: [] },
+      { kind: 'trigger', action: kind, step: 1, rounds: 0, unresolved: [] },
     )
   }
   assert.deepEqual(
@@ -79,6 +80,48 @@ test('controller triggers only actions derived by the authoritative state view',
   )
 })
 
+test('auto-run step counts every triggered action since this start, not rounds', () => {
+  // 开发被重试 3 次(step 1..3),再推 review(step 4)同属第 1 轮:步是推进,轮是闭环。
+  assert.deepEqual(
+    decideAutoRun({
+      autoRun: running({ step: 3 }),
+      nextAction: { kind: 'review', label: 'Review', hint: '' },
+      now: Date.parse('2026-08-23T01:00:00Z'),
+      reviewEvents: [],
+    }),
+    { kind: 'trigger', action: 'review', step: 4, rounds: 0, unresolved: [] },
+  )
+  // 旧状态没有 step 字段时按 0 起算。
+  const legacy = running({ step: 0 })
+  delete (legacy as { step?: number }).step
+  assert.deepEqual(
+    decideAutoRun({
+      autoRun: legacy,
+      nextAction: { kind: 'develop', label: '开发', hint: '' },
+      now: Date.parse('2026-08-23T01:00:00Z'),
+      reviewEvents: [],
+    }),
+    { kind: 'trigger', action: 'develop', step: 1, rounds: 0, unresolved: [] },
+  )
+  // wait / pause 不是推进动作,step 不增加(decision 不带 step)。
+  const wait = decideAutoRun({
+    autoRun: running({ step: 2 }),
+    nextAction: { kind: 'none', label: '无', hint: '' },
+    now: Date.parse('2026-08-23T01:00:00Z'),
+    reviewEvents: [],
+  })
+  assert.equal(wait.kind, 'wait')
+  assert.equal('step' in wait, false)
+  const exhausted = decideAutoRun({
+    autoRun: running({ step: 2, maxRounds: 1 }),
+    nextAction: { kind: 'rework', label: '返工', hint: '' },
+    now: Date.parse('2026-08-23T01:00:00Z'),
+    reviewEvents: [{ kind: 'review', at: '2026-08-23T01:00:00Z', verdict: { passed: false, issues: ['竞态'] } }],
+  })
+  assert.equal(exhausted.kind, 'pause')
+  assert.equal('step' in exhausted, false)
+})
+
 test('default stops at merge while opt-in continues through gated merge and cleanup', () => {
   const merge = { kind: 'merge' as const, label: '合并 PR', hint: '' }
   const input = { nextAction: merge, now: Date.parse('2026-08-23T01:00:00Z'), reviewEvents: [] }
@@ -90,6 +133,7 @@ test('default stops at merge while opt-in continues through gated merge and clea
   assert.deepEqual(decideAutoRun({ ...input, autoRun: running({ autoMerge: true }) }), {
     kind: 'trigger',
     action: 'merge',
+    step: 1,
     rounds: 0,
     unresolved: [],
   })
