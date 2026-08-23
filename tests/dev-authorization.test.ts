@@ -68,3 +68,58 @@ test('develop authorization copy and selector labels expose the exact baseline',
   assert.equal(baselineDependencyHint(17), '建议补「依赖: Blocked by #17」')
   assert.equal(baselineDependencyHint(null), null)
 })
+
+test('authorization helpers preserve safe defaults for sparse GitHub and preview data', () => {
+  assert.deepEqual(expectedDevelopSnapshot('https://github.com/o/r/issues/1', {}), {
+    url: 'https://github.com/o/r/issues/1',
+    title: '',
+    body: '',
+    state: '',
+    updatedAt: '',
+    comments: [],
+  })
+  assert.deepEqual(
+    expectedDevelopSnapshot('https://github.com/o/r/issues/1', {
+      comments: [{ author: null, body: null }],
+    }),
+    {
+      url: 'https://github.com/o/r/issues/1',
+      title: '',
+      body: '',
+      state: '',
+      updatedAt: '',
+      comments: [{ author: 'unknown', body: '' }],
+    },
+  )
+  assert.match(
+    authorizationSummary({
+      action: 'develop',
+      agent: 'codex',
+      url: 'https://github.com/o/r/issues/1',
+      authorizationDigest: 'authorization',
+      preview: { digest: 'short' },
+    }),
+    /issues\/1.*更新时间: 未知.*评论: 0 条.*开发基线: origin\/HEAD/s,
+  )
+  assert.match(
+    authorizationSummary({
+      action: 'merge',
+      agent: null,
+      url: 'https://github.com/o/r/issues/1',
+      authorizationDigest: 'authorization',
+      preview: { digest: 'short' },
+    }),
+    /PR: #\?.*分支: \?.*--merge.*清理:/s,
+  )
+  assert.match(
+    authorizationSummary({
+      action: 'resume',
+      agent: 'codex',
+      url: 'https://github.com/o/r/issues/1',
+      authorizationDigest: 'authorization',
+      preview: { digest: 'short' },
+    }),
+    /codex.*resume.*issues\/1/s,
+  )
+  assert.equal(baselineDependencyHint(undefined), null)
+})

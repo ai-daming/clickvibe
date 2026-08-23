@@ -8,6 +8,7 @@ import {
   requestedRemoteBase,
   resolveSelectedRemoteBase,
 } from '../src/workflow/baseline.ts'
+import { githubCompareUrl, workflowBaseBranch } from '../src/workflow/state-view.ts'
 
 test('baseline request accepts only origin refs and keeps origin/HEAD as the default sentinel', () => {
   assert.equal(requestedRemoteBase(undefined), 'origin/HEAD')
@@ -63,10 +64,28 @@ test('baseline preview keeps the default sentinel first and removes duplicate re
     baselinePreviewOptions('origin/main', ['origin/release/2.0', 'origin/main', 'origin/HEAD', 'origin/main']),
     ['origin/HEAD', 'origin/main', 'origin/release/2.0'],
   )
+  assert.deepEqual(baselinePreviewOptions('invalid', ['origin/main', 'local', 'origin/../bad']), [
+    'origin/HEAD',
+    'origin/main',
+  ])
 })
 
 test('issue development branch baseline suggests the parent issue dependency', () => {
   assert.equal(baselineDependencyIssue('origin/clickvibe-issue-17'), 17)
   assert.equal(baselineDependencyIssue('origin/release/clickvibe-issue-18'), 18)
   assert.equal(baselineDependencyIssue('origin/release-2.0'), null)
+  assert.equal(baselineDependencyIssue('origin/clickvibe-issue-0'), null)
+  assert.equal(baselineDependencyIssue('origin/clickvibe-issue-999999999999999999999999'), null)
+})
+
+test('compare URL uses the live baseline branch or its frozen hash after deletion', () => {
+  assert.equal(workflowBaseBranch('origin/trunk @ abc123', 'main'), 'trunk')
+  assert.equal(
+    githubCompareUrl('o/r', 'feature/7', 'origin/trunk @ abc123', 'main'),
+    'https://github.com/o/r/compare/trunk...feature%2F7?expand=1',
+  )
+  assert.equal(
+    githubCompareUrl('o/r', 'feature/7', 'origin/trunk @ abc123', 'main', false),
+    'https://github.com/o/r/compare/abc123...feature%2F7?expand=1',
+  )
 })

@@ -22,9 +22,10 @@ import { fetchIssue, issueSnapshot } from '../github/issue.ts'
 import { fetchPrRestDetail, type GithubCommentRest } from '../github/reads.ts'
 import { githubRest, isGithubRateLimitError } from '../github/rest.ts'
 import { REVIEW_RESULT_RELATIVE_PATH } from '../infra/review-result.ts'
-import { readWorktreeHead } from '../infra/runtime.ts'
+import { readWorktreeHead, runCommand } from '../infra/runtime.ts'
 import { type IssueWorkflow, issueBodyHash, saveWorkflow } from '../infra/state.ts'
-import { frozenRemoteBase } from './baseline.ts'
+import { frozenBaseHash, frozenRemoteBase } from './baseline.ts'
+import { shellQuote } from './develop.ts'
 import { buildStagePrompt, type PromptSnapshot, type SnapshotFreshness, selectReviewFeedback } from './prompt.ts'
 
 export interface ResolvedPromptSnapshot {
@@ -128,6 +129,15 @@ export async function buildReviewPrompt(
   if (workflow.prNumber) {
     const baseRef = await fetchPrBase(ctx, workflow.repoKey, workflow.prNumber)
     if (baseRef) base = `origin/${baseRef}`
+  } else if (workflow.baseRef) {
+    const available = await runCommand(ctx, `git show-ref --verify --quiet ${shellQuote(`refs/remotes/${base}`)}`, {
+      workdir: workflow.worktree,
+      timeoutMs: 10_000,
+      sandboxPolicy: { mode: 'read-only', workspaceRoot: workflow.worktree },
+    })
+      .then(() => true)
+      .catch(() => false)
+    if (!available) base = frozenBaseHash(workflow.baseRef) ?? base
   }
   const prUrl = workflow.prNumber ? `https://github.com/${workflow.repoKey}/pull/${workflow.prNumber}` : '未关联'
   const contractHash = issueBodyHash(resolved.snapshot.body)

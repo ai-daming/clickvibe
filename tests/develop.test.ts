@@ -404,6 +404,37 @@ test('LineLog bounds a never-terminated line and handles CRLF split across chunk
   assert.equal(read.lines.length, 2)
   assert.match(read.lines[0], /单行日志已截断/)
   assert.equal(read.lines[1], 'next')
+
+  const trailingCr = new LineLog(2)
+  trailingCr.appendChunk('tail\r')
+  trailingCr.flush()
+  assert.deepEqual(trailingCr.read(0).lines, ['tail'])
+})
+
+test('authorization input and origin validation reject malformed boundary data', () => {
+  assert.throws(
+    () => makeAuthorizationInput({ action: 'unknown', url: 'https://github.com/o/r/issues/1' }),
+    /不支持的 Agent 操作/,
+  )
+  assert.throws(
+    () =>
+      makeAuthorizationInput({
+        action: 'develop',
+        agent: 'codex',
+        url: 'https://github.com/o/r/issues/1',
+        baseline: 'main',
+      }),
+    /origin\/\*/,
+  )
+  assert.match(
+    validatePrivilegedRequest({
+      remoteAddress: '127.0.0.1',
+      host: '127.0.0.1:3080',
+      origin: 'not a URL',
+      requestMarker: '1',
+    }) ?? '',
+    /Origin 无效/,
+  )
 })
 
 test('parseDependencies extracts Blocked by numbers from the 依赖 section', () => {

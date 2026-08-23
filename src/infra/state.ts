@@ -220,6 +220,27 @@ export function logPath(key: string, kind: 'dev' | 'review'): string {
 // increments after the returned in-memory cursor.
 const logQueues = new Map<string, Promise<unknown>>()
 
+// Serialize the read-modify-write window for one issue workflow. Development
+// startup holds this through baseline reservation, worktree preparation and
+// durable task placeholder creation, so two valid capabilities cannot both
+// observe an unfrozen baseline or launch duplicate tasks.
+const workflowQueues = new Map<string, Promise<void>>()
+
+export async function withWorkflowLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
+  const previous = workflowQueues.get(key) ?? Promise.resolve()
+  const result = previous.catch(() => undefined).then(operation)
+  const tail = result.then(
+    () => undefined,
+    () => undefined,
+  )
+  workflowQueues.set(key, tail)
+  try {
+    return await result
+  } finally {
+    if (workflowQueues.get(key) === tail) workflowQueues.delete(key)
+  }
+}
+
 function enqueueLogOperation<T>(path: string, operation: () => Promise<T>): Promise<T> {
   const previous = logQueues.get(path) ?? Promise.resolve()
   const current = previous.catch(() => undefined).then(operation)

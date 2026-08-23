@@ -49,6 +49,7 @@ import {
   loadWorkflow,
   resetLog,
   saveWorkflow,
+  withWorkflowLock,
 } from '../infra/state.ts'
 import { deriveAutoDevelopment } from './auto-development.ts'
 import { deriveWorkflowState } from './derive.ts'
@@ -205,116 +206,118 @@ export async function startDevelop(
     if (!decision.ready) return { ok: false, error: `自动开发跳过: ${decision.reason}` }
   }
 
-  // Automatic selection and dryrun are deliberately pinned to the default sentinel.
-  const requestedBaseline = automatic || agent === 'dryrun' ? undefined : body.baseline
-  const ensured = await ensureWorktree(ctx, parsed, requestedBaseline)
-  if (!ensured.ok) return ensured
-  const { workflow } = ensured
-  // issue 已校验为 OPEN(真实 agent 走授权快照,dryrun 走抓取校验)
-  workflow.issueState = 'OPEN'
-  if (launchSnapshot) workflow.issueSnapshot = launchSnapshot.snapshot
-  // 首次开工 = 本地无任何开发/返工交付记录;带附加说明也不得误判为返工(issue #54)。
-  const firstDevelopment = !workflow.events.some((event) => event.kind === 'dev' || event.kind === 'rework')
+  return await withWorkflowLock(issueKey(`${parsed.owner}/${parsed.repo}`, parsed.number), async () => {
+    // Automatic selection and dryrun are deliberately pinned to the default sentinel.
+    const requestedBaseline = automatic || agent === 'dryrun' ? undefined : body.baseline
+    const ensured = await ensureWorktree(ctx, parsed, requestedBaseline)
+    if (!ensured.ok) return ensured
+    const { workflow } = ensured
+    // issue 已校验为 OPEN(真实 agent 走授权快照,dryrun 走抓取校验)
+    workflow.issueState = 'OPEN'
+    if (launchSnapshot) workflow.issueSnapshot = launchSnapshot.snapshot
+    // 首次开工 = 本地无任何开发/返工交付记录;带附加说明也不得误判为返工(issue #54)。
+    const firstDevelopment = !workflow.events.some((event) => event.kind === 'dev' || event.kind === 'rework')
 
-  if (agent === 'dryrun') {
-    // A safety probe is not a new durable development generation: never
-    // rotate the previous real task's disk-backed history here.
-    const taskIdValue = taskId('dryrun')
+    if (agent === 'dryrun') {
+      // A safety probe is not a new durable development generation: never
+      // rotate the previous real task's disk-backed history here.
+      const taskIdValue = taskId('dryrun')
+      let live: LiveTask
+      try {
+        live = createLiveTask(taskIdValue, workflow.key, 'dev', agent, null)
+      } catch (error) {
+        return { ok: false, error: String(error instanceof Error ? error.message : error) }
+      }
+      void (async () => {
+        try {
+          pushTaskLine(live, '[clickvibe] dry-run: 不会启动 Codex/Claude')
+          const policy = { mode: 'read-only' as const, workspaceRoot: workflow.worktree }
+          for (const command of ['pwd', 'git branch --show-current', 'git status --short --branch']) {
+            pushTaskLine(live, `$ ${command}`)
+            const output = await runCommand(ctx, command, {
+              workdir: workflow.worktree,
+              timeoutMs: 10_000,
+              sandboxPolicy: policy,
+            })
+            for (const line of output.split('\n')) if (line !== '') pushTaskLine(live, line)
+          }
+          pushTaskLine(live, '[clickvibe] dry-run 完成')
+          finishTask(live, 'done', 0)
+        } catch (error) {
+          pushTaskLine(live, `[clickvibe] dry-run 失败: ${String(error instanceof Error ? error.message : error)}`)
+          finishTask(live, 'failed', 1)
+        }
+      })()
+      return { ok: true, taskId: taskIdValue, worktree: workflow.worktree, branch: workflow.branch }
+    }
+    if (!authorizedSnapshot || !launchSnapshot) return { ok: false, error: '服务端确认快照丢失,请重新确认' }
+
+    // 已有开发任务在跑:复用
+    if (workflow.devTaskId && liveTasks.has(workflow.devTaskId) && !liveTasks.get(workflow.devTaskId)!.closed) {
+      return { ok: true, taskId: workflow.devTaskId, worktree: workflow.worktree, branch: workflow.branch }
+    }
+
+    const taskIdValue = taskId('dev')
     let live: LiveTask
     try {
       live = createLiveTask(taskIdValue, workflow.key, 'dev', agent, null)
     } catch (error) {
       return { ok: false, error: String(error instanceof Error ? error.message : error) }
     }
+    // Rotate only after both worktree preparation and LiveTask creation succeed;
+    // failed start attempts must not destroy the previous authoritative history.
+    await resetLog(workflow.key, 'dev')
+    workflow.devAgent = agent
+    workflow.devTaskId = taskIdValue
+    workflow.devInterrupted = false
+    workflow.stage = 'developing'
+    await saveWorkflow(workflow)
+
     void (async () => {
       try {
-        pushTaskLine(live, '[clickvibe] dry-run: 不会启动 Codex/Claude')
-        const policy = { mode: 'read-only' as const, workspaceRoot: workflow.worktree }
-        for (const command of ['pwd', 'git branch --show-current', 'git status --short --branch']) {
-          pushTaskLine(live, `$ ${command}`)
-          const output = await runCommand(ctx, command, {
-            workdir: workflow.worktree,
-            timeoutMs: 10_000,
-            sandboxPolicy: policy,
-          })
-          for (const line of output.split('\n')) if (line !== '') pushTaskLine(live, line)
-        }
-        pushTaskLine(live, '[clickvibe] dry-run 完成')
-        finishTask(live, 'done', 0)
+        pushTaskLine(
+          live,
+          `[clickvibe] 使用${launchSnapshot.freshness === 'current' ? '当前' : '持久化回退(可能过期)'} Issue 快照(${launchSnapshot.snapshot.updatedAt || '无更新时间'})`,
+        )
+        const prompt = buildDevelopPrompt(workflow, launchSnapshot, extraContext, firstDevelopment)
+
+        pushTaskLine(live, `[clickvibe] 启动 ${agent} 开发…`)
+        const agentCommand = buildFreshAgentCommand(agent)
+
+        attachAgentProcess(ctx, live, agentCommand, workflow.worktree, prompt, async (exitCode, sessionId) => {
+          pushTaskLine(live, `[clickvibe] ${agent} 结束,退出码 ${exitCode}`)
+          const reloaded = await loadWorkflow(workflow.key)
+          if (reloaded) {
+            const fixedIssues = reloaded.reviewResult?.passed === false ? [...reloaded.reviewResult.issues] : []
+            if (applyDevRunOutcome(reloaded, live.status, exitCode, sessionId, agent)) {
+              // 开发完成(含 rework):旧的 review 结论已归档到 events 历史,
+              // 当前回到"待 review"——不能继续显示"Review 未通过"
+              const head = await readWorktreeHead(ctx, workflow.worktree)
+              await recordDevDelivery(
+                ctx,
+                reloaded,
+                agent,
+                head,
+                fixedIssues,
+                extraContext !== '' && !firstDevelopment ? 'rework' : 'dev',
+                extraContext,
+              )
+            }
+            await saveWorkflow(reloaded)
+          }
+        })
       } catch (error) {
-        pushTaskLine(live, `[clickvibe] dry-run 失败: ${String(error instanceof Error ? error.message : error)}`)
+        pushTaskLine(live, `[clickvibe] 失败: ${String(error instanceof Error ? error.message : error)}`)
+        const reloaded = await loadWorkflow(workflow.key)
+        if (reloaded) {
+          reloaded.stage = 'developing'
+          reloaded.devInterrupted = true
+          await saveWorkflow(reloaded)
+        }
         finishTask(live, 'failed', 1)
       }
     })()
+
     return { ok: true, taskId: taskIdValue, worktree: workflow.worktree, branch: workflow.branch }
-  }
-  if (!authorizedSnapshot || !launchSnapshot) return { ok: false, error: '服务端确认快照丢失,请重新确认' }
-
-  // 已有开发任务在跑:复用
-  if (workflow.devTaskId && liveTasks.has(workflow.devTaskId) && !liveTasks.get(workflow.devTaskId)!.closed) {
-    return { ok: true, taskId: workflow.devTaskId, worktree: workflow.worktree, branch: workflow.branch }
-  }
-
-  const taskIdValue = taskId('dev')
-  let live: LiveTask
-  try {
-    live = createLiveTask(taskIdValue, workflow.key, 'dev', agent, null)
-  } catch (error) {
-    return { ok: false, error: String(error instanceof Error ? error.message : error) }
-  }
-  // Rotate only after both worktree preparation and LiveTask creation succeed;
-  // failed start attempts must not destroy the previous authoritative history.
-  await resetLog(workflow.key, 'dev')
-  workflow.devAgent = agent
-  workflow.devTaskId = taskIdValue
-  workflow.devInterrupted = false
-  workflow.stage = 'developing'
-  await saveWorkflow(workflow)
-
-  void (async () => {
-    try {
-      pushTaskLine(
-        live,
-        `[clickvibe] 使用${launchSnapshot.freshness === 'current' ? '当前' : '持久化回退(可能过期)'} Issue 快照(${launchSnapshot.snapshot.updatedAt || '无更新时间'})`,
-      )
-      const prompt = buildDevelopPrompt(workflow, launchSnapshot, extraContext, firstDevelopment)
-
-      pushTaskLine(live, `[clickvibe] 启动 ${agent} 开发…`)
-      const agentCommand = buildFreshAgentCommand(agent)
-
-      attachAgentProcess(ctx, live, agentCommand, workflow.worktree, prompt, async (exitCode, sessionId) => {
-        pushTaskLine(live, `[clickvibe] ${agent} 结束,退出码 ${exitCode}`)
-        const reloaded = await loadWorkflow(workflow.key)
-        if (reloaded) {
-          const fixedIssues = reloaded.reviewResult?.passed === false ? [...reloaded.reviewResult.issues] : []
-          if (applyDevRunOutcome(reloaded, live.status, exitCode, sessionId, agent)) {
-            // 开发完成(含 rework):旧的 review 结论已归档到 events 历史,
-            // 当前回到"待 review"——不能继续显示"Review 未通过"
-            const head = await readWorktreeHead(ctx, workflow.worktree)
-            await recordDevDelivery(
-              ctx,
-              reloaded,
-              agent,
-              head,
-              fixedIssues,
-              extraContext !== '' && !firstDevelopment ? 'rework' : 'dev',
-              extraContext,
-            )
-          }
-          await saveWorkflow(reloaded)
-        }
-      })
-    } catch (error) {
-      pushTaskLine(live, `[clickvibe] 失败: ${String(error instanceof Error ? error.message : error)}`)
-      const reloaded = await loadWorkflow(workflow.key)
-      if (reloaded) {
-        reloaded.stage = 'developing'
-        reloaded.devInterrupted = true
-        await saveWorkflow(reloaded)
-      }
-      finishTask(live, 'failed', 1)
-    }
-  })()
-
-  return { ok: true, taskId: taskIdValue, worktree: workflow.worktree, branch: workflow.branch }
+  })
 }

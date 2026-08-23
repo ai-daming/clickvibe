@@ -42,8 +42,10 @@ export function githubCompareUrl(
   branch: string,
   baseRef: string | null | undefined,
   defaultBranch = 'main',
+  baseRefAvailable = true,
 ): string {
-  const base = workflowBaseBranch(baseRef, defaultBranch)
+  const frozenHash = String(baseRef ?? '').match(/\s+@\s+([0-9a-f]{4,64})\s*$/i)?.[1]
+  const base = !baseRefAvailable && frozenHash ? frozenHash : workflowBaseBranch(baseRef, defaultBranch)
   return `https://github.com/${repoKey}/compare/${encodeURIComponent(base)}...${encodeURIComponent(branch)}?expand=1`
 }
 

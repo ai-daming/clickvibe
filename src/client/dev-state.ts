@@ -351,7 +351,13 @@ export function useDevSection({
       case 'create-pr':
         if (workflow) {
           window.open(
-            githubCompareUrl(workflow.repoKey, workflow.branch, workflow.baseRef, workflow.derived?.baseBranch),
+            githubCompareUrl(
+              workflow.repoKey,
+              workflow.branch,
+              workflow.baseRef,
+              workflow.derived?.baseBranch,
+              workflow.derived?.baseRefAvailable,
+            ),
             '_blank',
             'noopener',
           )

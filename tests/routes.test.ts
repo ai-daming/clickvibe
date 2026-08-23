@@ -422,6 +422,133 @@ test('develop authorization previews fetched baselines and binds a custom select
   }
 })
 
+test('concurrent first-development authorizations freeze exactly one baseline and start one task', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-baseline-race-'))
+  process.env.HOME = tempHome
+  try {
+    const repo = join(tempHome, 'repo')
+    await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
+    await mkdir(repo, { recursive: true })
+    await writeFile(
+      join(tempHome, '.clickvibe', 'config.yaml'),
+      ['repos:', `  o/r: ${repo}`, `worktreeRoot: ${join(tempHome, 'worktrees')}`, ''].join('\n'),
+    )
+    const item = {
+      url: 'https://github.com/o/r/issues/601',
+      title: 'baseline race',
+      body: '## 验收标准\n- freeze once',
+      state: 'OPEN',
+      updatedAt: '2026-08-23T00:00:00Z',
+      comments: [],
+    }
+    let developmentPhase = false
+    let fetchArrivals = 0
+    let releaseFetches: (() => void) | null = null
+    const bothFetchesArrived = new Promise<void>((resolve) => {
+      releaseFetches = resolve
+    })
+    let starts = 0
+    const handler = createHandler(
+      async (spec) => {
+        const api = githubApi(spec.command, { item })
+        if (api) return api
+        if (spec.command === 'git fetch origin --prune') {
+          if (developmentPhase) {
+            fetchArrivals += 1
+            if (fetchArrivals === 2) releaseFetches?.()
+            await Promise.race([bothFetchesArrived, new Promise((resolve) => setTimeout(resolve, 50))])
+          }
+          return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+        }
+        if (spec.command === 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD')
+          return { exitCode: 0, stdout: { text: 'origin/main' }, stderr: { text: '' } }
+        if (spec.command.startsWith('git for-each-ref'))
+          return {
+            exitCode: 0,
+            stdout: { text: 'origin/HEAD\norigin/main\norigin/release/2.0\n' },
+            stderr: { text: '' },
+          }
+        if (spec.command.startsWith('git show-ref --verify --quiet') && spec.command.includes('refs/remotes/'))
+          return { exitCode: 0, stdout: { text: '0' }, stderr: { text: '' } }
+        if (spec.command.startsWith('git rev-parse --short')) {
+          const hash = spec.command.includes('release/2.0')
+            ? '2222222'
+            : spec.command.includes('HEAD')
+              ? '3333333'
+              : '1111111'
+          return { exitCode: 0, stdout: { text: hash }, stderr: { text: '' } }
+        }
+        if (spec.command === 'git worktree list --porcelain')
+          return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+        if (spec.command.startsWith('git show-ref --verify --quiet') && spec.command.includes('refs/heads/'))
+          return { exitCode: 0, stdout: { text: '1' }, stderr: { text: '' } }
+        if (spec.command.startsWith('git worktree add'))
+          return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+        if (spec.command.startsWith('gh issue comment'))
+          return {
+            exitCode: 0,
+            stdout: { text: 'https://github.com/o/r/issues/601#issuecomment-1' },
+            stderr: { text: '' },
+          }
+        throw new Error(`unexpected command: ${spec.command}`)
+      },
+      () => {
+        starts += 1
+        return {
+          status: 'running',
+          exitCode: 0,
+          done: new Promise<void>((resolve) => setTimeout(resolve, 100)),
+          readOutput() {
+            return { delta: '', lossy: false }
+          },
+          kill() {
+            return true
+          },
+        }
+      },
+    )
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+    const authorize = async (baseline: string) =>
+      (await post(
+        handler,
+        '/clickvibe/api/authorize',
+        { action: 'develop', url: item.url, agent: 'codex', baseline, expectedSnapshot: item },
+        headers,
+      )) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
+    const main = await authorize('origin/main')
+    const release = await authorize('origin/release/2.0')
+    assert.equal(main.status, 200)
+    assert.equal(release.status, 200)
+    developmentPhase = true
+
+    const develop = (baseline: string, authorization: typeof main) =>
+      post(
+        handler,
+        '/clickvibe/api/develop',
+        {
+          url: item.url,
+          agent: 'codex',
+          baseline,
+          authorizationId: authorization.body.authorizationId,
+          authorizationDigest: authorization.body.authorizationDigest,
+        },
+        headers,
+      )
+    const results = await Promise.all([develop('origin/main', main), develop('origin/release/2.0', release)])
+    assert.deepEqual(results.map((result) => result.status).sort(), [200, 400])
+    assert.equal(starts, 1)
+    assert.match(results.find((result) => result.status === 400)?.body.error ?? '', /基线已定格/)
+    const frozen = await loadWorkflow('o-r-601')
+    assert.match(frozen?.baseRef ?? '', /^origin\/(?:main|release\/2\.0) @ (?:1111111|2222222)$/)
+    await new Promise((resolve) => setTimeout(resolve, 120))
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
 test('development rejects a confirmed snapshot when the issue changes before stage start', async () => {
   const url = 'https://github.com/ai-daming/clickvibe/issues/20'
   const oldItem = {
@@ -485,6 +612,17 @@ test('/sync rejects worktree mutation without the same-origin privileged headers
   })
   assert.equal(result.status, 403)
   assert.match(result.body.error ?? '', /授权请求头/)
+})
+
+test('all privileged workflow routes reject missing request provenance before action dispatch', async () => {
+  for (const method of ['review', 'resume', 'stop', 'sync', 'merge']) {
+    const result = await post(createHandler(), `/clickvibe/api/${method}`, {
+      url: 'https://github.com/o/r/issues/1',
+      agent: 'codex',
+    })
+    assert.equal(result.status, 403, method)
+    assert.match(result.body.error ?? '', /授权请求头/, method)
+  }
 })
 
 test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, cleanup and archive', async () => {
@@ -1418,6 +1556,87 @@ test('a rejected dry-run worktree attempt preserves the previous durable dev his
     const history = await readLogHistory('o-r-905', 'dev')
     assert.equal(history[0], 'previous completed task history')
     assert.ok(history.some((line) => line.includes('worktree 冲突')))
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('dryrun uses the default baseline, reports command output and closes success or failure tasks', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-dryrun-execution-'))
+  process.env.HOME = tempHome
+  try {
+    const repo = join(tempHome, 'repo')
+    const worktreeRoot = join(tempHome, 'worktrees')
+    await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
+    await mkdir(repo, { recursive: true })
+    await writeFile(
+      join(tempHome, '.clickvibe', 'config.yaml'),
+      ['repos:', `  o/r: ${repo}`, `worktreeRoot: ${worktreeRoot}`, ''].join('\n'),
+    )
+    const runOne = async (number: number, failPwd: boolean) => {
+      const issue = {
+        url: `https://github.com/o/r/issues/${number}`,
+        title: 'dryrun execution',
+        body: '',
+        state: 'OPEN',
+        updatedAt: 'now',
+        comments: [],
+      }
+      const commands: string[] = []
+      const handler = createHandler(async ({ command }) => {
+        commands.push(command)
+        const api = githubApi(command, { item: issue })
+        if (api) return api
+        if (command === 'git fetch origin --prune') return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+        if (command === 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD')
+          return { exitCode: 0, stdout: { text: 'origin/main' }, stderr: { text: '' } }
+        if (command === "git show-ref --verify --quiet 'refs/remotes/origin/main'; echo $?")
+          return { exitCode: 0, stdout: { text: '0' }, stderr: { text: '' } }
+        if (command === "git rev-parse --short 'origin/main'")
+          return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
+        if (command === 'git worktree list --porcelain')
+          return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+        if (command.includes(`refs/heads/repo-issue-${number}`))
+          return { exitCode: 0, stdout: { text: '1' }, stderr: { text: '' } }
+        if (command.startsWith('git worktree add')) return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+        if (command === 'pwd')
+          return failPwd
+            ? { exitCode: 1, stdout: { text: '' }, stderr: { text: 'pwd failed' } }
+            : { exitCode: 0, stdout: { text: '/fake/worktree\n' }, stderr: { text: '' } }
+        if (command === 'git branch --show-current')
+          return { exitCode: 0, stdout: { text: `repo-issue-${number}\n` }, stderr: { text: '' } }
+        if (command === 'git status --short --branch')
+          return { exitCode: 0, stdout: { text: `## repo-issue-${number}\n` }, stderr: { text: '' } }
+        throw new Error(`unexpected command: ${command}`)
+      })
+      const started = (await post(handler, '/clickvibe/api/develop', {
+        url: issue.url,
+        agent: 'dryrun',
+        baseline: 'origin/release/must-be-ignored',
+      })) as { status: number; body: { taskId?: string } }
+      assert.equal(started.status, 200)
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      const polled = (await post(handler, '/clickvibe/api/develop/poll', {
+        taskId: started.body.taskId,
+        cursor: 0,
+      })) as { body: { status?: string; delta?: string[] } }
+      return { commands, polled: polled.body }
+    }
+
+    const success = await runOne(906, false)
+    assert.equal(success.polled.status, 'done')
+    assert.match(success.polled.delta?.join('\n') ?? '', /fake\/worktree.*repo-issue-906/s)
+    assert.equal(
+      success.commands.some((command) => command.includes('release/must-be-ignored')),
+      false,
+    )
+
+    const failure = await runOne(907, true)
+    assert.equal(failure.polled.status, 'failed')
+    assert.match(failure.polled.delta?.join('\n') ?? '', /dry-run 失败/)
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome

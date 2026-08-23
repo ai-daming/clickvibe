@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { lstat, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -144,5 +144,46 @@ test('clearing creates the .clickvibe parent directory on a brand-new worktree',
     await assert.rejects(lstat(join(worktree, '.clickvibe/review-result.json')), { code: 'ENOENT' })
     const info = await lstat(join(worktree, '.clickvibe'))
     assert.equal(info.isDirectory(), true)
+  })
+})
+
+test('materialized verdict rejects directories, symlinks and oversized files before parsing', async () => {
+  await withWorktree(async (worktree) => {
+    const dir = join(worktree, REVIEW_RESULT_RELATIVE_PATH)
+    await mkdir(dir, { recursive: true })
+    const directory = await loadReviewResult(worktree, ['✅ Review 通过'])
+    assert.match(directory.fileError ?? '', /不是普通文件/)
+    await rm(dir, { recursive: true, force: true })
+
+    const target = join(worktree, 'target.json')
+    await writeFile(target, '{"passed":true,"issues":[]}')
+    await mkdir(join(worktree, '.clickvibe'), { recursive: true })
+    await symlink(target, dir)
+    const linked = await loadReviewResult(worktree, ['✅ Review 通过'])
+    assert.match(linked.fileError ?? '', /不是普通文件/)
+    await rm(dir, { force: true })
+
+    await writeFile(dir, 'x'.repeat(2 * 1024 * 1024 + 1))
+    const oversized = await loadReviewResult(worktree, ['✅ Review 通过'])
+    assert.match(oversized.fileError ?? '', /文件超过/)
+  })
+})
+
+test('stdout verdict extraction skips malformed JSON and captures numbered or following-line issues', async () => {
+  await withWorktree(async (worktree) => {
+    const numbered = await loadReviewResult(worktree, [
+      '💬 {"passed":broken}',
+      '💬 ❌ Review 发现问题 1. race 2. missing test',
+    ])
+    assert.deepEqual(numbered.result, { passed: false, issues: ['race', 'missing test'] })
+
+    const following = await loadReviewResult(worktree, [
+      '💬 ❌ Review 发现问题',
+      'first issue',
+      'second issue',
+      '✅ 本轮完成',
+      'ignored',
+    ])
+    assert.deepEqual(following.result, { passed: false, issues: ['first issue', 'second issue'] })
   })
 })

@@ -23,7 +23,14 @@ import { basename, dirname, join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { buildWorktreeAddCommand, decideWorktreeRecovery, shellQuote } from '../infra/develop-core.ts'
 import { expandHome, loadConfig, runCommand } from '../infra/runtime.ts'
-import { appendLog, type IssueWorkflow, issueKey, loadWorkflow, saveWorkflow } from '../infra/state.ts'
+import {
+  appendLog,
+  type IssueWorkflow,
+  issueKey,
+  loadWorkflow,
+  saveWorkflow,
+  saveWorkflowStrict,
+} from '../infra/state.ts'
 import { resolveSelectedRemoteBase } from './baseline.ts'
 
 /** Create (or reuse) the workflow record and the worktree+branch. */
@@ -117,6 +124,7 @@ export async function ensureWorktree(
   } catch (error) {
     return { ok: false, error: String(error instanceof Error ? error.message : error) }
   }
+  const firstBaseSelection = !workflow.baseRef
   const remoteBaseExists =
     (
       await runCommand(ctx, `git show-ref --verify --quiet ${shellQuote(`refs/remotes/${remoteBase}`)}; echo $?`, {
@@ -125,16 +133,30 @@ export async function ensureWorktree(
         timeoutMs: 10_000,
       })
     ).trim() === '0'
-  if (!workflow.baseRef && !remoteBaseExists) {
+  if (firstBaseSelection && !remoteBaseExists) {
     return { ok: false, error: `开发基线不存在或未 fetch: ${remoteBase}` }
   }
-  const remoteBaseHash = !workflow.baseRef
+  const remoteBaseHash = firstBaseSelection
     ? await runCommand(ctx, `git rev-parse --short ${shellQuote(remoteBase)}`, {
         workdir: expandedRepo,
         sandboxPolicy: policy,
         timeoutMs: 10_000,
       })
     : null
+
+  // Reserve the immutable baseline before touching the worktree. startDevelop
+  // holds the workflow lock around this strict write and task placeholder, so
+  // a concurrent authorization must reload and match this exact reservation.
+  if (firstBaseSelection) {
+    if (!remoteBaseHash) return { ok: false, error: `无法读取开发基线提交: ${remoteBase}` }
+    workflow.baseRef = `${remoteBase} @ ${remoteBaseHash}`
+    try {
+      await saveWorkflowStrict(workflow)
+    } catch (error) {
+      return { ok: false, error: `无法定格开发基线: ${String(error instanceof Error ? error.message : error)}` }
+    }
+    await appendLog(workflow.key, 'dev', `[clickvibe] 开发基线: ${workflow.baseRef}`)
+  }
 
   // 幂等建 worktree:用完整恢复决策(处理 reuse/attach/conflict/重建),
   // 而不是简单判断目录是否存在。git 操作需要无沙箱(写主仓库 .git/refs)。
@@ -232,13 +254,6 @@ export async function ensureWorktree(
         ? `[clickvibe] worktree 与分支创建完成`
         : `[clickvibe] 已从现有分支恢复 worktree`,
     )
-  }
-
-  // 记录开发基线:首次开发时记下明确的远端默认分支 + fetch 后提交。
-  if (!workflow.baseRef) {
-    if (!remoteBaseHash) return { ok: false, error: `无法读取开发基线提交: ${remoteBase}` }
-    workflow.baseRef = `${remoteBase} @ ${remoteBaseHash}`
-    await appendLog(workflow.key, 'dev', `[clickvibe] 开发基线: ${workflow.baseRef}`)
   }
 
   await saveWorkflow(workflow)

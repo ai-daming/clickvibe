@@ -3,8 +3,6 @@ import test from 'node:test'
 import {
   deriveNextAction,
   deriveWorkflowStatus,
-  githubCompareUrl,
-  workflowBaseBranch,
   workflowStatusLabel,
   type WorkflowFacts,
 } from '../src/workflow/state-view.ts'
@@ -59,14 +57,6 @@ test('closed unmerged PR offers the explicit recovery action', () => {
   const next = deriveNextAction(facts({ prNumber: '9', prState: 'CLOSED', prStatusKnown: true }))
   assert.equal(next.kind, 'develop')
   assert.equal(next.label, '查看原因 / 重新开发')
-})
-
-test('compare URL uses the frozen non-main workflow base', () => {
-  assert.equal(workflowBaseBranch('origin/trunk @ abc123', 'main'), 'trunk')
-  assert.equal(
-    githubCompareUrl('o/r', 'feature/7', 'origin/trunk @ abc123', 'main'),
-    'https://github.com/o/r/compare/trunk...feature%2F7?expand=1',
-  )
 })
 
 test('a linked PR with an unavailable live state fails closed', () => {

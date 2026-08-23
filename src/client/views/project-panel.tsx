@@ -63,6 +63,7 @@ export function PanelContent() {
           issue.workflow.branch,
           issue.workflow.baseRef,
           issue.workflow.derived?.baseBranch,
+          issue.workflow.derived?.baseRefAvailable,
         ),
         '_blank',
         'noopener',

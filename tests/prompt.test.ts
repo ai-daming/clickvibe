@@ -120,8 +120,18 @@ test('a current passed review never turns resume into rework from old feedback',
 })
 
 test('review without a PR falls back to the frozen workflow baseline', async () => {
+  const ctx = {
+    shell: {
+      resolve(spec: unknown) {
+        return spec
+      },
+      async run() {
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      },
+    },
+  }
   const prompt = await buildReviewPrompt(
-    {} as never,
+    ctx as never,
     {
       repoKey: 'o/r',
       branch: 'clickvibe-issue-60',
@@ -134,6 +144,37 @@ test('review without a PR falls back to the frozen workflow baseline', async () 
   )
   assert.match(prompt, /对比 base: origin\/release\/2\.0/)
   assert.match(prompt, /git diff origin\/release\/2\.0\.\.\.HEAD/)
+})
+
+test('review without a PR falls back to the frozen commit when its remote baseline was deleted', async () => {
+  const commands: string[] = []
+  const ctx = {
+    shell: {
+      resolve(spec: unknown) {
+        return spec
+      },
+      async run(spec: { command: string }) {
+        commands.push(spec.command)
+        return { exitCode: 1, stdout: { text: '' }, stderr: { text: '' } }
+      },
+    },
+  }
+  const prompt = await buildReviewPrompt(
+    ctx as never,
+    {
+      repoKey: 'o/r',
+      branch: 'clickvibe-issue-60',
+      worktree: '/tmp/worktree',
+      prNumber: null,
+      baseRef: 'origin/release/deleted @ abc123',
+    } as never,
+    { snapshot, freshness: 'current' },
+    'def456',
+  )
+  assert.deepEqual(commands, ["git show-ref --verify --quiet 'refs/remotes/origin/release/deleted'"])
+  assert.match(prompt, /对比 base: abc123/)
+  assert.match(prompt, /git diff abc123\.\.\.HEAD/)
+  assert.doesNotMatch(prompt, /git diff origin\/release\/deleted/)
 })
 
 test('review keeps the live PR base ahead of the frozen workflow baseline', async () => {
@@ -164,4 +205,20 @@ test('review keeps the live PR base ahead of the frozen workflow baseline', asyn
     'def456',
   )
   assert.match(prompt, /对比 base: origin\/integration/)
+})
+
+test('legacy review without a persisted baseline retains origin/main without probing a ref', async () => {
+  const prompt = await buildReviewPrompt(
+    {} as never,
+    {
+      repoKey: 'o/r',
+      branch: 'clickvibe-issue-1',
+      worktree: '/tmp/worktree',
+      prNumber: null,
+      baseRef: null,
+    } as never,
+    { snapshot, freshness: 'current' },
+    'abc123',
+  )
+  assert.match(prompt, /git diff origin\/main\.\.\.HEAD/)
 })

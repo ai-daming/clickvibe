@@ -29,4 +29,8 @@ test('client runtime derives stable task, status, publication and compare labels
     githubCompareUrl('owner/repo', 'feature/x', 'origin/release'),
     'https://github.com/owner/repo/compare/release...feature%2Fx?expand=1',
   )
+  assert.equal(
+    githubCompareUrl('owner/repo', 'feature/x', 'origin/release/deleted @ abc123', 'main', false),
+    'https://github.com/owner/repo/compare/abc123...feature%2Fx?expand=1',
+  )
 })
