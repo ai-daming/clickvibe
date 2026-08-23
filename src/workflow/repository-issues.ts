@@ -230,6 +230,7 @@ export async function fetchRepositoryIssues(
             bodyHash: issueBodyHash(issue.body),
             updatedAt: issue.updatedAt ?? '',
           },
+          workflowCachePresent: existing !== undefined,
         })
         const blockedBy = parseDependencies(issue.body).map((number) => {
           const dependency = issueByNumber.get(number)

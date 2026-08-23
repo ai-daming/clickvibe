@@ -100,6 +100,7 @@ export interface DeriveOptions {
   hasCommits?: boolean
   defaultBranch?: string
   issueContract?: IssueContractSnapshot | null
+  workflowCachePresent?: boolean
 }
 
 /** Short hash of one ref inside the worktree's repo (null when unresolvable). */
