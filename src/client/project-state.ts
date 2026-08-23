@@ -2,6 +2,7 @@
 import React from 'react'
 import {
   type ProjectOption,
+  type RepositoryAdvanceSignal,
   type RepositoryFreshness,
   type RepositoryIssue,
   type Workflow,
@@ -28,6 +29,9 @@ export function useProjectPanel() {
   const [workflow, setWorkflow] = React.useState<Workflow | null>(null)
   const [autoAction, setAutoAction] = React.useState(false)
   const [freshness, setFreshness] = React.useState<RepositoryFreshness | null>(null)
+  const [repoAdvance, setRepoAdvance] = React.useState<RepositoryAdvanceSignal | null>(null)
+  const [repoSyncBusy, setRepoSyncBusy] = React.useState(false)
+  const [repoSyncMessage, setRepoSyncMessage] = React.useState<string | null>(null)
   const [dependencyRefreshError, setDependencyRefreshError] = React.useState<string | null>(null)
   const [stateRefreshError, setStateRefreshError] = React.useState<string | null>(null)
   const [selectedIssues, setSelectedIssues] = React.useState<Set<number>>(new Set())
@@ -64,6 +68,7 @@ export function useProjectPanel() {
         setStateRefreshError(null)
         mergeWorkflowStates(response.workflows)
         setFreshness(response.freshness)
+        setRepoAdvance(response.repoAdvance)
         if (response.dependenciesRefreshDue) {
           try {
             if (result) {
@@ -79,12 +84,18 @@ export function useProjectPanel() {
               }
             } else {
               const next = await apiCall<
-                | { ok: true; issues: RepositoryIssue[]; freshness: RepositoryFreshness | null }
+                | {
+                    ok: true
+                    issues: RepositoryIssue[]
+                    freshness: RepositoryFreshness | null
+                    repoAdvance: RepositoryAdvanceSignal | null
+                  }
                 | { ok: false; error: string }
               >('repo/issues', { repoKey }, 4_000)
               if (next.ok) {
                 setIssues(next.issues)
                 setFreshness(next.freshness)
+                setRepoAdvance(next.repoAdvance)
                 setDependencyRefreshError(null)
               } else {
                 setDependencyRefreshError(next.error)
@@ -111,18 +122,27 @@ export function useProjectPanel() {
     setResult(null)
     setIssues([])
     setFreshness(null)
+    setRepoAdvance(null)
+    setRepoSyncMessage(null)
     setStateRefreshError(null)
     setDependencyRefreshError(null)
     setSelectedIssues(new Set())
     setBatchStatus(null)
     try {
       const response = await apiCall<
-        { ok: true; issues: RepositoryIssue[]; freshness: RepositoryFreshness | null } | { ok: false; error: string }
+        | {
+            ok: true
+            issues: RepositoryIssue[]
+            freshness: RepositoryFreshness | null
+            repoAdvance: RepositoryAdvanceSignal | null
+          }
+        | { ok: false; error: string }
       >('repo/issues', { repoKey: selected, forceRefresh }, 30_000)
       if (!response.ok) setError(response.error)
       else {
         setIssues(response.issues)
         setFreshness(response.freshness)
+        setRepoAdvance(response.repoAdvance)
         setDependencyRefreshError(null)
       }
     } catch (reason) {
@@ -170,6 +190,7 @@ export function useProjectPanel() {
       if (stateResponse?.ok) mergeWorkflowStates(stateResponse.workflows)
       if (stateResponse?.ok) {
         setFreshness(stateResponse.freshness)
+        setRepoAdvance(stateResponse.repoAdvance)
         setStateRefreshError(null)
       } else if (stateResponse && !stateResponse.ok) {
         setStateRefreshError(stateResponse.error)
@@ -214,6 +235,7 @@ export function useProjectPanel() {
         mergeWorkflowStates(stateResponse.workflows)
         setWorkflow(stateResponse.workflows.find((item) => item.url === url) ?? workflow)
         setFreshness(stateResponse.freshness)
+        setRepoAdvance(stateResponse.repoAdvance)
         setStateRefreshError(null)
       } else {
         setStateRefreshError(stateResponse.error)
@@ -222,6 +244,45 @@ export function useProjectPanel() {
       setError(`Issue 刷新失败: ${String(reason)}`)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const safeSyncRepository = async () => {
+    if (!repoKey || repoSyncBusy) return
+    setRepoSyncBusy(true)
+    setRepoSyncMessage(null)
+    try {
+      const response = await apiCall<
+        | {
+            ok: true
+            branchHead: { branch: string; head: string | null } | null
+            mainRefForwarded: boolean
+            conflict: { files: string[] } | null
+            refused: string[]
+          }
+        | { ok: false; error: string }
+      >('sync', { repoKey }, 90_000)
+      if (!response.ok) {
+        setRepoSyncMessage(response.error)
+        return
+      }
+      await loadRepo(repoKey, true)
+      if (response.conflict) {
+        const files = response.conflict.files.length > 0 ? response.conflict.files.join('、') : '请用 git status 查看'
+        setRepoSyncMessage(`合并冲突现场已保留 · ${files} · 附加说明:先同步最新代码并解决冲突`)
+      } else if (response.refused.length > 0) {
+        setRepoSyncMessage(response.refused.join('；'))
+      } else {
+        const updates = [
+          response.branchHead ? `当前分支 HEAD ${response.branchHead.head ?? '未知'}` : '',
+          response.mainRefForwarded ? '本地 main 已快进' : '',
+        ].filter(Boolean)
+        setRepoSyncMessage(updates.length > 0 ? `安全同步完成 · ${updates.join(' · ')}` : '仓库已是最新')
+      }
+    } catch (reason) {
+      setRepoSyncMessage(`安全同步失败:${String(reason)}`)
+    } finally {
+      setRepoSyncBusy(false)
     }
   }
 
@@ -242,7 +303,10 @@ export function useProjectPanel() {
     projects,
     refreshDetail,
     refreshWorkflowStates,
+    repoAdvance,
     repoKey,
+    repoSyncBusy,
+    repoSyncMessage,
     result,
     selectedIssues,
     setAutoAction,
@@ -255,6 +319,7 @@ export function useProjectPanel() {
     setRepoKey,
     setResult,
     setSelectedIssues,
+    safeSyncRepository,
     stateRefreshError,
     updateWorkflow,
     workflow,

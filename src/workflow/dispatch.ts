@@ -8,6 +8,7 @@ import { startDevelop } from './develop-start.ts'
 import { handleCommand, listProjects, stateWorkflows } from './handlers.ts'
 import { authorizeAgent, mergeAndCleanup } from './merge.ts'
 import { fetchRepositoryIssues } from './repository-issues.ts'
+import { syncConfiguredRepository } from './repository-sync.ts'
 import { resumeDevelop } from './resume.ts'
 import { startReview } from './review-flow.ts'
 import { syncWorktree } from './sync.ts'
@@ -104,7 +105,8 @@ export async function handleApiPost(
   if (method === 'sync') {
     const securityError = privilegedRequestError(req)
     if (securityError) return { status: 403, body: { ok: false, error: securityError } }
-    const result = await syncWorktree(ctx, payload)
+    const repoKey = String((payload as { repoKey?: unknown } | undefined)?.repoKey ?? '').trim()
+    const result = repoKey ? await syncConfiguredRepository(ctx, payload) : await syncWorktree(ctx, payload)
     return { status: result.ok ? 200 : 400, body: result }
   }
   if (method === 'merge') {

@@ -5,6 +5,7 @@ import { githubCompareUrl } from '../runtime.ts'
 import { type RepositoryIssue, apiCall, fetchIssue, stageLabel } from '../domain.ts'
 import { MAX_BATCH_ISSUES, setPanelOpen } from '../panel-state.ts'
 import { type Dependencies, type GhIssue, IssueView, type TimelineEvent, repoOf } from './issue-view.tsx'
+import { RepositoryAdvanceBanner } from './repository-advance-banner.tsx'
 
 export function PanelContent() {
   const {
@@ -24,7 +25,10 @@ export function PanelContent() {
     projects,
     refreshDetail,
     refreshWorkflowStates,
+    repoAdvance,
     repoKey,
+    repoSyncBusy,
+    repoSyncMessage,
     result,
     selectedIssues,
     setAutoAction,
@@ -37,6 +41,7 @@ export function PanelContent() {
     setRepoKey,
     setResult,
     setSelectedIssues,
+    safeSyncRepository,
     stateRefreshError,
     updateWorkflow,
     workflow,
@@ -225,6 +230,10 @@ export function PanelContent() {
             : '⚠ 依赖状态可能过期 · GitHub 刷新失败，当前保留上次结果'}
         </div>
       ) : null}
+      {!result ? (
+        <RepositoryAdvanceBanner signal={repoAdvance} busy={repoSyncBusy} onSync={() => void safeSyncRepository()} />
+      ) : null}
+      {!result && repoSyncMessage ? <div className="cv-project-meta">{repoSyncMessage}</div> : null}
       {result ? (
         <IssueView
           issue={result.item}
