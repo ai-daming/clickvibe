@@ -33,11 +33,23 @@ test('client runtime derives stable task, status, publication and compare labels
 })
 
 test('only stale development gate errors expire after derived state advances', () => {
-  const stale = '该 issue 尚未完成开发,无法 review'
-  assert.equal(isActionErrorExpired(stale, 'review-ready', null), true)
-  assert.equal(isActionErrorExpired(stale, 'reviewing', null), true)
-  assert.equal(isActionErrorExpired(stale, 'developing', null), false)
-  assert.equal(isActionErrorExpired(stale, 'review-ready', 'reviewing'), false)
+  const staleErrors = [
+    '该 issue 尚未完成开发,无法 review',
+    '开发仍在进行,尚无可 Review 的完成事实',
+    '本地 workflow 缓存缺失,且尚无完成事实,无法 Review',
+    '尚无完成事实,无法 Review',
+  ]
+  for (const stale of staleErrors) {
+    assert.equal(isActionErrorExpired(stale, 'review-ready', null), true)
+    assert.equal(isActionErrorExpired(stale, 'reviewing', null), true)
+    assert.equal(isActionErrorExpired(stale, 'developing', null), false)
+    assert.equal(isActionErrorExpired(stale, 'review-ready', 'reviewing'), false)
+  }
+  assert.equal(isActionErrorExpired('有进行中任务,请等待当前开发任务完成后再 Review', 'reviewing', null), false)
+  assert.equal(
+    isActionErrorExpired('本地 workflow 缓存缺失,无法从 PR 链接恢复对应 Issue 的 Review 上下文', 'review-ready', null),
+    false,
+  )
   assert.equal(isActionErrorExpired('合并门禁拒绝: review 结论过期', 'review-ready', null), false)
   assert.equal(isActionErrorExpired('网络请求失败', 'reviewing', null), false)
   assert.equal(isActionErrorExpired(null, 'review-ready', null), false)

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { isActionErrorExpired } from '../src/client/action-error.ts'
 import {
   decodeLiveLogLine as decodeClientLine,
   deliveryPublicationLabel as clientPublicationLabel,
@@ -19,6 +20,7 @@ import {
 } from '../src/infra/live-output.ts'
 import { selectHistoryTask as selectHostHistoryTask } from '../src/infra/task-history.ts'
 import { deliveryPublicationLabel as hostPublicationLabel } from '../src/workflow/delivery-publication.ts'
+import { reviewStartError } from '../src/workflow/review-start.ts'
 import {
   githubCompareUrl as hostCompareUrl,
   workflowStatusLabel as hostStatusLabel,
@@ -48,6 +50,16 @@ test('host and client preserve the same task-history selection', () => {
   for (const workflow of workflows) {
     assert.deepEqual(selectClientHistoryTask(workflow), selectHostHistoryTask(workflow))
   }
+})
+
+test('client expires every superseded host review-start gate but preserves a running task', () => {
+  for (const reason of ['development-in-progress', 'workflow-cache-missing', 'no-completion-facts'] as const) {
+    assert.equal(isActionErrorExpired(reviewStartError({ allowed: false, reason }), 'review-ready', null), true)
+  }
+  assert.equal(
+    isActionErrorExpired(reviewStartError({ allowed: false, reason: 'task-running' }), 'reviewing', null),
+    false,
+  )
 })
 
 test('host and client preserve the same pure presentation helpers', () => {
