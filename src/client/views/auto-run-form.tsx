@@ -2,7 +2,13 @@ import React from 'react'
 import { type Workflow, apiCall } from '../domain.ts'
 import { expectedDevelopSnapshot } from '../dev-authorization.ts'
 import type { GhIssue } from './issue-view.tsx'
-import { autoRunBanner, autoRunDefaults, synchronizeAutoRunDraft, unresolvedFindingCount } from '../auto-run.ts'
+import {
+  autoRunBanner,
+  autoRunDefaults,
+  autoRunTrigger,
+  synchronizeAutoRunDraft,
+  unresolvedFindingCount,
+} from '../auto-run.ts'
 
 export interface AutoRunFormProps {
   url: string
@@ -75,16 +81,24 @@ export function AutoRunForm({ url, issue, workflow, compact = false, onStarted }
 
   return (
     <div className={`cv-auto-run${compact ? ' cv-auto-run-compact' : ''}`}>
-      <button
-        className="cv-auto-run-trigger"
-        disabled={busy || active?.status === 'running'}
-        onClick={() => setOpen((value) => !value)}
-        title="开发、建 PR、Review 与返工自动对账推进;默认停在待合并"
-      >
-        {active?.status === 'running'
-          ? `自动运行 · 第 ${active.step ?? 0} 步 · 已完成 ${active.rounds}/${active.maxRounds} 轮`
-          : '自动跑到底'}
-      </button>
+      {(() => {
+        const trigger = autoRunTrigger(active, workflow)
+        return (
+          <button
+            className="cv-auto-run-trigger"
+            disabled={busy || trigger.disabled}
+            onClick={() => setOpen((value) => !value)}
+            title={
+              trigger.disabled
+                ? '当前有任务运行中,完成后再启动自动推进'
+                : '开发、建 PR、Review 与返工自动对账推进;默认停在待合并'
+            }
+          >
+            {busy ? '启动中…' : trigger.label}
+          </button>
+        )
+      })()}
+
       {(() => {
         const banner = autoRunBanner(active, workflow, { compact })
         return banner ? (
