@@ -35,7 +35,13 @@ function agentLabel(agent: WorkflowEvent['agent']): string | null {
 
 export function deriveDeliveryTimelineItem(event: WorkflowEvent): DeliveryTimelineItem {
   const parts: string[] = []
-  if (event.round !== undefined) parts.push(`第 ${event.round} 轮`)
+  // 轮(round)= 开发→Review 闭环,只出现在 dev/review 等交付事件上;
+  // 自动推进事件不是一轮,是"推进一步",显示步数(step),绝不显示"第 N 轮"。
+  if (event.kind === 'auto-run') {
+    if (event.step !== undefined) parts.push(`第 ${event.step} 步`)
+  } else if (event.round !== undefined) {
+    parts.push(`第 ${event.round} 轮`)
+  }
   const agent = agentLabel(event.agent)
   if (agent) parts.push(agent)
   if (event.stats && (event.kind === 'dev' || event.kind === 'rework' || event.kind === 'resume')) {

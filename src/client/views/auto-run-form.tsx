@@ -81,7 +81,9 @@ export function AutoRunForm({ url, issue, workflow, compact = false, onStarted }
         onClick={() => setOpen((value) => !value)}
         title="开发、建 PR、Review 与返工自动对账推进;默认停在待合并"
       >
-        {active?.status === 'running' ? `自动运行 · 第 ${active.rounds}/${active.maxRounds} 轮` : '自动跑到底'}
+        {active?.status === 'running'
+          ? `自动运行 · 第 ${active.step ?? 0} 步 · 已完成 ${active.rounds}/${active.maxRounds} 轮`
+          : '自动跑到底'}
       </button>
       {active?.status === 'paused' ? (
         <div className="cv-auto-run-status cv-auto-run-paused">

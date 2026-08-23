@@ -53,6 +53,21 @@ test('review projection preserves historical issue text and legacy events degrad
   assert.equal(legacy.detail.kind, 'development')
 })
 
+test('auto-run events show the step count, never a round number', () => {
+  const started = deriveDeliveryTimelineItem({ kind: 'auto-run', at: '2026-08-24T00:51:00Z', round: 0 })
+  assert.equal(started.kindLabel, '自动推进')
+  assert.equal(started.summary, '')
+
+  const paused = deriveDeliveryTimelineItem({
+    kind: 'auto-run',
+    at: '2026-08-24T01:00:42Z',
+    round: 0,
+    step: 4,
+    note: '自动跑到底已暂停:session-interrupted',
+  })
+  assert.equal(paused.summary, '第 4 步')
+})
+
 test('resume delivery remains the latest development summary', () => {
   const resumed = { kind: 'resume', at: '2026-08-23T03:00:00Z', hash: 'def456', fixed: 2 } as const
   assert.equal(
