@@ -2577,9 +2577,12 @@ function buildDevelopPrompt(
   workflow: IssueWorkflow,
   resolved: ResolvedPromptSnapshot,
   extraContext: string,
+  firstDevelopment: boolean,
 ): string {
+  // 附加说明只把「非首次开发」升级为返工;首次开工带说明仍是开发(issue #54)。
+  const rework = extraContext !== '' && !firstDevelopment
   return buildStagePrompt({
-    stage: extraContext === '' ? 'develop' : 'rework',
+    stage: rework ? 'rework' : 'develop',
     ...resolved,
     worktree: workflow.worktree,
     status: [
@@ -2599,6 +2602,7 @@ async function buildReviewPrompt(
   resolved: ResolvedPromptSnapshot,
   reviewedHead: string,
   sessionId: string | null = null,
+  extraContext = '',
 ): Promise<string> {
   // 解析 base:PR 有 baseRefName(若记录过),否则尝试 origin/HEAD 主干
   let base = 'origin/main'
@@ -2619,6 +2623,7 @@ async function buildReviewPrompt(
       `对比 base: ${base}`,
       `契约正文 SHA-256: ${contractHash}`,
       `会话模式: ${sessionId ? `续接 review 会话 ${sessionId};保留既有审查记忆` : '全新 review 会话'}`,
+      ...(extraContext ? ['附加上下文:', extraContext] : []),
     ],
     requirements: [
       '先执行 git fetch origin 同步远端最新状态(并行开发时 base 可能已变化)。',
@@ -3231,6 +3236,8 @@ async function startDevelop(
   // issue 已校验为 OPEN(真实 agent 走授权快照,dryrun 走抓取校验)
   workflow.issueState = 'OPEN'
   if (launchSnapshot) workflow.issueSnapshot = launchSnapshot.snapshot
+  // 首次开工 = 本地无任何开发/返工交付记录;带附加说明也不得误判为返工(issue #54)。
+  const firstDevelopment = !workflow.events.some((event) => event.kind === 'dev' || event.kind === 'rework')
 
   if (agent === 'dryrun') {
     // A safety probe is not a new durable development generation: never
@@ -3286,7 +3293,7 @@ async function startDevelop(
   void (async () => {
     try {
       pushTaskLine(live, `[clickvibe] 使用${launchSnapshot.freshness === 'current' ? '当前' : '持久化回退(可能过期)'} Issue 快照(${launchSnapshot.snapshot.updatedAt || '无更新时间'})`)
-      const prompt = buildDevelopPrompt(workflow, launchSnapshot, extraContext)
+      const prompt = buildDevelopPrompt(workflow, launchSnapshot, extraContext, firstDevelopment)
 
       pushTaskLine(live, `[clickvibe] 启动 ${agent} 开发…`)
       const agentCommand = buildFreshAgentCommand(agent)
@@ -3300,7 +3307,7 @@ async function startDevelop(
             // 开发完成(含 rework):旧的 review 结论已归档到 events 历史,
             // 当前回到"待 review"——不能继续显示"Review 未通过"
             const head = await readWorktreeHead(ctx, workflow.worktree)
-            await recordDevDelivery(ctx, reloaded, agent, head, fixedIssues, extraContext !== '' ? 'rework' : 'dev')
+            await recordDevDelivery(ctx, reloaded, agent, head, fixedIssues, extraContext !== '' && !firstDevelopment ? 'rework' : 'dev', extraContext)
           }
           await saveWorkflow(reloaded)
         }
@@ -3604,8 +3611,9 @@ async function startReview(
   | { ok: true; taskId: string }
   | { ok: false; error: string }
 > {
-  const body = (payload ?? {}) as { url?: unknown; agent?: unknown }
+  const body = (payload ?? {}) as { url?: unknown; agent?: unknown; context?: unknown }
   const url = String(body.url ?? '').trim()
+  const extraContext = typeof body.context === 'string' ? body.context.trim() : ''
   const parsedAgent = parseAgent(body.agent)
   if (parsedAgent === 'dryrun') return { ok: false, error: 'review 不支持 dryrun' }
   const agent: AgentKind = parsedAgent
@@ -3723,7 +3731,7 @@ async function startReview(
   const agentCommand = sessionId
     ? buildResumeAgentCommand(agent, sessionId)
     : buildFreshAgentCommand(agent)
-  const prompt = await buildReviewPrompt(ctx, workflow, resolvedSnapshot, reviewedHead, sessionId)
+  const prompt = await buildReviewPrompt(ctx, workflow, resolvedSnapshot, reviewedHead, sessionId, extraContext)
 
   pushTaskLine(live, `[clickvibe] 启动 ${agent} review${sessionId ? `(续会话 ${sessionId})` : ''}…`)
   attachAgentProcess(ctx, live, agentCommand, workflow.worktree, prompt, async (exitCode, newSessionId) => {
@@ -3772,6 +3780,8 @@ async function startReview(
         verdict: { passed, issues },
         issueContract: reviewIssue.contract,
         note: `${agent} review${passed ? ' 通过' : ` 发现 ${issues.length} 个问题`}`,
+        // 用户附加说明只进本地事件时间线,不进 GitHub 评论(issue #54)。
+        ...(extraContext !== '' ? { userContext: extraContext } : {}),
       }
       await appendEvent(reloaded, event)
       const issueNumber = parseUrl(reloaded.url)?.number ?? 'unknown'
@@ -3801,7 +3811,7 @@ async function startReview(
       if (reloaded && clearStaleSessionId(reloaded, 'review', sessionId)) await saveWorkflow(reloaded)
       return {
         command: buildFreshAgentCommand(agent),
-        prompt: await buildReviewPrompt(ctx, workflow, resolvedSnapshot, reviewedHead),
+        prompt: await buildReviewPrompt(ctx, workflow, resolvedSnapshot, reviewedHead, null, extraContext),
       }
     },
   } : undefined)
@@ -3817,6 +3827,7 @@ async function recordDevDelivery(
   head: string | null,
   fixedIssues: string[],
   kind: 'dev' | 'rework',
+  userContext = '',
 ): Promise<void> {
   if (!workflow.prNumber) {
     const pr = await detectLinkedPr(ctx, workflow.repoKey, workflow.branch)
@@ -3828,6 +3839,8 @@ async function recordDevDelivery(
     hash: head ?? undefined,
     fixed: fixedIssues.length,
     note: `${agent} 完成开发${kind === 'rework' ? '(按 review 意见返工)' : ''}`,
+    // 用户附加说明只进本地事件时间线,不进 GitHub 评论(issue #54)。
+    ...(userContext !== '' ? { userContext } : {}),
   }
   await appendEvent(workflow, event)
   const issueNumber = parseUrl(workflow.url)?.number ?? 'unknown'
@@ -3967,7 +3980,7 @@ export async function resumeDevelop(
         // rework 完成:旧的 review 结论已归档到 events,回到"待 review",
         // 不能继续显示"Review 未通过"让用户无限重复点
         const head = await readWorktreeHead(ctx, workflow.worktree)
-        await recordDevDelivery(ctx, reloaded, agent, head, fixedIssues, 'rework')
+        await recordDevDelivery(ctx, reloaded, agent, head, fixedIssues, 'rework', extraContext)
       }
       await saveWorkflow(reloaded)
     }

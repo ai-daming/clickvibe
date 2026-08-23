@@ -29,6 +29,7 @@ import {
   type LiveLogEvent,
 } from '../live-output.ts'
 import { resolveDesktopPanelWidth, resolvePanelLayout } from './panel-layout.ts'
+import { clearedContext, contextToSubmit, toggledContext } from './action-context.ts'
 import { openDshConversationDraft, resolveDshConversationDeps } from './dsh-conversation.ts'
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 type _SlotLoaders = [typeof LayoutController, SidebarFooterActionOwnerProps]
@@ -272,6 +273,12 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 .cv-dev-btn.cv-dev-merge { background: #1a7f37; }
 .cv-dev-link { border: none; background: transparent; color: #0969da; font-size: 11.5px; cursor: pointer; padding: 4px 2px; text-decoration: underline; }
 .cv-dev-link:hover { opacity: 0.8; }
+.cv-context { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; flex: 1; min-width: 0; }
+.cv-context-toggle { border: none; background: transparent; color: #0969da; font-size: 11.5px; cursor: pointer; padding: 2px 0; text-decoration: underline; }
+.cv-context-toggle:hover { opacity: 0.8; }
+.cv-context-toggle:disabled { opacity: 0.45; cursor: not-allowed; }
+.cv-context-input { width: 100%; box-sizing: border-box; border: 1px solid #d0d7de; border-radius: 6px; padding: 6px 8px; font-size: 12px; font-family: inherit; line-height: 1.5; resize: vertical; }
+.cv-tl-user-context { color: #57606a; word-break: break-all; }
 `
 
 /** Inject the plugin stylesheet once; returns the disposer. */
@@ -832,6 +839,8 @@ interface WorkflowEvent {
   verdict?: { passed: boolean; issues: string[] }
   issueContract?: { bodyHash: string; updatedAt: string }
   fixed?: number
+  /** 用户附加说明(issue #54):动作触发时填写,只进本地时间线。 */
+  userContext?: string
   publication?: DeliveryPublication
   note?: string
   /** 人工放行审计(仅 merge-override 事件)。 */
@@ -966,6 +975,9 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
   const [streamState, setStreamState] = React.useState<'idle' | 'history' | 'connecting' | 'streaming' | 'retrying' | 'ended'>('idle')
   const [streamNotice, setStreamNotice] = React.useState<string | null>(null)
   const [agentChoice, setAgentChoice] = React.useState<'codex' | 'claude'>(() => workflow?.reviewAgent ?? workflow?.devAgent ?? 'codex')
+  /** 附加说明输入(issue #54):develop/resume/rework/review 可展开,触发后清空。 */
+  const [contextOpen, setContextOpen] = React.useState(false)
+  const [contextText, setContextText] = React.useState('')
   const esRef = React.useRef<EventSource | null>(null)
   const streamGenerationRef = React.useRef(0)
   const checkingStreamRef = React.useRef(false)
@@ -1153,6 +1165,13 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
     return { authorizationId: res.authorizationId, authorizationDigest: res.authorizationDigest, ...(res.target ? { target: res.target } : {}) }
   }
 
+  // 动作触发后清空附加说明输入框,避免残留文本被下一次动作误带(issue #54)。
+  const clearUserContext = () => {
+    const next = clearedContext()
+    setContextText(next.text)
+    setContextOpen(next.open)
+  }
+
   const startDev = async (agent: 'codex' | 'claude' | 'dryrun', context?: string) => {
     setBusy('developing')
     setError(null)
@@ -1163,6 +1182,7 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
       if (agent !== 'dryrun' && !authorization) { setBusy(null); return }
       const res = await apiCall<{ ok: true; taskId: string; worktree: string; branch: string } | { ok: false; error: string }>('develop', { url, agent, ...(context ? { context } : {}), ...authorization })
       if (!res.ok) { setError(res.error); setBusy(null); return }
+      clearUserContext()
       await refresh()
       void openStream(res.taskId)
       setBusy(null)
@@ -1182,6 +1202,7 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
       if (!authorization) { setBusy(null); return }
       const res = await apiCall<{ ok: true; taskId: string } | { ok: false; error: string }>('resume', { url, agent, ...(context ? { context } : {}), ...authorization })
       if (!res.ok) { setError(res.error); setBusy(null); return }
+      clearUserContext()
       await refresh()
       void openStream(res.taskId)
       setBusy(null)
@@ -1190,16 +1211,17 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
     }
   }
 
-  const startReview = async (agent: 'codex' | 'claude') => {
+  const startReview = async (agent: 'codex' | 'claude', context = '') => {
     setBusy('reviewing')
     setError(null)
     setLogEvents([])
     setHistoryKind(null)
     try {
-      const authorization = await authorize('review', agent)
+      const authorization = await authorize('review', agent, context)
       if (!authorization) { setBusy(null); return }
-      const res = await apiCall<{ ok: true; taskId: string } | { ok: false; error: string }>('review', { url, agent, ...authorization })
+      const res = await apiCall<{ ok: true; taskId: string } | { ok: false; error: string }>('review', { url, agent, ...(context ? { context } : {}), ...authorization })
       if (!res.ok) { setError(res.error); setBusy(null); return }
+      clearUserContext()
       await refresh()
       void openStream(res.taskId)
       setBusy(null)
@@ -1354,11 +1376,14 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
       : { kind: 'none', label: '无', hint: '等待状态…' }))
 
   const runAction = () => {
+    const userContext = contextToSubmit(contextText)
     switch (effectiveAction.kind) {
-      case 'develop': void startDev(agentChoice); break
-      case 'resume': void resume(); break
-      case 'rework': void resume(workflow?.reviewResult?.issues.join('\n')); break
-      case 'review': void startReview(agentChoice); break
+      case 'develop': void startDev(agentChoice, userContext); break
+      case 'resume': void resume(userContext); break
+      // 返工:textarea 预填当前 review 意见(可编辑),发送以输入框最终文本为准;
+      // 清空也不影响服务端既有的 review 意见自动注入(issue #54)。
+      case 'rework': void resume(userContext); break
+      case 'review': void startReview(agentChoice, userContext); break
       case 'sync': void syncWorktree(); break
       case 'create-pr':
         if (workflow) {
@@ -1387,6 +1412,21 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
   // review 锁定:从未 review 过则两个 agent 都可选;锁过只留那个
   const lockedAgent = effectiveAction.kind === 'review' ? workflow?.reviewAgent ?? null : null
   const showAgentToggle = effectiveAction.kind === 'develop' || effectiveAction.kind === 'review'
+
+  // 附加说明(issue #54):仅 develop/resume/rework/review 支持;merge/cleanup/sync 不加。
+  const contextSupported = effectiveAction.kind === 'develop'
+    || effectiveAction.kind === 'resume'
+    || effectiveAction.kind === 'rework'
+    || effectiveAction.kind === 'review'
+  const toggleContext = () => {
+    // 返工首次展开时预填当前 review 意见(纯函数判定,见 action-context.ts)。
+    const prefillIssues = workflow?.reviewResult && !workflow.reviewResult.passed
+      ? workflow.reviewResult.issues
+      : null
+    const next = toggledContext({ open: contextOpen, text: contextText }, effectiveAction.kind, prefillIssues)
+    setContextText(next.text)
+    setContextOpen(next.open)
+  }
 
   const actionButtonClass = effectiveAction.kind === 'merge' || effectiveAction.kind === 'cleanup'
     ? 'cv-dev-btn cv-dev-merge'
@@ -1530,6 +1570,29 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
             >
               {busyLabel ?? effectiveAction.label}
             </button>
+            {contextSupported ? (
+              <div className="cv-context">
+                <button
+                  className="cv-context-toggle"
+                  onClick={toggleContext}
+                  disabled={busy !== null}
+                  title="展开后可填写附加说明,随动作拼入 agent prompt;留空则与现状一致"
+                >
+                  附加说明(可选) {contextOpen ? '▾' : '▸'}
+                </button>
+                {contextOpen ? (
+                  <textarea
+                    className="cv-context-input"
+                    value={contextText}
+                    onChange={(event) => setContextText(event.target.value)}
+                    rows={3}
+                    placeholder={effectiveAction.kind === 'rework'
+                      ? '已预填当前 Review 意见,可编辑;发送以这里的最终文本为准'
+                      : '补充给 agent 的附加上下文,可留空'}
+                  />
+                ) : null}
+              </div>
+            ) : null}
           </>
         )}
         {stage === 'idle' && effectiveAction.kind === 'develop' ? (
@@ -1606,6 +1669,11 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
                 ? <span className="cv-tl-note">修复 {ev.fixed} 个问题</span>
                 : null}
               {ev.note ? <span className="cv-tl-note">{ev.note}</span> : null}
+              {ev.userContext ? (
+                <span className="cv-tl-user-context" title={ev.userContext}>
+                  用户附加说明:{ev.userContext.length > 80 ? `${ev.userContext.slice(0, 80)}…` : ev.userContext}
+                </span>
+              ) : null}
               {ev.publication?.status === 'posted'
                 ? ev.publication.url
                   ? <a className="cv-tl-public" href={ev.publication.url} target="_blank" rel="noreferrer">
