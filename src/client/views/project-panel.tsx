@@ -5,6 +5,7 @@ import { githubCompareUrl } from '../runtime.ts'
 import { type RepositoryIssue, apiCall, fetchIssue, stageLabel } from '../domain.ts'
 import { MAX_BATCH_ISSUES, setPanelOpen } from '../panel-state.ts'
 import { type Dependencies, type GhIssue, IssueView, type TimelineEvent, repoOf } from './issue-view.tsx'
+import { ProjectSelector } from './project-selector.tsx'
 
 export function PanelContent() {
   const {
@@ -14,9 +15,12 @@ export function PanelContent() {
     batchStatus,
     dependencyFilter,
     dependencyRefreshError,
+    dshWorkspaceError,
     error,
     freshness,
     groupBy,
+    importBusy,
+    importProject,
     issues,
     loadRepo,
     loading,
@@ -41,6 +45,8 @@ export function PanelContent() {
     updateWorkflow,
     workflow,
   } = useProjectPanel()
+  const selectedProject = projects.find((project) => project.repoKey === repoKey) ?? null
+  const projectConfigured = selectedProject?.configured !== false
 
   const filtered = issues.filter((issue) => {
     const blocked = issue.blockedBy.some((dependency) => dependency.state.toUpperCase() === 'OPEN')
@@ -225,6 +231,11 @@ export function PanelContent() {
             : '⚠ 依赖状态可能过期 · GitHub 刷新失败，当前保留上次结果'}
         </div>
       ) : null}
+      {dshWorkspaceError ? (
+        <div className="cv-stale" title={dshWorkspaceError}>
+          ⚠ {dshWorkspaceError}
+        </div>
+      ) : null}
       {result ? (
         <IssueView
           issue={result.item}
@@ -250,22 +261,23 @@ export function PanelContent() {
       ) : (
         <>
           <div className="cv-project-toolbar">
-            <select
-              className="cv-select"
-              value={repoKey}
-              onChange={(event) => {
-                const value = event.target.value
-                setRepoKey(value)
-                void loadRepo(value)
+            <ProjectSelector
+              projects={projects}
+              selected={selectedProject}
+              importBusy={importBusy}
+              onSelect={(project) => {
+                setRepoKey(project.repoKey)
+                if (project.configured === false) {
+                  setResult(null)
+                  updateWorkflow(null)
+                  setSelectedIssues(new Set())
+                  setBatchStatus(null)
+                } else {
+                  void loadRepo(project.repoKey)
+                }
               }}
-            >
-              {projects.map((project) => (
-                <option key={project.repoKey} value={project.repoKey}>
-                  {project.repoKey}
-                  {project.available ? '' : ' · 远程配置'}
-                </option>
-              ))}
-            </select>
+              onImport={(project) => void importProject(project)}
+            />
             <div className="cv-project-selects">
               <select
                 className="cv-select"
@@ -297,7 +309,7 @@ export function PanelContent() {
               <button
                 className="cv-batch-btn cv-batch-secondary"
                 onClick={toggleReadySelection}
-                disabled={batchBusy || readyIssues.length === 0}
+                disabled={!projectConfigured || batchBusy || readyIssues.length === 0}
               >
                 {selectedReadyIssues.length === batchCandidates.length && batchCandidates.length > 0
                   ? '取消全选'
@@ -307,14 +319,14 @@ export function PanelContent() {
                 <button
                   className={batchAgent === 'codex' ? 'on' : ''}
                   onClick={() => setBatchAgent('codex')}
-                  disabled={batchBusy}
+                  disabled={!projectConfigured || batchBusy}
                 >
                   Codex
                 </button>
                 <button
                   className={batchAgent === 'claude' ? 'on' : ''}
                   onClick={() => setBatchAgent('claude')}
-                  disabled={batchBusy}
+                  disabled={!projectConfigured || batchBusy}
                 >
                   Claude
                 </button>
@@ -322,7 +334,7 @@ export function PanelContent() {
               <button
                 className="cv-batch-btn"
                 onClick={() => void startBatchDevelopment()}
-                disabled={batchBusy || selectedReadyIssues.length === 0}
+                disabled={!projectConfigured || batchBusy || selectedReadyIssues.length === 0}
               >
                 {batchBusy ? '批量启动中…' : `批量下单 (${selectedReadyIssues.length})`}
               </button>
@@ -330,11 +342,9 @@ export function PanelContent() {
             </div>
             {repoKey ? (
               <div className="cv-project-meta">
-                {issues.length} 个 open issue ·{' '}
-                {projects.find((project) => project.repoKey === repoKey)?.available
-                  ? '本机 git + GitHub'
-                  : '远程配置 · GitHub'}{' '}
-                实时事实
+                {selectedProject?.configured === false
+                  ? '未配置 · 只读展示，导入后才能加载 Issue 或开始开发'
+                  : `${issues.length} 个 open issue · ${selectedProject?.available ? '本机 git + GitHub' : '远程配置 · GitHub'} 实时事实`}
               </div>
             ) : null}
           </div>
@@ -342,7 +352,9 @@ export function PanelContent() {
           {loading ? (
             <div className="cv-loading">正在读取项目 issues 与实时状态…</div>
           ) : projects.length === 0 ? (
-            <div className="cv-hint">请先在 ~/.clickvibe/config.yaml 配置 repos</div>
+            <div className="cv-hint">config.yaml 与 DSH 中都没有可显示的项目</div>
+          ) : selectedProject?.configured === false ? (
+            <div className="cv-hint">该 DSH 项目尚未配置。点击“导入”后才能读取 GitHub Issue 和执行开发动作。</div>
           ) : (
             <div className="cv-project-list">
               {[...grouped.entries()]
