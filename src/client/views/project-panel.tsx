@@ -106,8 +106,7 @@ export function PanelContent() {
       }> = []
       for (const issue of chosen) {
         const url = String(issue.url ?? '')
-        // The first item refreshes the shared repository dependency snapshot;
-        // later items consume its versions instead of multiplying full-repo reads.
+        // The first item refreshes the shared repository dependency snapshot; later items reuse it.
         const fetched = await fetchIssue(url, 20_000, prepared.length === 0)
         if (!fetched.ok) throw new Error(`#${issue.number} 刷新失败: ${fetched.error}`)
         const snapshot = fetched.data.item as GhIssue
