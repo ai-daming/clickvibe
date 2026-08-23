@@ -86,6 +86,7 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 .cv-comment-author { font-weight: 600; color: #0969da; }
 .cv-comment-date { color: #8c959f; }
 .cv-toggle { border: 1px solid #d0d7de; background: #ffffff; border-radius: 6px; padding: 3px 8px; font-size: 12px; cursor: pointer; color: #1f2328; }
+:where(.cv-panel, .cv-terminal-overlay, .cv-audit-drawer) :is(button, select, input, textarea, a, summary):focus-visible { outline: 2px solid #0969da; outline-offset: 1px; border-radius: 4px; }
 .cv-toggle:hover { background: #f6f8fa; }
 .cv-issue-organizer { border: 0; border-radius: 6px; padding: 4px 8px; background: transparent; color: var(--ds-color-text-secondary, #57606a); font: inherit; white-space: nowrap; cursor: pointer; }
 .cv-issue-organizer:hover { background: var(--ds-color-bg-secondary, #f6f8fa); color: var(--ds-color-text, #1f2328); }
