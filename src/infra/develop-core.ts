@@ -157,25 +157,23 @@ export interface LogRead {
   truncated: boolean
 }
 
-/** Optionally line-count-bounded, non-destructive log with independent cursor readers. */
+/** Line-count-bounded, non-destructive log with independent cursor readers. */
 export class LineLog {
-  readonly #limit: number | null
+  readonly #limit: number
   #entries: LogEntry[] = []
   #partial = ''
   #pendingCr = false
   #sequence = 0
 
-  constructor(limit?: number) {
-    if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1)) {
-      throw new Error('log limit must be positive')
-    }
-    this.#limit = limit ?? null
+  constructor(limit: number) {
+    if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('log limit must be positive')
+    this.#limit = limit
   }
 
   appendLine(line: string): number {
     this.#sequence += 1
     this.#entries.push({ sequence: this.#sequence, line })
-    if (this.#limit !== null && this.#entries.length > this.#limit) {
+    if (this.#entries.length > this.#limit) {
       this.#entries.splice(0, this.#entries.length - this.#limit)
     }
     return this.#sequence

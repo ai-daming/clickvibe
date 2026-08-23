@@ -19,6 +19,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { type DevelopAgent, LineLog, shouldFallbackFromExactResume } from '../infra/develop-core.ts'
+import { LineBuffer } from '../infra/line-buffer.ts'
 import { encodeLiveLogEvent, type LiveLogEvent } from '../infra/live-output.ts'
 import {
   type LiveTask,
@@ -60,8 +61,7 @@ export function createLiveTask(
     agent,
     startedAt: Date.now(),
     log: new LineLog(TASK_LOG_LINES),
-    rawLog: new LineLog(),
-    rawCursor: 0,
+    rawLog: new LineBuffer(),
     closed: false,
     status: 'running',
     exitCode: null,
@@ -163,12 +163,10 @@ export function attachAgentProcess(
     // 轮询读取 agent 输出,解析为状态行,写入内存缓冲 + 落盘日志
     const drain = (flush = false) => {
       const read = process.readOutput()
-      if (read.delta !== '') task.rawLog.appendChunk(read.delta)
-      if (flush) task.rawLog.flush()
-      const raw = task.rawLog.read(task.rawCursor)
-      task.rawCursor = raw.cursor
-      if (raw.lines.length > 0) {
-        const parsed = parseAgentChunk(task.agent as AgentKind, raw.lines.join('\n'))
+      const rawLines = read.delta === '' ? [] : task.rawLog.appendChunk(read.delta)
+      if (flush) rawLines.push(...task.rawLog.flush())
+      if (rawLines.length > 0) {
+        const parsed = parseAgentChunk(task.agent as AgentKind, rawLines.join('\n'))
         for (const line of parsed.lines) {
           pushTaskLine(task, {
             source: 'agent',
@@ -183,7 +181,7 @@ export function attachAgentProcess(
           task.sessionId = parsed.sessionId
         }
       }
-      if (raw.truncated || read.lossy) {
+      if (read.lossy) {
         pushTaskLine(task, '[clickvibe] Agent 原始输出被截断(日志过长)')
       }
     }

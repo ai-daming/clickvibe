@@ -18,6 +18,7 @@ import {
   parseDependencies,
   validatePrivilegedRequest,
 } from '../src/agent/develop.ts'
+import { LineBuffer } from '../src/infra/line-buffer.ts'
 
 test('parseAgent accepts only the three supported agents', () => {
   assert.equal(parseAgent('codex'), 'codex')
@@ -383,20 +384,21 @@ test('LineLog preserves a never-terminated long line and handles CRLF split acro
   assert.equal(read.lines[1], 'next')
 })
 
-test('an unbounded raw LineLog preserves every event before parsing', () => {
-  const log = new LineLog()
-  for (let index = 0; index < 2001; index += 1) {
-    log.appendChunk(
-      `${JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: `m${index}` } })}\n`,
-    )
-  }
-
-  const read = log.read(0)
-  const parsed = parseAgentChunk('codex', read.lines.join('\n'))
-  assert.equal(read.truncated, false)
+test('LineBuffer consumes complete raw events while retaining only the partial line', () => {
+  const buffer = new LineBuffer()
+  const events = Array.from({ length: 2001 }, (_, index) =>
+    JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: `m${index}` } }),
+  )
+  const lines = buffer.appendChunk(`${events.join('\n')}\npartial`)
+  const parsed = parseAgentChunk('codex', lines.join('\n'))
   assert.equal(parsed.lines.length, 2001)
   assert.equal(parsed.lines[0].text, '💬 m0')
   assert.equal(parsed.lines[2000].text, '💬 m2000')
+  assert.deepEqual(buffer.appendChunk(' tail\r'), [])
+  assert.deepEqual(buffer.appendChunk('\nnext\r'), ['partial tail'])
+  assert.deepEqual(buffer.appendChunk('\nfinal'), ['next'])
+  assert.deepEqual(buffer.flush(), ['final'])
+  assert.deepEqual(buffer.flush(), [])
 })
 
 test('parseDependencies extracts Blocked by numbers from the 依赖 section', () => {
