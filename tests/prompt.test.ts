@@ -220,7 +220,9 @@ test('review with a PR falls back to the frozen commit when the PR base was dele
           return {
             exitCode: 0,
             stdout: {
-              text: ['HTTP/2.0 200 OK', '', JSON.stringify({ base: { ref: 'release/deleted' } })].join('\n'),
+              text: ['HTTP/2.0 200 OK', '', JSON.stringify({ base: { ref: 'integration', sha: 'def9999' } })].join(
+                '\n',
+              ),
             },
             stderr: { text: '' },
           }
@@ -236,15 +238,15 @@ test('review with a PR falls back to the frozen commit when the PR base was dele
       branch: 'clickvibe-issue-60',
       worktree: '/tmp/worktree',
       prNumber: '77',
-      baseRef: 'origin/release/deleted @ abc123',
+      baseRef: 'origin/release/2.0 @ abc1234',
     } as never,
     { snapshot, freshness: 'current' },
     'def456',
   )
-  assert.ok(commands.some((command) => command.includes('refs/remotes/origin/release/deleted')))
-  assert.match(prompt, /对比 base: abc123/)
-  assert.match(prompt, /git diff abc123\.\.\.HEAD/)
-  assert.doesNotMatch(prompt, /git diff origin\/release\/deleted/)
+  assert.ok(commands.some((command) => command.includes('refs/remotes/origin/integration')))
+  assert.match(prompt, /对比 base: def9999/)
+  assert.match(prompt, /git diff def9999\.\.\.HEAD/)
+  assert.doesNotMatch(prompt, /git diff abc1234/)
 })
 
 test('legacy review without a persisted baseline retains origin/main without probing a ref', async () => {

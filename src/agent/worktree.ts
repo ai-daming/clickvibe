@@ -179,6 +179,14 @@ export async function ensureWorktree(
     branchExists,
     branchWorktree: atBranch?.path ?? null,
   })
+  const detachedHead =
+    recovery.kind === 'attach-detached' || recovery.kind === 'attach-existing'
+      ? await runCommand(ctx, 'git rev-parse HEAD', {
+          workdir: normalizedTarget,
+          timeoutMs: 10_000,
+          sandboxPolicy: policy,
+        })
+      : null
 
   if (recovery.kind === 'conflict') {
     await appendLog(workflow.key, 'dev', `[clickvibe] worktree 冲突: ${recovery.reason}`)
@@ -254,7 +262,26 @@ export async function ensureWorktree(
     try {
       await saveWorkflowStrict(workflow)
     } catch (error) {
-      return { ok: false, error: `无法定格开发基线: ${String(error instanceof Error ? error.message : error)}` }
+      const rollbackErrors: string[] = []
+      const rollback = async (command: string, workdir: string) => {
+        try {
+          await runCommand(ctx, command, { workdir, timeoutMs: 60_000, sandboxPolicy: policy })
+        } catch (rollbackError) {
+          rollbackErrors.push(String(rollbackError instanceof Error ? rollbackError.message : rollbackError))
+        }
+      }
+      if (recovery.kind === 'add-new-branch') {
+        await rollback(`git worktree remove --force ${shellQuote(normalizedTarget)}`, expandedRepo)
+        await rollback(`git branch -D ${shellQuote(branch)}`, expandedRepo)
+      } else if (recovery.kind === 'add-existing-branch' || recovery.kind === 'repair') {
+        await rollback(`git worktree remove --force ${shellQuote(normalizedTarget)}`, expandedRepo)
+      } else if (recovery.kind === 'attach-detached' || recovery.kind === 'attach-existing') {
+        if (detachedHead) await rollback(`git switch --detach ${shellQuote(detachedHead)}`, normalizedTarget)
+        if (recovery.kind === 'attach-detached') await rollback(`git branch -D ${shellQuote(branch)}`, expandedRepo)
+      }
+      const detail = String(error instanceof Error ? error.message : error)
+      const rollbackDetail = rollbackErrors.length > 0 ? `; worktree 回滚失败: ${rollbackErrors.join('; ')}` : ''
+      return { ok: false, error: `无法定格开发基线: ${detail}${rollbackDetail}` }
     }
   } else {
     await saveWorkflow(workflow)

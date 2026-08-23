@@ -138,3 +138,41 @@ test('first development creates from a selected remote branch and freezes it', a
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('a baseline persistence failure rolls back a newly created worktree and branch', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'clickvibe-baseline-rollback-'))
+  const home = join(root, 'home')
+  const remote = join(root, 'remote.git')
+  const repo = join(root, 'repo')
+  const worktreeRoot = join(root, 'worktrees')
+  const target = join(worktreeRoot, 'repo', 'repo-issue-63')
+  const previousHome = process.env.HOME
+  process.env.HOME = home
+  const git = (...args: string[]) => execFileAsync('git', ['-C', repo, ...args])
+  try {
+    await mkdir(join(home, '.clickvibe'), { recursive: true })
+    await execFileAsync('git', ['init', '--bare', remote])
+    await execFileAsync('git', ['clone', remote, repo])
+    await git('config', 'user.name', 'clickvibe-test')
+    await git('config', 'user.email', 'clickvibe-test@example.invalid')
+    await git('commit', '--allow-empty', '-m', 'base')
+    await git('branch', '-M', 'main')
+    await git('push', '-u', 'origin', 'main')
+    await execFileAsync('git', [`--git-dir=${remote}`, 'symbolic-ref', 'HEAD', 'refs/heads/main'])
+    await writeFile(
+      join(home, '.clickvibe', 'config.yaml'),
+      ['repos:', `  o/r: ${repo}`, `worktreeRoot: ${worktreeRoot}`, ''].join('\n'),
+    )
+    await writeFile(join(home, '.clickvibe', 'state'), 'blocks workflow persistence')
+
+    const result = await ensureWorktree(realShellCtx() as never, { owner: 'o', repo: 'r', number: '63' })
+    assert.equal(result.ok, false)
+    if (!result.ok) assert.match(result.error, /无法定格开发基线/)
+    await assert.rejects(execFileAsync('git', ['-C', target, 'rev-parse', 'HEAD']))
+    await assert.rejects(git('show-ref', '--verify', 'refs/heads/repo-issue-63'))
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(root, { recursive: true, force: true })
+  }
+})

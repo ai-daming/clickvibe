@@ -126,11 +126,15 @@ export async function buildReviewPrompt(
   extraContext = '',
 ): Promise<string> {
   let base = frozenRemoteBase(workflow.baseRef) ?? 'origin/main'
+  let fallbackHash = frozenBaseHash(workflow.baseRef)
   if (workflow.prNumber) {
-    const baseRef = await fetchPrBase(ctx, workflow.repoKey, workflow.prNumber)
-    if (baseRef) base = `origin/${baseRef}`
+    const target = await fetchPrBaseTarget(ctx, workflow.repoKey, workflow.prNumber)
+    if (target) {
+      base = `origin/${target.ref}`
+      fallbackHash = target.sha ?? fallbackHash
+    }
   }
-  if (workflow.baseRef) {
+  if (fallbackHash) {
     const available = await runCommand(ctx, `git show-ref --verify --quiet ${shellQuote(`refs/remotes/${base}`)}`, {
       workdir: workflow.worktree,
       timeoutMs: 10_000,
@@ -138,7 +142,7 @@ export async function buildReviewPrompt(
     })
       .then(() => true)
       .catch(() => false)
-    if (!available) base = frozenBaseHash(workflow.baseRef) ?? base
+    if (!available) base = fallbackHash
   }
   const prUrl = workflow.prNumber ? `https://github.com/${workflow.repoKey}/pull/${workflow.prNumber}` : '未关联'
   const contractHash = issueBodyHash(resolved.snapshot.body)
@@ -217,10 +221,19 @@ export async function buildResumePrompt(
 
 /** Fetch a PR's base ref name via gh. */
 export async function fetchPrBase(ctx: Context, repoKey: string, prNumber: string): Promise<string | null> {
+  return (await fetchPrBaseTarget(ctx, repoKey, prNumber))?.ref ?? null
+}
+
+async function fetchPrBaseTarget(
+  ctx: Context,
+  repoKey: string,
+  prNumber: string,
+): Promise<{ ref: string; sha: string | null } | null> {
   try {
     const pr = await fetchPrRestDetail(ctx, repoKey, prNumber)
-    const name = String(pr.base?.ref ?? '').trim()
-    return name === '' ? null : name
+    const ref = String(pr.base?.ref ?? '').trim()
+    const sha = String(pr.base?.sha ?? '').trim()
+    return ref === '' ? null : { ref, sha: sha === '' ? null : sha }
   } catch (error) {
     if (isGithubRateLimitError(error)) throw error
     return null
