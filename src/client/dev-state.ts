@@ -1,6 +1,6 @@
 import React from 'react'
 import { clearedContext, contextToSubmit, toggledContext } from './action-context.ts'
-import { type AuthorizationPreview, authorizationSummary, expectedDevelopSnapshot } from './dev-authorization.ts'
+import { useAgentAuthorization } from './agent-authorization.ts'
 import { useDevStream } from './dev-stream.ts'
 import { type MergeGateFailure, type NextAction, OVERRIDE_REASON_MAX, type Workflow, apiCall } from './domain.ts'
 import { githubCompareUrl } from './runtime.ts'
@@ -30,6 +30,13 @@ export function useDevSection({
   )
   const [contextOpen, setContextOpen] = React.useState(false)
   const [contextText, setContextText] = React.useState('')
+  const authorizationFlow = useAgentAuthorization({
+    url,
+    issue,
+    workflowBaseRef: workflow?.baseRef,
+    setError,
+    setOverrideGates,
+  })
   const autoActionConsumedRef = React.useRef(false)
   const derived = workflow?.derived
   const stage = derived?.status ?? workflow?.stage ?? 'idle'
@@ -46,51 +53,7 @@ export function useDevSection({
     const preferred = workflow?.reviewAgent ?? workflow?.devAgent
     setAgentChoice(preferred ?? 'codex')
   }, [workflow?.reviewAgent, workflow?.devAgent])
-  const authorize = async (
-    action: 'develop' | 'review' | 'resume' | 'merge',
-    agent: 'codex' | 'claude' | null,
-    context = '',
-  ): Promise<{
-    authorizationId: string
-    authorizationDigest: string
-    target?: { prNumber: string; branch: string; head: string; mergeFlag: '--merge' }
-  } | null> => {
-    const expectedSnapshot = expectedDevelopSnapshot(url, issue)
-    const res = await apiCall<
-      | {
-          ok: true
-          authorizationId: string
-          authorizationDigest: string
-          target?: { prNumber: string; branch: string; head: string; mergeFlag: '--merge' }
-          preview: AuthorizationPreview
-        }
-      | { ok: false; error: string; gateFailures?: MergeGateFailure[] }
-    >('authorize', {
-      action,
-      url,
-      ...(agent ? { agent } : {}),
-      context,
-      ...(action === 'develop' ? { expectedSnapshot } : {}),
-    })
-    if (!res.ok) {
-      setError(res.error)
-      setOverrideGates(res.gateFailures ?? null)
-      return null
-    }
-    const summary = authorizationSummary({
-      action,
-      agent,
-      url,
-      authorizationDigest: res.authorizationDigest,
-      preview: res.preview,
-    })
-    if (!window.confirm(summary)) return null
-    return {
-      authorizationId: res.authorizationId,
-      authorizationDigest: res.authorizationDigest,
-      ...(res.target ? { target: res.target } : {}),
-    }
-  }
+  const { authorize } = authorizationFlow
   const clearUserContext = () => {
     const next = clearedContext()
     setContextText(next.text)
@@ -466,6 +429,7 @@ export function useDevSection({
           (effectiveAction.kind === 'none' && derived.issueContractUnknownReason === 'current-contract-unavailable')),
     )
   return {
+    ...authorizationFlow,
     actionButtonClass,
     activeTaskId,
     agentChoice,

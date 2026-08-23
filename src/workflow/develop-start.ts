@@ -55,6 +55,7 @@ import { deriveWorkflowState } from './derive.ts'
 import { checkIssueContract } from './issue-contract.ts'
 import { firstDevelopmentFor } from './repository-state.ts'
 import { recordDevDelivery } from './review-flow.ts'
+import { workflowBaseBranch } from './state-view.ts'
 
 export async function resolveAutomaticFirstDevelopment(
   ctx: Context,
@@ -92,7 +93,12 @@ export async function resolveAutomaticFirstDevelopment(
     events: [],
   }
   const [branchFacts, prLookup] = await Promise.all([
-    readConfiguredBranchFacts(ctx, config, workflow),
+    readConfiguredBranchFacts(
+      ctx,
+      config,
+      workflow,
+      workflow.baseRef ? workflowBaseBranch(workflow.baseRef) : undefined,
+    ),
     fetchGithubPrFact(ctx, repoKey, branch, existing?.prNumber ?? null),
   ])
   if (!prLookup.known) return { ok: false, error: '无法确认开发分支是否已有 PR，自动开发已关门' }
@@ -110,7 +116,13 @@ export async function startDevelop(
   payload: unknown,
   authorizedSnapshot: IssuePromptSnapshot | null,
 ): Promise<{ ok: true; taskId: string; worktree: string; branch: string } | { ok: false; error: string }> {
-  const body = (payload ?? {}) as { url?: unknown; agent?: unknown; context?: unknown; automatic?: unknown }
+  const body = (payload ?? {}) as {
+    url?: unknown
+    agent?: unknown
+    context?: unknown
+    automatic?: unknown
+    baseline?: unknown
+  }
   const url = String(body.url ?? '').trim()
   let agent: DevelopAgent
   try {
@@ -193,7 +205,9 @@ export async function startDevelop(
     if (!decision.ready) return { ok: false, error: `自动开发跳过: ${decision.reason}` }
   }
 
-  const ensured = await ensureWorktree(ctx, parsed)
+  // Automatic selection and dryrun are deliberately pinned to the default sentinel.
+  const requestedBaseline = automatic || agent === 'dryrun' ? undefined : body.baseline
+  const ensured = await ensureWorktree(ctx, parsed, requestedBaseline)
   if (!ensured.ok) return ensured
   const { workflow } = ensured
   // issue 已校验为 OPEN(真实 agent 走授权快照,dryrun 走抓取校验)

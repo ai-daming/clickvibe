@@ -214,6 +214,20 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 .cv-context-toggle:disabled { opacity: 0.45; cursor: not-allowed; }
 .cv-context-input { width: 100%; box-sizing: border-box; border: 1px solid #d0d7de; border-radius: 6px; padding: 6px 8px; font-size: 12px; font-family: inherit; line-height: 1.5; resize: vertical; }
 .cv-tl-user-context { color: #57606a; word-break: break-all; }
+.cv-auth-overlay { position: fixed; z-index: 90; inset: 0; display: grid; place-items: center; padding: 18px; background: rgba(31, 35, 40, .42); }
+.cv-auth-dialog { width: min(460px, 100%); max-height: calc(100vh - 36px); overflow: auto; box-sizing: border-box; padding: 16px; border: 1px solid #d0d7de; border-radius: 10px; background: #fff; box-shadow: 0 12px 36px rgba(31, 35, 40, .24); }
+.cv-auth-title { margin-bottom: 10px; color: #1f2328; font-size: 15px; font-weight: 700; }
+.cv-auth-snapshot { display: grid; gap: 3px; color: #57606a; font-size: 12px; }
+.cv-auth-snapshot strong { color: #1f2328; font-size: 13px; }
+.cv-auth-advanced { margin-top: 12px; padding: 9px 10px; border: 1px solid #d8dee4; border-radius: 7px; background: #f6f8fa; }
+.cv-auth-advanced summary { cursor: pointer; color: #24292f; font-weight: 600; }
+.cv-auth-baseline { display: grid; gap: 5px; margin-top: 9px; color: #57606a; font-size: 12px; }
+.cv-auth-baseline select { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid #afb8c1; border-radius: 6px; background: #fff; color: #1f2328; }
+.cv-auth-frozen, .cv-auth-note, .cv-auth-warning { margin-top: 7px; font-size: 11.5px; line-height: 1.45; }
+.cv-auth-frozen { color: #57606a; }
+.cv-auth-note { color: #0969da; }
+.cv-auth-warning { color: #9a6700; }
+.cv-auth-actions { display: flex; justify-content: flex-end; align-items: center; gap: 10px; margin-top: 14px; }
 `
 
 /** Inject the plugin stylesheet once; returns the disposer. */

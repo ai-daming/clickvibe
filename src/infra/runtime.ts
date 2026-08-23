@@ -151,7 +151,13 @@ export function authorizationInputFromPayload(
   action: AgentAuthorizationInput['action'],
   payload: unknown,
 ): AgentAuthorizationInput {
-  const body = (payload ?? {}) as { url?: unknown; agent?: unknown; context?: unknown; target?: unknown }
+  const body = (payload ?? {}) as {
+    url?: unknown
+    agent?: unknown
+    context?: unknown
+    baseline?: unknown
+    target?: unknown
+  }
   return makeAuthorizationInput({ ...body, action })
 }
 

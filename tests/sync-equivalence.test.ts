@@ -38,7 +38,7 @@ const ctx = realShellCtx() as never
  * 基础仓库:main 上有 base.md;worktree 分支上完成被审提交 R(与 main 改动
  * 不冲突),随后 main 前进 —— 即 review 通过后需要同步的标准现场。
  */
-async function setupSyncScene(options: { branchEditsConflictFile?: boolean } = {}) {
+async function setupSyncScene(options: { branchEditsConflictFile?: boolean; baseBranch?: string } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'clickvibe-sync-equiv-'))
   const remote = join(root, 'remote.git')
   const repo = join(root, 'repo')
@@ -57,8 +57,13 @@ async function setupSyncScene(options: { branchEditsConflictFile?: boolean } = {
   await git('branch', '-M', 'main')
   await git('push', '-u', 'origin', 'main')
   await remoteGit('symbolic-ref', 'HEAD', 'refs/heads/main')
+  const baseBranch = options.baseBranch ?? 'main'
+  if (baseBranch !== 'main') {
+    await git('switch', '-c', baseBranch)
+    await git('push', '-u', 'origin', baseBranch)
+  }
   await git('fetch', 'origin', '--prune')
-  await git('worktree', 'add', '-b', branch, worktree, 'origin/main')
+  await git('worktree', 'add', '-b', branch, worktree, `origin/${baseBranch}`)
   // 被审提交 R:分支侧改动
   await writeFile(join(worktree, options.branchEditsConflictFile ? 'base.md' : 'feature.md'), 'dev work\n')
   await wt('add', '.')
@@ -66,12 +71,12 @@ async function setupSyncScene(options: { branchEditsConflictFile?: boolean } = {
   await wt('push', '-u', 'origin', branch)
   const reviewedShort = (await wt('rev-parse', '--short', 'HEAD')).stdout.trim()
   const reviewedFull = (await wt('rev-parse', 'HEAD')).stdout.trim()
-  // review 通过后 main 前进
-  await git('switch', 'main')
+  // review 通过后所选基线前进
+  await git('switch', baseBranch)
   await writeFile(join(repo, 'base.md'), `base B\n${options.branchEditsConflictFile ? 'main extra\n' : ''}`)
   await git('add', '.')
-  await git('commit', '-m', 'main advances')
-  await git('push', 'origin', 'main')
+  await git('commit', '-m', 'base advances')
+  await git('push', 'origin', baseBranch)
   const remoteBranchHead = async () => (await remoteGit('rev-parse', `refs/heads/${branch}`)).stdout.trim()
   return { root, remote, repo, worktree, branch, git, wt, remoteGit, reviewedShort, reviewedFull, remoteBranchHead }
 }
@@ -90,6 +95,25 @@ test('pure sync merge of R with origin/main is sync-equivalent (issue #48)', asy
     assert.equal(await isSyncEquivalentMerge(ctx, scene.worktree, scene.reviewedFull, head), true)
     // 门禁:H 为纯同步合并时放行
     await assert.doesNotReject(assertReviewHeadMatchesPr(ctx, scene.worktree, scene.reviewedShort, head))
+  } finally {
+    await rm(scene.root, { recursive: true, force: true })
+  }
+})
+
+test('pure sync merge follows a custom frozen baseline', async () => {
+  const scene = await setupSyncScene({ baseBranch: 'release/2.0' })
+  try {
+    await scene.wt('fetch', 'origin', '--prune')
+    await scene.wt('merge', '--no-edit', 'origin/release/2.0')
+    await scene.wt('push', 'origin', scene.branch)
+    const head = await scene.remoteBranchHead()
+    const parents = (await scene.wt('rev-list', '--parents', '-n', '1', head)).stdout.trim().split(/\s+/).slice(1)
+    const reviewed = (await scene.wt('rev-parse', scene.reviewedShort)).stdout.trim()
+    const releaseHead = (await scene.wt('rev-parse', 'origin/release/2.0')).stdout.trim()
+    assert.equal(parents.includes(reviewed), true)
+    assert.equal(parents.includes(releaseHead), true)
+    assert.equal(await isSyncEquivalentMerge(ctx, scene.worktree, scene.reviewedShort, head, 'release/2.0'), true)
+    await assert.doesNotReject(assertReviewHeadMatchesPr(ctx, scene.worktree, scene.reviewedShort, head, 'release/2.0'))
   } finally {
     await rm(scene.root, { recursive: true, force: true })
   }

@@ -249,6 +249,8 @@ export interface AgentAuthorizationInput {
   url: string
   agent: 'codex' | 'claude' | null
   context: string
+  /** First-development remote baseline; when present it is bound into the one-use digest. */
+  baseline?: string
   target?: {
     prNumber: string
     branch: string
@@ -369,6 +371,7 @@ export function makeAuthorizationInput(value: {
   url?: unknown
   agent?: unknown
   context?: unknown
+  baseline?: unknown
   target?: unknown
   override?: unknown
 }): AgentAuthorizationInput {
@@ -380,6 +383,13 @@ export function makeAuthorizationInput(value: {
   if (parsedAgent === 'dryrun') throw new Error('dryrun 不需要高权限授权')
   const url = String(value.url ?? '').trim()
   if (!parseGithubUrl(url)) throw new Error('GitHub URL 无效')
+  let baseline: string | undefined
+  if (action === 'develop' && value.baseline !== undefined) {
+    baseline = String(value.baseline).trim()
+    if (!/^origin\/[A-Za-z0-9._/-]+$/.test(baseline)) {
+      throw new Error('开发基线只接受 origin/* 远端分支')
+    }
+  }
   let target: AgentAuthorizationInput['target']
   if (action === 'merge' && value.target !== undefined) {
     const raw = value.target as Record<string, unknown>
@@ -415,6 +425,7 @@ export function makeAuthorizationInput(value: {
     url,
     agent: parsedAgent,
     context: typeof value.context === 'string' ? value.context.trim() : '',
+    ...(baseline ? { baseline } : {}),
     ...(target ? { target } : {}),
     ...(override ? { override } : {}),
   }

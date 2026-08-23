@@ -7,6 +7,7 @@ import { promisify } from 'node:util'
 import test from 'node:test'
 import { deriveWorkflowState, enrichWorkflowStates, type IssueWorkflow } from '../src/index.ts'
 import { issueBodyHash } from '../src/infra/state.ts'
+import { readConfiguredBranchFacts } from '../src/github/facts.ts'
 
 const execFileAsync = promisify(execFile)
 
@@ -130,6 +131,75 @@ test('state view derives worktree/main/remote hashes, ahead-behind and sync need
     assert.equal(synced.behindBase, 0)
     assert.equal(synced.needsSync, false)
     assert.equal(synced.nextAction.kind, 'create-pr')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('state view compares a custom workflow baseline instead of origin/main', async () => {
+  const { root, repo, worktree, git, wt } = await setupRepo()
+  try {
+    await git('switch', '-c', 'release/2.0')
+    await git('push', '-u', 'origin', 'release/2.0')
+    const releaseBase = (await git('rev-parse', '--short', 'origin/release/2.0')).stdout.trim()
+    await wt('commit', '--allow-empty', '-m', 'release feature')
+
+    await git('switch', 'main')
+    await git('commit', '--allow-empty', '-m', 'main only advance')
+    await git('push', 'origin', 'main')
+    await wt('fetch', 'origin', '--prune')
+    const afterMain = (
+      await deriveWorkflowState(ctx, workflow({ worktree, baseRef: `origin/release/2.0 @ ${releaseBase}` }))
+    ).derived
+    assert.equal(afterMain.baseBranch, 'release/2.0')
+    assert.equal(afterMain.originMainHead, releaseBase)
+    assert.equal(afterMain.behindBase, 0)
+    assert.equal(afterMain.needsSync, false)
+
+    await git('switch', 'release/2.0')
+    await git('commit', '--allow-empty', '-m', 'release advance')
+    await git('push', 'origin', 'release/2.0')
+    await wt('fetch', 'origin', '--prune')
+    const afterRelease = (
+      await deriveWorkflowState(ctx, workflow({ worktree, baseRef: `origin/release/2.0 @ ${releaseBase}` }))
+    ).derived
+    assert.equal(afterRelease.behindBase, 1)
+    assert.equal(afterRelease.needsSync, true)
+
+    await git('branch', 'baseline-probe', 'origin/release/2.0')
+    const probe = workflow({ branch: 'baseline-probe', baseRef: `origin/release/2.0 @ ${releaseBase}` })
+    const customFacts = await readConfiguredBranchFacts(
+      ctx,
+      { repos: { 'o/r': repo }, worktreeRoot: root },
+      probe,
+      'release/2.0',
+    )
+    const defaultFacts = await readConfiguredBranchFacts(ctx, { repos: { 'o/r': repo }, worktreeRoot: root }, probe)
+    assert.equal(customFacts.hasCommits, false)
+    assert.equal(defaultFacts.hasCommits, true)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a deleted remote baseline warns but retains commit and review flow facts', async () => {
+  const { root, worktree, git, wt, baseA } = await setupRepo()
+  try {
+    await git('switch', '-c', 'release/deleted')
+    await git('push', '-u', 'origin', 'release/deleted')
+    await wt('commit', '--allow-empty', '-m', 'feature after frozen base')
+    await git('push', 'origin', '--delete', 'release/deleted')
+    await wt('fetch', 'origin', '--prune')
+
+    const derived = (
+      await deriveWorkflowState(ctx, workflow({ worktree, baseRef: `origin/release/deleted @ ${baseA}` }))
+    ).derived
+    assert.equal(derived.baseRefAvailable, false)
+    assert.equal(derived.originMainHead, null)
+    assert.equal(derived.aheadOfBase, 1)
+    assert.equal(derived.hasCommits, true)
+    assert.equal(derived.needsSync, false)
+    assert.equal(derived.nextAction.kind, 'create-pr')
   } finally {
     await rm(root, { recursive: true, force: true })
   }

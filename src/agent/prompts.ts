@@ -24,6 +24,7 @@ import { githubRest, isGithubRateLimitError } from '../github/rest.ts'
 import { REVIEW_RESULT_RELATIVE_PATH } from '../infra/review-result.ts'
 import { readWorktreeHead } from '../infra/runtime.ts'
 import { type IssueWorkflow, issueBodyHash, saveWorkflow } from '../infra/state.ts'
+import { frozenRemoteBase } from './baseline.ts'
 import { buildStagePrompt, type PromptSnapshot, type SnapshotFreshness, selectReviewFeedback } from './prompt.ts'
 
 export interface ResolvedPromptSnapshot {
@@ -114,7 +115,7 @@ export function buildDevelopPrompt(
 }
 
 /** Build the review prompt: review `git diff base...HEAD` against the issue.
- *  base 取远端主干(origin/main 或 PR base),让 agent 用真实 diff 审查。 */
+ *  A live PR base wins; without a PR, use the frozen workflow baseline. */
 export async function buildReviewPrompt(
   ctx: Context,
   workflow: IssueWorkflow,
@@ -123,8 +124,7 @@ export async function buildReviewPrompt(
   sessionId: string | null = null,
   extraContext = '',
 ): Promise<string> {
-  // 解析 base:PR 有 baseRefName(若记录过),否则尝试 origin/HEAD 主干
-  let base = 'origin/main'
+  let base = frozenRemoteBase(workflow.baseRef) ?? 'origin/main'
   if (workflow.prNumber) {
     const baseRef = await fetchPrBase(ctx, workflow.repoKey, workflow.prNumber)
     if (baseRef) base = `origin/${baseRef}`

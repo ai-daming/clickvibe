@@ -41,6 +41,7 @@ import {
 import { deriveWorkflowState, type WorkflowDerived } from './derive.ts'
 import { checkIssueContract } from './issue-contract.ts'
 import { fetchIssueContract } from './merge-gates.ts'
+import { workflowBaseBranch } from './state-view.ts'
 
 export async function enrichWorkflowStates(
   ctx: Context,
@@ -52,7 +53,12 @@ export async function enrichWorkflowStates(
     workflows.map(async (workflow) => {
       const [prLookup, branchFacts, currentIssue, liveIssueState] = await Promise.all([
         fetchGithubPrFact(ctx, workflow.repoKey, workflow.branch, workflow.prNumber),
-        readConfiguredBranchFacts(ctx, config, workflow),
+        readConfiguredBranchFacts(
+          ctx,
+          config,
+          workflow,
+          workflow.baseRef ? workflowBaseBranch(workflow.baseRef) : undefined,
+        ),
         fetchIssueContract(ctx, workflow.url).catch(() => null),
         fetchGithubIssueState(ctx, workflow.url),
       ])

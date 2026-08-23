@@ -106,6 +106,7 @@ export async function readConfiguredBranchFacts(
   ctx: Context,
   config: ClickVibeConfig,
   workflow: IssueWorkflow,
+  baseBranch?: string,
 ): Promise<{ branchExists?: boolean; hasCommits?: boolean; defaultBranch?: string }> {
   const configuredPath = config.repos[workflow.repoKey]
   if (!configuredPath) return {}
@@ -125,7 +126,7 @@ export async function readConfiguredBranchFacts(
     sandboxPolicy: policy,
   }).catch(() => '')
   if (!branchRef) return { branchExists: false, defaultBranch: defaultRef.replace(/^origin\//, '') || undefined }
-  const baseRef = defaultRef || 'origin/main'
+  const baseRef = baseBranch ? `origin/${baseBranch}` : defaultRef || 'origin/main'
   const hasCommits = await runCommand(ctx, `git rev-list --count ${shellQuote(baseRef)}..${shellQuote(branchRef)}`, {
     workdir: repoPath,
     timeoutMs: 3000,

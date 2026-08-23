@@ -24,11 +24,13 @@ import type { Context } from '@deepseek-ai/cordis'
 import { buildWorktreeAddCommand, decideWorktreeRecovery, shellQuote } from '../infra/develop-core.ts'
 import { expandHome, loadConfig, runCommand } from '../infra/runtime.ts'
 import { appendLog, type IssueWorkflow, issueKey, loadWorkflow, saveWorkflow } from '../infra/state.ts'
+import { resolveSelectedRemoteBase } from './baseline.ts'
 
 /** Create (or reuse) the workflow record and the worktree+branch. */
 export async function ensureWorktree(
   ctx: Context,
   parsed: { owner: string; repo: string; number: string },
+  requestedBaseline?: unknown,
 ): Promise<{ ok: true; workflow: IssueWorkflow; worktree: string; branch: string } | { ok: false; error: string }> {
   const config = await loadConfig()
   const repoKey = `${parsed.owner}/${parsed.repo}`
@@ -91,25 +93,48 @@ export async function ensureWorktree(
     sandboxPolicy: policy,
     timeoutMs: 60_000,
   })
-  let remoteBase = await runCommand(ctx, 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD', {
+  let defaultRemoteBase = await runCommand(ctx, 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD', {
     workdir: expandedRepo,
     sandboxPolicy: policy,
     timeoutMs: 10_000,
   }).catch(() => '')
-  if (!remoteBase) {
+  if (!defaultRemoteBase) {
     const hasMain = await runCommand(
       ctx,
       `git show-ref --verify --quiet ${shellQuote('refs/remotes/origin/main')}; echo $?`,
       { workdir: expandedRepo, sandboxPolicy: policy, timeoutMs: 10_000 },
     )
     if (hasMain.trim() !== '0') return { ok: false, error: '无法确定 origin 默认分支,请设置 origin/HEAD' }
-    remoteBase = 'origin/main'
+    defaultRemoteBase = 'origin/main'
   }
-  const remoteBaseHash = await runCommand(ctx, `git rev-parse --short ${shellQuote(remoteBase)}`, {
-    workdir: expandedRepo,
-    sandboxPolicy: policy,
-    timeoutMs: 10_000,
-  })
+  let remoteBase: string
+  try {
+    remoteBase = resolveSelectedRemoteBase({
+      requested: requestedBaseline,
+      frozen: workflow.baseRef,
+      defaultRemoteBase,
+    })
+  } catch (error) {
+    return { ok: false, error: String(error instanceof Error ? error.message : error) }
+  }
+  const remoteBaseExists =
+    (
+      await runCommand(ctx, `git show-ref --verify --quiet ${shellQuote(`refs/remotes/${remoteBase}`)}; echo $?`, {
+        workdir: expandedRepo,
+        sandboxPolicy: policy,
+        timeoutMs: 10_000,
+      })
+    ).trim() === '0'
+  if (!workflow.baseRef && !remoteBaseExists) {
+    return { ok: false, error: `开发基线不存在或未 fetch: ${remoteBase}` }
+  }
+  const remoteBaseHash = !workflow.baseRef
+    ? await runCommand(ctx, `git rev-parse --short ${shellQuote(remoteBase)}`, {
+        workdir: expandedRepo,
+        sandboxPolicy: policy,
+        timeoutMs: 10_000,
+      })
+    : null
 
   // 幂等建 worktree:用完整恢复决策(处理 reuse/attach/conflict/重建),
   // 而不是简单判断目录是否存在。git 操作需要无沙箱(写主仓库 .git/refs)。
@@ -165,6 +190,7 @@ export async function ensureWorktree(
     })
     await appendLog(workflow.key, 'dev', `[clickvibe] 已将 detached worktree 切换到现有目标分支`)
   } else if (recovery.kind === 'repair') {
+    if (!remoteBaseExists && !branchExists) return { ok: false, error: `基线分支已不存在: ${remoteBase}` }
     // stale 注册:先清理 git 注册记录(路径为空时可顺带删空目录),再重建
     await appendLog(workflow.key, 'dev', `[clickvibe] 修复 stale 注册: ${recovery.reason}`)
     if (pathExists && pathEmpty) {
@@ -189,6 +215,9 @@ export async function ensureWorktree(
     // add-new-branch / add-existing-branch:确保父目录存在后创建/复用
     const { mkdir } = await import('node:fs/promises')
     await mkdir(dirname(normalizedTarget), { recursive: true })
+    if (!remoteBaseExists && recovery.kind === 'add-new-branch') {
+      return { ok: false, error: `基线分支已不存在: ${remoteBase}` }
+    }
     const command = buildWorktreeAddCommand({
       path: normalizedTarget,
       branch,
@@ -207,6 +236,7 @@ export async function ensureWorktree(
 
   // 记录开发基线:首次开发时记下明确的远端默认分支 + fetch 后提交。
   if (!workflow.baseRef) {
+    if (!remoteBaseHash) return { ok: false, error: `无法读取开发基线提交: ${remoteBase}` }
     workflow.baseRef = `${remoteBase} @ ${remoteBaseHash}`
     await appendLog(workflow.key, 'dev', `[clickvibe] 开发基线: ${workflow.baseRef}`)
   }

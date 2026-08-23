@@ -319,6 +319,31 @@ test('server authorization is one-use, bounded, expiring and bound to the frozen
   assert.equal(store.size, 2)
 })
 
+test('develop authorization binds the selected remote baseline', () => {
+  const store = new AuthorizationStore()
+  const input = makeAuthorizationInput({
+    action: 'develop',
+    agent: 'codex',
+    url: 'https://github.com/ai-daming/clickvibe/issues/60',
+    baseline: 'origin/release/2.0',
+  })
+  assert.equal(input.baseline, 'origin/release/2.0')
+  const authorization = store.issue(input, null)
+  assert.equal(
+    store.consume(
+      authorization.id,
+      makeAuthorizationInput({
+        action: 'develop',
+        agent: 'codex',
+        url: input.url,
+        baseline: 'origin/main',
+      }),
+      authorization.digest,
+    ),
+    null,
+  )
+})
+
 test('merge authorization input accepts only a well-formed manual override', () => {
   const base = {
     action: 'merge',

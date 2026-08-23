@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { authorizationSummary, expectedDevelopSnapshot } from '../src/client/dev-authorization.ts'
+import {
+  authorizationSummary,
+  baselineDependencyHint,
+  baselineOptionLabel,
+  expectedDevelopSnapshot,
+} from '../src/client/dev-authorization.ts'
 
 test('develop authorization freezes the visible issue snapshot', () => {
   assert.deepEqual(
@@ -39,4 +44,27 @@ test('authorization confirmation copy preserves develop, review and merge detail
     }),
     /PR: #65.*issue-61.*worktree/s,
   )
+})
+
+test('develop authorization copy and selector labels expose the exact baseline', () => {
+  const summary = authorizationSummary({
+    action: 'develop',
+    agent: 'codex',
+    url: 'https://github.com/o/r/issues/60',
+    authorizationDigest: 'authorization-digest',
+    preview: {
+      digest: 'snapshot-digest',
+      title: 'Issue #60',
+      baseline: 'origin/release/2.0',
+      baselineOptions: ['origin/HEAD', 'origin/release/2.0'],
+      baselineFrozen: false,
+      baselineRef: null,
+      baselineDependencyIssue: 17,
+    },
+  })
+  assert.match(summary, /开发基线: origin\/release\/2\.0/)
+  assert.equal(baselineOptionLabel('origin/HEAD'), 'origin/HEAD（默认）')
+  assert.equal(baselineOptionLabel('origin/release/2.0'), 'origin/release/2.0')
+  assert.equal(baselineDependencyHint(17), '建议补「依赖: Blocked by #17」')
+  assert.equal(baselineDependencyHint(null), null)
 })

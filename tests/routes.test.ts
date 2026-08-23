@@ -307,6 +307,121 @@ test('authorization route freezes the displayed snapshot and consumes tampered c
   assert.equal(replay.status, 403)
 })
 
+test('develop authorization previews fetched baselines and binds a custom selection', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-baseline-preview-'))
+  process.env.HOME = tempHome
+  try {
+    const repo = join(tempHome, 'repo')
+    await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
+    await mkdir(repo, { recursive: true })
+    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), ['repos:', `  o/r: ${repo}`, ''].join('\n'))
+    const item = {
+      url: 'https://github.com/o/r/issues/60',
+      title: 'baseline selection',
+      body: '## 验收标准\n- select release',
+      state: 'OPEN',
+      updatedAt: '2026-08-23T00:00:00Z',
+      comments: [],
+    }
+    const commands: string[] = []
+    const handler = createHandler(async (spec) => {
+      commands.push(spec.command)
+      const api = githubApi(spec.command, { item })
+      if (api) return api
+      if (spec.command === 'git fetch origin --prune')
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      if (spec.command === 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD')
+        return { exitCode: 0, stdout: { text: 'origin/main' }, stderr: { text: '' } }
+      if (spec.command.startsWith('git for-each-ref'))
+        return {
+          exitCode: 0,
+          stdout: { text: 'origin/HEAD\norigin/main\norigin/release/2.0\norigin/clickvibe-issue-17\n' },
+          stderr: { text: '' },
+        }
+      throw new Error(`unexpected command: ${spec.command}`)
+    })
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+    const expectedSnapshot = { ...item }
+    const authorized = await post(
+      handler,
+      '/clickvibe/api/authorize',
+      { action: 'develop', url: item.url, agent: 'codex', baseline: 'origin/release/2.0', expectedSnapshot },
+      headers,
+    )
+    assert.equal(authorized.status, 200, JSON.stringify(authorized.body))
+    assert.deepEqual((authorized.body.preview as { baselineOptions: string[] }).baselineOptions, [
+      'origin/HEAD',
+      'origin/clickvibe-issue-17',
+      'origin/main',
+      'origin/release/2.0',
+    ])
+    assert.equal((authorized.body.preview as { baseline: string }).baseline, 'origin/release/2.0')
+    assert.equal((authorized.body.preview as { baselineFrozen: boolean }).baselineFrozen, false)
+    assert.equal(commands.includes('git fetch origin --prune'), true)
+
+    const dependencyPreview = await post(
+      handler,
+      '/clickvibe/api/authorize',
+      { action: 'develop', url: item.url, agent: 'codex', baseline: 'origin/clickvibe-issue-17', expectedSnapshot },
+      headers,
+    )
+    assert.equal(dependencyPreview.status, 200, JSON.stringify(dependencyPreview.body))
+    assert.equal((dependencyPreview.body.preview as { baselineDependencyIssue: number }).baselineDependencyIssue, 17)
+
+    const missingPreview = await post(
+      handler,
+      '/clickvibe/api/authorize',
+      { action: 'develop', url: item.url, agent: 'codex', baseline: 'origin/not-fetched', expectedSnapshot },
+      headers,
+    )
+    assert.equal(missingPreview.status, 400)
+    assert.match(String(missingPreview.body.error), /不存在或未 fetch/)
+
+    const tampered = await post(
+      handler,
+      '/clickvibe/api/develop',
+      {
+        url: item.url,
+        agent: 'codex',
+        baseline: 'origin/main',
+        authorizationId: authorized.body.authorizationId,
+        authorizationDigest: authorized.body.authorizationDigest,
+      },
+      headers,
+    )
+    assert.equal(tampered.status, 403)
+
+    const frozen = interruptedWorkflow('o-r-60', item.url, join(tempHome, 'worktree'))
+    frozen.baseRef = 'origin/release/2.0 @ abc123'
+    await saveWorkflow(frozen)
+    const frozenPreview = await post(
+      handler,
+      '/clickvibe/api/authorize',
+      { action: 'develop', url: item.url, agent: 'codex', expectedSnapshot },
+      headers,
+    )
+    assert.equal(frozenPreview.status, 200, JSON.stringify(frozenPreview.body))
+    assert.equal((frozenPreview.body.preview as { baselineFrozen: boolean }).baselineFrozen, true)
+    assert.equal((frozenPreview.body.preview as { baselineRef: string }).baselineRef, frozen.baseRef)
+    assert.deepEqual((frozenPreview.body.preview as { baselineOptions: string[] }).baselineOptions, [
+      'origin/release/2.0',
+    ])
+    const replaceFrozen = await post(
+      handler,
+      '/clickvibe/api/authorize',
+      { action: 'develop', url: item.url, agent: 'codex', baseline: 'origin/main', expectedSnapshot },
+      headers,
+    )
+    assert.equal(replaceFrozen.status, 400)
+    assert.match(String(replaceFrozen.body.error), /基线已定格/)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
 test('development rejects a confirmed snapshot when the issue changes before stage start', async () => {
   const url = 'https://github.com/ai-daming/clickvibe/issues/20'
   const oldItem = {
@@ -1284,6 +1399,8 @@ test('a rejected dry-run worktree attempt preserves the previous durable dev his
         return { exitCode: 0, stdout: { text: 'origin/main' }, stderr: { text: '' } }
       if (command === "git rev-parse --short 'origin/main'")
         return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
+      if (command === "git show-ref --verify --quiet 'refs/remotes/origin/main'; echo $?")
+        return { exitCode: 0, stdout: { text: '0' }, stderr: { text: '' } }
       if (command === 'git worktree list --porcelain')
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       if (command.includes("git show-ref --verify --quiet 'refs/heads/repo-issue-905'"))
@@ -1291,7 +1408,11 @@ test('a rejected dry-run worktree attempt preserves the previous durable dev his
       throw new Error(`unexpected command: ${command}`)
     })
 
-    const result = await post(handler, '/clickvibe/api/develop', { url: issue.url, agent: 'dryrun' })
+    const result = await post(handler, '/clickvibe/api/develop', {
+      url: issue.url,
+      agent: 'dryrun',
+      baseline: 'origin/release/must-be-ignored',
+    })
     assert.equal(result.status, 400)
     assert.match(result.body.error ?? '', /worktree 冲突/)
     const history = await readLogHistory('o-r-905', 'dev')
@@ -3203,6 +3324,10 @@ test('develop with user context stays a first development and records the note i
         if (api) return api
         if (spec.command === 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD')
           return { exitCode: 0, stdout: { text: 'origin/main' }, stderr: { text: '' } }
+        if (spec.command === "git show-ref --verify --quiet 'refs/remotes/origin/main'; echo $?")
+          return { exitCode: 0, stdout: { text: '0' }, stderr: { text: '' } }
+        if (spec.command === "git rev-parse --short 'origin/main'")
+          return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
         if (spec.command === 'git rev-parse --short HEAD')
           return { exitCode: 0, stdout: { text: 'f00d123' }, stderr: { text: '' } }
         if (spec.command.startsWith('gh issue comment')) {

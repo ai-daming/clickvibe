@@ -23,6 +23,7 @@ import { fetchIssueRestDetail } from '../github/reads.ts'
 import { type MergeOverrideGate, shellQuote } from '../infra/develop-core.ts'
 import { parseUrl, runCommand } from '../infra/runtime.ts'
 import { type IssueContractSnapshot, type IssueWorkflow, issueBodyHash, type WorkflowEvent } from '../infra/state.ts'
+import { workflowBaseBranch } from './state-view.ts'
 
 export interface ReviewIssueContract {
   title: string
@@ -75,10 +76,10 @@ export interface MergeGateFailure {
 }
 
 /**
- * 判定实时 PR HEAD 是否为「R 与 origin/main 的纯同步合并」(issue #48):
+ * 判定实时 PR HEAD 是否为「R 与冻结远端基线的纯同步合并」(issue #48/#60):
  * H 必须是恰好两个父提交的 merge commit,其中一个父提交精确等于被审提交 R
  * (R 的任何后代 —— 分支侧新提交、叠加 merge —— 都不放行),另一个父提交位于
- * 当前 origin/main 的历史上,且 H 的树与 git merge-tree 对两父的自动合并结果
+ * 当前 origin/<base> 的历史上,且 H 的树与 git merge-tree 对两父的自动合并结果
  * 完全一致 —— 任何手工冲突决断(哪怕一行)都会破坏该等价。
  * 任一 git 事实无法核实时按不满足处理(fail closed)。
  */
@@ -87,6 +88,7 @@ export async function isSyncEquivalentMerge(
   worktree: string,
   reviewedHash: string,
   prHead: string,
+  baseBranch = 'main',
 ): Promise<boolean> {
   if (!existsSync(worktree)) return false
   const policy = { mode: 'danger-full-access' as const, workspaceRoot: worktree }
@@ -110,7 +112,8 @@ export async function isSyncEquivalentMerge(
       return null
     }
   }
-  // 先同步远端:被检的 H(远端分支 HEAD)与最新 origin/main 对象必须在本地可解析
+  const remoteBase = `origin/${baseBranch}`
+  // 先同步远端:被检的 H(远端分支 HEAD)与最新冻结基线对象必须在本地可解析
   if (!(await gitOk('fetch origin --prune', 60_000))) return false
   const head = await gitOut(`rev-parse --verify ${shellQuote(`${prHead}^{commit}`)}`)
   const reviewed = await gitOut(`rev-parse --verify ${shellQuote(`${reviewedHash}^{commit}`)}`)
@@ -121,8 +124,8 @@ export async function isSyncEquivalentMerge(
   if (headOid !== head || parents.length !== 2) return false
   if (!parents.includes(reviewed)) return false
   const mainSide = parents[0] === reviewed ? parents[1] : parents[0]
-  // 另一父必须位于当前 origin/main 历史上(同步来源只能是 main)
-  const mergeBase = await gitOut(`merge-base ${mainSide} origin/main`)
+  // 另一父必须位于当前冻结基线历史上(同步来源只能是该 base)
+  const mergeBase = await gitOut(`merge-base ${mainSide} ${shellQuote(remoteBase)}`)
   if (!mergeBase || mergeBase !== mainSide) return false
   // 树等价:H 的树必须与 R、main 侧的干净自动合并结果逐字节一致
   const autoTree = await gitOut(`merge-tree --write-tree ${reviewed} ${mainSide}`)
@@ -132,7 +135,7 @@ export async function isSyncEquivalentMerge(
 
 /**
  * 合并门禁的 HEAD 一致性校验(issue #48):R 与 H 哈希一致直接放行;不一致时
- * 唯一例外是 H 为 R 与最新 origin/main 的纯同步合并,其余(含 H 比 R 旧、
+ * 唯一例外是 H 为 R 与最新冻结基线的纯同步合并,其余(含 H 比 R 旧、
  * 分叉、分支侧新提交)一律要求重新 Review。
  */
 export async function assertReviewHeadMatchesPr(
@@ -140,10 +143,11 @@ export async function assertReviewHeadMatchesPr(
   worktree: string,
   reviewedHash: string | null,
   prHead: string | null | undefined,
+  baseBranch = 'main',
 ): Promise<void> {
   if (prHead && reviewedHash) {
     if (sameCommitHash(reviewedHash, prHead)) return
-    if (await isSyncEquivalentMerge(ctx, worktree, reviewedHash, prHead)) return
+    if (await isSyncEquivalentMerge(ctx, worktree, reviewedHash, prHead, baseBranch)) return
   }
   throw new Error('合并门禁拒绝:实时 PR HEAD 与最近一次通过的 review 结论哈希不一致,且不满足同步等价,需重新 Review')
 }
@@ -152,7 +156,7 @@ export async function assertReviewHeadMatchesPr(
  * Collect every failing ClickVibe-side merge gate in the historical rejection
  * order (hash first, then contract). GitHub-side protections are not gates here
  * and can never be overridden. The hash gate reuses the issue #48 head check,
- * so a pure sync merge of the reviewed commit with origin/main passes without
+ * so a pure sync merge of the reviewed commit with its frozen base passes without
  * re-review; its message stays in sync with the assert-based wording.
  */
 export async function collectMergeGateFailures(
@@ -163,7 +167,7 @@ export async function collectMergeGateFailures(
   const failures: MergeGateFailure[] = []
   const reviewedHash = latestPassingReviewHash(workflow)
   try {
-    await assertReviewHeadMatchesPr(ctx, workflow.worktree, reviewedHash, prHead)
+    await assertReviewHeadMatchesPr(ctx, workflow.worktree, reviewedHash, prHead, workflowBaseBranch(workflow.baseRef))
   } catch (error) {
     failures.push({
       key: 'review-hash',

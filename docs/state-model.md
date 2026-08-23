@@ -20,8 +20,8 @@
 | **硬** | worktree 有无、registered branch | 本地 git | `git worktree list --porcelain` 交叉约定路径 |
 | **硬** | 目标分支有无(本地/远端) | 本地 git | `git show-ref` / `for-each-ref` |
 | **硬** | 内容更新(不管是否 commit) | 本地 git | `git status --porcelain` + `git log <fork点>..HEAD` |
-| **硬** | fork 点(baseline 曾经是什么) | 本地 git | `git merge-base origin/main <branch>` |
-| **硬** | 应同步基线(现在该是什么) | 本地 git | `origin/HEAD` / `origin/main` 当前 tip |
+| **硬** | fork 点(baseline 曾经是什么) | 本地 git | `workflow.baseRef` 中冻结的远端分支与 hash |
+| **硬** | 应同步基线(现在该是什么) | 本地 git | `baseRef` 对应 `origin/<branch>` 的当前 tip(默认 origin/HEAD) |
 | **硬** | PR 存在 / open / merged / closed | GitHub | `gh pr list --head <branch>` + `gh pr view` |
 | **硬** | GitHub 原生 review(APPROVED/CHANGES_REQUESTED/COMMENTED) | GitHub | `gh pr view --json reviews`(受控词表,字段保证存在) |
 | **软** | review 结论(通过 + 问题列表) | 本地事件 / comment meta | 见降级链 |
@@ -54,7 +54,7 @@
 | 有分支(有内容)+ 无 worktree | 「恢复 worktree 继续开发」 |
 | 有分支(空)+ 无 worktree | 「开始开发」(复用/重建) |
 | worktree 在,但 detached / 错分支 | 「修复 worktree」 |
-| worktree 落后 origin/main | 「同步 worktree」——优先于一切阶段动作 |
+| worktree 落后冻结的远端基线 | 「同步 worktree」——优先于一切阶段动作 |
 
 ### P3 开发生命周期(结构正常)
 
@@ -127,7 +127,7 @@
 ### 原则
 
 1. **基础事实常驻,派生信号按需**——客观存在的信息常显;对比算出来的信息"有情况才显示,没情况不显示"。
-2. **对比对象只有一个:origin/main(远端)**。不显示本地 main(判断不用它,且本地未 pull 会误导)。
+2. **对比对象只有一个:冻结基线对应的 origin/<branch>(远端)**。默认选择 origin/HEAD，解析后行为与原 origin/main 路径一致。
 3. **数字必须带语义**,不能裸数字:"落后 2"要能读成"主干有 2 个新提交我还没有"。
 
 ### 基础事实(常驻 3 项)
@@ -138,7 +138,7 @@
 📍 基线        origin/main @ 8715172                                (从哪出发,定格不变)
 ```
 
-- 基线 = 创建分支时的 `origin/HEAD`(兼容回退 `origin/main`)+ 当时 hash
+- 基线 = 首次开发选择的 fetch 后 `origin/*` 分支(默认 `origin/HEAD`，兼容回退 `origin/main`)+ 当时 hash
 - 基线**永远不变**,主干怎么前进它都定格
 
 ### 派生信号(按需出现)
@@ -146,7 +146,7 @@
 | 状态 | 显示 | 语义 | 按钮 |
 |---|---|---|---|
 | 落后 0 · 领先 0 | 无 | 干净,无需关注 | 无 |
-| 落后 N > 0 | ⚠ 落后 origin/main N | 主干自基线后新增 N 个提交,还没并入 | 「同步 worktree」 |
+| 落后 N > 0 | ⚠ 落后 origin/&lt;base&gt; N | 所选基线分支新增 N 个提交,还没并入 | 「同步 worktree」 |
 | 领先 M > 0 | 领先 M | 比主干多 M 个提交(开发成果/待 review 量) | 无(状态徽章已表达"有内容") |
 | 领先 M · 落后 N(分叉) | 领先 M · 落后 N | 分支与主干分叉,同步将 merge 主干进来 | 「同步 worktree」 |
 | 契约已变 | 📋 issue 契约已改 | issue 正文目标/验收与结论绑定指纹不符,结论过期 | 「重新 Review」 |

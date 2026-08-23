@@ -44,6 +44,7 @@ import {
 import { appendEvent, archiveWorkflow, issueKey, loadWorkflow, saveWorkflowStrict } from '../infra/state.ts'
 import { collectMergeGateFailures, type MergeGateFailure, mergeGateRejection } from './merge-gates.ts'
 import { workflowBaseBranch } from './state-view.ts'
+import { type DevelopBaselinePreview, developBaselinePreview } from './develop-baseline-preview.ts'
 
 export type MergeAuthorizationPreview =
   | {
@@ -113,6 +114,7 @@ export async function authorizeAgent(
     const action = String(body.action ?? '') as AgentAuthorizationInput['action']
     const input = authorizationInputFromPayload(action, payload)
     let snapshot: IssuePromptSnapshot | null = null
+    let baselinePreview: DevelopBaselinePreview | null = null
     let mergePreview: Extract<Awaited<ReturnType<typeof mergeAuthorizationPreview>>, { ok: true }> | null = null
     let mergeOverride: AgentAuthorizationInput['override']
     if (input.action === 'develop') {
@@ -123,6 +125,7 @@ export async function authorizeAgent(
       if (JSON.stringify(body.expectedSnapshot) !== JSON.stringify(snapshot)) {
         return { ok: false, error: 'Issue 内容已变化或未提供完整预览快照,请刷新面板并重新确认' }
       }
+      baselinePreview = await developBaselinePreview(ctx, input.url, input.baseline)
     } else if (input.action === 'merge') {
       const preview = await mergeAuthorizationPreview(ctx, input.url)
       if (preview.ok) {
@@ -182,6 +185,7 @@ export async function authorizeAgent(
               updatedAt: snapshot.updatedAt,
               commentCount: snapshot.comments.length,
               digest: authorization.digest,
+              ...baselinePreview,
             }
           : { action: input.action, agent: input.agent, url: input.url, digest: authorization.digest }),
       ...(mergePreview ? { target: authorizationInput.target } : {}),

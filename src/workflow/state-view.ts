@@ -93,6 +93,8 @@ export interface WorkflowFacts {
   hasUncommittedChanges?: boolean
   hasCommits?: boolean
   hasResumeSession?: boolean
+  /** Frozen remote baseline branch; omitted legacy callers retain main wording. */
+  baseBranch?: string
 }
 
 function action(kind: NextActionKind, label: string, hint: string): NextAction {
@@ -166,6 +168,7 @@ export function workflowStatusLabel(
  *   → stage-specific verdict (develop / review / rework / merge)
  */
 export function deriveNextAction(facts: WorkflowFacts): NextAction {
+  const remoteBase = `origin/${facts.baseBranch ?? 'main'}`
   if (facts.cleanupPending) {
     return action('cleanup', '重试清理', 'PR 已合并,继续完成已确认的合并后清理')
   }
@@ -187,17 +190,17 @@ export function deriveNextAction(facts: WorkflowFacts): NextAction {
 
   // worktree 落后远端基线 → 先同步(唯一动作)。
   // 例外(issue #26):会走 resumeDevelop 的动作都放行——resume/rework 的
-  // agent 有完整 git 权限,prompt 前置「先合并 origin/main、解决冲突」指令,
+  // agent 有完整 git 权限,prompt 前置「先合并冻结基线、解决冲突」指令,
   // 由它自己追平基线。否则同步一旦冲突,意见/会话永远送不到 agent,流水线
   // 死锁。注意返工启动后 stage 已变为 developing:返工中断(失败/停止/超时/
   // Host 重启)时若只放行 review-ready,唯一动作会退回 sync 并再次冲突,
   // 死锁在第一次返工中断后复现,所以 developing 的恢复分支同样放行。
   if (facts.needsSync) {
     if (facts.stage === 'developing') {
-      return action('resume', '恢复开发', 'worktree 落后基线,恢复会话会先合并 origin/main 解决冲突,再继续开发')
+      return action('resume', '恢复开发', `worktree 落后基线,恢复会话会先合并 ${remoteBase} 解决冲突,再继续开发`)
     }
     if (facts.stage === 'review-ready' && facts.reviewPassed === false) {
-      return action('rework', '按意见返工', 'worktree 落后基线,返工会先合并 origin/main 解决冲突,再按意见修改')
+      return action('rework', '按意见返工', `worktree 落后基线,返工会先合并 ${remoteBase} 解决冲突,再按意见修改`)
     }
     // 未完成的冲突合并(MERGE_HEAD 存在):sync 只会因「合并未完成」再次失败,
     // 没有任何非 agent 动作能推进。待 review/复审阶段也一样(PR #33 现场:

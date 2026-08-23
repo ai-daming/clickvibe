@@ -20,6 +20,7 @@
 
 import { existsSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
+import { frozenBaseHash } from '../agent/baseline.ts'
 import { type DeriveOptions, hasMergeConflict, readBranch, readRefShort, readRevCount } from '../infra/git.ts'
 import { liveTasks, readWorktreeHead, runCommand } from '../infra/runtime.ts'
 import { type IssueContractSnapshot, type IssueWorkflow } from '../infra/state.ts'
@@ -68,6 +69,8 @@ export interface WorkflowDerived {
   nextAction: NextAction
   status: 'idle' | 'developing' | 'review-ready' | 'reviewing' | 'passed'
   baseBranch: string
+  /** False when the frozen origin/<base> ref no longer exists after fetch. */
+  baseRefAvailable: boolean
 }
 
 /**
@@ -85,6 +88,8 @@ export async function deriveWorkflowState(
   options: DeriveOptions = {},
 ): Promise<IssueWorkflow & { derived: WorkflowDerived }> {
   const workflowPrNumber = workflow.prNumber == null ? null : String(workflow.prNumber)
+  const baseBranch = workflowBaseBranch(workflow.baseRef, options.defaultBranch ?? 'main')
+  const remoteBaseRef = `origin/${baseBranch}`
   const worktree = workflow.worktree
   const exists = existsSync(worktree)
   const events = workflow.events ?? []
@@ -130,9 +135,10 @@ export async function deriveWorkflowState(
         aheadOfMain = compare.ahead
       }
     }
-    originMainHead = await readRefShort(ctx, worktree, 'origin/main')
-    if (originMainHead) {
-      const compare = await readRevCount(ctx, worktree, 'origin/main', 'HEAD')
+    originMainHead = await readRefShort(ctx, worktree, remoteBaseRef)
+    const baseCompareRef = originMainHead ? remoteBaseRef : frozenBaseHash(workflow.baseRef)
+    if (baseCompareRef) {
+      const compare = await readRevCount(ctx, worktree, baseCompareRef, 'HEAD')
       if (compare) {
         behindBase = compare.behind
         aheadOfBase = compare.ahead
@@ -152,7 +158,7 @@ export async function deriveWorkflowState(
 
   // 有新提交 = worktree HEAD 不在已记录的任何 dev/rework 事件哈希里
   const hasNewCommits = head !== null && lastDevHash !== null && head !== lastDevHash
-  // worktree 落后远端基线(origin/main 或远端同名分支)→ 需要同步
+  // worktree 落后其冻结的远端基线或远端同名分支 → 需要同步。
   const needsSync = behindBase > 0 || (behindUpstream ?? 0) > 0
   // 未完成的冲突合并(MERGE_HEAD 存在):sync 只会再次失败,必须由 agent 收拾(issue #26)
   const mergeConflict = exists && (await hasMergeConflict(ctx, worktree))
@@ -215,9 +221,9 @@ export async function deriveWorkflowState(
     hasUncommittedChanges,
     hasCommits,
     hasResumeSession: workflow.devSessionId !== null,
+    baseBranch,
   }
   const nextAction = deriveNextAction(facts)
-  const baseBranch = workflowBaseBranch(workflow.baseRef, options.defaultBranch ?? 'main')
   const status = deriveWorkflowStatus(facts)
 
   return {
@@ -257,6 +263,7 @@ export async function deriveWorkflowState(
       nextAction,
       status,
       baseBranch,
+      baseRefAvailable: originMainHead !== null,
     },
   }
 }

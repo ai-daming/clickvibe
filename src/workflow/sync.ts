@@ -24,6 +24,7 @@ import { shellQuote } from '../infra/develop-core.ts'
 import { conflictFileSuffix, hasMergeConflict, listConflictFiles } from '../infra/git.ts'
 import { parseUrl, readWorktreeHead, runCommand } from '../infra/runtime.ts'
 import { appendEvent, appendLog, issueKey, loadWorkflow } from '../infra/state.ts'
+import { workflowBaseBranch } from './state-view.ts'
 
 /** Sync a workflow's worktree with the remote base, then push the PR branch.
  *  Keeps the worktree on the latest base so dev/review never target stale code
@@ -48,6 +49,7 @@ export async function syncWorktree(
     return { ok: false, error: '该 issue 尚无 worktree,无法同步' }
   }
   const policy = { mode: 'danger-full-access' as const, workspaceRoot: workflow.worktree }
+  const remoteBase = `origin/${workflowBaseBranch(workflow.baseRef)}`
   try {
     // Do not rely on git merge to reject a dirty tree:Git permits unrelated
     // local changes, which would otherwise let the merge commit be pushed.
@@ -67,9 +69,16 @@ export async function syncWorktree(
       timeoutMs: 60_000,
       sandboxPolicy: policy,
     })
-    await appendLog(workflow.key, 'dev', '[clickvibe] 同步:合并 origin/main…')
+    await runCommand(ctx, `git rev-parse --verify --quiet ${shellQuote(remoteBase)}`, {
+      workdir: workflow.worktree,
+      timeoutMs: 10_000,
+      sandboxPolicy: policy,
+    }).catch(() => {
+      throw new Error(`基线分支已不存在: ${remoteBase}`)
+    })
+    await appendLog(workflow.key, 'dev', `[clickvibe] 同步:合并 ${remoteBase}…`)
     try {
-      await runCommand(ctx, 'git merge --no-edit origin/main', {
+      await runCommand(ctx, `git merge --no-edit ${shellQuote(remoteBase)}`, {
         workdir: workflow.worktree,
         timeoutMs: 60_000,
         sandboxPolicy: policy,
@@ -83,7 +92,7 @@ export async function syncWorktree(
         // 冲突详情透传(issue #26):文件清单记日志、进时间线、随错误返回面板
         const files = await listConflictFiles(ctx, workflow.worktree)
         const suffix = conflictFileSuffix(files)
-        const note = `合并 origin/main 冲突,现场已保留(未回滚),转交返工 agent 处理${suffix}`
+        const note = `合并 ${remoteBase} 冲突,现场已保留(未回滚),转交返工 agent 处理${suffix}`
         await appendLog(workflow.key, 'dev', `[clickvibe] ${note}`)
         const reloaded = await loadWorkflow(workflow.key)
         if (reloaded) {
@@ -97,7 +106,7 @@ export async function syncWorktree(
           ok: false,
           conflict: true,
           files,
-          error: `合并 origin/main 冲突,现场已保留:${message}${suffix}。可直接「按意见返工」,agent 会先解决冲突再修意见`,
+          error: `合并 ${remoteBase} 冲突,现场已保留:${message}${suffix}。可直接「按意见返工」,agent 会先解决冲突再修意见`,
         }
       }
       throw error
@@ -117,7 +126,7 @@ export async function syncWorktree(
         kind: 'note',
         at: new Date().toISOString(),
         hash: head ?? undefined,
-        note: 'worktree 已同步到 origin/main',
+        note: `worktree 已同步到 ${remoteBase}`,
       })
     }
     return { ok: true, worktree: workflow.worktree, branch: workflow.branch, head }

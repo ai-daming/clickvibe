@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { buildStagePrompt, selectReviewFeedback, type PromptSnapshot } from '../src/agent/prompt.ts'
+import { buildReviewPrompt } from '../src/agent/prompts.ts'
 
 const snapshot: PromptSnapshot = {
   url: 'https://github.com/o/r/issues/20',
@@ -116,4 +117,51 @@ test('a current passed review never turns resume into rework from old feedback',
     localIssues: [],
   })
   assert.equal(feedback, null)
+})
+
+test('review without a PR falls back to the frozen workflow baseline', async () => {
+  const prompt = await buildReviewPrompt(
+    {} as never,
+    {
+      repoKey: 'o/r',
+      branch: 'clickvibe-issue-60',
+      worktree: '/tmp/worktree',
+      prNumber: null,
+      baseRef: 'origin/release/2.0 @ abc123',
+    } as never,
+    { snapshot, freshness: 'current' },
+    'def456',
+  )
+  assert.match(prompt, /对比 base: origin\/release\/2\.0/)
+  assert.match(prompt, /git diff origin\/release\/2\.0\.\.\.HEAD/)
+})
+
+test('review keeps the live PR base ahead of the frozen workflow baseline', async () => {
+  const ctx = {
+    shell: {
+      resolve(spec: unknown) {
+        return spec
+      },
+      async run() {
+        return {
+          exitCode: 0,
+          stdout: { text: ['HTTP/2.0 200 OK', '', JSON.stringify({ base: { ref: 'integration' } })].join('\n') },
+          stderr: { text: '' },
+        }
+      },
+    },
+  }
+  const prompt = await buildReviewPrompt(
+    ctx as never,
+    {
+      repoKey: 'o/r',
+      branch: 'clickvibe-issue-60',
+      worktree: '/tmp/worktree',
+      prNumber: '77',
+      baseRef: 'origin/release/2.0 @ abc123',
+    } as never,
+    { snapshot, freshness: 'current' },
+    'def456',
+  )
+  assert.match(prompt, /对比 base: origin\/integration/)
 })
