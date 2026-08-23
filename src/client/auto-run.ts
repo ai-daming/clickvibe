@@ -47,6 +47,27 @@ export function unresolvedFindingCount(workflow: Workflow | null): number {
  * 控制器的暂停(session-interrupted 等)不冒充流程状态;详情视图展示原因,宿主仍持有
  * 运行任务时如实追加「任务继续运行中」。
  */
+/**
+ * 「自动跑到底」按钮的文案与可点性。只要还有任务在跑(autoRun 自己在跑,或
+ * 宿主仍持有开发/review 任务——即使 autoRun 因会话中断已暂停),按钮就必须
+ * 禁用,防止任务运行期间双开自动推进。
+ */
+export function autoRunTrigger(
+  active: Workflow['autoRun'],
+  workflow: Workflow | null,
+): { label: string; disabled: boolean } {
+  if (active?.status === 'running') {
+    return {
+      label: `自动运行 · 第 ${active.step ?? 0} 步 · 已完成 ${active.rounds}/${active.maxRounds} 轮`,
+      disabled: true,
+    }
+  }
+  if (workflow?.runStartedAt != null) {
+    return { label: '任务进行中', disabled: true }
+  }
+  return { label: '自动跑到底', disabled: false }
+}
+
 export function autoRunBanner(
   active: Workflow['autoRun'],
   workflow: Workflow | null,
