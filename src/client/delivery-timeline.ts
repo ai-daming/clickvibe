@@ -24,6 +24,7 @@ const KIND_LABELS: Record<WorkflowEvent['kind'], string> = {
   resume: '恢复',
   note: '备注',
   'merge-override': '人工放行',
+  'auto-run': '自动推进',
 }
 
 function agentLabel(agent: WorkflowEvent['agent']): string | null {

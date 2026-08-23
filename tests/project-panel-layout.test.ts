@@ -15,4 +15,5 @@ test('running duration stays inside the issue row content column', () => {
 test('issue rows keep four grid columns and reserve the last one for the action', () => {
   assert.match(PANEL_CSS, /\.cv-issue-row \{[^}]*grid-template-columns:\s*auto auto minmax\(0, 1fr\) auto;/)
   assert.match(PANEL_CSS, /\.cv-row-action \{[^}]*white-space:\s*nowrap;/)
+  assert.match(PANEL_CSS, /\.cv-row-actions \{[^}]*display:\s*flex;[^}]*white-space:\s*nowrap;/)
 })

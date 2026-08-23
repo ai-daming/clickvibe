@@ -5,6 +5,8 @@ import { fetchIssue } from '../github/issue.ts'
 import { type AgentAuthorization, isLoopbackAddress, parseAgent } from '../infra/develop-core.ts'
 import { consumeAuthorization, githubAwareStatus, privilegedRequestError } from '../infra/runtime.ts'
 import { startDevelop } from './develop-start.ts'
+import { createPullRequest } from './create-pr.ts'
+import { startAutoRun } from './auto-run.ts'
 import { handleCommand, listProjects, stateWorkflows } from './handlers.ts'
 import { authorizeAgent, mergeAndCleanup } from './merge.ts'
 import { fetchRepositoryIssues } from './repository-issues.ts'
@@ -66,6 +68,20 @@ export async function handleApiPost(
     const result = await startDevelop(ctx, payload, authorization?.snapshot ?? null)
     return { status: result.ok ? 200 : 400, body: result }
   }
+  if (method === 'auto') {
+    const securityError = privilegedRequestError(req)
+    if (securityError) return { status: 403, body: { ok: false, error: securityError } }
+    try {
+      const authorization = consumeAuthorization('auto', payload)
+      if (!authorization) {
+        return { status: 403, body: { ok: false, error: '自动跑到底授权无效、已使用或已过期,请重新确认' } }
+      }
+      const result = await startAutoRun(ctx, payload, authorization.snapshot)
+      return { status: result.ok ? 200 : 400, body: result }
+    } catch (error) {
+      return { status: 400, body: { ok: false, error: String(error instanceof Error ? error.message : error) } }
+    }
+  }
   if (method === 'develop/poll') {
     const result = await pollDevelop(payload)
     return { status: result.ok ? 200 : 400, body: result }
@@ -81,6 +97,19 @@ export async function handleApiPost(
       return { status: 400, body: { ok: false, error: String(error instanceof Error ? error.message : error) } }
     }
     const result = await startReview(ctx, payload)
+    return { status: result.ok ? 200 : 400, body: result }
+  }
+  if (method === 'create-pr') {
+    const securityError = privilegedRequestError(req)
+    if (securityError) return { status: 403, body: { ok: false, error: securityError } }
+    try {
+      if (!consumeAuthorization('create-pr', payload)) {
+        return { status: 403, body: { ok: false, error: '创建 PR 授权无效、已使用或已过期,请重新确认' } }
+      }
+    } catch (error) {
+      return { status: 400, body: { ok: false, error: String(error instanceof Error ? error.message : error) } }
+    }
+    const result = await createPullRequest(ctx, payload)
     return { status: result.ok ? 200 : 400, body: result }
   }
   if (method === 'resume') {

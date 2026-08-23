@@ -6,6 +6,7 @@ import { type MergeGateFailure, type NextAction, OVERRIDE_REASON_MAX, type Workf
 import { githubCompareUrl, latestDevelopmentEvent } from './runtime.ts'
 import { effectiveActionForIssue } from './fresh-session.ts'
 import { type GhIssue } from './views/issue-view.tsx'
+import { createPrFromClient } from './create-pr.ts'
 export function useDevSection({
   url,
   issue,
@@ -48,7 +49,7 @@ export function useDevSection({
     setAgentChoice(preferred ?? 'codex')
   }, [workflow?.reviewAgent, workflow?.devAgent])
   const authorize = async (
-    action: 'develop' | 'review' | 'resume' | 'merge',
+    action: 'develop' | 'review' | 'resume' | 'create-pr' | 'merge',
     agent: 'codex' | 'claude' | null,
     context = '',
     freshSession = false,
@@ -223,6 +224,8 @@ export function useDevSection({
       setBusy(null)
     }
   }
+  const createPr = () =>
+    createPrFromClient({ url, authorize: () => authorize('create-pr', null), setBusy, setError, refresh })
   const mergeAndCleanup = async () => {
     setBusy('merging')
     setError(null)
@@ -383,13 +386,7 @@ export function useDevSection({
         void syncWorktree()
         break
       case 'create-pr':
-        if (workflow) {
-          window.open(
-            githubCompareUrl(workflow.repoKey, workflow.branch, workflow.baseRef, workflow.derived?.baseBranch),
-            '_blank',
-            'noopener',
-          )
-        }
+        void createPr()
         break
       case 'merge':
       case 'cleanup':
@@ -441,13 +438,15 @@ export function useDevSection({
       ? '合并并清理中…'
       : busy === 'syncing'
         ? '同步中…'
-        : busy === 'resuming'
-          ? '恢复中…'
-          : busy === 'reviewing'
-            ? 'Review 中…'
-            : busy === 'developing'
-              ? '启动中…'
-              : null
+        : busy === 'creating-pr'
+          ? '创建 PR 中…'
+          : busy === 'resuming'
+            ? '恢复中…'
+            : busy === 'reviewing'
+              ? 'Review 中…'
+              : busy === 'developing'
+                ? '启动中…'
+                : null
   // 人工放行入口(issue #49):门禁拒绝,或 review 已通过但结论/契约过期时。
   const overrideEntryVisible =
     overrideGates !== null ||

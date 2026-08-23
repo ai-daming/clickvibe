@@ -14,6 +14,7 @@
  *   develop <target> [repoKey] [codex|claude|dryrun] [context=<rest>]
  *   review <target> [repoKey] [codex|claude]
  *   rework|resume <target> [repoKey] [context=<rest>]
+ *   auto <target> [dev=codex|claude] [review=codex|claude] [rounds=N] [budget=H] [merge=on|off]
  *   merge|sync|stop <target> [repoKey]
  * 动词支持中文别名(下单开发/开始开发/审查/返工/恢复/合并/同步/停止/状态/
  * 列表/项目/帮助/安全演练),允许「把/请/帮我/用/一下」等语气词;自然语言
@@ -30,6 +31,7 @@ export type CommandAction =
   | 'review'
   | 'rework'
   | 'resume'
+  | 'auto'
   | 'merge'
   | 'sync'
   | 'stop'
@@ -48,6 +50,14 @@ export interface ParsedCommand {
   context: string
   /** Manual-override reason for merge (`override=…`, issue #49); empty = no override. */
   overrideReason: string
+  autoRun: {
+    autoMerge: boolean
+    devAgent: 'codex' | 'claude'
+    reviewAgent: 'codex' | 'claude'
+    maxRounds: number
+    budgetHours: number
+  } | null
+  autoRunAgentOverrides: { dev: boolean; review: boolean } | null
 }
 
 export type ParseResult = { ok: true; command: ParsedCommand } | { ok: false; error: string }
@@ -60,6 +70,7 @@ const VERB_ALIASES: Array<[RegExp, CommandAction | 'dryrun']> = [
   [/\bstatus\b|\bstate\b|^看状态$|^状态$|^进度$/, 'status'],
   [/安全演练|^演练$|\bdry[- ]?run\b/, 'dryrun'],
   [/下单开发|开始开发|^下单$|\bdevelop\b|\bdev\b|^开发$/, 'develop'],
+  [/自动跑到底|^自动推进$|\bauto\b/, 'auto'],
   [/按意见返工|^返工$|\brework\b/, 'rework'],
   [/恢复开发|^恢复$|\bresume\b/, 'resume'],
   [/^合并$|\bmerge\b/, 'merge'],
@@ -77,6 +88,7 @@ const ACTIONS_REQUIRING_TARGET: readonly CommandAction[] = [
   'review',
   'rework',
   'resume',
+  'auto',
   'merge',
   'sync',
   'stop',
@@ -84,7 +96,7 @@ const ACTIONS_REQUIRING_TARGET: readonly CommandAction[] = [
 
 /** Parse one command line. Pure; never throws. */
 export function parseCommand(input: string): ParseResult {
-  const raw = input.trim()
+  const raw = input.trim().replace(/^\/clickvibe\s+/, '')
   if (raw === '') return { ok: false, error: '命令为空。发送 help 查看全部可命令化操作。' }
 
   // context=/override=<rest of line>:作为整体剥离,避免其中的空格破坏分词
@@ -120,7 +132,18 @@ export function parseCommand(input: string): ParseResult {
     agent: null,
     context,
     overrideReason,
+    autoRun: null,
+    autoRunAgentOverrides: null,
   }
+  const autoOptions: NonNullable<ParsedCommand['autoRun']> = {
+    autoMerge: false,
+    devAgent: 'codex',
+    reviewAgent: 'codex',
+    maxRounds: 20,
+    budgetHours: 24,
+  }
+  const autoAgentOverrides = { dev: false, review: false }
+  let sawAutoOption = false
   let sawVerb = false
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i]
@@ -152,6 +175,36 @@ export function parseCommand(input: string): ParseResult {
       command.agent = value
       continue
     }
+    if (/^(dev|review)=(codex|claude)$/.test(token)) {
+      sawAutoOption = true
+      const [key, value] = token.split('=') as ['dev' | 'review', 'codex' | 'claude']
+      if (key === 'dev') {
+        autoOptions.devAgent = value
+        autoAgentOverrides.dev = true
+      } else {
+        autoOptions.reviewAgent = value
+        autoAgentOverrides.review = true
+      }
+      continue
+    }
+    if (/^(rounds|budget)=\S+$/.test(token)) {
+      sawAutoOption = true
+      const [key, rawValue] = token.split('=', 2)
+      const value = Number(rawValue)
+      if (!Number.isFinite(value) || value <= 0 || (key === 'rounds' && !Number.isInteger(value))) {
+        return { ok: false, error: `${key} 必须是${key === 'rounds' ? '正整数' : '正数'}` }
+      }
+      if (key === 'rounds') autoOptions.maxRounds = value
+      else autoOptions.budgetHours = value
+      continue
+    }
+    if (/^merge=\S+$/.test(token)) {
+      sawAutoOption = true
+      const value = token.slice('merge='.length)
+      if (value !== 'on' && value !== 'off') return { ok: false, error: 'merge 只支持 on / off' }
+      autoOptions.autoMerge = value === 'on'
+      continue
+    }
     if (!sawVerb) {
       const alias = VERB_ALIASES.find(([pattern]) => pattern.test(token))
       if (alias) {
@@ -178,7 +231,27 @@ export function parseCommand(input: string): ParseResult {
   if (overrideReason !== '' && command.action !== 'merge') {
     return { ok: false, error: 'override= 只用于 merge 命令的门禁人工放行。' }
   }
+  if (sawAutoOption && command.action !== 'auto') {
+    return { ok: false, error: 'dev=/review=/rounds=/budget=/merge= 只用于 auto 命令。' }
+  }
+  if (command.action === 'auto') {
+    command.autoRun = autoOptions
+    command.autoRunAgentOverrides = autoAgentOverrides
+  }
   return { ok: true, command }
+}
+
+export function applyPreviousAutoRunAgents(
+  config: NonNullable<ParsedCommand['autoRun']>,
+  overrides: NonNullable<ParsedCommand['autoRunAgentOverrides']>,
+  previous: { devAgent?: 'codex' | 'claude' | null; reviewAgent?: 'codex' | 'claude' | null } | null,
+): NonNullable<ParsedCommand['autoRun']> {
+  const devAgent = overrides.dev ? config.devAgent : (previous?.devAgent ?? config.devAgent)
+  return {
+    ...config,
+    devAgent,
+    reviewAgent: overrides.review ? config.reviewAgent : (previous?.reviewAgent ?? previous?.devAgent ?? devAgent),
+  }
 }
 
 export const COMMAND_HELP_TEXT = [
@@ -191,6 +264,7 @@ export const COMMAND_HELP_TEXT = [
   '  review <目标> [repoKey] [agent]     启动 review',
   '  rework <目标> [context=…]           按 review 意见返工',
   '  resume <目标> [context=…]           恢复中断的开发会话',
+  '  auto <目标> [dev=… review=… rounds=20 budget=24 merge=off]  自动跑到底',
   '  sync <目标>                         同步 worktree 到远端基线',
   '  stop <目标>                         停止运行中的任务',
   '  merge <目标>                        合并 PR 并清理(需二次确认)',
@@ -313,6 +387,7 @@ export interface CommandAuthorizationPreview {
     reason?: string
     gates?: { key?: string; message?: string }[]
   }
+  autoRun?: ParsedCommand['autoRun']
 }
 
 export function formatConfirmationPreview(
@@ -331,6 +406,19 @@ export function formatConfirmationPreview(
       `更新时间:${preview.updatedAt || '未知'} · 评论 ${preview.commentCount ?? 0} 条`,
       '',
       '请用户在对话中明确确认(如「确认」)。确认后携带授权原样重发命令即可执行;快照在执行前还会再次校验,过期则需重新预览。',
+      expireNote,
+    ].join('\n')
+  }
+  if (action === 'auto') {
+    const config = preview.autoRun
+    return [
+      '即将启动自动跑到底(每步完成后重新观察权威事实):',
+      `- 目标:${preview.title ?? preview.url ?? ''}`,
+      `- 开发 agent:${config?.devAgent ?? '?'} · Review agent:${config?.reviewAgent ?? '?'}`,
+      `- 轮次上限:${config?.maxRounds ?? '?'} · 总预算:${config?.budgetHours ?? '?'} 小时`,
+      `- 自动合并:${config?.autoMerge ? '开(仍执行全部门禁)' : '关(默认停在待合并)'}`,
+      '',
+      '请用户明确确认后携带一次性授权原样重发命令。',
       expireNote,
     ].join('\n')
   }
