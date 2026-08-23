@@ -90,6 +90,7 @@ test('every text entry surface explicitly binds its background, text and placeho
 test('terminal keeps an explicit fixed dark palette outside theme overrides', () => {
   const terminal = between('/* Fixed dark terminal palette: start */', '/* Fixed dark terminal palette: end */')
   assert.match(terminal, /\.cv-terminal\s*\{[^}]*background:\s*#0d1117;/s)
+  assert.match(terminal, /\.cv-terminal-head \.cv-running-duration\s*\{[^}]*color:\s*inherit;[^}]*font:\s*inherit;/s)
   assert.doesNotMatch(terminal, /var\(--dsw-/)
   assert.doesNotMatch(PANEL_CSS, /body\[data-ds-dark-theme\][^{]*\.cv-terminal/)
 })

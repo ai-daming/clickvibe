@@ -128,6 +128,7 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 /* Fixed dark terminal palette: start */
 .cv-terminal { position: relative; display: flex; flex-direction: column; min-height: 0; overflow: hidden; border: 1px solid #30363d; border-radius: 8px; background: #0d1117; color: #e6edf3; box-shadow: inset 0 1px 0 rgb(255 255 255 / 4%); }
 .cv-terminal-head { min-height: 32px; padding: 0 8px 0 10px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid #21262d; background: #161b22; font: 600 10.5px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; color: #8b949e; }
+.cv-terminal-head .cv-running-duration { color: inherit; font: inherit; }
 .cv-terminal-agent { color: #58a6ff; text-transform: uppercase; letter-spacing: .04em; }
 .cv-terminal-agent[data-agent="claude"] { color: #f2a65a; }
 .cv-terminal-spacer { flex: 1; }

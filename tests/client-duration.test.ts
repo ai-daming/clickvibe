@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -20,4 +21,21 @@ test('running and delivery duration components render their display contracts', 
     /耗时 12m34s/,
   )
   assert.equal(renderToStaticMarkup(React.createElement(DeliveryDuration, { kind: 'note', durationMs: 754_000 })), '')
+})
+
+test('one running-duration component serves detail, list and terminal header', () => {
+  assert.match(
+    renderToStaticMarkup(React.createElement(RunningDuration, { startedAt: 1_000, now: 2_000, compact: true })),
+    /aria-label="任务已运行时长"[^>]*>00:00:01</,
+  )
+
+  for (const path of [
+    '../src/client/views/dev-section.tsx',
+    '../src/client/views/project-panel.tsx',
+    '../src/client/views/live-terminal.tsx',
+  ]) {
+    const source = readFileSync(new URL(path, import.meta.url), 'utf8')
+    assert.match(source, /import \{ RunningDuration \} from '\.\.\/duration\.ts'/)
+    assert.match(source, /<RunningDuration\b/)
+  }
 })

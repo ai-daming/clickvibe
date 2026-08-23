@@ -13,7 +13,15 @@ export function deliveryDurationLabel(milliseconds: number): string {
   return `${seconds}s`
 }
 
-export function RunningDuration({ startedAt, now }: { startedAt: number; now?: number }) {
+export function RunningDuration({
+  startedAt,
+  now,
+  compact = false,
+}: {
+  startedAt: number
+  now?: number
+  compact?: boolean
+}) {
   const [current, setCurrent] = React.useState(() => now ?? Date.now())
 
   React.useEffect(() => {
@@ -25,8 +33,8 @@ export function RunningDuration({ startedAt, now }: { startedAt: number; now?: n
 
   return React.createElement(
     'span',
-    { className: 'cv-running-duration' },
-    `正在运行 · 已运行 ${formatElapsed(current - startedAt)}`,
+    { className: 'cv-running-duration', 'aria-label': compact ? '任务已运行时长' : undefined },
+    `${compact ? '' : '正在运行 · 已运行 '}${formatElapsed(current - startedAt)}`,
   )
 }
 
