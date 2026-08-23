@@ -41,3 +41,21 @@ export function synchronizeAutoRunDraft(
 export function unresolvedFindingCount(workflow: Workflow | null): number {
   return workflow?.autoRun?.unresolved.reduce((sum, round) => sum + round.issues.length, 0) ?? 0
 }
+
+/**
+ * 自动推进横幅文案。列表行(compact)不展示暂停横幅——行的真实状态由交付阶段徽章表达,
+ * 控制器的暂停(session-interrupted 等)不冒充流程状态;详情视图展示原因,宿主仍持有
+ * 运行任务时如实追加「任务继续运行中」。
+ */
+export function autoRunBanner(
+  active: Workflow['autoRun'],
+  workflow: Workflow | null,
+  options: { compact: boolean },
+): string | null {
+  if (!active) return null
+  if (active.status === 'completed') return '已到待合并'
+  if (active.status !== 'paused') return null
+  if (options.compact) return null
+  const label = AUTO_RUN_PAUSE_LABEL[active.pausedReason ?? ''] ?? active.pausedReason
+  return workflow?.runStartedAt != null ? `已暂停:${label} · 任务继续运行中` : `已暂停:${label}`
+}
