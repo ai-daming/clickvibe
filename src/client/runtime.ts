@@ -6,7 +6,15 @@
  * workflow/delivery-publication.ts. tests/runtime-contract.test.ts compares
  * both boundaries so a one-sided protocol or label change fails CI.
  */
+import type { WorkflowEvent } from './domain.ts'
+
 export type AgentKind = 'codex' | 'claude'
+
+export function latestDevelopmentEvent(events: WorkflowEvent[]): WorkflowEvent | undefined {
+  return [...events]
+    .reverse()
+    .find((event) => event.kind === 'dev' || event.kind === 'rework' || event.kind === 'resume')
+}
 export type LiveLogKind =
   | 'system'
   | 'stage'

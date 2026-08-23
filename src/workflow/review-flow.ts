@@ -28,6 +28,7 @@ import { githubRest } from '../github/rest.ts'
 import { approvePassedReview } from '../github/review-approval.ts'
 import { buildFreshAgentCommand, buildResumeAgentCommand, parseAgent, shellQuote } from '../infra/develop-core.ts'
 import { decodeLiveLogLine } from '../infra/live-output.ts'
+import { readDeliveryStats } from '../infra/git.ts'
 import { clearReviewResultFile, loadReviewResult, REVIEW_RESULT_RELATIVE_PATH } from '../infra/review-result.ts'
 import { type LiveTask, parseUrl, readWorktreeHead, reviewTaskGate, runCommand, taskId } from '../infra/runtime.ts'
 import {
@@ -46,8 +47,10 @@ import {
   type WorkflowEvent,
 } from '../infra/state.ts'
 import { buildDevComment, buildReviewComment } from './delivery-comment.ts'
-import { extractGithubCommentUrl } from './delivery-publication.ts'
+import { deriveEventRound } from './delivery-audit.ts'
+import { extractGithubCommentId, extractGithubCommentUrl } from './delivery-publication.ts'
 import { type ReviewIssueContract } from './merge-gates.ts'
+import { workflowBaseBranch } from './state-view.ts'
 
 /** Start a review task on the dev branch with codex/claude. */
 export async function startReview(
@@ -218,6 +221,13 @@ export async function startReview(
       const { passed, issues } = resolved.result
       const reloaded = await loadWorkflow(workflow.key)
       if (reloaded) {
+        const round = deriveEventRound(reloaded.events)
+        const stats = await readDeliveryStats(
+          ctx,
+          reloaded.worktree,
+          workflowBaseBranch(reloaded.baseRef),
+          reviewedHead,
+        )
         reloaded.reviewResult = { passed, issues }
         reloaded.stage = passed ? 'passed' : 'review-ready' // 有问题 → 可回开发(rework)
         // 记录 review 会话 id(供下次 review 续会话)
@@ -227,6 +237,10 @@ export async function startReview(
           at: new Date().toISOString(),
           durationMs,
           hash: reviewedHead,
+          round,
+          agent,
+          ...(stats ? { stats } : {}),
+          taskId: live.taskId,
           verdict: { passed, issues },
           issueContract: reviewIssue.contract,
           note: `${agent} review${passed ? ' 通过' : ` 发现 ${issues.length} 个问题`}`,
@@ -241,6 +255,8 @@ export async function startReview(
           passed,
           issues,
           agent,
+          round,
+          stats,
           at: event.at,
         })
         await publishDeliveryComment(ctx, reloaded, event, body)
@@ -288,19 +304,28 @@ export async function recordDevDelivery(
   agent: 'codex' | 'claude',
   head: string | null,
   fixedIssues: string[],
-  kind: 'dev' | 'rework',
+  kind: 'dev' | 'rework' | 'resume',
   userContext = '',
+  taskIdValue?: string,
   durationMs?: number,
 ): Promise<void> {
   if (!workflow.prNumber) {
     const pr = await detectLinkedPr(ctx, workflow.repoKey, workflow.branch)
     if (pr) workflow.prNumber = pr
   }
+  const round = deriveEventRound(workflow.events)
+  const stats = head
+    ? await readDeliveryStats(ctx, workflow.worktree, workflowBaseBranch(workflow.baseRef), head)
+    : undefined
   const event: WorkflowEvent = {
     kind,
     at: new Date().toISOString(),
     ...(Number.isFinite(durationMs) ? { durationMs: Math.max(0, durationMs ?? 0) } : {}),
     hash: head ?? undefined,
+    round,
+    agent,
+    ...(stats ? { stats } : {}),
+    ...(taskIdValue ? { taskId: taskIdValue } : {}),
     fixed: fixedIssues.length,
     note: `${agent} 完成开发${kind === 'rework' ? '(按 review 意见返工)' : ''}`,
     // 用户附加说明只进本地事件时间线,不进 GitHub 评论(issue #54)。
@@ -313,9 +338,50 @@ export async function recordDevDelivery(
     issueNumber,
     fixedIssues,
     agent,
+    round,
+    stats,
     at: event.at,
   })
   await publishDeliveryComment(ctx, workflow, event, body)
+  if (fixedIssues.length > 0 && kind !== 'dev') await markPreviousReviewFixed(ctx, workflow, round, agent)
+}
+
+async function markPreviousReviewFixed(
+  ctx: Context,
+  workflow: IssueWorkflow,
+  fixedRound: number,
+  fallbackAgent: 'codex' | 'claude',
+): Promise<void> {
+  const reviewEvent = [...workflow.events]
+    .reverse()
+    .find((candidate) => candidate.kind === 'review' && candidate.verdict?.passed === false)
+  if (!reviewEvent?.verdict) return
+  const commentUrl = reviewEvent.publication?.url ?? workflow.reviewResult?.commentUrl
+  const commentId = commentUrl ? extractGithubCommentId(commentUrl) : undefined
+  if (!commentId) return
+  const issueNumber = parseUrl(workflow.url)?.number ?? 'unknown'
+  const body = buildReviewComment({
+    commit: reviewEvent.hash ?? 'unknown',
+    issueNumber,
+    passed: false,
+    issues: reviewEvent.verdict.issues,
+    agent: reviewEvent.agent ?? workflow.reviewAgent ?? fallbackAgent,
+    round: reviewEvent.round ?? Math.max(1, fixedRound - 1),
+    fixedRound,
+    stats: reviewEvent.stats,
+    at: reviewEvent.at,
+  })
+  try {
+    await runCommand(
+      ctx,
+      `gh api ${shellQuote(`repos/${workflow.repoKey}/issues/comments/${commentId}`)} --method PATCH --input -`,
+      { stdin: JSON.stringify({ body }), timeoutMs: 30000 },
+    )
+    await appendLog(workflow.key, 'dev', `[clickvibe] 已标注上一轮 Review 评论:第 ${fixedRound} 轮已修复`)
+  } catch (error) {
+    const message = String(error instanceof Error ? error.message : error).slice(0, 500)
+    await appendLog(workflow.key, 'dev', `[clickvibe] Review 评论修复标注失败(不影响交付): ${message}`)
+  }
 }
 
 /** Publish a public delivery node without pretending a failed write succeeded. */

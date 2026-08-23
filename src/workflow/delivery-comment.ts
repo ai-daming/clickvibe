@@ -1,8 +1,12 @@
+import type { DeliveryStats } from '../infra/contracts.ts'
+
 export interface DevCommentInput {
   commit: string
   issueNumber: string
   fixedIssues: string[]
   agent: 'codex' | 'claude'
+  round: number
+  stats?: DeliveryStats
   at: string
 }
 
@@ -12,7 +16,16 @@ export interface ReviewCommentInput {
   passed: boolean
   issues: string[]
   agent: 'codex' | 'claude'
+  round: number
+  fixedRound?: number
+  stats?: DeliveryStats
   at: string
+}
+
+function statsMeta(stats: DeliveryStats | undefined): string {
+  return stats
+    ? `commits=${stats.commits.length} filesChanged=${stats.filesChanged} insertions=${stats.insertions} deletions=${stats.deletions}`
+    : 'unavailable'
 }
 
 export function buildDevComment(input: DevCommentInput): string {
@@ -21,7 +34,7 @@ export function buildDevComment(input: DevCommentInput): string {
       ? [
           `已处理上一轮 Review 的 ${input.fixedIssues.length} 个问题:`,
           '',
-          ...input.fixedIssues.map((issue) => `- ${issue}`),
+          ...input.fixedIssues.map((issue) => `- [已于第 ${input.round} 轮修复] ${issue}`),
         ]
       : ['已完成本轮 Issue 需求实现。']
   return [
@@ -31,6 +44,8 @@ export function buildDevComment(input: DevCommentInput): string {
     `- issue: #${input.issueNumber}`,
     `- fixed: ${input.fixedIssues.length}`,
     '- next: review',
+    `- round: ${input.round}`,
+    `- stats: ${statsMeta(input.stats)}`,
     `- agent: ${input.agent}`,
     `- at: ${input.at}`,
     '',
@@ -52,9 +67,13 @@ export function buildReviewComment(input: ReviewCommentInput): string {
     : [
         `## ❌ ClickVibe Review 发现问题(${input.issues.length} 条)`,
         '',
-        ...input.issues.map((issue) => `- ${issue}`),
+        ...input.issues.map((issue) =>
+          input.fixedRound === undefined ? `- ${issue}` : `- [已于第 ${input.fixedRound} 轮修复] ${issue}`,
+        ),
         '',
-        '下一步:请重新开发并处理上述问题。',
+        input.fixedRound === undefined
+          ? '下一步:请重新开发并处理上述问题。'
+          : `第 ${input.fixedRound} 轮修复已交付，请 Review 当前提交。`,
       ]
   return [
     '== Review Meta ==',
@@ -63,6 +82,9 @@ export function buildReviewComment(input: ReviewCommentInput): string {
     `- issue: #${input.issueNumber}`,
     `- passed: ${input.passed}`,
     `- next: ${input.passed ? 'merge' : 'rework'}`,
+    `- round: ${input.round}`,
+    ...(input.fixedRound === undefined ? [] : [`- fixed-round: ${input.fixedRound}`]),
+    `- stats: ${statsMeta(input.stats)}`,
     `- agent: ${input.agent}`,
     `- at: ${input.at}`,
     '',
