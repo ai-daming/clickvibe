@@ -531,6 +531,20 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
     workflow.branch = 'r-issue-23'
     workflow.stage = 'passed'
     workflow.reviewResult = { passed: true, issues: [] }
+    workflow.autoRun = {
+      status: 'running',
+      autoMerge: true,
+      devAgent: 'codex',
+      reviewAgent: 'claude',
+      maxRounds: 20,
+      budgetHours: 24,
+      startedAt: '2026-08-22T00:00:00Z',
+      deadline: '2026-08-23T00:00:00Z',
+      rounds: 1,
+      unresolved: [],
+      lastObservedAt: null,
+      pausedReason: null,
+    }
     const reviewedBody = '## 验收标准\n- merge contract'
     workflow.events = [
       {
@@ -660,6 +674,11 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
     const archived = await loadAllArchivedWorkflows()
     assert.equal(archived.length, 1)
     assert.equal(archived[0].delivery?.status, 'archived')
+    assert.equal(archived[0].autoRun?.status, 'completed')
+    assert.equal(
+      archived[0].events.some((event) => event.kind === 'auto-run' && /自动合并.*收敛/.test(event.note ?? '')),
+      true,
+    )
     assert.deepEqual(archived[0].delivery?.cleanup, {
       worktree: true,
       localBranch: true,

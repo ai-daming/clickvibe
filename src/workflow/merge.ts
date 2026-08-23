@@ -414,11 +414,33 @@ export async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): P
     }
   }
 
+  const completingAutoRun = workflow.autoRun?.status === 'running' && workflow.autoRun.autoMerge
+  const priorObservedAt = workflow.autoRun?.lastObservedAt ?? null
+  const completionAt = new Date().toISOString()
+  if (completingAutoRun && workflow.autoRun) {
+    workflow.autoRun.status = 'completed'
+    workflow.autoRun.pausedReason = null
+    workflow.autoRun.lastObservedAt = completionAt
+    workflow.events.push({
+      kind: 'auto-run',
+      at: completionAt,
+      round: workflow.autoRun.rounds,
+      note: '自动跑到底已自动合并并完成清理,交付收敛',
+    })
+  }
   try {
     delivery.status = 'archived'
     delete delivery.lastError
     await archiveWorkflow(workflow)
   } catch (error) {
+    if (completingAutoRun && workflow.autoRun) {
+      workflow.autoRun.status = 'running'
+      workflow.autoRun.lastObservedAt = priorObservedAt
+      const eventIndex = workflow.events.findIndex(
+        (event) => event.kind === 'auto-run' && event.at === completionAt && event.note?.includes('自动合并'),
+      )
+      if (eventIndex >= 0) workflow.events.splice(eventIndex, 1)
+    }
     return failCleanup('归档 workflow', error)
   }
   return { ok: true, merged: true, archived: true, prNumber: pr.number }

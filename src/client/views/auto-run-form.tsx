@@ -2,7 +2,7 @@ import React from 'react'
 import { type Workflow, apiCall } from '../domain.ts'
 import { expectedDevelopSnapshot } from '../dev-authorization.ts'
 import type { GhIssue } from './issue-view.tsx'
-import { AUTO_RUN_PAUSE_LABEL, autoRunDefaults, unresolvedFindingCount } from '../auto-run.ts'
+import { AUTO_RUN_PAUSE_LABEL, autoRunDefaults, synchronizeAutoRunDraft, unresolvedFindingCount } from '../auto-run.ts'
 
 export interface AutoRunFormProps {
   url: string
@@ -22,7 +22,22 @@ export function AutoRunForm({ url, issue, workflow, compact = false, onStarted }
   const [reviewAgent, setReviewAgent] = React.useState<'codex' | 'claude'>(defaults.reviewAgent)
   const [maxRounds, setMaxRounds] = React.useState(defaults.maxRounds)
   const [budgetHours, setBudgetHours] = React.useState(defaults.budgetHours)
+  const edited = React.useRef(false)
   const active = workflow?.autoRun
+
+  React.useEffect(() => {
+    const next = synchronizeAutoRunDraft(
+      { autoMerge, devAgent, reviewAgent, maxRounds, budgetHours },
+      workflow,
+      edited.current,
+    )
+    if (edited.current) return
+    setAutoMerge(next.autoMerge)
+    setDevAgent(next.devAgent)
+    setReviewAgent(next.reviewAgent)
+    setMaxRounds(next.maxRounds)
+    setBudgetHours(next.budgetHours)
+  }, [autoMerge, budgetHours, devAgent, maxRounds, reviewAgent, workflow, workflow?.devAgent, workflow?.reviewAgent])
 
   const start = async () => {
     setBusy(true)
@@ -93,14 +108,26 @@ export function AutoRunForm({ url, issue, workflow, compact = false, onStarted }
         <div className="cv-auto-run-form">
           <label>
             开发 agent
-            <select value={devAgent} onChange={(event) => setDevAgent(event.target.value as 'codex' | 'claude')}>
+            <select
+              value={devAgent}
+              onChange={(event) => {
+                edited.current = true
+                setDevAgent(event.target.value as 'codex' | 'claude')
+              }}
+            >
               <option value="codex">Codex</option>
               <option value="claude">Claude</option>
             </select>
           </label>
           <label>
             Review agent
-            <select value={reviewAgent} onChange={(event) => setReviewAgent(event.target.value as 'codex' | 'claude')}>
+            <select
+              value={reviewAgent}
+              onChange={(event) => {
+                edited.current = true
+                setReviewAgent(event.target.value as 'codex' | 'claude')
+              }}
+            >
               <option value="codex">Codex</option>
               <option value="claude">Claude</option>
             </select>
@@ -112,7 +139,10 @@ export function AutoRunForm({ url, issue, workflow, compact = false, onStarted }
               min={1}
               step={1}
               value={maxRounds}
-              onChange={(event) => setMaxRounds(Number(event.target.value))}
+              onChange={(event) => {
+                edited.current = true
+                setMaxRounds(Number(event.target.value))
+              }}
             />
           </label>
           <label>
@@ -122,11 +152,21 @@ export function AutoRunForm({ url, issue, workflow, compact = false, onStarted }
               min={0.1}
               step={0.1}
               value={budgetHours}
-              onChange={(event) => setBudgetHours(Number(event.target.value))}
+              onChange={(event) => {
+                edited.current = true
+                setBudgetHours(Number(event.target.value))
+              }}
             />
           </label>
           <label className="cv-auto-run-check">
-            <input type="checkbox" checked={autoMerge} onChange={(event) => setAutoMerge(event.target.checked)} />
+            <input
+              type="checkbox"
+              checked={autoMerge}
+              onChange={(event) => {
+                edited.current = true
+                setAutoMerge(event.target.checked)
+              }}
+            />
             自动合并(显式开启)
           </label>
           <button disabled={busy || maxRounds < 1 || budgetHours <= 0} onClick={() => void start()}>

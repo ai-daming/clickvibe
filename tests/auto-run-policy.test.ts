@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { aggregateAutoRunReviews, decideAutoRun, validateAutoRunConfig } from '../src/workflow/auto-run-policy.ts'
+import {
+  aggregateAutoRunReviews,
+  autoRunFailureReason,
+  autoRunRetryDelay,
+  decideAutoRun,
+  validateAutoRunConfig,
+} from '../src/workflow/auto-run-policy.ts'
 import type { AutoRunState, WorkflowEvent } from '../src/infra/state.ts'
 
 function running(overrides: Partial<AutoRunState> = {}): AutoRunState {
@@ -149,4 +155,16 @@ test('deadline and task outcomes converge to explicit pause reasons', () => {
     decideAutoRun({ autoRun: running(), nextAction, now: 0, reviewEvents: [], taskOutcome: 'failed' }).reason,
     'session-interrupted',
   )
+})
+
+test('temporary observation gaps retry within the wall-clock budget', () => {
+  const deadline = Date.parse('2026-08-24T00:00:00Z')
+  assert.equal(autoRunRetryDelay(deadline - 60_000, deadline), 5_000)
+  assert.equal(autoRunRetryDelay(deadline - 2_000, deadline), 2_000)
+  assert.equal(autoRunRetryDelay(deadline, deadline), null)
+})
+
+test('cleanup failures remain distinct from merge gate rejection', () => {
+  assert.equal(autoRunFailureReason('cleanup', { ok: false, merged: true, cleanupPending: true }), 'cleanup-failed')
+  assert.equal(autoRunFailureReason('merge', { ok: false, gateFailures: [{}] }), 'merge-gate-rejected')
 })

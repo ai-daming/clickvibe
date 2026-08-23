@@ -64,6 +64,7 @@ export interface Workflow {
       | 'authorization-denied'
       | 'sync-conflict'
       | 'merge-gate-rejected'
+      | 'cleanup-failed'
       | 'task-timeout'
       | 'budget-exhausted'
       | 'rounds-exhausted'

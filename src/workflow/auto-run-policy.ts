@@ -10,6 +10,7 @@ export interface AutoRunConfig {
 }
 
 export type AutoRunTaskOutcome = 'done' | 'failed' | 'stopped' | 'timed_out'
+export const AUTO_RUN_RETRY_MS = 5_000
 
 export type AutoRunDecision =
   | { kind: 'manual' }
@@ -70,6 +71,22 @@ export function aggregateAutoRunReviews(
 
 function paused(reason: AutoRunPausedReason, reviews: ReturnType<typeof aggregateAutoRunReviews>): AutoRunDecision {
   return { kind: 'pause', reason, ...reviews }
+}
+
+export function autoRunRetryDelay(now: number, deadline: number): number | null {
+  const remaining = deadline - now
+  return remaining <= 0 ? null : Math.min(AUTO_RUN_RETRY_MS, remaining)
+}
+
+export function autoRunFailureReason(
+  action: Extract<AutoRunDecision, { kind: 'trigger' }>['action'],
+  result: { error?: string; conflict?: boolean; merged?: boolean; cleanupPending?: boolean; gateFailures?: unknown[] },
+): AutoRunPausedReason {
+  if (result.cleanupPending || (action === 'cleanup' && result.merged)) return 'cleanup-failed'
+  if (result.conflict) return 'sync-conflict'
+  if (action === 'merge' || action === 'cleanup' || result.gateFailures) return 'merge-gate-rejected'
+  if (/授权|快照/.test(result.error ?? '')) return 'authorization-denied'
+  return 'session-interrupted'
 }
 
 export function decideAutoRun(input: {

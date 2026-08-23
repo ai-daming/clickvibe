@@ -5,6 +5,7 @@ export const AUTO_RUN_PAUSE_LABEL: Record<string, string> = {
   'authorization-denied': '授权被拒',
   'sync-conflict': '同步冲突降级',
   'merge-gate-rejected': '合并门禁拒绝',
+  'cleanup-failed': '合并后清理失败',
   'task-timeout': '单任务超时',
   'budget-exhausted': '总预算耗尽',
   'rounds-exhausted': '轮次耗尽',
@@ -25,6 +26,16 @@ export function autoRunDefaults(workflow: Workflow | null): {
     maxRounds: 20,
     budgetHours: 24,
   }
+}
+
+export type AutoRunDraft = ReturnType<typeof autoRunDefaults>
+
+export function synchronizeAutoRunDraft(
+  current: AutoRunDraft,
+  workflow: Workflow | null,
+  edited: boolean,
+): AutoRunDraft {
+  return edited ? current : autoRunDefaults(workflow)
 }
 
 export function unresolvedFindingCount(workflow: Workflow | null): number {

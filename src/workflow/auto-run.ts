@@ -11,6 +11,8 @@ import {
   type AutoRunDecision,
   type AutoRunConfig,
   type AutoRunTaskOutcome,
+  autoRunFailureReason,
+  autoRunRetryDelay,
   decideAutoRun,
   validateAutoRunConfig,
 } from './auto-run-policy.ts'
@@ -23,6 +25,7 @@ import { syncWorktree } from './sync.ts'
 const running = new Set<string>()
 const queued = new Map<string, AutoRunTaskOutcome | undefined>()
 const deadlineTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const observationTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 function liveTaskFor(key: string) {
   return [...liveTasks.values()].find((task) => task.workflowKey === key && !task.closed) ?? null
@@ -50,6 +53,7 @@ async function pauseAutoRun(key: string, reason: AutoRunPausedReason): Promise<v
     note: `自动跑到底已暂停:${reason}`,
   })
   clearDeadline(key)
+  clearObservation(key)
 }
 
 async function completeAutoRun(key: string): Promise<void> {
@@ -64,6 +68,25 @@ async function completeAutoRun(key: string): Promise<void> {
     note: '自动跑到底已收敛,等待人工合并',
   })
   clearDeadline(key)
+  clearObservation(key)
+}
+
+function clearObservation(key: string): void {
+  const timer = observationTimers.get(key)
+  if (timer) clearTimeout(timer)
+  observationTimers.delete(key)
+}
+
+function scheduleObservation(ctx: Context, key: string, deadline: string): void {
+  clearObservation(key)
+  const delay = autoRunRetryDelay(Date.now(), Date.parse(deadline))
+  if (delay === null) return
+  const timer = setTimeout(() => {
+    observationTimers.delete(key)
+    requestAutoRunReconcile(ctx, key)
+  }, delay)
+  timer.unref?.()
+  observationTimers.set(key, timer)
 }
 
 function clearDeadline(key: string): void {
@@ -93,7 +116,12 @@ function armDeadline(key: string, deadline: string): void {
 }
 
 async function applyDecision(ctx: Context, key: string, decision: AutoRunDecision): Promise<void> {
-  if (decision.kind === 'manual' || decision.kind === 'wait') return
+  if (decision.kind === 'manual') return
+  if (decision.kind === 'wait') {
+    const workflow = await loadWorkflow(key)
+    if (workflow?.autoRun?.status === 'running') scheduleObservation(ctx, key, workflow.autoRun.deadline)
+    return
+  }
   if (decision.kind === 'pause') {
     await pauseAutoRun(key, decision.reason)
     return
@@ -104,7 +132,14 @@ async function applyDecision(ctx: Context, key: string, decision: AutoRunDecisio
   }
   const workflow = await loadWorkflow(key)
   if (!workflow?.autoRun || workflow.autoRun.status !== 'running') return
-  let result: { ok: boolean; error?: string; conflict?: boolean; gateFailures?: unknown[] }
+  let result: {
+    ok: boolean
+    error?: string
+    conflict?: boolean
+    merged?: boolean
+    cleanupPending?: boolean
+    gateFailures?: unknown[]
+  }
   switch (decision.action) {
     case 'develop':
       result = await startDevelop(
@@ -133,22 +168,14 @@ async function applyDecision(ctx: Context, key: string, decision: AutoRunDecisio
       break
   }
   if (!result.ok) {
-    await pauseAutoRun(
-      key,
-      result.conflict
-        ? 'sync-conflict'
-        : decision.action === 'merge' || decision.action === 'cleanup' || result.gateFailures
-          ? 'merge-gate-rejected'
-          : /授权|快照/.test(result.error ?? '')
-            ? 'authorization-denied'
-            : 'session-interrupted',
-    )
+    await pauseAutoRun(key, autoRunFailureReason(decision.action, result))
     return
   }
   if (decision.action === 'create-pr' || decision.action === 'sync') requestAutoRunReconcile(ctx, key)
 }
 
 async function reconcileOnce(ctx: Context, key: string, outcome?: AutoRunTaskOutcome): Promise<void> {
+  clearObservation(key)
   const workflow = await loadWorkflow(key)
   if (!workflow?.autoRun || workflow.autoRun.status !== 'running') return
   const [observed] = await enrichWorkflowStates(ctx, [workflow])
@@ -238,7 +265,13 @@ export async function pauseOrphanedAutoRuns(
   workflows: readonly { key: string; autoRun?: { status: string } }[],
 ): Promise<void> {
   for (const candidate of workflows) {
-    if (candidate.autoRun?.status !== 'running' || running.has(candidate.key) || liveTaskFor(candidate.key)) continue
+    if (
+      candidate.autoRun?.status !== 'running' ||
+      running.has(candidate.key) ||
+      observationTimers.has(candidate.key) ||
+      liveTaskFor(candidate.key)
+    )
+      continue
     await pauseAutoRun(candidate.key, 'session-interrupted')
   }
 }

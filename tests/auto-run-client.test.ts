@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { AUTO_RUN_PAUSE_LABEL, autoRunDefaults, unresolvedFindingCount } from '../src/client/auto-run.ts'
+import {
+  AUTO_RUN_PAUSE_LABEL,
+  autoRunDefaults,
+  synchronizeAutoRunDraft,
+  unresolvedFindingCount,
+} from '../src/client/auto-run.ts'
 import type { Workflow } from '../src/client/domain.ts'
 
 test('shared auto-run entry derives all five settings with last-used agent defaults', () => {
@@ -36,4 +41,12 @@ test('paused auto-run exposes the reason and aggregated unresolved finding count
   } as Workflow
   assert.equal(AUTO_RUN_PAUSE_LABEL[workflow.autoRun!.pausedReason!], '轮次耗尽')
   assert.equal(unresolvedFindingCount(workflow), 1)
+  assert.equal(AUTO_RUN_PAUSE_LABEL['cleanup-failed'], '合并后清理失败')
+})
+
+test('untouched form draft follows asynchronous workflow defaults without overwriting edits', () => {
+  const initial = autoRunDefaults(null)
+  const workflow = { devAgent: 'claude', reviewAgent: 'codex' } as Workflow
+  assert.deepEqual(synchronizeAutoRunDraft(initial, workflow, false), autoRunDefaults(workflow))
+  assert.equal(synchronizeAutoRunDraft(initial, workflow, true), initial)
 })
