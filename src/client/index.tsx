@@ -29,6 +29,7 @@ import {
   type LiveLogEvent,
 } from '../live-output.ts'
 import { resolveDesktopPanelWidth, resolvePanelLayout } from './panel-layout.ts'
+import { clearedContext, contextToSubmit, toggledContext } from './action-context.ts'
 import { openDshConversationDraft, resolveDshConversationDeps } from './dsh-conversation.ts'
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 type _SlotLoaders = [typeof LayoutController, SidebarFooterActionOwnerProps]
@@ -1166,8 +1167,9 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
 
   // 动作触发后清空附加说明输入框,避免残留文本被下一次动作误带(issue #54)。
   const clearUserContext = () => {
-    setContextText('')
-    setContextOpen(false)
+    const next = clearedContext()
+    setContextText(next.text)
+    setContextOpen(next.open)
   }
 
   const startDev = async (agent: 'codex' | 'claude' | 'dryrun', context?: string) => {
@@ -1374,7 +1376,7 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
       : { kind: 'none', label: '无', hint: '等待状态…' }))
 
   const runAction = () => {
-    const userContext = contextText.trim()
+    const userContext = contextToSubmit(contextText)
     switch (effectiveAction.kind) {
       case 'develop': void startDev(agentChoice, userContext); break
       case 'resume': void resume(userContext); break
@@ -1417,13 +1419,13 @@ function DevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoAction
     || effectiveAction.kind === 'rework'
     || effectiveAction.kind === 'review'
   const toggleContext = () => {
-    const next = !contextOpen
-    // 返工首次展开时预填当前 review 意见,供用户编辑;以输入框最终文本为发送内容。
-    if (next && effectiveAction.kind === 'rework' && contextText === ''
-      && workflow?.reviewResult && !workflow.reviewResult.passed) {
-      setContextText(workflow.reviewResult.issues.join('\n'))
-    }
-    setContextOpen(next)
+    // 返工首次展开时预填当前 review 意见(纯函数判定,见 action-context.ts)。
+    const prefillIssues = workflow?.reviewResult && !workflow.reviewResult.passed
+      ? workflow.reviewResult.issues
+      : null
+    const next = toggledContext({ open: contextOpen, text: contextText }, effectiveAction.kind, prefillIssues)
+    setContextText(next.text)
+    setContextOpen(next.open)
   }
 
   const actionButtonClass = effectiveAction.kind === 'merge' || effectiveAction.kind === 'cleanup'
