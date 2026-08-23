@@ -47,9 +47,10 @@ test('token usage accepts both agent field conventions and stays optional', () =
   )
 })
 
-test('elapsed duration uses mm:ss until an hour and task ids expose start time', () => {
-  assert.equal(formatElapsed(204_000), '03:24')
+test('elapsed duration always uses HH:MM:SS and task ids expose start time', () => {
+  assert.equal(formatElapsed(204_000), '00:03:24')
   assert.equal(formatElapsed(3_724_000), '01:02:04')
+  assert.equal(formatElapsed(-1), '00:00:00')
   assert.equal(taskStartedAt('dev-1720000000000-random'), 1720000000000)
   assert.equal(taskStartedAt('legacy'), null)
 })

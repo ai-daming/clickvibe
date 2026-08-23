@@ -2,18 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import {
-  DeliveryDuration,
-  RunningDuration,
-  deliveryDurationLabel,
-  runningDurationLabel,
-} from '../src/client/duration.ts'
-
-test('running counters always use HH:MM:SS and clamp clock skew to zero', () => {
-  assert.equal(runningDurationLabel(-1), '00:00:00')
-  assert.equal(runningDurationLabel(1_000), '00:00:01')
-  assert.equal(runningDurationLabel(3_724_000), '01:02:04')
-})
+import { DeliveryDuration, RunningDuration, deliveryDurationLabel } from '../src/client/duration.ts'
 
 test('delivery durations use a compact unit format', () => {
   assert.equal(deliveryDurationLabel(0), '0s')

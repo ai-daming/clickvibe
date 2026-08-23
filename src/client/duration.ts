@@ -1,15 +1,7 @@
 import React from 'react'
+import { formatElapsed } from './runtime.ts'
 
 type DeliveryKind = 'dev' | 'review' | 'rework' | 'resume' | 'note' | 'merge-override'
-
-/** Fixed-width live counter used by both issue detail and repository rows. */
-export function runningDurationLabel(milliseconds: number): string {
-  const seconds = Math.max(0, Math.floor(milliseconds / 1000))
-  const hours = Math.floor(seconds / 3600)
-  const minutes = Math.floor((seconds % 3600) / 60)
-  const remainder = seconds % 60
-  return [hours, minutes, remainder].map((value) => String(value).padStart(2, '0')).join(':')
-}
 
 /** Compact completed-run duration; hour-scale entries intentionally omit seconds. */
 export function deliveryDurationLabel(milliseconds: number): string {
@@ -34,7 +26,7 @@ export function RunningDuration({ startedAt, now }: { startedAt: number; now?: n
   return React.createElement(
     'span',
     { className: 'cv-running-duration' },
-    `正在运行 · 已运行 ${runningDurationLabel(current - startedAt)}`,
+    `正在运行 · 已运行 ${formatElapsed(current - startedAt)}`,
   )
 }
 
