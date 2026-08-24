@@ -35,6 +35,7 @@ async function withFixtures(files: Record<string, string>, run: (directory: stri
 test('gate fails on a bare single-argument saveWorkflow call', async () => {
   await withFixtures(
     {
+      'src/infra/state.ts': 'export async function saveWorkflow(w: unknown, r?: number) { void w; void r }',
       'src/workflow/bad.ts': [
         "import { saveWorkflow } from '../infra/state.ts'",
         'export async function f(w: unknown) { await saveWorkflow(w) }',
@@ -51,6 +52,7 @@ test('gate fails on a bare single-argument saveWorkflow call', async () => {
 test('gate fails on aliased imports and const rebinding', async () => {
   await withFixtures(
     {
+      'src/infra/state.ts': 'export async function saveWorkflow(w: unknown, r?: number) { void w; void r }',
       'src/workflow/alias.ts': [
         "import { saveWorkflow as persist } from '../infra/state.ts'",
         'export async function f(w: unknown) { await persist(w) }',
@@ -64,8 +66,41 @@ test('gate fails on aliased imports and const rebinding', async () => {
     (directory) => {
       const result = runGate(directory)
       assert.equal(result.status, 1, `expected failure, got:\n${result.stdout}${result.stderr}`)
-      assert.match(result.stderr ?? '', /persist called without/)
-      assert.match(result.stderr ?? '', /write called without/)
+      // Messages carry the original export name; the file path names the offender.
+      assert.match(result.stderr ?? '', /alias\.ts: saveWorkflow called without/)
+      assert.match(result.stderr ?? '', /rebind\.ts: saveWorkflow called without/)
+    },
+  )
+})
+
+test('gate fails on namespace-property rebinding, destructuring and reassignment', async () => {
+  await withFixtures(
+    {
+      'src/infra/state.ts': 'export async function saveWorkflow(w: unknown, r?: number) { void w; void r }',
+      'src/workflow/ns-rebind.ts': [
+        "import * as state from '../infra/state.ts'",
+        'const write = state.saveWorkflow',
+        'export async function f(w: unknown) { await write(w) }',
+      ].join('\n'),
+      'src/workflow/destructure.ts': [
+        "import * as st from '../infra/state.ts'",
+        'const { saveWorkflow: d } = st',
+        'export async function f(w: unknown) { await d(w) }',
+      ].join('\n'),
+      'src/workflow/reassign.ts': [
+        "import { saveWorkflow } from '../infra/state.ts'",
+        'let h: typeof saveWorkflow = async () => {}',
+        'h = saveWorkflow',
+        'export async function f(w: unknown) { await h(w) }',
+      ].join('\n'),
+    },
+    (directory) => {
+      const result = runGate(directory)
+      assert.equal(result.status, 1, `expected failure, got:\n${result.stdout}${result.stderr}`)
+      const stderr = result.stderr ?? ''
+      for (const file of ['ns-rebind', 'destructure', 'reassign']) {
+        assert.match(stderr, new RegExp(`${file}.ts: saveWorkflow called without`), `expected ${file} to be tracked`)
+      }
     },
   )
 })
@@ -73,6 +108,7 @@ test('gate fails on aliased imports and const rebinding', async () => {
 test('gate fails on nested single-argument calls and namespace imports', async () => {
   await withFixtures(
     {
+      'src/infra/state.ts': 'export async function saveWorkflow(w: unknown, r?: number) { void w; void r }',
       'src/workflow/nested.ts': [
         "import { saveWorkflow } from '../infra/state.ts'",
         'export async function f(w: unknown) { await saveWorkflow(structuredClone(w)) }',
@@ -94,6 +130,7 @@ test('gate fails on direct persistence imports and stray path references', async
   await withFixtures(
     {
       'src/workflow/direct.ts': "import { saveWorkflowStateForTask } from '../infra/workflow-persistence.ts'",
+      'src/infra/state-layout.ts': 'export function workflowPath(x: unknown): string { return String(x) }',
       'src/workflow/path.ts':
         "import { workflowPath } from '../infra/state-layout.ts'\nexport const p = (x: unknown) => workflowPath(x as never)",
     },

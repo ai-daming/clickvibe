@@ -76,7 +76,7 @@ R4-R8 是同一件事(重复推导不一致),R9-R10 是另一件事(写入无并
 
 ## 机器门禁(已实现:`pnpm run check:state-writes`,AST 解析)
 
-脚本 `scripts/check-state-writes.mjs` 基于 TypeScript AST(非文本正则)追踪 import 别名、const 重绑定与命名空间导入,负向 fixture(`tests/check-state-writes-gate.test.ts`)锁定所有已知绕过路径——门禁自身也有必须失败的测试。已接入 `check` 复合链与 CI,执行原则 2/4 的三条边界规则:
+脚本 `scripts/check-state-writes.mjs` 基于 TypeScript Program + TypeChecker 做**符号级解析**(非文本正则、非名字集合):每个调用表达式解析到 state/workflow-persistence 的真实导出符号,别名链、命名空间属性、const/let 重绑定、赋值重绑定与解构均按 symbol 追踪。负向 fixture(`tests/check-state-writes-gate.test.ts`)锁定全部已知绕过路径——门禁自身也有必须失败的测试(名字追踪版本曾在两轮 review 中被绕过,故换范式)。已接入 `check` 复合链与 CI,执行原则 2/4 的三条边界规则:
 
 1. **状态路径白名单**:workflow 状态文件路径(`workflowPath`/`workflowStatePath`)只允许在持久化层解析(`workflow-persistence.ts` 写入、`state-layout.ts` 定义、`state.ts` facade);其他文件触及即 CI 红。路径独占同时保证写入只能是持久化层的 temp + rename 原子写。
 2. **持久化模块独占**:`workflow-persistence.ts` 只允许被 `state.ts`(facade)与 `task-ownership.ts`(纯选择器)import;上层直接 import 即 CI 红。

@@ -1,18 +1,26 @@
-import { readFile, readdir } from 'node:fs/promises'
+import { readdir } from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 import ts from 'typescript'
 
-// Workflow-state persistence boundary gate (docs/fix-discipline.md 机器门禁),
-// AST-based so aliases, rebinding and namespace imports cannot bypass it:
+// Workflow-state persistence boundary gate (docs/fix-discipline.md 机器门禁).
+// Symbol-based: every CallExpression is resolved through the TypeScript
+// TypeChecker to the real export of state/workflow-persistence, following
+// import aliases, namespace properties, reassignment and destructuring —
+// name-set tracking was bypassed twice (rounds 15/16), so tracking follows
+// symbols, not strings.
+//
 // rule 1 — only the persistence layer may reference workflow state path helpers;
 // rule 2 — the persistence module is reachable only via the state facade and
 //          the pure ownership selector;
-// rule 3 — snapshot/task mutations must be conditional (revision/capability
+// rule 3 — snapshot/task mutations must be conditional (revision/lease
 //          argument required; a bare one-argument call is last-writer-wins).
 
 const MUTATION_NAMES = new Set(['saveWorkflow', 'saveWorkflowForTask', 'claimWorkflowTask', 'mutateWorkflowForTask'])
 const PATH_NAMES = new Set(['workflowPath', 'workflowStatePath'])
+const FACADE_FILE = /(^|\/)state\.ts$/
+const PERSISTENCE_FILE = /workflow-persistence\.ts$/
+
 const PATH_ALLOWED = new Set(['src/infra/workflow-persistence.ts', 'src/infra/state-layout.ts', 'src/infra/state.ts'])
 const IMPORT_ALLOWED = new Set(['src/infra/state.ts', 'src/infra/task-ownership.ts'])
 
@@ -27,103 +35,122 @@ async function collect(directory) {
   return files
 }
 
-function importSpecifier(node) {
-  if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) return node.moduleSpecifier.text
-  if (ts.isExportDeclaration(node) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
-    return node.moduleSpecifier.text
-  }
-  return null
-}
-
-/** Track local names bound to mutation/path functions, across aliases and rebinding. */
-function trackBindings(source, targets) {
-  const names = new Set()
-  const visit = (node) => {
-    if (!node) return
-    if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
-      const specifier = node.moduleSpecifier.text
-      const relevant =
-        /workflow-persistence(\.ts)?$/.test(specifier) ||
-        /(^|\/)state(\.ts)?$/.test(specifier) ||
-        /(^|\/)state-layout(\.ts)?$/.test(specifier)
-      if (relevant && node.importClause) {
-        const clause = node.importClause
-        if (clause.name) names.add(clause.name.text) // default import of the facade
-        if (clause.namedBindings) {
-          if (ts.isNamespaceImport(clause.namedBindings)) names.add(`*${clause.namedBindings.name.text}`)
-          for (const element of clause.namedBindings.elements ?? []) {
-            if (targets.has(element.propertyName?.text ?? element.name.text)) names.add(element.name.text)
-          }
-        }
-      }
-    }
-    if (
-      ts.isVariableDeclaration(node) &&
-      ts.isIdentifier(node.name) &&
-      node.initializer &&
-      names.has(node.initializer.text)
-    ) {
-      names.add(node.name.text)
-    }
-    ts.forEachChild(node, visit)
-  }
-  visit(source)
-  return names
-}
-
 function allowed(set, relative) {
   return [...set].some((key) => relative === key || relative.endsWith(`/${key}`))
 }
 
-function checkFile(relative, source, failures) {
-  const mutationNames = trackBindings(source, MUTATION_NAMES)
+const roots = process.argv.slice(2).length > 0 ? process.argv.slice(2) : ['src']
+const rootFiles = []
+for (const root of roots) rootFiles.push(...(await collect(path.resolve(process.cwd(), root))))
 
-  if (!allowed(PATH_ALLOWED, relative)) {
-    const visit = (node) => {
-      if (!node) return
-      if (ts.isIdentifier(node) && PATH_NAMES.has(node.text)) {
-        failures.push(`${relative}: workflow state path may only be referenced in the persistence layer`)
-      }
-      ts.forEachChild(node, visit)
+const program = ts.createProgram(rootFiles, {
+  allowImportingTsExtensions: true,
+  moduleResolution: ts.ModuleResolutionKind.Bundler,
+  target: ts.ScriptTarget.ES2022,
+  module: ts.ModuleKind.ESNext,
+  noEmit: true,
+})
+const checker = program.getTypeChecker()
+
+/** Resolve an expression to the export symbol it denotes, following aliases. */
+function exportSymbol(expression) {
+  if (!expression) return null
+  let symbol = checker.getSymbolAtLocation(expression)
+  if (!symbol) return null
+  if (symbol.flags & ts.SymbolFlags.Alias) symbol = checker.getAliasedSymbol(symbol)
+  return symbol
+}
+
+function isTrackedExport(symbol) {
+  if (!symbol?.declarations?.length) return false
+  if (!MUTATION_NAMES.has(symbol.name)) return false
+  return symbol.declarations.some((declaration) => {
+    const file = declaration.getSourceFile().fileName
+    return FACADE_FILE.test(file) || PERSISTENCE_FILE.test(file)
+  })
+}
+
+/**
+ * The tracked mutation a local binding was initialized from, if any.
+ * Handles `const x = saveWorkflow`, `x = state.saveWorkflow`,
+ * `const { saveWorkflow: w } = state`, and one hop through another local.
+ */
+function initializedMutation(declaration, localTracked) {
+  if (ts.isVariableDeclaration(declaration) || ts.isBinaryExpression(declaration)) {
+    const value = ts.isVariableDeclaration(declaration) ? declaration.initializer : declaration.right
+    if (!value) return null
+    if (ts.isIdentifier(value) && localTracked.has(value.text)) return localTracked.get(value.text)
+    if (ts.isPropertyAccessExpression(value)) {
+      const property = exportSymbol(value.name)
+      if (isTrackedExport(property)) return property.name
     }
-    visit(source)
+    const direct = exportSymbol(value)
+    if (isTrackedExport(direct)) return direct.name
+  }
+  if (ts.isBindingElement(declaration) && ts.isObjectBindingPattern(declaration.parent)) {
+    const property =
+      declaration.propertyName && ts.isIdentifier(declaration.propertyName)
+        ? declaration.propertyName.text
+        : declaration.name.text
+    if (MUTATION_NAMES.has(property)) return property
+  }
+  return null
+}
+
+const failures = []
+for (const sourceFile of program.getSourceFiles()) {
+  if (!rootFiles.some((file) => file === sourceFile.fileName)) continue
+  const relative = path.relative(process.cwd(), sourceFile.fileName).split(path.sep).join('/')
+
+  // Local bindings carrying tracked mutations, resolved to export symbol names.
+  const localTracked = new Map()
+  const collectBindings = (node) => {
+    if (!node) return
+    const origin = initializedMutation(node, localTracked)
+    if (origin) {
+      const name = ts.isVariableDeclaration(node)
+        ? node.name.text
+        : ts.isBinaryExpression(node) && ts.isIdentifier(node.left)
+          ? node.left.text
+          : ts.isBindingElement(node) && ts.isIdentifier(node.name)
+            ? node.name.text
+            : null
+      if (name) localTracked.set(name, origin)
+    }
+    ts.forEachChild(node, collectBindings)
+  }
+  collectBindings(sourceFile)
+
+  const trackedCallName = (callee) => {
+    const symbol = exportSymbol(callee)
+    if (isTrackedExport(symbol)) return symbol.name
+    if (ts.isIdentifier(callee) && localTracked.has(callee.text)) return localTracked.get(callee.text)
+    return null
   }
 
   const visit = (node) => {
     if (!node) return
-    if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
-      const specifier = importSpecifier(node)
-      if (/workflow-persistence(\.ts)?$/.test(specifier ?? '') && !allowed(IMPORT_ALLOWED, relative)) {
-        failures.push(`${relative}: import workflow-persistence directly (must go through src/infra/state.ts)`)
-      }
+    const specifier =
+      (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+      node.moduleSpecifier &&
+      ts.isStringLiteral(node.moduleSpecifier)
+        ? node.moduleSpecifier.text
+        : null
+    if (specifier && PERSISTENCE_FILE.test(specifier) && !allowed(IMPORT_ALLOWED, relative)) {
+      failures.push(`${relative}: import workflow-persistence directly (must go through src/infra/state.ts)`)
+    }
+    if (!allowed(PATH_ALLOWED, relative) && ts.isIdentifier(node) && PATH_NAMES.has(node.text)) {
+      failures.push(`${relative}: workflow state path may only be referenced in the persistence layer`)
     }
     if (ts.isCallExpression(node)) {
-      const callee = node.expression
-      const isTrackedCall =
-        (ts.isIdentifier(callee) && mutationNames.has(callee.text)) ||
-        (ts.isPropertyAccessExpression(callee) &&
-          mutationNames.has(`*${callee.expression.getText()}`) &&
-          MUTATION_NAMES.has(callee.name.text))
-      if (isTrackedCall && node.arguments.length < 2) {
-        const name = ts.isIdentifier(callee) ? callee.text : callee.name.text
-        failures.push(`${relative}: ${name} called without expected-revision/capability argument (last-writer-wins)`)
+      const name = trackedCallName(node.expression)
+      if (name && node.arguments.length < 2) {
+        failures.push(`${relative}: ${name} called without expected-revision/lease argument (last-writer-wins)`)
       }
     }
     ts.forEachChild(node, visit)
   }
-  visit(source)
-}
-
-const roots = process.argv.slice(2).length > 0 ? process.argv.slice(2) : ['src']
-const failures = []
-for (const root of roots) {
-  const absoluteRoot = path.resolve(process.cwd(), root)
-  const rootLabel = root.replace(/\/+$/, '').split('/').pop()
-  for (const file of await collect(absoluteRoot)) {
-    const relative = path.posix.join(rootLabel, path.relative(absoluteRoot, file).split(path.sep).join('/'))
-    const source = ts.createSourceFile(file, await readFile(file, 'utf8'), ts.ScriptTarget.ES2022, true)
-    checkFile(relative, source, failures)
-  }
+  visit(sourceFile)
 }
 
 if (failures.length > 0) {
