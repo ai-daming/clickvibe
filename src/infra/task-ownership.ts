@@ -1,4 +1,4 @@
-import type { IssueWorkflow } from './state.ts'
+import { type IssueWorkflow, loadWorkflow, saveWorkflow } from './state.ts'
 import { liveTasks } from './runtime.ts'
 
 export interface HostJobSnapshot {
@@ -49,9 +49,12 @@ type OwnershipFields = Pick<
   'key' | 'stage' | 'devTaskId' | 'reviewTaskId' | 'devHostJobId' | 'reviewHostJobId'
 > & { devInterrupted?: boolean }
 
-interface TaskRef {
+export interface WorkflowTaskRef {
   kind: 'dev' | 'review'
   taskId: string
+}
+
+interface TaskRef extends WorkflowTaskRef {
   hostJobId: string | null | undefined
 }
 
@@ -84,6 +87,41 @@ function currentTask(workflow: OwnershipFields, tasks: TaskRef[]): TaskRef | nul
     if (!latest) return task
     return taskSequence(task.taskId) >= taskSequence(latest.taskId) ? task : latest
   }, null)
+}
+
+/** Select the task generation that owns workflow writes; persisted history alone never grants ownership. */
+export function currentWorkflowTaskRef(workflow: OwnershipFields): WorkflowTaskRef | null {
+  const task = currentTask(workflow, taskRefs(workflow))
+  return task ? { kind: task.kind, taskId: task.taskId } : null
+}
+
+export function isCurrentWorkflowTask(
+  workflow: OwnershipFields,
+  kind: WorkflowTaskRef['kind'],
+  taskId: string,
+): boolean {
+  const current = currentWorkflowTaskRef(workflow)
+  return current?.kind === kind && current.taskId === taskId
+}
+
+export async function loadCurrentTaskWorkflow(
+  key: string,
+  kind: WorkflowTaskRef['kind'],
+  taskId: string,
+): Promise<IssueWorkflow | null> {
+  const workflow = await loadWorkflow(key)
+  return workflow && isCurrentWorkflowTask(workflow, kind, taskId) ? workflow : null
+}
+
+/** Re-check generation immediately before persistence so delayed callbacks cannot overwrite a successor. */
+export async function saveCurrentTaskWorkflow(
+  workflow: IssueWorkflow,
+  kind: WorkflowTaskRef['kind'],
+  taskId: string,
+): Promise<boolean> {
+  if (!(await loadCurrentTaskWorkflow(workflow.key, kind, taskId))) return false
+  await saveWorkflow(workflow)
+  return true
 }
 
 function expectedLabel(workflow: OwnershipFields, task: TaskRef): string {

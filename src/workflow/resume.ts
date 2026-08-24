@@ -30,7 +30,13 @@ import { buildFreshAgentCommand, buildResumeAgentCommand } from '../infra/develo
 import { buildMergePreface } from '../infra/git.ts'
 import { type LiveTask, parseUrl, readWorktreeHead, resumeTaskGate, runCommand, taskId } from '../infra/runtime.ts'
 import { clearStaleSessionId, issueKey, loadWorkflow, resolveSessionForAgent, saveWorkflow } from '../infra/state.ts'
-import { observeWorkflowTask, taskLaunchDecision, type TaskOwnershipContext } from '../infra/task-ownership.ts'
+import {
+  loadCurrentTaskWorkflow,
+  observeWorkflowTask,
+  saveCurrentTaskWorkflow,
+  taskLaunchDecision,
+  type TaskOwnershipContext,
+} from '../infra/task-ownership.ts'
 import { recordDevDelivery } from './review-flow.ts'
 import { finalizeDevRun } from './dev-completion.ts'
 import { deriveFreshSessionAvailability, selectSessionLaunch } from './fresh-session.ts'
@@ -140,7 +146,7 @@ export async function resumeDevelop(
   } catch (error) {
     finishTask(live, 'failed', 1)
     workflow.devInterrupted = true
-    await saveWorkflow(workflow)
+    await saveCurrentTaskWorkflow(workflow, 'dev', live.taskId)
     return {
       ok: false,
       error: `宿主任务占位失败:${String(error instanceof Error ? error.message : error)}`,
@@ -169,10 +175,10 @@ export async function resumeDevelop(
     async (exitCode, newSessionId) => {
       const durationMs = Math.max(0, Date.now() - live.startedAt)
       pushTaskLine(live, `[clickvibe] ${agent} 恢复结束,退出码 ${exitCode}`)
-      const reloaded = await loadWorkflow(workflow.key)
+      const reloaded = await loadCurrentTaskWorkflow(workflow.key, 'dev', live.taskId)
       if (reloaded) {
         const fixedIssues = reloaded.reviewResult?.passed === false ? [...reloaded.reviewResult.issues] : []
-        await finalizeDevRun(reloaded, live.status, exitCode, newSessionId, agent, async () => {
+        await finalizeDevRun(reloaded, live.taskId, live.status, exitCode, newSessionId, agent, async () => {
           // rework 完成:旧的 review 结论已归档到 events,回到"待 review",
           // 不能继续显示"Review 未通过"让用户无限重复点
           const head = await readWorktreeHead(ctx, workflow.worktree)
@@ -183,8 +189,8 @@ export async function resumeDevelop(
             head,
             fixedIssues,
             'resume',
-            extraContext,
             live.taskId,
+            extraContext,
             durationMs,
           )
         })
@@ -195,11 +201,25 @@ export async function resumeDevelop(
       ? {
           staleSessionId: sessionId,
           prepare: async () => {
-            const reloaded = await loadWorkflow(workflow.key)
-            if (reloaded && clearStaleSessionId(reloaded, 'dev', sessionId)) await saveWorkflow(reloaded)
+            const reloaded = await loadCurrentTaskWorkflow(workflow.key, 'dev', live.taskId)
+            if (!reloaded) throw new Error('旧开发任务已被新代替换,不再启动会话回退')
+            if (clearStaleSessionId(reloaded, 'dev', sessionId)) {
+              await saveCurrentTaskWorkflow(reloaded, 'dev', live.taskId)
+            }
+            const fallbackPrompt = await buildResumePrompt(
+              ctx,
+              workflow,
+              resolvedSnapshot,
+              extraContext,
+              mergePreface,
+              null,
+            )
+            if (!(await loadCurrentTaskWorkflow(workflow.key, 'dev', live.taskId))) {
+              throw new Error('旧开发任务已被新代替换,放弃已准备的会话回退')
+            }
             return {
               command: buildFreshAgentCommand(agent),
-              prompt: await buildResumePrompt(ctx, workflow, resolvedSnapshot, extraContext, mergePreface, null),
+              prompt: fallbackPrompt,
             }
           },
         }

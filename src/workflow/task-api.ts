@@ -11,10 +11,9 @@ import {
   loadAllWorkflows,
   loadWorkflow,
   readTaskLog,
-  saveWorkflow,
 } from '../infra/state.ts'
 import type { TaskMetrics } from '../infra/task-log-store.ts'
-import { observeWorkflowTask, type TaskOwnershipContext } from '../infra/task-ownership.ts'
+import { observeWorkflowTask, saveCurrentTaskWorkflow, type TaskOwnershipContext } from '../infra/task-ownership.ts'
 
 /** Consume incremental dev log/status for one task. */
 export async function pollDevelop(payload: unknown): Promise<
@@ -244,7 +243,9 @@ export async function stopTask(
       } else {
         currentWorkflow.stage = 'review-ready'
       }
-      await saveWorkflow(currentWorkflow)
+      if (!(await saveCurrentTaskWorkflow(currentWorkflow, kind, taskId))) {
+        return { ok: false, error: '任务请求已过期:当前任务代次已变化,请刷新后重试' }
+      }
       return { ok: true, taskId, stopped: false }
     }
     if (!hostJobId && ctx.jobs) {
@@ -269,7 +270,9 @@ export async function stopTask(
       } else {
         currentWorkflow.stage = 'review-ready'
       }
-      await saveWorkflow(currentWorkflow)
+      if (!(await saveCurrentTaskWorkflow(currentWorkflow, kind, taskId))) {
+        return { ok: false, error: '任务请求已过期:当前任务代次已变化,请刷新后重试' }
+      }
       return { ok: true, taskId, stopped: result === 'requested' }
     } catch (error) {
       return { ok: false, error: `宿主任务停止失败:${String(error instanceof Error ? error.message : error)}` }
@@ -291,7 +294,7 @@ export async function stopTask(
     } else {
       workflow.stage = 'review-ready'
     }
-    await saveWorkflow(workflow)
+    await saveCurrentTaskWorkflow(workflow, task.kind, task.taskId)
   })()
   return { ok: true, taskId, stopped }
 }

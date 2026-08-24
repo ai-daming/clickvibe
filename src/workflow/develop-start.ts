@@ -49,7 +49,13 @@ import {
   taskId,
 } from '../infra/runtime.ts'
 import { type IssueWorkflow, issueKey, loadWorkflow, saveWorkflow } from '../infra/state.ts'
-import { observeWorkflowTask, taskLaunchDecision, type TaskOwnershipContext } from '../infra/task-ownership.ts'
+import {
+  loadCurrentTaskWorkflow,
+  observeWorkflowTask,
+  saveCurrentTaskWorkflow,
+  taskLaunchDecision,
+  type TaskOwnershipContext,
+} from '../infra/task-ownership.ts'
 import { deriveAutoDevelopment } from './auto-development.ts'
 import { deriveDevelopmentEventKind } from './delivery-audit.ts'
 import { finalizeDevRun } from './dev-completion.ts'
@@ -305,10 +311,10 @@ export async function startDevelop(
       attachAgentProcess(ctx, live, agentCommand, workflow.worktree, prompt, async (exitCode, sessionId) => {
         const durationMs = Math.max(0, Date.now() - live.startedAt)
         pushTaskLine(live, `[clickvibe] ${agent} 结束,退出码 ${exitCode}`)
-        const reloaded = await loadWorkflow(workflow.key)
+        const reloaded = await loadCurrentTaskWorkflow(workflow.key, 'dev', live.taskId)
         if (reloaded) {
           const fixedIssues = reloaded.reviewResult?.passed === false ? [...reloaded.reviewResult.issues] : []
-          await finalizeDevRun(reloaded, live.status, exitCode, sessionId, agent, async () => {
+          await finalizeDevRun(reloaded, live.taskId, live.status, exitCode, sessionId, agent, async () => {
             // 开发完成(含 rework):旧的 review 结论已归档到 events 历史,
             // 当前回到"待 review"——不能继续显示"Review 未通过"
             const head = await readWorktreeHead(ctx, workflow.worktree)
@@ -319,8 +325,8 @@ export async function startDevelop(
               head,
               fixedIssues,
               deriveDevelopmentEventKind(firstDevelopment, extraContext),
-              extraContext,
               live.taskId,
+              extraContext,
               durationMs,
             )
           })
@@ -329,11 +335,11 @@ export async function startDevelop(
       })
     } catch (error) {
       pushTaskLine(live, `[clickvibe] 失败: ${String(error instanceof Error ? error.message : error)}`)
-      const reloaded = await loadWorkflow(workflow.key)
+      const reloaded = await loadCurrentTaskWorkflow(workflow.key, 'dev', live.taskId)
       if (reloaded) {
         reloaded.stage = 'developing'
         reloaded.devInterrupted = true
-        await saveWorkflow(reloaded)
+        await saveCurrentTaskWorkflow(reloaded, 'dev', live.taskId)
       }
       notifyAutoRunCompletion(ctx, workflow.key, 'failed')
       finishTask(live, 'failed', 1)

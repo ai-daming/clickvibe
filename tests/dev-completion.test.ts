@@ -40,7 +40,7 @@ test('successful dev completion is durable before slow delivery work begins', as
     const current = workflow()
     await saveWorkflow(current)
     let deliveryStarted = false
-    const completed = await finalizeDevRun(current, 'done', 0, 'session-106', 'codex', async () => {
+    const completed = await finalizeDevRun(current, current.devTaskId!, 'done', 0, 'session-106', 'codex', async () => {
       deliveryStarted = true
       const visible = await loadWorkflow(current.key)
       assert.equal(visible?.stage, 'review-ready')
