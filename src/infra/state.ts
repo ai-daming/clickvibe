@@ -1,12 +1,12 @@
 /** Project-scoped workflow state and task-log compatibility facade. */
 import { createHash } from 'node:crypto'
-import { appendFile, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, readdir, rm } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { isAutoRunState } from './contracts.ts'
 import type { AutoRunState, DeliveryPublication, DeliveryStats, PromptSnapshot } from './contracts.ts'
 export type { AutoRunPausedReason, AutoRunState, AutoRunUnresolvedRound } from './contracts.ts'
-import { issueKey, legacyIssueKey, taskLogPath, workflowPath, type WorkflowStorageIdentity } from './state-layout.ts'
+import { issueKey, legacyIssueKey, taskLogPath, type WorkflowStorageIdentity } from './state-layout.ts'
 import {
   appendTaskLog as appendTaskLogRecord,
   appendTaskLogNext,
@@ -18,6 +18,14 @@ import {
   type TaskLogKind,
   type TaskLogRead,
 } from './task-log-store.ts'
+import {
+  saveWorkflowState as saveWorkflow,
+  saveWorkflowStateForTask as saveWorkflowForTask,
+  saveWorkflowStateStrict as saveWorkflowStrict,
+  workflowStatePath,
+} from './workflow-persistence.ts'
+export type { WorkflowTaskCredential } from './workflow-persistence.ts'
+export { saveWorkflow, saveWorkflowForTask, saveWorkflowStrict }
 export { issueKey } from './state-layout.ts'
 export type WorkflowStage =
   | 'idle' // 未开始开发
@@ -210,7 +218,7 @@ export function stateDir(): string {
 }
 
 export function statePath(workflow: WorkflowStorageIdentity): string {
-  return workflowPath(stateDir(), workflow)
+  return workflowStatePath(workflow)
 }
 
 export function logPath(workflow: WorkflowStorageIdentity, kind: TaskLogKind, taskId: string): string {
@@ -281,14 +289,9 @@ async function migrateLegacyWorkflowFile(path: string): Promise<void> {
   if (!workflow) return
   const destination = statePath(workflow)
   try {
-    await mkdir(join(destination, '..'), { recursive: true })
-    try {
-      await writeFile(destination, await readFile(path), { flag: 'wx' })
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-      const existing = await readWorkflowFile(destination)
-      if (!existing || existing.key !== workflow.key) throw error
-    }
+    const existing = await readWorkflowFile(destination)
+    if (existing && existing.key !== workflow.key) throw new Error('workflow migration target belongs to another issue')
+    if (!existing) await saveWorkflowStrict(workflow)
     await rm(path)
     await migrateWorkflowLogs(workflow)
   } catch {
@@ -363,20 +366,6 @@ export async function loadAllArchivedWorkflows(): Promise<IssueWorkflow[]> {
     if (workflow?.delivery?.status === 'archived') workflows.push(workflow)
   }
   return workflows.sort((a, b) => b.updatedAt - a.updatedAt)
-}
-
-export async function saveWorkflow(workflow: IssueWorkflow): Promise<void> {
-  try {
-    await saveWorkflowStrict(workflow)
-  } catch {
-    // state persistence must never break the request path
-  }
-}
-
-export async function saveWorkflowStrict(workflow: IssueWorkflow): Promise<void> {
-  await mkdir(join(statePath(workflow), '..'), { recursive: true })
-  workflow.updatedAt = Date.now()
-  await writeFile(statePath(workflow), JSON.stringify(workflow, null, 2), 'utf8')
 }
 
 export async function archiveWorkflow(workflow: IssueWorkflow): Promise<void> {

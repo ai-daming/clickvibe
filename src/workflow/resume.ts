@@ -29,14 +29,15 @@ import {
 import { buildFreshAgentCommand, buildResumeAgentCommand } from '../infra/develop-core.ts'
 import { buildMergePreface } from '../infra/git.ts'
 import { type LiveTask, parseUrl, readWorktreeHead, resumeTaskGate, runCommand, taskId } from '../infra/runtime.ts'
-import { clearStaleSessionId, issueKey, loadWorkflow, resolveSessionForAgent, saveWorkflow } from '../infra/state.ts'
 import {
-  loadCurrentTaskWorkflow,
-  observeWorkflowTask,
-  saveCurrentTaskWorkflow,
-  taskLaunchDecision,
-  type TaskOwnershipContext,
-} from '../infra/task-ownership.ts'
+  clearStaleSessionId,
+  issueKey,
+  loadWorkflow,
+  resolveSessionForAgent,
+  saveWorkflow,
+  saveWorkflowForTask,
+} from '../infra/state.ts'
+import { observeWorkflowTask, taskLaunchDecision, type TaskOwnershipContext } from '../infra/task-ownership.ts'
 import { recordDevDelivery } from './review-flow.ts'
 import { finalizeDevRun } from './dev-completion.ts'
 import { deriveFreshSessionAvailability, selectSessionLaunch } from './fresh-session.ts'
@@ -146,7 +147,7 @@ export async function resumeDevelop(
   } catch (error) {
     finishTask(live, 'failed', 1)
     workflow.devInterrupted = true
-    await saveCurrentTaskWorkflow(workflow, 'dev', live.taskId)
+    await saveWorkflowForTask(workflow, { kind: 'dev', taskId: live.taskId })
     return {
       ok: false,
       error: `宿主任务占位失败:${String(error instanceof Error ? error.message : error)}`,
@@ -175,7 +176,7 @@ export async function resumeDevelop(
     async (exitCode, newSessionId) => {
       const durationMs = Math.max(0, Date.now() - live.startedAt)
       pushTaskLine(live, `[clickvibe] ${agent} 恢复结束,退出码 ${exitCode}`)
-      const reloaded = await loadCurrentTaskWorkflow(workflow.key, 'dev', live.taskId)
+      const reloaded = await loadWorkflow(workflow.key)
       if (reloaded) {
         const fixedIssues = reloaded.reviewResult?.passed === false ? [...reloaded.reviewResult.issues] : []
         await finalizeDevRun(reloaded, live.taskId, live.status, exitCode, newSessionId, agent, async () => {
@@ -201,11 +202,11 @@ export async function resumeDevelop(
       ? {
           staleSessionId: sessionId,
           prepare: async () => {
-            const reloaded = await loadCurrentTaskWorkflow(workflow.key, 'dev', live.taskId)
-            if (!reloaded) throw new Error('旧开发任务已被新代替换,不再启动会话回退')
-            if (clearStaleSessionId(reloaded, 'dev', sessionId)) {
-              await saveCurrentTaskWorkflow(reloaded, 'dev', live.taskId)
-            }
+            const reloaded = await loadWorkflow(workflow.key)
+            if (!reloaded) throw new Error('开发 workflow 不存在,不再启动会话回退')
+            clearStaleSessionId(reloaded, 'dev', sessionId)
+            const saved = await saveWorkflowForTask(reloaded, { kind: 'dev', taskId: live.taskId })
+            if (!saved) throw new Error('旧开发任务已被新代替换,不再启动会话回退')
             const fallbackPrompt = await buildResumePrompt(
               ctx,
               workflow,
@@ -214,9 +215,6 @@ export async function resumeDevelop(
               mergePreface,
               null,
             )
-            if (!(await loadCurrentTaskWorkflow(workflow.key, 'dev', live.taskId))) {
-              throw new Error('旧开发任务已被新代替换,放弃已准备的会话回退')
-            }
             return {
               command: buildFreshAgentCommand(agent),
               prompt: fallbackPrompt,

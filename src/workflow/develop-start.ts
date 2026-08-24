@@ -48,14 +48,8 @@ import {
   runCommand,
   taskId,
 } from '../infra/runtime.ts'
-import { type IssueWorkflow, issueKey, loadWorkflow, saveWorkflow } from '../infra/state.ts'
-import {
-  loadCurrentTaskWorkflow,
-  observeWorkflowTask,
-  saveCurrentTaskWorkflow,
-  taskLaunchDecision,
-  type TaskOwnershipContext,
-} from '../infra/task-ownership.ts'
+import { type IssueWorkflow, issueKey, loadWorkflow, saveWorkflow, saveWorkflowForTask } from '../infra/state.ts'
+import { observeWorkflowTask, taskLaunchDecision, type TaskOwnershipContext } from '../infra/task-ownership.ts'
 import { deriveAutoDevelopment } from './auto-development.ts'
 import { deriveDevelopmentEventKind } from './delivery-audit.ts'
 import { finalizeDevRun } from './dev-completion.ts'
@@ -311,7 +305,7 @@ export async function startDevelop(
       attachAgentProcess(ctx, live, agentCommand, workflow.worktree, prompt, async (exitCode, sessionId) => {
         const durationMs = Math.max(0, Date.now() - live.startedAt)
         pushTaskLine(live, `[clickvibe] ${agent} 结束,退出码 ${exitCode}`)
-        const reloaded = await loadCurrentTaskWorkflow(workflow.key, 'dev', live.taskId)
+        const reloaded = await loadWorkflow(workflow.key)
         if (reloaded) {
           const fixedIssues = reloaded.reviewResult?.passed === false ? [...reloaded.reviewResult.issues] : []
           await finalizeDevRun(reloaded, live.taskId, live.status, exitCode, sessionId, agent, async () => {
@@ -335,11 +329,11 @@ export async function startDevelop(
       })
     } catch (error) {
       pushTaskLine(live, `[clickvibe] 失败: ${String(error instanceof Error ? error.message : error)}`)
-      const reloaded = await loadCurrentTaskWorkflow(workflow.key, 'dev', live.taskId)
+      const reloaded = await loadWorkflow(workflow.key)
       if (reloaded) {
         reloaded.stage = 'developing'
         reloaded.devInterrupted = true
-        await saveCurrentTaskWorkflow(reloaded, 'dev', live.taskId)
+        await saveWorkflowForTask(reloaded, { kind: 'dev', taskId: live.taskId })
       }
       notifyAutoRunCompletion(ctx, workflow.key, 'failed')
       finishTask(live, 'failed', 1)

@@ -1,5 +1,6 @@
-import { type IssueWorkflow, loadWorkflow, saveWorkflow } from './state.ts'
+import type { IssueWorkflow } from './state.ts'
 import { liveTasks } from './runtime.ts'
+import { currentWorkflowTaskRef, type WorkflowTaskCredential } from './workflow-persistence.ts'
 
 export interface HostJobSnapshot {
   id: string
@@ -49,10 +50,7 @@ type OwnershipFields = Pick<
   'key' | 'stage' | 'devTaskId' | 'reviewTaskId' | 'devHostJobId' | 'reviewHostJobId'
 > & { devInterrupted?: boolean }
 
-export interface WorkflowTaskRef {
-  kind: 'dev' | 'review'
-  taskId: string
-}
+export type WorkflowTaskRef = WorkflowTaskCredential
 
 interface TaskRef extends WorkflowTaskRef {
   hostJobId: string | null | undefined
@@ -74,54 +72,11 @@ function expectedTask(workflow: OwnershipFields): TaskRef | null {
   return kind === null ? null : (taskRefs(workflow).find((task) => task.kind === kind) ?? null)
 }
 
-function taskSequence(taskId: string): number {
-  const value = Number(taskId.match(/^[a-z]+-(\d+)-/)?.[1])
-  return Number.isSafeInteger(value) ? value : 0
-}
-
 /** Selects which persisted task reference is current; its timestamp is never treated as liveness proof. */
 function currentTask(workflow: OwnershipFields, tasks: TaskRef[]): TaskRef | null {
-  const expected = expectedTask(workflow)
-  if (expected) return expected
-  return tasks.reduce<TaskRef | null>((latest, task) => {
-    if (!latest) return task
-    return taskSequence(task.taskId) >= taskSequence(latest.taskId) ? task : latest
-  }, null)
-}
-
-/** Select the task generation that owns workflow writes; persisted history alone never grants ownership. */
-export function currentWorkflowTaskRef(workflow: OwnershipFields): WorkflowTaskRef | null {
-  const task = currentTask(workflow, taskRefs(workflow))
-  return task ? { kind: task.kind, taskId: task.taskId } : null
-}
-
-export function isCurrentWorkflowTask(
-  workflow: OwnershipFields,
-  kind: WorkflowTaskRef['kind'],
-  taskId: string,
-): boolean {
-  const current = currentWorkflowTaskRef(workflow)
-  return current?.kind === kind && current.taskId === taskId
-}
-
-export async function loadCurrentTaskWorkflow(
-  key: string,
-  kind: WorkflowTaskRef['kind'],
-  taskId: string,
-): Promise<IssueWorkflow | null> {
-  const workflow = await loadWorkflow(key)
-  return workflow && isCurrentWorkflowTask(workflow, kind, taskId) ? workflow : null
-}
-
-/** Re-check generation immediately before persistence so delayed callbacks cannot overwrite a successor. */
-export async function saveCurrentTaskWorkflow(
-  workflow: IssueWorkflow,
-  kind: WorkflowTaskRef['kind'],
-  taskId: string,
-): Promise<boolean> {
-  if (!(await loadCurrentTaskWorkflow(workflow.key, kind, taskId))) return false
-  await saveWorkflow(workflow)
-  return true
+  const selected = currentWorkflowTaskRef(workflow)
+  if (!selected) return null
+  return tasks.find((task) => task.kind === selected.kind && task.taskId === selected.taskId) ?? null
 }
 
 function expectedLabel(workflow: OwnershipFields, task: TaskRef): string {

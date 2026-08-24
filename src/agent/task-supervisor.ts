@@ -50,6 +50,18 @@ interface HostTaskReservation {
 }
 
 const hostReservations = new WeakMap<LiveTask, HostTaskReservation>()
+const taskPersistence = new WeakMap<LiveTask, Promise<void>>()
+
+function persistTask(task: LiveTask, operation: () => Promise<void>): void {
+  const previous = taskPersistence.get(task) ?? Promise.resolve()
+  const current = previous.then(operation, operation)
+  taskPersistence.set(task, current)
+}
+
+/** Await all best-effort log writes scheduled for one live task before releasing its storage. */
+export async function waitForTaskPersistence(task: LiveTask): Promise<void> {
+  await taskPersistence.get(task)?.catch(() => undefined)
+}
 
 function hostJobOutcome(task: LiveTask, status: LiveTask['status']): JobOutcome {
   if (status === 'done') return { status: 'completed', detail: `task ${task.taskId} completed` }
@@ -154,7 +166,7 @@ export function createLiveTask(
   }
   liveTasks.set(taskId, task)
   logTaskDiagnostic('live-task-set', { taskId, workflowKey: workflow.key, kind, status: task.status, closed: false })
-  void startTaskLog(workflow, kind, taskId)
+  persistTask(task, () => startTaskLog(workflow, kind, taskId))
   pushTaskLine(task, '[clickvibe] 任务开始')
   return task
 }
@@ -172,7 +184,7 @@ export function pushTaskLine(
       : value
   const line = encodeLiveLogEvent(event)
   const sequence = task.log.appendLine(line)
-  void appendTaskLog(task.workflow, task.kind, task.taskId, sequence, line, completion)
+  persistTask(task, () => appendTaskLog(task.workflow, task.kind, task.taskId, sequence, line, completion))
   notifyTask(task.taskId)
 }
 

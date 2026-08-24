@@ -5,8 +5,14 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
-import { attachAgentProcess, createLiveTask, finishTask, reserveHostTask } from '../src/agent/task-supervisor.ts'
-import { liveTasks } from '../src/infra/runtime.ts'
+import {
+  attachAgentProcess,
+  createLiveTask,
+  finishTask,
+  reserveHostTask,
+  waitForTaskPersistence,
+} from '../src/agent/task-supervisor.ts'
+import { type LiveTask, liveTasks } from '../src/infra/runtime.ts'
 import type { IssueWorkflow } from '../src/infra/state.ts'
 import { observeTaskOwnership } from '../src/infra/task-ownership.ts'
 
@@ -61,6 +67,7 @@ test('real host registry retains ownership across plugin fiber reload and cancel
   const previousHome = process.env.HOME
   process.env.HOME = tempHome
   const host = new Context()
+  const persistedTasks: LiveTask[] = []
   try {
     await host.plugin(LocalJobRegistry)
     host.jobs.attachController('clickvibe-test')
@@ -76,6 +83,7 @@ test('real host registry retains ownership across plugin fiber reload and cancel
 
     const firstWorkflow = workflow(tempHome, 'review-1000-first')
     const firstTask = createLiveTask(firstWorkflow.reviewTaskId!, firstWorkflow, 'review', 'codex', null)
+    persistedTasks.push(firstTask)
     const firstProcess = processHarness()
     firstWorkflow.reviewHostJobId = attachAgentProcess(
       {
@@ -94,6 +102,7 @@ test('real host registry retains ownership across plugin fiber reload and cancel
 
     const competingWorkflow = workflow(tempHome, 'review-1001-competing')
     const competingTask = createLiveTask(competingWorkflow.reviewTaskId!, competingWorkflow, 'review', 'codex', null)
+    persistedTasks.push(competingTask)
     assert.deepEqual(reserveHostTask(producerCtx, competingTask), {
       created: false,
       taskId: firstWorkflow.reviewTaskId,
@@ -124,6 +133,7 @@ test('real host registry retains ownership across plugin fiber reload and cancel
 
     const disposalWorkflow = workflow(tempHome, 'review-1002-disposal')
     const disposalTask = createLiveTask(disposalWorkflow.reviewTaskId!, disposalWorkflow, 'review', 'codex', null)
+    persistedTasks.push(disposalTask)
     const disposalProcess = processHarness(true)
     disposalWorkflow.reviewHostJobId = attachAgentProcess(
       {
@@ -144,6 +154,7 @@ test('real host registry retains ownership across plugin fiber reload and cancel
     assert.equal(disposalProcess.killed(), true)
   } finally {
     if (!host.fiber.isDisposed) await host.fiber.dispose()
+    await Promise.all(persistedTasks.map(waitForTaskPersistence))
     liveTasks.delete('review-1000-first')
     liveTasks.delete('review-1001-competing')
     liveTasks.delete('review-1002-disposal')

@@ -11,9 +11,10 @@ import {
   loadAllWorkflows,
   loadWorkflow,
   readTaskLog,
+  saveWorkflowForTask,
 } from '../infra/state.ts'
 import type { TaskMetrics } from '../infra/task-log-store.ts'
-import { observeWorkflowTask, saveCurrentTaskWorkflow, type TaskOwnershipContext } from '../infra/task-ownership.ts'
+import { observeWorkflowTask, type TaskOwnershipContext } from '../infra/task-ownership.ts'
 
 /** Consume incremental dev log/status for one task. */
 export async function pollDevelop(payload: unknown): Promise<
@@ -243,7 +244,7 @@ export async function stopTask(
       } else {
         currentWorkflow.stage = 'review-ready'
       }
-      if (!(await saveCurrentTaskWorkflow(currentWorkflow, kind, taskId))) {
+      if (!(await saveWorkflowForTask(currentWorkflow, { kind, taskId }))) {
         return { ok: false, error: '任务请求已过期:当前任务代次已变化,请刷新后重试' }
       }
       return { ok: true, taskId, stopped: false }
@@ -270,7 +271,7 @@ export async function stopTask(
       } else {
         currentWorkflow.stage = 'review-ready'
       }
-      if (!(await saveCurrentTaskWorkflow(currentWorkflow, kind, taskId))) {
+      if (!(await saveWorkflowForTask(currentWorkflow, { kind, taskId }))) {
         return { ok: false, error: '任务请求已过期:当前任务代次已变化,请刷新后重试' }
       }
       return { ok: true, taskId, stopped: result === 'requested' }
@@ -286,15 +287,13 @@ export async function stopTask(
   void (async () => {
     const workflow = await loadWorkflow(task.workflowKey)
     if (!workflow) return
-    const currentTaskId = task.kind === 'dev' ? workflow.devTaskId : workflow.reviewTaskId
-    if (currentTaskId !== task.taskId) return
     if (task.kind === 'dev') {
       workflow.stage = 'developing'
       workflow.devInterrupted = true
     } else {
       workflow.stage = 'review-ready'
     }
-    await saveCurrentTaskWorkflow(workflow, task.kind, task.taskId)
+    await saveWorkflowForTask(workflow, { kind: task.kind, taskId: task.taskId })
   })()
   return { ok: true, taskId, stopped }
 }

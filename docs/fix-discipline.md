@@ -75,7 +75,7 @@ R4-R8 是同一件事(重复推导不一致),R9-R10 是另一件事(写入无并
 
 原则 2/4 的强约束应逐步落为可执行门禁(与 `check:layers`、`check:size` 同级):
 
-1. **状态写入白名单**:对 `~/.clickvibe/state/` 路径的 `writeFile`/`rename` 只允许出现在 `src/infra/state.ts`;其他文件出现即 CI 红。
+1. **状态写入白名单**:workflow 的 `writeFile`/`rename` 只允许出现在 `src/infra/workflow-persistence.ts`;`state.ts` 仅作 facade,其他文件出现即 CI 红。
 2. **saveWorkflow 调用方白名单**:`saveWorkflow`/`saveWorkflowStrict` 的直接调用方只允许 state 层与所有权层模块;调用点扩散即 CI 红。
 3. **原子写**:workflow 状态落盘必须 temp + rename,禁止直接覆盖写。
 
