@@ -38,7 +38,7 @@ For each current finding, state: new theme, or recurrence of theme X (rounds N, 
 
 ### 3. Dual root-cause verdict (mandatory per finding)
 
-- **Code root cause**: what missing invariant makes this entire class possible? Answer explicitly: "what construction would make this class impossible by design?" (single writer + atomic commit, capability in the API signature, one answering source, type-level ownership...). If the only answer you can produce is "add a check before the operation", you have not found the root cause.
+- **Code root cause**: what missing invariant makes this entire class possible? Answer explicitly: "what construction would make this class impossible by design?" (single writer + atomic commit, capability in the API signature, one answering source, type-level ownership...). If the only answer you can produce is "add a check before the operation", you have not found the root cause. **Match against the known-pattern catalog first** (docs/fix-discipline.md 原则 9: lost update → CAS; stale writer overwrites successor → fencing token/lease; check-then-act → move validation inside the critical section; inconsistent answers → single source of truth). If the finding matches a known pattern, the fix directive must demand that pattern's COMPLETE form, not a partial step toward it — deriving it from scratch round by round wastes rounds re-inventing textbook results.
 - **Process root cause**: why did this bug survive to this round? (nobody asked the cross-round question / the guard was scoped to the previous finding / the test encoded the author's mental model). Only answerable with history — which is why step 1 is non-negotiable.
 
 ### 4. Static invariant audit (mandatory, before any dynamic testing)
@@ -72,6 +72,8 @@ Exactly one of:
   3. the current fix's altitude is call-site-level for a theme that already recurred once.
 
   Output is NOT a findings list. It is: the recurring theme, the missing invariant (half a page, as a requirement — not as an implementation), and the constraint that the next round must ship the mechanism (e.g. single-writer serialized store + atomic commit + capability-checked writes) plus deletion of the scattered call-site checks. Reference `docs/fix-discipline.md` principles by number.
+
+  **Abstraction escalation (chain terminator):** if a theme recurs AFTER a mechanism-level fix shipped for it, the next verdict escalates past implementation — it must name the shared model itself as wrong (e.g. "single-file whole-object snapshot persistence cannot express this invariant; replace the abstraction"), not demand another layer of fencing on the same model. Patching an exhausted abstraction yields onion layer N+1, never convergence.
 
 **Every non-pass verdict MUST end with a "下一轮指令" block** (the reviewer has all the information needed — it just did the root-cause analysis and the reproduction):
 
