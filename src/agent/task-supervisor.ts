@@ -34,7 +34,7 @@ import {
   TASK_TIMEOUT_MS,
 } from '../infra/runtime.ts'
 import { appendTaskLog, startTaskLog, type IssueWorkflow } from '../infra/state.ts'
-import { type AgentKind, parseAgentChunk } from './agent-stream.ts'
+import { type AgentKind, lossyAgentOutputNotice, parseAgentChunk } from './agent-stream.ts'
 
 /** Start (or restart) a dev task in the live map with status parsing. */
 export function createLiveTask(
@@ -181,9 +181,8 @@ export function attachAgentProcess(
           task.sessionId = parsed.sessionId
         }
       }
-      if (read.lossy) {
-        pushTaskLine(task, '[clickvibe] Agent 原始输出被截断(日志过长)')
-      }
+      const lossNotice = lossyAgentOutputNotice(read)
+      if (lossNotice) pushTaskLine(task, lossNotice)
     }
     const pump = setInterval(() => drain(), 250)
 
