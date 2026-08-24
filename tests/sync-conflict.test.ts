@@ -13,6 +13,7 @@ import {
   syncWorktree,
   type IssueWorkflow,
 } from '../src/index.ts'
+import { liveTasks } from '../src/infra/runtime.ts'
 import { applyDevRunOutcome, loadWorkflow, readLogTail, saveWorkflow } from '../src/infra/state.ts'
 import { createFakeJobs } from './fake-jobs.ts'
 
@@ -42,6 +43,15 @@ function realShellCtx() {
 }
 
 const ctx = realShellCtx() as never
+
+async function waitForTaskClosed(taskId: string, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (liveTasks.get(taskId)?.closed) return
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  assert.fail(`task ${taskId} did not close within ${timeoutMs}ms`)
+}
 
 /** Set up a repo whose worktree branch conflicts with the advanced origin/main. */
 async function setupConflictedRepo() {
@@ -373,7 +383,7 @@ test('review issues reach the agent across stale-session fallback on an interrup
       await saveWorkflow(interrupted, interrupted.revision ?? null)
       const exact = await resumeDevelop(captureCtx, { url: 'https://github.com/o/r/issues/26' })
       assert.equal(exact.ok, true)
-      await new Promise((r) => setTimeout(r, 200))
+      await waitForTaskClosed(exact.taskId)
       assert.equal(launches.length, 2) // 精确会话秒退 → 回退全新会话
       for (const launch of launches) {
         assert.match(launch.prompt, /未完成的合并/)
@@ -389,7 +399,7 @@ test('review issues reach the agent across stale-session fallback on an interrup
       launches.length = 0
       const fresh = await resumeDevelop(captureCtx, { url: 'https://github.com/o/r/issues/26' })
       assert.equal(fresh.ok, true)
-      await new Promise((r) => setTimeout(r, 50))
+      await waitForTaskClosed(fresh.taskId)
       assert.equal(launches.length, 1)
       assert.match(launches[0]!.prompt, /未完成的合并/)
       assert.match(launches[0]!.prompt, /README 内容冲突/)
@@ -401,7 +411,7 @@ test('review issues reach the agent across stale-session fallback on an interrup
         context: 'README 内容冲突',
       })
       assert.equal(rework.ok, true)
-      await new Promise((r) => setTimeout(r, 50))
+      await waitForTaskClosed(rework.taskId)
       const occurrences = launches[0]!.prompt.split('README 内容冲突').length - 1
       assert.equal(occurrences, 1)
     })
