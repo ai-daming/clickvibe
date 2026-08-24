@@ -85,3 +85,67 @@ test('stop API requires explicit confirmation before releasing an unknown legacy
     await rm(tempHome, { recursive: true, force: true })
   }
 })
+
+test('stop API rejects a stale unknown-task confirmation after review became current', async () => {
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-stop-current-task-'))
+  const previousHome = process.env.HOME
+  process.env.HOME = tempHome
+  const workflow: IssueWorkflow = {
+    key: 'owner-repo-111-current',
+    url: 'https://github.com/owner/repo/issues/111',
+    repoKey: 'owner/repo',
+    worktree: tempHome,
+    branch: 'clickvibe-issue-111',
+    stage: 'passed',
+    devAgent: 'codex',
+    devTaskId: 'dev-1000-old',
+    devSessionId: 'legacy-session',
+    devSessionAgent: 'codex',
+    devInterrupted: false,
+    reviewAgent: 'codex',
+    reviewTaskId: 'review-2000-current',
+    reviewSessionId: 'review-session',
+    reviewSessionAgent: 'codex',
+    reviewResult: { passed: true, issues: [] },
+    prNumber: '114',
+    issueState: 'OPEN',
+    baseRef: 'origin/main @ 82e55b2',
+    updatedAt: Date.now(),
+    events: [],
+  }
+  const registryOffline = {
+    jobs: {
+      list(): never {
+        throw new Error('registry offline')
+      },
+      get(): never {
+        throw new Error('registry offline')
+      },
+    },
+  }
+  try {
+    await saveWorkflow(workflow)
+    const stale = await stopTask(registryOffline as never, {
+      taskId: workflow.devTaskId,
+      confirmedStopped: true,
+    })
+    assert.deepEqual(stale, {
+      ok: false,
+      error: '任务确认已过期:当前待确认任务为 review-2000-current,请刷新后重试',
+    })
+    assert.equal((await loadWorkflow(workflow.key))?.stage, 'passed')
+    assert.equal((await loadWorkflow(workflow.key))?.devInterrupted, false)
+
+    const current = await stopTask(registryOffline as never, {
+      taskId: workflow.reviewTaskId,
+      confirmedStopped: true,
+    })
+    assert.deepEqual(current, { ok: true, taskId: 'review-2000-current', stopped: false })
+    assert.equal((await loadWorkflow(workflow.key))?.stage, 'review-ready')
+    assert.equal((await loadWorkflow(workflow.key))?.devInterrupted, false)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})

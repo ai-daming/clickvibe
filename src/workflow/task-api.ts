@@ -228,9 +228,15 @@ export async function stopTask(
       ? ((await loadWorkflow(stored.workflow.key)) ?? stored.workflow)
       : (await loadAllWorkflows()).find((workflow) => workflow.devTaskId === taskId || workflow.reviewTaskId === taskId)
     if (!currentWorkflow) return { ok: false, error: `未知任务 ${taskId}` }
-    const kind = stored?.kind ?? (currentWorkflow.devTaskId === taskId ? 'dev' : 'review')
-    let hostJobId = kind === 'dev' ? currentWorkflow.devHostJobId : currentWorkflow.reviewHostJobId
     const ownership = observeWorkflowTask(ctx as unknown as TaskOwnershipContext, currentWorkflow)
+    if (ownership.state === 'unknown' && ownership.taskId !== taskId) {
+      return { ok: false, error: `任务确认已过期:当前待确认任务为 ${ownership.taskId},请刷新后重试` }
+    }
+    const kind =
+      ownership.state === 'unknown'
+        ? ownership.kind
+        : (stored?.kind ?? (currentWorkflow.devTaskId === taskId ? 'dev' : 'review'))
+    let hostJobId = kind === 'dev' ? currentWorkflow.devHostJobId : currentWorkflow.reviewHostJobId
     if (ownership.state === 'interrupted' || (ownership.state === 'unknown' && confirmedStopped)) {
       if (kind === 'dev') {
         currentWorkflow.stage = 'developing'

@@ -78,6 +78,7 @@ export interface Workflow {
   updatedAt: number
   events?: WorkflowEvent[]
   derived?: {
+    taskRef: { kind: 'dev' | 'review'; taskId: string } | null
     head: string | null
     branch: string | null
     mainHead: string | null

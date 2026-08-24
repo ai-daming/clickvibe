@@ -41,6 +41,7 @@ import {
 
 /** Worktree facts derived from git, GitHub and durable workflow events. */
 export interface WorkflowDerived {
+  taskRef: { kind: 'dev' | 'review'; taskId: string } | null
   head: string | null
   branch: string | null
   mainHead: string | null
@@ -256,6 +257,10 @@ export async function deriveWorkflowState(
     prNumber: options.pr?.number ?? workflowPrNumber,
     runStartedAt: ownership.state === 'running' ? ownership.startedAt : null,
     derived: {
+      taskRef:
+        ownership.state === 'running' || ownership.state === 'unknown'
+          ? { kind: ownership.kind, taskId: ownership.taskId }
+          : null,
       head,
       branch,
       mainHead,

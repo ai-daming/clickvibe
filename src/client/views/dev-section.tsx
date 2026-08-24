@@ -1,6 +1,6 @@
 import { RunningDuration } from '../duration.ts'
 import { type Workflow, stageLabel } from '../domain.ts'
-import { reviewVerdictView } from '../runtime.ts'
+import { reviewVerdictView, selectUnknownTaskId } from '../runtime.ts'
 import { sectionStorageKey } from './collapsible-section.ts'
 import { type GhIssue } from './issue-view.tsx'
 import { LiveTerminal } from './live-terminal.tsx'
@@ -63,7 +63,7 @@ export function DevSection({
     workflowEvents,
   } = useDevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoActionHandled, onDelivered })
   const freshEntry = freshSessionEntry(effectiveAction.kind, derived?.freshSession)
-  const unknownTaskId = workflow?.stage === 'reviewing' ? workflow.reviewTaskId : workflow?.devTaskId
+  const unknownTaskId = selectUnknownTaskId(workflow)
   const runFreshSession = () => {
     const userContext = contextToSubmit(contextText)
     if (freshEntry === 'develop') void resume(userContext, true)

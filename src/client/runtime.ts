@@ -6,7 +6,7 @@
  * workflow/delivery-publication.ts. tests/runtime-contract.test.ts compares
  * both boundaries so a one-sided protocol or label change fails CI.
  */
-import type { WorkflowEvent } from './domain.ts'
+import type { Workflow, WorkflowEvent } from './domain.ts'
 
 export type AgentKind = 'codex' | 'claude'
 
@@ -109,6 +109,12 @@ export function selectHistoryTask(workflow: TaskHistoryWorkflow): { taskId: stri
     workflow.hasReviewResult ||
     started(workflow.reviewTaskId) > started(workflow.devTaskId)
   return { taskId: showReview ? workflow.reviewTaskId : workflow.devTaskId, expectRunning: false }
+}
+
+export function selectUnknownTaskId(
+  workflow: Pick<Workflow, 'stage' | 'devTaskId' | 'reviewTaskId' | 'derived'> | null,
+): string | null {
+  return workflow?.derived?.status === 'task-unknown' ? (workflow.derived.taskRef?.taskId ?? null) : null
 }
 
 function workflowBaseBranch(baseRef: string | null | undefined, defaultBranch = 'main'): string {
