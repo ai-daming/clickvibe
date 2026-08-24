@@ -133,6 +133,7 @@ R4-R8 是同一件事(重复推导不一致),R9-R10 是另一件事(写入无并
 
 ## 关联
 
-- 案例全记录:issue #111 及 PR #114 的十轮 review 评论。
+- 完整复盘(三阶段时间线、协议演化、六条教训):`docs/plans/2026-08-25-issue-111-retrospective.md`
+- 案例全记录:issue #111 及 PR #114 的 18 条 Review Meta 评论。
 - 并发模型与任务所有权设计:`docs/state-model.md`「宿主重启与任务恢复」。
 - review 执行流程:`skills/root-cause-review/SKILL.md`。
