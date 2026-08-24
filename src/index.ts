@@ -53,7 +53,12 @@ declare module '@deepseek-ai/cordis' {
         status: string
         exitCode: number | null
         readonly done: Promise<void>
-        readOutput(): { delta: string; lossy: boolean }
+        readOutput(): {
+          delta: string
+          lossy: boolean
+          stdoutSpillPath?: string
+          stderrSpillPath?: string
+        }
         kill(): boolean
       }
     }

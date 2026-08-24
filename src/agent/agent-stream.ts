@@ -18,6 +18,21 @@ export interface StatusLine {
   usage?: TokenUsage
 }
 
+export function lossyAgentOutputNotice(read: {
+  lossy: boolean
+  stdoutSpillPath?: string
+  stderrSpillPath?: string
+}): string | null {
+  if (!read.lossy) return null
+  const spillFiles = [
+    read.stdoutSpillPath ? `stdout ${read.stdoutSpillPath}` : '',
+    read.stderrSpillPath ? `stderr ${read.stderrSpillPath}` : '',
+  ].filter(Boolean)
+  return spillFiles.length > 0
+    ? `[clickvibe] 宿主流式缓冲已丢失部分 Agent 输出；可从宿主 spill 文件恢复：${spillFiles.join('；')}`
+    : '[clickvibe] 宿主流式缓冲已丢失部分 Agent 输出；宿主未提供 spill 文件，缺口无法从 ClickVibe 日志恢复'
+}
+
 /** Classify a tool name into a friendly "current action" label. */
 function toolLabel(name: string, args: string): string {
   switch (name) {
@@ -130,7 +145,10 @@ export function parseCodexEvent(line: string): StatusLine[] {
           break
         }
         case 'error':
-          out.push({ kind: 'text', text: `⚠️ ${item.text ?? 'error'}` })
+          out.push({
+            kind: 'text',
+            text: `⚠️ ${item.text?.trim() ? item.text : 'Codex 报告错误，但未提供错误详情'}`,
+          })
           break
         default:
           break
