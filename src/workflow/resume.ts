@@ -19,19 +19,18 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { buildResumePrompt, resolvePromptSnapshot } from '../agent/prompts.ts'
-import { attachAgentProcess, createLiveTask, finishTask, pushTaskLine } from '../agent/task-supervisor.ts'
+import {
+  attachAgentProcess,
+  createLiveTask,
+  finishTask,
+  pushTaskLine,
+  reserveHostTask,
+} from '../agent/task-supervisor.ts'
 import { buildFreshAgentCommand, buildResumeAgentCommand } from '../infra/develop-core.ts'
 import { buildMergePreface } from '../infra/git.ts'
-import {
-  type LiveTask,
-  liveTasks,
-  parseUrl,
-  readWorktreeHead,
-  resumeTaskGate,
-  runCommand,
-  taskId,
-} from '../infra/runtime.ts'
+import { type LiveTask, parseUrl, readWorktreeHead, resumeTaskGate, runCommand, taskId } from '../infra/runtime.ts'
 import { clearStaleSessionId, issueKey, loadWorkflow, resolveSessionForAgent, saveWorkflow } from '../infra/state.ts'
+import { observeWorkflowTask, taskLaunchDecision, type TaskOwnershipContext } from '../infra/task-ownership.ts'
 import { recordDevDelivery } from './review-flow.ts'
 import { finalizeDevRun } from './dev-completion.ts'
 import { deriveFreshSessionAvailability, selectSessionLaunch } from './fresh-session.ts'
@@ -58,6 +57,10 @@ export async function resumeDevelop(
   if (!workflow || !workflow.devTaskId) {
     return { ok: false, error: '该 issue 尚无开发记录,无法续会话' }
   }
+  const ownershipGate = taskLaunchDecision(observeWorkflowTask(ctx as unknown as TaskOwnershipContext, workflow))
+  if (!ownershipGate.allowed && !workflow.devInterrupted) {
+    return ownershipGate.running ? { ok: true, taskId: workflow.devTaskId } : { ok: false, error: ownershipGate.error }
+  }
 
   const availability = deriveFreshSessionAvailability(
     workflow.events,
@@ -66,11 +69,6 @@ export async function resumeDevelop(
   )
   if (freshSession && !availability.develop) {
     return { ok: false, error: '当前轮次未超过阈值,或没有可放弃的开发会话' }
-  }
-
-  const oldLive = liveTasks.get(workflow.devTaskId)
-  if (oldLive && !oldLive.closed) {
-    return { ok: true, taskId: oldLive.taskId }
   }
 
   const agent = workflow.devAgent ?? 'codex'
@@ -103,6 +101,7 @@ export async function resumeDevelop(
     return { ok: false, error: resolvedSnapshot.error }
   }
   workflow.devTaskId = live.taskId
+  workflow.devHostJobId = null
   workflow.devInterrupted = false
   workflow.stage = 'developing'
   await saveWorkflow(workflow)
@@ -132,6 +131,22 @@ export async function resumeDevelop(
   const mergePreface = await buildMergePreface(ctx, workflow.worktree, workflowBaseBranch(workflow.baseRef))
 
   const prompt = await buildResumePrompt(ctx, workflow, resolvedSnapshot, extraContext, mergePreface, sessionId)
+
+  let hostReservation: ReturnType<typeof reserveHostTask>
+  try {
+    hostReservation = reserveHostTask(ctx, live)
+  } catch (error) {
+    finishTask(live, 'failed', 1)
+    workflow.devInterrupted = true
+    await saveWorkflow(workflow)
+    return { ok: false, error: `宿主任务占位失败:${String(error instanceof Error ? error.message : error)}` }
+  }
+  if (!hostReservation.created) {
+    finishTask(live, 'stopped', null)
+    return { ok: true, taskId: hostReservation.taskId }
+  }
+  workflow.devHostJobId = hostReservation.hostJobId
+  await saveWorkflow(workflow)
 
   pushTaskLine(
     live,

@@ -21,7 +21,13 @@
 import { basename, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { buildDevelopPrompt, type ResolvedPromptSnapshot, sameSnapshot } from '../agent/prompts.ts'
-import { attachAgentProcess, createLiveTask, finishTask, pushTaskLine } from '../agent/task-supervisor.ts'
+import {
+  attachAgentProcess,
+  createLiveTask,
+  finishTask,
+  pushTaskLine,
+  reserveHostTask,
+} from '../agent/task-supervisor.ts'
 import { ensureWorktree } from '../agent/worktree.ts'
 import { fetchGithubPrFact, readConfiguredBranchFacts } from '../github/facts.ts'
 import { fetchIssue, issueSnapshot } from '../github/issue.ts'
@@ -43,6 +49,7 @@ import {
   taskId,
 } from '../infra/runtime.ts'
 import { type IssueWorkflow, issueKey, loadWorkflow, saveWorkflow } from '../infra/state.ts'
+import { observeWorkflowTask, taskLaunchDecision, type TaskOwnershipContext } from '../infra/task-ownership.ts'
 import { deriveAutoDevelopment } from './auto-development.ts'
 import { deriveDevelopmentEventKind } from './delivery-audit.ts'
 import { finalizeDevRun } from './dev-completion.ts'
@@ -234,6 +241,13 @@ export async function startDevelop(
   }
   if (!authorizedSnapshot || !launchSnapshot) return { ok: false, error: '服务端确认快照丢失,请重新确认' }
 
+  const ownershipGate = taskLaunchDecision(observeWorkflowTask(ctx as unknown as TaskOwnershipContext, workflow))
+  if (!ownershipGate.allowed) {
+    return ownershipGate.running && workflow.devTaskId
+      ? { ok: true, taskId: workflow.devTaskId, worktree: workflow.worktree, branch: workflow.branch }
+      : { ok: false, error: ownershipGate.error }
+  }
+
   // 已有开发任务在跑:复用
   if (workflow.devTaskId && liveTasks.has(workflow.devTaskId) && !liveTasks.get(workflow.devTaskId)!.closed) {
     return { ok: true, taskId: workflow.devTaskId, worktree: workflow.worktree, branch: workflow.branch }
@@ -246,10 +260,27 @@ export async function startDevelop(
   } catch (error) {
     return { ok: false, error: String(error instanceof Error ? error.message : error) }
   }
+  let hostReservation: ReturnType<typeof reserveHostTask>
+  try {
+    hostReservation = reserveHostTask(ctx, live)
+  } catch (error) {
+    finishTask(live, 'failed', 1)
+    return { ok: false, error: `宿主任务占位失败:${String(error instanceof Error ? error.message : error)}` }
+  }
+  if (!hostReservation.created) {
+    finishTask(live, 'stopped', null)
+    return {
+      ok: true,
+      taskId: hostReservation.taskId,
+      worktree: workflow.worktree,
+      branch: workflow.branch,
+    }
+  }
   // LiveTask creation opened a new immutable JSONL generation. Previous task
   // files remain queryable and are never truncated.
   workflow.devAgent = agent
   workflow.devTaskId = taskIdValue
+  workflow.devHostJobId = hostReservation.hostJobId
   workflow.devInterrupted = false
   workflow.stage = 'developing'
   await saveWorkflow(workflow)

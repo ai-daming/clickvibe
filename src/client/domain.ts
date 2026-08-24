@@ -26,18 +26,20 @@ export interface Workflow {
   stage: 'idle' | 'developing' | 'review-ready' | 'reviewing' | 'passed'
   devAgent: 'codex' | 'claude' | null
   devTaskId: string | null
+  devHostJobId?: string | null
   devSessionId: string | null
   devSessionAgent: 'codex' | 'claude' | null
   devInterrupted: boolean
   reviewAgent: 'codex' | 'claude' | null
   reviewTaskId: string | null
+  reviewHostJobId?: string | null
   reviewSessionId: string | null
   reviewSessionAgent: 'codex' | 'claude' | null
   reviewResult: { passed: boolean; issues: string[]; commentUrl?: string } | null
   prNumber: string | null
   issueState?: 'OPEN' | 'CLOSED'
   baseRef: string | null
-  /** Present only while this host process still owns the active task. */
+  /** Present while the current host supervisor still owns the active task. */
   runStartedAt: number | null
   delivery?: {
     status: 'merged' | 'cleanup-pending' | 'archived'
@@ -63,6 +65,7 @@ export interface Workflow {
     lastObservedAt: string | null
     pausedReason:
       | 'session-interrupted'
+      | 'controller-error'
       | 'authorization-denied'
       | 'sync-conflict'
       | 'merge-gate-rejected'
@@ -107,7 +110,7 @@ export interface Workflow {
   }
 }
 
-export type WorkflowStatus = Workflow['stage'] | 'interrupted'
+export type WorkflowStatus = Workflow['stage'] | 'task-unknown' | 'interrupted'
 
 export type NextActionKind =
   | 'develop'

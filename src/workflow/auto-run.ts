@@ -4,6 +4,8 @@ import { fetchIssue, issueSnapshot } from '../github/issue.ts'
 import { type IssuePromptSnapshot } from '../infra/develop-core.ts'
 import { liveTasks, parseUrl } from '../infra/runtime.ts'
 import { appendEvent, type AutoRunPausedReason, issueKey, loadWorkflow, saveWorkflow } from '../infra/state.ts'
+import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
+import { observeWorkflowTask, type TaskOwnershipContext } from '../infra/task-ownership.ts'
 import { createPullRequest } from './create-pr.ts'
 import { startDevelop } from './develop-start.ts'
 import { mergeAndCleanup } from './merge.ts'
@@ -14,7 +16,6 @@ import {
   autoRunFailureReason,
   autoRunRetryDelay,
   decideAutoRun,
-  isOrphanedAutoRun,
   validateAutoRunConfig,
 } from './auto-run-policy.ts'
 import type { AutoRunState, IssueWorkflow } from '../infra/state.ts'
@@ -54,13 +55,15 @@ async function persistDecision(key: string, decision: Exclude<AutoRunDecision, {
 async function pauseAutoRun(key: string, reason: AutoRunPausedReason): Promise<void> {
   const workflow = await loadWorkflow(key)
   if (!workflow?.autoRun || workflow.autoRun.status !== 'running') return
-  // 诊断停靠点:暂停瞬间的 live 任务事实,方便事后核对是否误判孤儿(issue #111)。
-  console.warn(
-    `[clickvibe] autoRun 暂停 reason=${reason} key=${key} step=${workflow.autoRun.step ?? 0} ` +
-      `devTaskId=${workflow.devTaskId ?? '-'} reviewTaskId=${workflow.reviewTaskId ?? '-'} ` +
-      `devLive=${workflow.devTaskId ? (liveTasks.get(workflow.devTaskId) && !liveTasks.get(workflow.devTaskId)!.closed ? 'yes' : 'no') : '-'} ` +
-      `reviewLive=${workflow.reviewTaskId ? (liveTasks.get(workflow.reviewTaskId) && !liveTasks.get(workflow.reviewTaskId)!.closed ? 'yes' : 'no') : '-'}`,
-  )
+  logTaskDiagnostic('auto-run-pause', {
+    reason,
+    workflowKey: key,
+    step: workflow.autoRun.step ?? 0,
+    updatedAt: workflow.updatedAt,
+    devTaskId: workflow.devTaskId,
+    reviewTaskId: workflow.reviewTaskId,
+    liveTaskKeys: [...liveTasks.entries()].filter(([, task]) => !task.closed).map(([taskId]) => taskId),
+  })
   workflow.autoRun.status = 'paused'
   workflow.autoRun.pausedReason = reason
   workflow.autoRun.lastObservedAt = new Date().toISOString()
@@ -226,8 +229,15 @@ export function requestAutoRunReconcile(ctx: Context, key: string, outcome?: Aut
         await reconcileOnce(ctx, key, nextOutcome)
         nextOutcome = queued.get(key)
       } while (queued.has(key))
-    } catch {
-      await pauseAutoRun(key, 'session-interrupted')
+    } catch (error) {
+      logTaskDiagnostic('auto-run-reconcile-error', {
+        workflowKey: key,
+        outcome: nextOutcome ?? null,
+        errorName: error instanceof Error ? error.name : typeof error,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        errorStack: error instanceof Error ? error.stack : null,
+      })
+      await pauseAutoRun(key, 'controller-error')
     } finally {
       running.delete(key)
     }
@@ -263,8 +273,12 @@ export async function startAutoRun(
   const key = issueKey(`${parsed.owner}/${parsed.repo}`, parsed.number)
   const ensured = await ensureWorktree(ctx, parsed)
   if (!ensured.ok) return ensured
-  if (liveTaskFor(ensured.workflow)) {
+  const ownership = observeWorkflowTask(ctx as unknown as TaskOwnershipContext, ensured.workflow)
+  if (ownership.state === 'running') {
     return { ok: false, error: '该 issue 当前有任务运行,请等待或停止后再启动自动跑到底' }
+  }
+  if (ownership.state === 'unknown') {
+    return { ok: false, error: '当前控制器无法确认旧任务生死,为避免双开已禁止启动自动跑到底' }
   }
   const startedAt = new Date().toISOString()
   ensured.workflow.issueSnapshot = authorizedSnapshot
@@ -286,19 +300,28 @@ export async function startAutoRun(
 }
 
 export async function pauseOrphanedAutoRuns(
+  ctx: Context,
   workflows: readonly (IssueWorkflow & { autoRun?: AutoRunState })[],
 ): Promise<void> {
   for (const candidate of workflows) {
-    if (
-      running.has(candidate.key) ||
-      observationTimers.has(candidate.key) ||
-      !isOrphanedAutoRun(candidate, (taskId: string | null) => {
-        if (taskId === null) return false
-        const task = liveTasks.get(taskId)
-        return task !== undefined && !task.closed
-      })
-    )
+    if (candidate.autoRun?.status !== 'running' || running.has(candidate.key) || observationTimers.has(candidate.key)) {
       continue
-    await pauseAutoRun(candidate.key, 'session-interrupted')
+    }
+    const ownership = observeWorkflowTask(ctx as unknown as TaskOwnershipContext, candidate)
+    logTaskDiagnostic('auto-run-ownership-observed', {
+      workflowKey: candidate.key,
+      step: candidate.autoRun.step ?? 0,
+      updatedAt: candidate.updatedAt,
+      ownership,
+      devTaskId: candidate.devTaskId,
+      reviewTaskId: candidate.reviewTaskId,
+      liveTaskKeys: [...liveTasks.entries()].filter(([, task]) => !task.closed).map(([taskId]) => taskId),
+      trigger: 'state-refresh',
+    })
+    if (ownership.state === 'interrupted') {
+      await pauseAutoRun(candidate.key, 'session-interrupted')
+      continue
+    }
+    requestAutoRunReconcile(ctx, candidate.key)
   }
 }

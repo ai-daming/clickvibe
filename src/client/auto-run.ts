@@ -2,6 +2,7 @@ import type { Workflow } from './domain.ts'
 
 export const AUTO_RUN_PAUSE_LABEL: Record<string, string> = {
   'session-interrupted': '会话中断',
+  'controller-error': '控制器异常',
   'authorization-denied': '授权被拒',
   'sync-conflict': '同步冲突降级',
   'merge-gate-rejected': '合并门禁拒绝',
@@ -64,6 +65,9 @@ export function autoRunTrigger(
   }
   if (workflow?.runStartedAt != null) {
     return { label: '任务进行中', disabled: true }
+  }
+  if (workflow?.derived?.status === 'task-unknown') {
+    return { label: '等待任务确认', disabled: true }
   }
   return { label: '自动跑到底', disabled: false }
 }

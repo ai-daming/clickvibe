@@ -41,6 +41,8 @@ export function reviewStartError(decision: Exclude<ReviewStartDecision, { allowe
   switch (decision.reason) {
     case 'task-running':
       return '有进行中任务,请等待当前开发任务完成后再 Review'
+    case 'task-unknown':
+      return '当前控制器无法确认旧任务生死,为避免双开已禁止启动 Review'
     case 'development-in-progress':
       return '开发仍在进行,尚无可 Review 的完成事实'
     case 'workflow-cache-missing':
@@ -92,7 +94,9 @@ export async function resolveReviewStartWorkflow(
   if (existing) {
     const cachedDecision = deriveReviewStartDecision(cachedReviewFacts(existing))
     if (cachedDecision.allowed) return { ok: true, workflow: existing }
-    if (cachedDecision.reason === 'task-running') return { ok: false, error: reviewStartError(cachedDecision) }
+    if (cachedDecision.reason === 'task-running' || cachedDecision.reason === 'task-unknown') {
+      return { ok: false, error: reviewStartError(cachedDecision) }
+    }
   }
 
   if (parsed.kind !== 'issue') {

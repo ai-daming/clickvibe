@@ -23,6 +23,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { type DeriveOptions, hasMergeConflict, readBranch, readRefShort, readRevCount } from '../infra/git.ts'
 import { liveTasks, readWorktreeHead, runCommand } from '../infra/runtime.ts'
 import { type IssueContractSnapshot, type IssueWorkflow } from '../infra/state.ts'
+import { observeTaskOwnership, type TaskOwnershipContext } from '../infra/task-ownership.ts'
 import { latestDevelopmentHash } from './delivery-audit.ts'
 import { deriveFreshSessionAvailability, type FreshSessionAvailability } from './fresh-session.ts'
 import {
@@ -187,15 +188,19 @@ export async function deriveWorkflowState(
   const verdictCurrent =
     reviewPassed !== null && head !== null && reviewedHash !== null && head === reviewedHash && issueContractCurrent
 
-  const devLive = workflow.devTaskId ? liveTasks.get(workflow.devTaskId) : undefined
-  const reviewLive = workflow.reviewTaskId ? liveTasks.get(workflow.reviewTaskId) : undefined
-  const runningTask =
-    reviewLive !== undefined && !reviewLive.closed
-      ? reviewLive
-      : devLive !== undefined && !devLive.closed
-        ? devLive
-        : null
-  const taskRunning = runningTask !== null
+  const ownership = observeTaskOwnership(
+    ctx as unknown as TaskOwnershipContext,
+    workflow,
+    (taskId) => {
+      const task = liveTasks.get(taskId)
+      return task !== undefined && !task.closed
+    },
+    (taskId) => liveTasks.get(taskId)?.startedAt ?? null,
+  )
+  const taskRunning = ownership.state === 'running'
+  const taskInterrupted =
+    ownership.state === 'interrupted' || (workflow.stage === 'developing' && workflow.devInterrupted)
+  const taskUnknown = !taskInterrupted && ownership.state === 'unknown'
 
   const branchExists = options.branchExists ?? branch !== null
   const worktreeValid = !exists || branch === workflow.branch
@@ -213,6 +218,8 @@ export async function deriveWorkflowState(
     stage: workflow.stage,
     devInterrupted: workflow.devInterrupted,
     taskRunning,
+    taskUnknown,
+    taskInterrupted,
     head,
     reviewedHash,
     reviewPassed,
@@ -245,7 +252,7 @@ export async function deriveWorkflowState(
   return {
     ...workflow,
     prNumber: options.pr?.number ?? workflowPrNumber,
-    runStartedAt: runningTask?.startedAt ?? null,
+    runStartedAt: ownership.state === 'running' ? ownership.startedAt : null,
     derived: {
       head,
       branch,

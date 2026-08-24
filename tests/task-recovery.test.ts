@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { workflowStatusLabel as clientStatusLabel } from '../src/client/runtime.ts'
+import { observeTaskOwnership } from '../src/infra/task-ownership.ts'
 import {
   deriveNextAction,
   deriveWorkflowStatus,
@@ -8,7 +9,7 @@ import {
   type WorkflowFacts,
 } from '../src/workflow/state-view.ts'
 
-function interrupted(stage: 'developing' | 'reviewing'): WorkflowFacts {
+function inFlight(stage: 'developing' | 'reviewing'): WorkflowFacts {
   return {
     issueOpen: true,
     prMerged: false,
@@ -18,6 +19,8 @@ function interrupted(stage: 'developing' | 'reviewing'): WorkflowFacts {
     stage,
     devInterrupted: stage === 'developing',
     taskRunning: false,
+    taskUnknown: true,
+    taskInterrupted: false,
     head: '82e55b2',
     reviewedHash: null,
     reviewPassed: null,
@@ -29,18 +32,18 @@ function interrupted(stage: 'developing' | 'reviewing'): WorkflowFacts {
   }
 }
 
-test('a lost development task is explicit and resumes through its agent session', () => {
-  const facts = interrupted('developing')
-  assert.equal(deriveWorkflowStatus(facts), 'interrupted')
+test('an in-flight task with unknown ownership fails closed', () => {
+  const facts = inFlight('developing')
+  assert.equal(deriveWorkflowStatus(facts), 'task-unknown')
   assert.deepEqual(deriveNextAction(facts), {
-    kind: 'resume',
-    label: '恢复开发',
-    hint: '确认旧宿主任务已停止后,续上次 agent 会话恢复开发',
+    kind: 'none',
+    label: '等待任务确认',
+    hint: '当前控制器无法确认旧任务生死,为避免双开已禁止启动新任务',
   })
 })
 
-test('a lost review task never falls back to ordinary review-ready status', () => {
-  const facts = interrupted('reviewing')
+test('an explicitly interrupted review offers a safe re-review action', () => {
+  const facts = { ...inFlight('reviewing'), taskUnknown: false, taskInterrupted: true }
   assert.equal(deriveWorkflowStatus(facts), 'interrupted')
   assert.deepEqual(deriveNextAction(facts), {
     kind: 'review',
@@ -49,7 +52,90 @@ test('a lost review task never falls back to ordinary review-ready status', () =
   })
 })
 
-test('host and client expose the same interrupted status label', () => {
-  assert.equal(hostStatusLabel('interrupted', null, false), '任务已中断')
-  assert.equal(clientStatusLabel('interrupted', null, false), '任务已中断')
+test('host and client expose the same task-unknown status label', () => {
+  assert.equal(hostStatusLabel('task-unknown', null, false), '任务状态未知')
+  assert.equal(clientStatusLabel('task-unknown', null, false), '任务状态未知')
+})
+
+test('shared host registry keeps a task visible after a plugin instance loses its local map', () => {
+  const jobs = {
+    get(id: string) {
+      assert.equal(id, 'clickvibe-1')
+      return {
+        id,
+        kind: 'clickvibe',
+        label: 'clickvibe:owner-repo-111:review:review-task-1',
+        status: 'running',
+        startedAt: 123,
+        reported: false,
+      }
+    },
+  }
+  const ownership = observeTaskOwnership(
+    { jobs },
+    {
+      key: 'owner-repo-111',
+      stage: 'reviewing',
+      devTaskId: null,
+      reviewTaskId: 'review-task-1',
+      devHostJobId: null,
+      reviewHostJobId: 'clickvibe-1',
+    },
+    () => false,
+  )
+  assert.deepEqual(ownership, { state: 'running', startedAt: 123, source: 'host-registry' })
+})
+
+test('concurrent refreshes follow one shared host-job lifecycle across controller instances', async () => {
+  let status: 'running' | 'completed' = 'running'
+  const jobs = {
+    get() {
+      return {
+        id: 'clickvibe-2',
+        kind: 'clickvibe',
+        label: 'clickvibe:owner-repo-111:dev:dev-task-2',
+        status,
+        startedAt: 456,
+        reported: false,
+      }
+    },
+  }
+  const workflow = {
+    key: 'owner-repo-111',
+    stage: 'developing' as const,
+    devTaskId: 'dev-task-2',
+    reviewTaskId: null,
+    devHostJobId: 'clickvibe-2',
+    reviewHostJobId: null,
+  }
+  const refresh = async () => observeTaskOwnership({ jobs }, workflow, () => false)
+
+  const whileRunning = await Promise.all(Array.from({ length: 12 }, refresh))
+  assert.ok(whileRunning.every((ownership) => ownership.state === 'running'))
+
+  status = 'completed'
+  const afterSettlement = await Promise.all(Array.from({ length: 12 }, refresh))
+  assert.ok(afterSettlement.every((ownership) => ownership.state === 'interrupted'))
+})
+
+test('missing ownership evidence remains unknown instead of claiming interruption', () => {
+  const ownership = observeTaskOwnership(
+    {
+      jobs: {
+        get() {
+          throw new Error('unknown job')
+        },
+      },
+    },
+    {
+      key: 'owner-repo-111',
+      stage: 'developing',
+      devTaskId: 'dev-task-1',
+      reviewTaskId: null,
+      devHostJobId: null,
+      reviewHostJobId: null,
+    },
+    () => false,
+  )
+  assert.deepEqual(ownership, { state: 'unknown', startedAt: null, source: 'no-proof' })
 })

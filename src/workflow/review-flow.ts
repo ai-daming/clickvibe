@@ -22,7 +22,13 @@ import { existsSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import { type AgentKind } from '../agent/agent-stream.ts'
 import { buildReviewPrompt, fetchPrHeadBranch, resolvePromptSnapshot } from '../agent/prompts.ts'
-import { attachAgentProcess, createLiveTask, finishTask, pushTaskLine } from '../agent/task-supervisor.ts'
+import {
+  attachAgentProcess,
+  createLiveTask,
+  finishTask,
+  pushTaskLine,
+  reserveHostTask,
+} from '../agent/task-supervisor.ts'
 import { detectLinkedPr } from '../github/pr.ts'
 import { githubRest } from '../github/rest.ts'
 import { approvePassedReview } from '../github/review-approval.ts'
@@ -46,6 +52,7 @@ import {
   saveWorkflow,
   type WorkflowEvent,
 } from '../infra/state.ts'
+import { observeWorkflowTask, taskLaunchDecision, type TaskOwnershipContext } from '../infra/task-ownership.ts'
 import { buildDevComment, buildReviewComment } from './delivery-comment.ts'
 import { deriveEventRound } from './delivery-audit.ts'
 import { deriveFreshSessionAvailability, selectSessionLaunch } from './fresh-session.ts'
@@ -93,6 +100,13 @@ export async function startReview(
   const resolvedStart = await resolveReviewStartWorkflow(ctx, parsed, workflow)
   if (!resolvedStart.ok) return resolvedStart
   workflow = resolvedStart.workflow
+  const ownershipGate = taskLaunchDecision(observeWorkflowTask(ctx as unknown as TaskOwnershipContext, workflow))
+  if (!ownershipGate.allowed) {
+    const activeTaskId = workflow.reviewTaskId ?? workflow.devTaskId
+    return ownershipGate.running && activeTaskId
+      ? { ok: true, taskId: activeTaskId }
+      : { ok: false, error: ownershipGate.error }
+  }
   if (!existsSync(workflow.worktree)) {
     return { ok: false, error: `worktree 不存在: ${workflow.worktree}` }
   }
@@ -188,8 +202,20 @@ export async function startReview(
     return { ok: false, error: `无法清除旧 review 结论文件: ${message}` }
   }
 
+  let hostReservation: ReturnType<typeof reserveHostTask>
+  try {
+    hostReservation = reserveHostTask(ctx, live)
+  } catch (error) {
+    finishTask(live, 'failed', 1)
+    return { ok: false, error: `宿主任务占位失败:${String(error instanceof Error ? error.message : error)}` }
+  }
+  if (!hostReservation.created) {
+    finishTask(live, 'stopped', null)
+    return { ok: true, taskId: hostReservation.taskId }
+  }
   workflow.reviewAgent = agent
   workflow.reviewTaskId = live.taskId
+  workflow.reviewHostJobId = hostReservation.hostJobId
   workflow.stage = 'reviewing'
   await saveWorkflow(workflow)
 

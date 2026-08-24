@@ -48,7 +48,7 @@ export function githubCompareUrl(
 }
 
 export type WorkflowStageInput = 'idle' | 'developing' | 'review-ready' | 'reviewing' | 'passed'
-export type WorkflowStatus = WorkflowStageInput | 'interrupted'
+export type WorkflowStatus = WorkflowStageInput | 'task-unknown' | 'interrupted'
 export type IssueContractStatus = 'current' | 'changed' | 'unknown'
 export type IssueContractUnknownReason = 'missing-review-snapshot' | 'current-contract-unavailable' | null
 
@@ -70,6 +70,10 @@ export interface WorkflowFacts {
   devInterrupted: boolean
   /** A dev/review agent process is currently running for this workflow. */
   taskRunning: boolean
+  /** Current controller cannot prove whether the in-flight task is alive. */
+  taskUnknown?: boolean
+  /** The host supervisor or an explicit task outcome proves termination. */
+  taskInterrupted?: boolean
   /** Worktree HEAD short hash; null when the worktree is missing. */
   head: string | null
   /** HEAD the latest review verdict was bound to. */
@@ -103,7 +107,12 @@ export type ReviewStartDecision =
   | { allowed: true; reason: 'completed-facts' | 'workflow-ready' }
   | {
       allowed: false
-      reason: 'task-running' | 'development-in-progress' | 'workflow-cache-missing' | 'no-completion-facts'
+      reason:
+        | 'task-running'
+        | 'task-unknown'
+        | 'development-in-progress'
+        | 'workflow-cache-missing'
+        | 'no-completion-facts'
     }
 
 function sameCommit(left: string | null | undefined, right: string | null | undefined): boolean {
@@ -115,6 +124,7 @@ function sameCommit(left: string | null | undefined, right: string | null | unde
 /** Decide review launchability from the same cache and hard facts used by the next-action projection. */
 export function deriveReviewStartDecision(facts: WorkflowFacts): ReviewStartDecision {
   if (facts.taskRunning) return { allowed: false, reason: 'task-running' }
+  if (facts.taskUnknown) return { allowed: false, reason: 'task-unknown' }
   if (!facts.issueOpen || facts.prMerged) return { allowed: false, reason: 'no-completion-facts' }
   // An explicitly interrupted development/rework must retain its resumable
   // session even when HEAD still matches the previous delivered PR commit.
@@ -161,10 +171,8 @@ export function deriveWorkflowStatus(facts: WorkflowFacts): WorkflowStatus {
   if (facts.prMerged) return 'passed'
   // A live task outranks the linked PR and any verdict bound to an older HEAD.
   if (facts.taskRunning) return facts.stage === 'reviewing' ? 'reviewing' : 'developing'
-  // A persisted in-flight stage without its host-owned process is a recovery
-  // state, never ordinary review-ready. This is deliberately not "running":
-  // after host teardown there is no process handle that can prove liveness.
-  if (facts.stage === 'developing' || facts.stage === 'reviewing') return 'interrupted'
+  if (facts.taskUnknown) return 'task-unknown'
+  if (facts.taskInterrupted || (facts.stage === 'developing' && facts.devInterrupted)) return 'interrupted'
   // When the worktree cannot be inspected, preserve a known passing verdict
   // unless there is positive evidence of a newer commit. This matches the
   // pre-derived-state behavior without treating a known changed HEAD as current.
@@ -203,6 +211,8 @@ export function workflowStatusLabel(
       return '待 review'
     case 'reviewing':
       return 'review 中'
+    case 'task-unknown':
+      return '任务状态未知'
     case 'interrupted':
       return '任务已中断'
     case 'passed':
@@ -230,6 +240,9 @@ export function deriveNextAction(facts: WorkflowFacts): NextAction {
   if (!facts.issueOpen) return action('none', '无', 'issue 已关闭,无待办动作')
   if (facts.prMerged) return action('none', '无', 'PR 已合并,交付完成')
   if (facts.taskRunning) return action('none', '任务进行中', '开发/review 正在运行,等待完成')
+  if (facts.taskUnknown) {
+    return action('none', '等待任务确认', '当前控制器无法确认旧任务生死,为避免双开已禁止启动新任务')
+  }
   if (facts.prNumber && facts.prStatusKnown === false) {
     return action('none', '刷新 PR 状态', 'GitHub PR 实时状态查询失败,为避免误合并已暂停动作')
   }
@@ -290,9 +303,8 @@ export function deriveNextAction(facts: WorkflowFacts): NextAction {
     return action('create-pr', '创建 PR', '开发分支已有提交,推送并创建 PR 后 Review')
   }
 
-  // 中断恢复:开发中但没有存活任务(Host 重启 / 用户停止 / agent 失败)→ 恢复会话。
-  // taskRunning 已在上方排除,这里 stage==='developing' 即意味着任务已失联。
-  if (facts.stage === 'developing') {
+  // 只有明确停止、失败或宿主 supervisor 的终态才允许恢复。
+  if (facts.stage === 'developing' && (facts.taskInterrupted || facts.devInterrupted)) {
     return action(
       'resume',
       '恢复开发',
@@ -301,8 +313,7 @@ export function deriveNextAction(facts: WorkflowFacts): NextAction {
         : '确认旧宿主任务已停止后,尝试恢复失联的开发会话',
     )
   }
-  // review 中断:reviewing 但没有存活任务 → 重新 review。
-  if (facts.stage === 'reviewing') {
+  if (facts.stage === 'reviewing' && facts.taskInterrupted) {
     return reviewStart.allowed
       ? action('review', '重新 Review', '确认旧宿主任务已停止后,重新审查当前代码')
       : action('none', '无', '当前事实不足以重新启动 Review')
@@ -313,7 +324,11 @@ export function deriveNextAction(facts: WorkflowFacts): NextAction {
     return action('none', '无', 'worktree 缺失,请检查本地配置')
   }
 
-  // developing / reviewing 已被上面的早退处理(中断恢复/重新 review)
+  // Remaining in-flight stages lack enough evidence and stay fail closed.
+  if (facts.stage === 'developing' || facts.stage === 'reviewing') {
+    return action('none', '等待任务确认', '当前控制器无法确认旧任务生死,为避免双开已禁止启动新任务')
+  }
+
   switch (facts.stage) {
     case 'idle':
       return action('develop', '开始开发', '创建 worktree 并启动 agent 开发')

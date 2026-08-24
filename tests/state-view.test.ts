@@ -194,18 +194,18 @@ test('a stale review verdict is labelled as awaiting re-review', () => {
 })
 
 test('interrupted development resumes the agent session', () => {
-  const next = deriveNextAction(facts({ stage: 'developing', devInterrupted: true }))
+  const next = deriveNextAction(facts({ stage: 'developing', devInterrupted: true, taskInterrupted: true }))
   assert.equal(next.kind, 'resume')
 })
 
-test('development without a live task after host restart resumes the session', () => {
-  const next = deriveNextAction(facts({ stage: 'developing', devInterrupted: false }))
-  assert.equal(next.kind, 'resume')
-  assert.match(next.hint, /失联/)
+test('development without proof of host termination fails closed', () => {
+  const next = deriveNextAction(facts({ stage: 'developing', devInterrupted: false, taskUnknown: true }))
+  assert.equal(next.kind, 'none')
+  assert.match(next.hint, /避免双开/)
 })
 
 test('aborted review re-reviews instead of blocking', () => {
-  const next = deriveNextAction(facts({ stage: 'reviewing', devInterrupted: false }))
+  const next = deriveNextAction(facts({ stage: 'reviewing', devInterrupted: false, taskInterrupted: true }))
   assert.equal(next.kind, 'review')
 })
 

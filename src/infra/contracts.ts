@@ -45,6 +45,7 @@ export interface IssueContractCheck {
 
 export type AutoRunPausedReason =
   | 'session-interrupted'
+  | 'controller-error'
   | 'authorization-denied'
   | 'sync-conflict'
   | 'merge-gate-rejected'

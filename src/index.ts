@@ -67,9 +67,10 @@ export { ROUTE } from './infra/http-contract.ts'
 
 export const name = 'clickvibe'
 
-export const inject = ['webServer', 'shell', 'skills']
+export const inject = ['webServer', 'shell', 'skills', 'jobs']
 
 export function apply(ctx: Context): void {
+  ctx.jobs?.attachController('clickvibe')
   ctx.skills.register(loadEmbeddedGhIssueSkill())
   ctx.webServer.register({
     kind: 'prefix',

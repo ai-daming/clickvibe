@@ -54,7 +54,7 @@ test('review start rejects a live task before considering cached or hard complet
   assert.equal(deriveNextAction(running).kind, 'none')
 })
 
-test('developing without matching completion facts remains development in progress', () => {
+test('developing with unknown task ownership remains fail closed', () => {
   const developing = facts({
     stage: 'developing',
     branchExists: true,
@@ -63,19 +63,21 @@ test('developing without matching completion facts remains development in progre
     prNumber: '105',
     prState: 'OPEN',
     deliveryHash: 'old9999',
+    taskUnknown: true,
   })
 
   assert.deepEqual(deriveReviewStartDecision(developing), {
     allowed: false,
-    reason: 'development-in-progress',
+    reason: 'task-unknown',
   })
-  assert.equal(deriveNextAction(developing).kind, 'resume')
+  assert.equal(deriveNextAction(developing).kind, 'none')
 })
 
 test('an interrupted rework resumes even when unchanged delivery facts still match', () => {
   const interrupted = facts({
     stage: 'developing',
     devInterrupted: true,
+    taskInterrupted: true,
     branchExists: true,
     worktreeExists: true,
     hasCommits: true,

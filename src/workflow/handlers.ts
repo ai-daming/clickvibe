@@ -68,7 +68,7 @@ export async function stateWorkflows(
   const repoKey = String(filter?.repoKey ?? '')
   const config = await loadConfig()
   const active = await loadAllWorkflows()
-  await pauseOrphanedAutoRuns(active)
+  await pauseOrphanedAutoRuns(ctx, active)
   const currentActive = await loadAllWorkflows()
   const archived = url === '' ? [] : await loadAllArchivedWorkflows()
   const workflows = [...currentActive, ...archived].filter(

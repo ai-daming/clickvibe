@@ -1,4 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { Context } from '@deepseek-ai/cordis'
+import type { JobId } from '@deepseek-ai/dsh-jobs'
 import { finishTask, pushTaskLine } from '../agent/task-supervisor.ts'
 import { decodeLiveLogLine, type LiveLogEvent } from '../infra/live-output.ts'
 import { type LiveTask, liveTasks, liveWaiters } from '../infra/runtime.ts'
@@ -6,6 +8,7 @@ import {
   findTaskHistory,
   findWorkflowByIssue,
   type IssueWorkflow,
+  loadAllWorkflows,
   loadWorkflow,
   readTaskLog,
   saveWorkflow,
@@ -210,12 +213,37 @@ export function handleStream(req: IncomingMessage, res: ServerResponse): void {
   }
 }
 
-export function stopTask(
+export async function stopTask(
+  ctx: Context,
   payload: unknown,
-): { ok: true; taskId: string; stopped: boolean } | { ok: false; error: string } {
+): Promise<{ ok: true; taskId: string; stopped: boolean } | { ok: false; error: string }> {
   const taskId = String((payload as { taskId?: unknown } | undefined)?.taskId ?? '')
   const task = liveTasks.get(taskId)
-  if (!task) return { ok: false, error: `未知任务 ${taskId}` }
+  if (!task) {
+    const stored = await findTaskHistory(taskId)
+    const currentWorkflow = stored
+      ? stored.workflow
+      : (await loadAllWorkflows()).find((workflow) => workflow.devTaskId === taskId || workflow.reviewTaskId === taskId)
+    if (!currentWorkflow) return { ok: false, error: `未知任务 ${taskId}` }
+    const kind = stored?.kind ?? (currentWorkflow.devTaskId === taskId ? 'dev' : 'review')
+    const hostJobId = kind === 'dev' ? currentWorkflow.devHostJobId : currentWorkflow.reviewHostJobId
+    if (!hostJobId || !ctx.jobs) {
+      return { ok: false, error: `任务 ${taskId} 的宿主归属无法确认,请在宿主任务视图停止后刷新` }
+    }
+    try {
+      const result = ctx.jobs.kill(hostJobId as JobId, undefined, `ClickVibe stop ${taskId}`)
+      if (kind === 'dev') {
+        currentWorkflow.stage = 'developing'
+        currentWorkflow.devInterrupted = true
+      } else {
+        currentWorkflow.stage = 'review-ready'
+      }
+      await saveWorkflow(currentWorkflow)
+      return { ok: true, taskId, stopped: result === 'requested' }
+    } catch (error) {
+      return { ok: false, error: `宿主任务停止失败:${String(error instanceof Error ? error.message : error)}` }
+    }
+  }
   if (task.closed) return { ok: true, taskId, stopped: false }
   pushTaskLine(task, '[clickvibe] 用户请求停止任务')
   task.status = 'stopped'

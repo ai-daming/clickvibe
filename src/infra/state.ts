@@ -19,7 +19,6 @@ import {
   type TaskLogRead,
 } from './task-log-store.ts'
 export { issueKey } from './state-layout.ts'
-/** The workflow stage of one issue. */
 export type WorkflowStage =
   | 'idle' // 未开始开发
   | 'developing' // 开发中(可能有中断)
@@ -50,11 +49,13 @@ export interface IssueWorkflow {
   stage: WorkflowStage
   devAgent: 'codex' | 'claude' | null
   devTaskId: string | null
+  devHostJobId?: string | null
   devSessionId: string | null
   devSessionAgent: SessionAgent | null
   devInterrupted: boolean
   reviewAgent: 'codex' | 'claude' | null
   reviewTaskId: string | null
+  reviewHostJobId?: string | null
   reviewSessionId: string | null
   reviewSessionAgent: SessionAgent | null
   reviewResult: { passed: boolean; issues: string[]; commentUrl?: string } | null
@@ -112,7 +113,6 @@ export interface IssueContractSnapshot {
   /** GitHub 在冻结快照时返回的 updatedAt，保留作审计证据。 */
   updatedAt: string
 }
-/** Hash the exact GitHub issue body; updatedAt is evidence, bodyHash is identity. */
 export function issueBodyHash(body: string): string {
   return createHash('sha256').update(body, 'utf8').digest('hex')
 }
