@@ -225,17 +225,17 @@ export async function stopTask(
   if (!task) {
     const stored = await findTaskHistory(taskId)
     const currentWorkflow = stored
-      ? ((await loadWorkflow(stored.workflow.key)) ?? stored.workflow)
+      ? await loadWorkflow(stored.workflow.key)
       : (await loadAllWorkflows()).find((workflow) => workflow.devTaskId === taskId || workflow.reviewTaskId === taskId)
-    if (!currentWorkflow) return { ok: false, error: `未知任务 ${taskId}` }
+    if (!currentWorkflow) {
+      return stored ? { ok: true, taskId, stopped: false } : { ok: false, error: `未知任务 ${taskId}` }
+    }
     const ownership = observeWorkflowTask(ctx as unknown as TaskOwnershipContext, currentWorkflow)
-    if ((ownership.state === 'running' || ownership.state === 'unknown') && ownership.taskId !== taskId) {
+    if (ownership.state === 'none') return { ok: true, taskId, stopped: false }
+    if (ownership.taskId !== taskId) {
       return { ok: false, error: `任务请求已过期:当前任务为 ${ownership.taskId},请刷新后重试` }
     }
-    const kind =
-      ownership.state === 'running' || ownership.state === 'unknown'
-        ? ownership.kind
-        : (stored?.kind ?? (currentWorkflow.devTaskId === taskId ? 'dev' : 'review'))
+    const kind = ownership.kind
     let hostJobId = kind === 'dev' ? currentWorkflow.devHostJobId : currentWorkflow.reviewHostJobId
     if (ownership.state === 'interrupted' || (ownership.state === 'unknown' && confirmedStopped)) {
       if (kind === 'dev') {
@@ -283,6 +283,8 @@ export async function stopTask(
   void (async () => {
     const workflow = await loadWorkflow(task.workflowKey)
     if (!workflow) return
+    const currentTaskId = task.kind === 'dev' ? workflow.devTaskId : workflow.reviewTaskId
+    if (currentTaskId !== task.taskId) return
     if (task.kind === 'dev') {
       workflow.stage = 'developing'
       workflow.devInterrupted = true

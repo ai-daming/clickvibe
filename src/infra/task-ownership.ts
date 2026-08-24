@@ -38,6 +38,8 @@ export type TaskOwnership =
       state: 'interrupted'
       startedAt: number | null
       source: 'explicit-outcome' | 'host-terminal'
+      kind: 'dev' | 'review'
+      taskId: string
     }
 
 export type TaskLaunchDecision = { allowed: true } | { allowed: false; running: boolean; error: string }
@@ -101,7 +103,8 @@ export function observeTaskOwnership(
 ): TaskOwnership {
   const tasks = taskRefs(workflow)
   const current = currentTask(workflow, tasks)
-  for (const task of tasks) {
+  const orderedTasks = current ? [current, ...tasks.filter((task) => task.taskId !== current.taskId)] : tasks
+  for (const task of orderedTasks) {
     if (localTaskRunning(task.taskId)) {
       return {
         state: 'running',
@@ -124,7 +127,7 @@ export function observeTaskOwnership(
         registryFailed = true
       }
     }
-    for (const task of tasks) {
+    for (const task of orderedTasks) {
       let snapshot = listed?.find((job) => job.label === expectedLabel(workflow, task)) ?? null
       if (!snapshot && task.hostJobId) {
         try {
@@ -158,10 +161,16 @@ export function observeTaskOwnership(
       taskId: current.taskId,
     }
   }
-  if (workflow.stage === 'developing' && workflow.devInterrupted) {
-    return { state: 'interrupted', startedAt: null, source: 'explicit-outcome' }
-  }
   const expected = expectedTask(workflow)
+  if (workflow.stage === 'developing' && workflow.devInterrupted && expected) {
+    return {
+      state: 'interrupted',
+      startedAt: null,
+      source: 'explicit-outcome',
+      kind: expected.kind,
+      taskId: expected.taskId,
+    }
+  }
   if (!expected) return { state: 'none', startedAt: null, source: 'not-in-flight' }
   if (!ctx.jobs) {
     return {
@@ -174,7 +183,15 @@ export function observeTaskOwnership(
   }
 
   const snapshot = snapshots.get(expected.taskId)
-  if (snapshot) return { state: 'interrupted', startedAt: snapshot.startedAt, source: 'host-terminal' }
+  if (snapshot) {
+    return {
+      state: 'interrupted',
+      startedAt: snapshot.startedAt,
+      source: 'host-terminal',
+      kind: expected.kind,
+      taskId: expected.taskId,
+    }
+  }
   return {
     state: 'unknown',
     startedAt: null,

@@ -257,10 +257,7 @@ export async function deriveWorkflowState(
     prNumber: options.pr?.number ?? workflowPrNumber,
     runStartedAt: ownership.state === 'running' ? ownership.startedAt : null,
     derived: {
-      taskRef:
-        ownership.state === 'running' || ownership.state === 'unknown'
-          ? { kind: ownership.kind, taskId: ownership.taskId }
-          : null,
+      taskRef: ownership.state === 'none' ? null : { kind: ownership.kind, taskId: ownership.taskId },
       head,
       branch,
       mainHead,

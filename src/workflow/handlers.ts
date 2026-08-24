@@ -310,14 +310,10 @@ export async function handleCommand(
     const workflow = await loadWorkflow(issueKey(`${key.owner}/${key.repo}`, key.number))
     if (!workflow) return { status: 400, body: { ok: false, action: 'stop', error: '该 issue 没有运行中的任务' } }
     const ownership = observeWorkflowTask(ctx as unknown as TaskOwnershipContext, workflow)
-    const persistedTaskId =
-      workflow.stage === 'reviewing'
-        ? workflow.reviewTaskId
-        : workflow.stage === 'developing'
-          ? workflow.devTaskId
-          : null
-    const taskId = ownership.state === 'running' || ownership.state === 'unknown' ? ownership.taskId : persistedTaskId
-    if (!taskId) return { status: 400, body: { ok: false, action: 'stop', error: '该 issue 没有运行中的任务' } }
+    if (ownership.state === 'none') {
+      return { status: 400, body: { ok: false, action: 'stop', error: '该 issue 没有运行中的任务' } }
+    }
+    const taskId = ownership.taskId
     if (ownership.state === 'unknown' && !confirmedStopped) {
       return {
         status: 200,
@@ -330,9 +326,6 @@ export async function handleCommand(
           confirmation: { confirmedStopped: true },
         },
       }
-    }
-    if (ownership.state === 'none') {
-      return { status: 400, body: { ok: false, action: 'stop', error: '该 issue 没有运行中的任务' } }
     }
     return formatWriteOutcome(command.action, await execute('stop', { taskId, confirmedStopped }))
   }
