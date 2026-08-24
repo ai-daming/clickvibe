@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { workflowStatusLabel as clientStatusLabel } from '../src/client/runtime.ts'
-import { observeTaskOwnership } from '../src/infra/task-ownership.ts'
+import { observeTaskOwnership, taskLaunchDecision } from '../src/infra/task-ownership.ts'
 import {
   deriveNextAction,
   deriveWorkflowStatus,
@@ -169,10 +169,9 @@ test('a live task remains visible after its workflow stage advances', () => {
   })
 })
 
-test('a legacy task from before the current host process is interrupted after a real restart', () => {
+test('a legacy task stays unknown after restart until its process termination is proven', () => {
   const ownership = observeTaskOwnership(
     {
-      processStartedAt: 2_000,
       jobs: {
         get() {
           throw new Error('not used')
@@ -192,5 +191,32 @@ test('a legacy task from before the current host process is interrupted after a 
     },
     () => false,
   )
-  assert.deepEqual(ownership, { state: 'interrupted', startedAt: null, source: 'host-restarted' })
+  assert.deepEqual(ownership, { state: 'unknown', startedAt: null, source: 'no-proof' })
+  assert.equal(taskLaunchDecision(ownership).allowed, false)
+})
+
+test('a persisted host job missing from a fresh registry is not proof that its child process stopped', () => {
+  const ownership = observeTaskOwnership(
+    {
+      jobs: {
+        get() {
+          throw new Error('unknown job')
+        },
+        list() {
+          return []
+        },
+      },
+    },
+    {
+      key: 'owner-repo-111',
+      stage: 'reviewing',
+      devTaskId: null,
+      reviewTaskId: 'review-1000-legacy',
+      devHostJobId: null,
+      reviewHostJobId: 'old-host-job',
+    },
+    () => false,
+  )
+  assert.deepEqual(ownership, { state: 'unknown', startedAt: null, source: 'no-proof' })
+  assert.equal(taskLaunchDecision(ownership).allowed, false)
 })

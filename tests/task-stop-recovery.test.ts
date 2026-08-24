@@ -7,7 +7,7 @@ import type { IssueWorkflow } from '../src/infra/state.ts'
 import { loadWorkflow, saveWorkflow } from '../src/infra/state.ts'
 import { stopTask } from '../src/workflow/task-api.ts'
 
-test('stop API turns a pre-restart legacy task into a recoverable interruption', async () => {
+test('stop API requires explicit confirmation before releasing an unknown legacy task', async () => {
   const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-stop-legacy-'))
   const previousHome = process.env.HOME
   process.env.HOME = tempHome
@@ -36,7 +36,7 @@ test('stop API turns a pre-restart legacy task into a recoverable interruption',
   }
   try {
     await saveWorkflow(workflow)
-    const result = await stopTask(
+    const blocked = await stopTask(
       {
         jobs: {
           list: () => [],
@@ -47,10 +47,38 @@ test('stop API turns a pre-restart legacy task into a recoverable interruption',
       } as never,
       { taskId: workflow.devTaskId },
     )
+    assert.deepEqual(blocked, {
+      ok: false,
+      error: '任务 dev-1-legacy 的宿主归属无法确认,请在宿主任务视图停止后刷新',
+    })
+    assert.equal((await loadWorkflow(workflow.key))?.devInterrupted, false)
+
+    const result = await stopTask(
+      {
+        jobs: {
+          list: () => [],
+          get: () => {
+            throw new Error('not used')
+          },
+        },
+      } as never,
+      { taskId: workflow.devTaskId, confirmedStopped: true },
+    )
     assert.deepEqual(result, { ok: true, taskId: 'dev-1-legacy', stopped: false })
     const recovered = await loadWorkflow(workflow.key)
     assert.equal(recovered?.stage, 'developing')
     assert.equal(recovered?.devInterrupted, true)
+
+    if (!recovered) throw new Error('workflow missing after development recovery')
+    recovered.stage = 'reviewing'
+    recovered.reviewTaskId = 'review-2-legacy'
+    await saveWorkflow(recovered)
+    const reviewResult = await stopTask({ jobs: { list: () => [] } } as never, {
+      taskId: recovered.reviewTaskId,
+      confirmedStopped: true,
+    })
+    assert.deepEqual(reviewResult, { ok: true, taskId: 'review-2-legacy', stopped: false })
+    assert.equal((await loadWorkflow(workflow.key))?.stage, 'review-ready')
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome

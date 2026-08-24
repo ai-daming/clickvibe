@@ -15,19 +15,19 @@
 
 ### 宿主重启与任务恢复
 
-**操作要求:**重启 `dsh web`、更新宿主或卸载 ClickVibe 前,必须先在面板停止所有开发/Review 任务并等待状态不再显示「任务进行中」。DSH 的 `ctx.jobs` 是同一宿主进程内的稳定 supervisor,可跨 ClickVibe 插件重载/模块实例查询和停止任务;它不是跨进程持久化服务,真正的宿主重启会销毁 registry 并终止其任务。
+**操作要求:**重启 `dsh web`、更新宿主或卸载 ClickVibe 前,必须先在面板停止所有开发/Review 任务并等待状态不再显示「任务进行中」。DSH 的 `ctx.jobs` 是同一宿主进程内的稳定 supervisor,可跨 ClickVibe 插件重载/模块实例查询和停止任务;它不是跨进程持久化服务。真正的宿主重启会销毁 registry,但不能据此断言旧 agent 子进程已终止。
 
 恢复时严格区分三种证据状态:
 
 - `running`:当前 local task 或 `ctx.jobs` 确认任务仍在运行;状态保持开发中/Review 中,所有启动入口继续禁用。
-- `task-unknown`:只有“当前控制器看不到”的证据、registry 查询异常,或无 host job ID 的旧任务仍可能属于当前宿主进程;状态显示「任务状态未知」,禁止恢复开发、重新 Review和自动跑到底,等待探活恢复或先从宿主任务视图明确停止。
-- `interrupted`:用户明确停止、进程失败/超时、host job 已终态、新 registry 确认旧 job ID 不存在,或旧格式 task ID 的签发时间明确早于当前 DSH 进程启动边界且当前 registry 无同标签任务;此时才提供恢复动作。后一个判断证明任务属于已经销毁的宿主进程,不是用 PID、日志新鲜度或本地 step 猜存活。
+- `task-unknown`:只有“当前控制器看不到”的证据、registry 查询异常、旧 job ID 在新 registry 中不存在,或无 host job ID 的旧任务;状态显示「任务状态未知」,禁止恢复开发、重新 Review和自动跑到底。宿主重启不等于旧 agent 子进程已退出,不得从进程启动时间、PID、日志时间戳或本地 step 推断任务死亡。
+- `interrupted`:用户明确停止、人工在宿主任务视图或系统进程中确认停止、进程失败/超时,或 supervisor 返回 host job 终态;此时才提供恢复动作。
 
-确认中断后的操作:
+确认中断后的操作(未知任务先点击「确认旧任务已停止」;该按钮只解除门禁,不能代替实际停止进程):
 
 - 开发/返工中断:使用「恢复开发」,只在原 agent 归属匹配时续接已记录的 session;session 缺失、归属不匹配或被 agent 拒绝时按既有规则降级为同一 worktree 的全新会话。
 - Review 中断:确认旧宿主任务已经停止后使用「重新 Review」,重新审查当前 HEAD;不得沿用未物化结论的旧 Review。
-- 自动跑到底:只有任务失败/停止/超时或上述宿主终止证据才使用 `session-interrupted`;宿主 registry/controller/占位错误使用 `controller-error`,由人处理后重新挂起。系统不得根据本地 step 或日志时间戳自动双开任务。
+- 自动跑到底:只有任务失败/停止/超时或上述宿主终止证据才使用 `session-interrupted`;GitHub、git、宿主 registry/controller/占位等非 Agent 故障使用 `controller-error`,由人处理后重新挂起。系统不得根据本地 step 或日志时间戳自动双开任务。
 
 方案评估与选型:
 

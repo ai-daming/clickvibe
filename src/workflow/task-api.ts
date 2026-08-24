@@ -218,7 +218,9 @@ export async function stopTask(
   ctx: Context,
   payload: unknown,
 ): Promise<{ ok: true; taskId: string; stopped: boolean } | { ok: false; error: string }> {
-  const taskId = String((payload as { taskId?: unknown } | undefined)?.taskId ?? '')
+  const input = payload as { taskId?: unknown; confirmedStopped?: unknown } | undefined
+  const taskId = String(input?.taskId ?? '')
+  const confirmedStopped = input?.confirmedStopped === true
   const task = liveTasks.get(taskId)
   if (!task) {
     const stored = await findTaskHistory(taskId)
@@ -229,7 +231,7 @@ export async function stopTask(
     const kind = stored?.kind ?? (currentWorkflow.devTaskId === taskId ? 'dev' : 'review')
     let hostJobId = kind === 'dev' ? currentWorkflow.devHostJobId : currentWorkflow.reviewHostJobId
     const ownership = observeWorkflowTask(ctx as unknown as TaskOwnershipContext, currentWorkflow)
-    if (ownership.state === 'interrupted') {
+    if (ownership.state === 'interrupted' || (ownership.state === 'unknown' && confirmedStopped)) {
       if (kind === 'dev') {
         currentWorkflow.stage = 'developing'
         currentWorkflow.devInterrupted = true

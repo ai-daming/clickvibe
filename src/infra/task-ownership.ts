@@ -1,6 +1,5 @@
 import type { IssueWorkflow } from './state.ts'
 import { liveTasks } from './runtime.ts'
-import { runtimeIdentity } from './task-diagnostics.ts'
 
 export interface HostJobSnapshot {
   id: string
@@ -17,8 +16,6 @@ export interface HostJobsReader {
 
 export interface TaskOwnershipContext {
   jobs?: HostJobsReader
-  /** Stable process boundary; injectable only to make restart classification deterministic in tests. */
-  processStartedAt?: number
 }
 
 export type TaskOwnership =
@@ -34,7 +31,7 @@ export type TaskOwnership =
   | {
       state: 'interrupted'
       startedAt: number | null
-      source: 'explicit-outcome' | 'host-terminal' | 'registry-restarted' | 'host-restarted'
+      source: 'explicit-outcome' | 'host-terminal'
     }
 
 export type TaskLaunchDecision = { allowed: true } | { allowed: false; running: boolean; error: string }
@@ -70,13 +67,6 @@ function expectedLabel(workflow: OwnershipFields, task: TaskRef): string {
   return `clickvibe:${workflow.key}:${task.kind}:${task.taskId}`
 }
 
-function taskTimestamp(taskId: string): number | null {
-  const matched = taskId.match(/^[a-z]+-(\d+)-/)
-  if (!matched) return null
-  const value = Number(matched[1])
-  return Number.isSafeInteger(value) ? value : null
-}
-
 function isActive(snapshot: HostJobSnapshot): boolean {
   return snapshot.status === 'running' || snapshot.status === 'stopping'
 }
@@ -103,13 +93,11 @@ export function observeTaskOwnership(
 
   const snapshots = new Map<string, HostJobSnapshot>()
   let registryFailed = false
-  let registryListed = false
   if (ctx.jobs) {
     let listed: HostJobSnapshot[] | null = null
     if (ctx.jobs.list) {
       try {
         listed = ctx.jobs.list()
-        registryListed = true
       } catch {
         registryFailed = true
       }
@@ -149,13 +137,6 @@ export function observeTaskOwnership(
 
   const snapshot = snapshots.get(expected.taskId)
   if (snapshot) return { state: 'interrupted', startedAt: snapshot.startedAt, source: 'host-terminal' }
-  if (expected.hostJobId) return { state: 'interrupted', startedAt: null, source: 'registry-restarted' }
-
-  const startedAt = taskTimestamp(expected.taskId)
-  const processStartedAt = ctx.processStartedAt ?? runtimeIdentity.processStartedAt
-  if (registryListed && startedAt !== null && startedAt < processStartedAt) {
-    return { state: 'interrupted', startedAt: null, source: 'host-restarted' }
-  }
   return { state: 'unknown', startedAt: null, source: 'no-proof' }
 }
 

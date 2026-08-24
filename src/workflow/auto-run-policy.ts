@@ -116,7 +116,7 @@ export function autoRunFailureReason(
   if (result.conflict) return 'sync-conflict'
   if (action === 'merge' || action === 'cleanup' || result.gateFailures) return 'merge-gate-rejected'
   if (/授权|快照/.test(result.error ?? '')) return 'authorization-denied'
-  return 'session-interrupted'
+  return 'controller-error'
 }
 
 export function decideAutoRun(input: {
