@@ -73,6 +73,18 @@ Exactly one of:
 
   Output is NOT a findings list. It is: the recurring theme, the missing invariant (half a page, as a requirement — not as an implementation), and the constraint that the next round must ship the mechanism (e.g. single-writer serialized store + atomic commit + capability-checked writes) plus deletion of the scattered call-site checks. Reference `docs/fix-discipline.md` principles by number.
 
+**Every non-pass verdict MUST end with a "下一轮指令" block** (the reviewer has all the information needed — it just did the root-cause analysis and the reproduction):
+
+```text
+## 下一轮指令
+按 docs/fix-discipline.md〈修复轮|重设计轮〉模板执行,处理 N 项,修法指定:
+1. <finding> → <唯一修法,不留选择空间>(e.g. 判别式结果 / 非空类型 / 下传引用)
+2. ...
+交付物:<枚举表/回归/声明对应构造等验收口径>。本轮 diff <净减少|持平|允许净增(机制+测试)>。
+```
+
+Write fix directives as one specified approach per finding, not open-ended options — the coder's incentive is to pass review, and an ambiguous directive invites the cheapest local patch.
+
 ## Output format
 
 Keep the PR's existing Review Meta comment format so the loop's consumers keep working, and add two fields:

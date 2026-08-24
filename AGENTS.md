@@ -92,5 +92,5 @@ ClickVibe 是一个 DSH Web 插件:右侧面板把 GitHub issue 变成「开发 
 ## 6. 关联文档
 
 - 领域拆分完整设计:`docs/plans/2026-08-23-domain-split-architecture-design.md`(§3 三规则、§4/§5 目标结构、§7 门禁、§8 PR 序列)
-- 修复纪律与并发不变量:`docs/fix-discipline.md`;根因 review 流程:`skills/root-cause-review/SKILL.md`
+- 修复纪律与并发不变量:`docs/fix-discipline.md`;根因 review 流程:`skills/root-cause-review/SKILL.md`;循环外协议审计:`skills/observer/SKILL.md`
 - 状态模型与按钮决策:`docs/state-model.md`;命令参考:`docs/command-reference.md`;产品蓝图:`docs/product-blueprint.md`
