@@ -59,6 +59,7 @@ For the fix under review (or proposed): mechanism-level or call-site-level?
 
 - Mechanism-level: the invariant is enforced by a type, a storage primitive, or a serialization point; violators cannot be written.
 - Call-site-level: correctness depends on every caller remembering to check. Allowed only as registered debt with a convergence deadline.
+- **Fake-redesign check (rename detection)**: when a round claims an abstraction was replaced, diff the public API/export surface before and after. An old capability that survives under a new name (same signature shape, same reach) means the redesign did not happen — the finding stands regardless of new structure added around it. Case: round 18 renamed saveWorkflow to commitWorkflow and kept it exported with full-object reach while the new command domain shipped around it.
 
 ### 6. Verdict
 
