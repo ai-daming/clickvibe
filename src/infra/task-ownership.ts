@@ -1,5 +1,6 @@
 import type { IssueWorkflow } from './state.ts'
 import { liveTasks } from './runtime.ts'
+import { runtimeIdentity } from './task-diagnostics.ts'
 
 export interface HostJobSnapshot {
   id: string
@@ -11,70 +12,151 @@ export interface HostJobSnapshot {
 
 export interface HostJobsReader {
   get(id: string): HostJobSnapshot
+  list?(): HostJobSnapshot[]
 }
 
 export interface TaskOwnershipContext {
   jobs?: HostJobsReader
+  /** Stable process boundary; injectable only to make restart classification deterministic in tests. */
+  processStartedAt?: number
 }
 
 export type TaskOwnership =
   | { state: 'none'; startedAt: null; source: 'not-in-flight' }
-  | { state: 'running'; startedAt: number; source: 'local-map' | 'host-registry' }
+  | {
+      state: 'running'
+      startedAt: number
+      source: 'local-map' | 'host-registry'
+      kind: 'dev' | 'review'
+      taskId: string
+    }
   | { state: 'unknown'; startedAt: null; source: 'no-proof' | 'registry-error' }
-  | { state: 'interrupted'; startedAt: number | null; source: 'host-terminal' | 'registry-restarted' }
+  | {
+      state: 'interrupted'
+      startedAt: number | null
+      source: 'explicit-outcome' | 'host-terminal' | 'registry-restarted' | 'host-restarted'
+    }
 
 export type TaskLaunchDecision = { allowed: true } | { allowed: false; running: boolean; error: string }
 
 type OwnershipFields = Pick<
   IssueWorkflow,
   'key' | 'stage' | 'devTaskId' | 'reviewTaskId' | 'devHostJobId' | 'reviewHostJobId'
->
+> & { devInterrupted?: boolean }
 
-function activeTask(workflow: OwnershipFields): { taskId: string | null; hostJobId: string | null | undefined } | null {
-  if (workflow.stage === 'developing') {
-    return { taskId: workflow.devTaskId, hostJobId: workflow.devHostJobId }
-  }
-  if (workflow.stage === 'reviewing') {
-    return { taskId: workflow.reviewTaskId, hostJobId: workflow.reviewHostJobId }
-  }
-  return null
+interface TaskRef {
+  kind: 'dev' | 'review'
+  taskId: string
+  hostJobId: string | null | undefined
 }
 
-function expectedLabel(workflow: OwnershipFields, taskId: string): string {
-  return `clickvibe:${workflow.key}:${workflow.stage === 'reviewing' ? 'review' : 'dev'}:${taskId}`
+function taskRefs(workflow: OwnershipFields): TaskRef[] {
+  return [
+    ...(workflow.devTaskId
+      ? [{ kind: 'dev' as const, taskId: workflow.devTaskId, hostJobId: workflow.devHostJobId }]
+      : []),
+    ...(workflow.reviewTaskId
+      ? [{ kind: 'review' as const, taskId: workflow.reviewTaskId, hostJobId: workflow.reviewHostJobId }]
+      : []),
+  ]
 }
 
-/** Observe task ownership without treating controller-local absence as death. */
+function expectedTask(workflow: OwnershipFields): TaskRef | null {
+  const kind = workflow.stage === 'developing' ? 'dev' : workflow.stage === 'reviewing' ? 'review' : null
+  return kind === null ? null : (taskRefs(workflow).find((task) => task.kind === kind) ?? null)
+}
+
+function expectedLabel(workflow: OwnershipFields, task: TaskRef): string {
+  return `clickvibe:${workflow.key}:${task.kind}:${task.taskId}`
+}
+
+function taskTimestamp(taskId: string): number | null {
+  const matched = taskId.match(/^[a-z]+-(\d+)-/)
+  if (!matched) return null
+  const value = Number(matched[1])
+  return Number.isSafeInteger(value) ? value : null
+}
+
+function isActive(snapshot: HostJobSnapshot): boolean {
+  return snapshot.status === 'running' || snapshot.status === 'stopping'
+}
+
+/** Observe ownership independently of the workflow stage, which may advance before task settlement. */
 export function observeTaskOwnership(
   ctx: TaskOwnershipContext,
   workflow: OwnershipFields,
   localTaskRunning: (taskId: string) => boolean,
   localStartedAt?: (taskId: string) => number | null,
 ): TaskOwnership {
-  const active = activeTask(workflow)
-  if (!active) return { state: 'none', startedAt: null, source: 'not-in-flight' }
-  if (active.taskId && localTaskRunning(active.taskId)) {
-    return { state: 'running', startedAt: localStartedAt?.(active.taskId) ?? Date.now(), source: 'local-map' }
+  const tasks = taskRefs(workflow)
+  for (const task of tasks) {
+    if (localTaskRunning(task.taskId)) {
+      return {
+        state: 'running',
+        startedAt: localStartedAt?.(task.taskId) ?? Date.now(),
+        source: 'local-map',
+        kind: task.kind,
+        taskId: task.taskId,
+      }
+    }
   }
-  if (!active.taskId || !active.hostJobId || !ctx.jobs) {
-    return { state: 'unknown', startedAt: null, source: 'no-proof' }
+
+  const snapshots = new Map<string, HostJobSnapshot>()
+  let registryFailed = false
+  let registryListed = false
+  if (ctx.jobs) {
+    let listed: HostJobSnapshot[] | null = null
+    if (ctx.jobs.list) {
+      try {
+        listed = ctx.jobs.list()
+        registryListed = true
+      } catch {
+        registryFailed = true
+      }
+    }
+    for (const task of tasks) {
+      let snapshot = listed?.find((job) => job.label === expectedLabel(workflow, task)) ?? null
+      if (!snapshot && task.hostJobId) {
+        try {
+          snapshot = ctx.jobs.get(task.hostJobId)
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          if (!/unknown|not found|不存在/i.test(message)) registryFailed = true
+        }
+      }
+      if (snapshot && snapshot.label === expectedLabel(workflow, task)) {
+        snapshots.set(task.taskId, snapshot)
+        if (isActive(snapshot)) {
+          return {
+            state: 'running',
+            startedAt: snapshot.startedAt,
+            source: 'host-registry',
+            kind: task.kind,
+            taskId: task.taskId,
+          }
+        }
+      }
+    }
   }
-  let snapshot: HostJobSnapshot
-  try {
-    snapshot = ctx.jobs.get(active.hostJobId)
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    return /unknown|not found|不存在/i.test(message)
-      ? { state: 'interrupted', startedAt: null, source: 'registry-restarted' }
-      : { state: 'unknown', startedAt: null, source: 'registry-error' }
+
+  if (registryFailed) return { state: 'unknown', startedAt: null, source: 'registry-error' }
+  if (workflow.stage === 'developing' && workflow.devInterrupted) {
+    return { state: 'interrupted', startedAt: null, source: 'explicit-outcome' }
   }
-  if (snapshot.label !== expectedLabel(workflow, active.taskId)) {
-    return { state: 'interrupted', startedAt: snapshot.startedAt, source: 'registry-restarted' }
+  const expected = expectedTask(workflow)
+  if (!expected) return { state: 'none', startedAt: null, source: 'not-in-flight' }
+  if (!ctx.jobs) return { state: 'unknown', startedAt: null, source: 'no-proof' }
+
+  const snapshot = snapshots.get(expected.taskId)
+  if (snapshot) return { state: 'interrupted', startedAt: snapshot.startedAt, source: 'host-terminal' }
+  if (expected.hostJobId) return { state: 'interrupted', startedAt: null, source: 'registry-restarted' }
+
+  const startedAt = taskTimestamp(expected.taskId)
+  const processStartedAt = ctx.processStartedAt ?? runtimeIdentity.processStartedAt
+  if (registryListed && startedAt !== null && startedAt < processStartedAt) {
+    return { state: 'interrupted', startedAt: null, source: 'host-restarted' }
   }
-  if (snapshot.status === 'running' || snapshot.status === 'stopping') {
-    return { state: 'running', startedAt: snapshot.startedAt, source: 'host-registry' }
-  }
-  return { state: 'interrupted', startedAt: snapshot.startedAt, source: 'host-terminal' }
+  return { state: 'unknown', startedAt: null, source: 'no-proof' }
 }
 
 export function taskLaunchDecision(ownership: TaskOwnership): TaskLaunchDecision {

@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto'
+import { performance } from 'node:perf_hooks'
 
 export const runtimeIdentity = Object.freeze({
   runtimeInstanceId: randomUUID(),
   pid: process.pid,
+  processStartedAt: performance.timeOrigin,
   loadedAt: new Date().toISOString(),
   modulePath: import.meta.url,
 })

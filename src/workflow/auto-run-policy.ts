@@ -102,8 +102,16 @@ export function autoRunRetryDelay(now: number, deadline: number): number | null 
 
 export function autoRunFailureReason(
   action: Extract<AutoRunDecision, { kind: 'trigger' }>['action'],
-  result: { error?: string; conflict?: boolean; merged?: boolean; cleanupPending?: boolean; gateFailures?: unknown[] },
+  result: {
+    error?: string
+    conflict?: boolean
+    merged?: boolean
+    cleanupPending?: boolean
+    gateFailures?: unknown[]
+    controllerError?: boolean
+  },
 ): AutoRunPausedReason {
+  if (result.controllerError) return 'controller-error'
   if (result.cleanupPending || (action === 'cleanup' && result.merged)) return 'cleanup-failed'
   if (result.conflict) return 'sync-conflict'
   if (action === 'merge' || action === 'cleanup' || result.gateFailures) return 'merge-gate-rejected'

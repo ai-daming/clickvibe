@@ -83,7 +83,13 @@ test('shared host registry keeps a task visible after a plugin instance loses it
     },
     () => false,
   )
-  assert.deepEqual(ownership, { state: 'running', startedAt: 123, source: 'host-registry' })
+  assert.deepEqual(ownership, {
+    state: 'running',
+    startedAt: 123,
+    source: 'host-registry',
+    kind: 'review',
+    taskId: 'review-task-1',
+  })
 })
 
 test('concurrent refreshes follow one shared host-job lifecycle across controller instances', async () => {
@@ -138,4 +144,53 @@ test('missing ownership evidence remains unknown instead of claiming interruptio
     () => false,
   )
   assert.deepEqual(ownership, { state: 'unknown', startedAt: null, source: 'no-proof' })
+})
+
+test('a live task remains visible after its workflow stage advances', () => {
+  const ownership = observeTaskOwnership(
+    {},
+    {
+      key: 'owner-repo-111',
+      stage: 'review-ready',
+      devTaskId: 'dev-2000-task',
+      reviewTaskId: null,
+      devHostJobId: null,
+      reviewHostJobId: null,
+    },
+    (taskId) => taskId === 'dev-2000-task',
+    () => 789,
+  )
+  assert.deepEqual(ownership, {
+    state: 'running',
+    startedAt: 789,
+    source: 'local-map',
+    kind: 'dev',
+    taskId: 'dev-2000-task',
+  })
+})
+
+test('a legacy task from before the current host process is interrupted after a real restart', () => {
+  const ownership = observeTaskOwnership(
+    {
+      processStartedAt: 2_000,
+      jobs: {
+        get() {
+          throw new Error('not used')
+        },
+        list() {
+          return []
+        },
+      },
+    },
+    {
+      key: 'owner-repo-111',
+      stage: 'developing',
+      devTaskId: 'dev-1000-legacy',
+      reviewTaskId: null,
+      devHostJobId: null,
+      reviewHostJobId: null,
+    },
+    () => false,
+  )
+  assert.deepEqual(ownership, { state: 'interrupted', startedAt: null, source: 'host-restarted' })
 })

@@ -70,6 +70,8 @@ export interface WorkflowFacts {
   devInterrupted: boolean
   /** A dev/review agent process is currently running for this workflow. */
   taskRunning: boolean
+  /** Kind reported by the supervisor; stage may already have advanced during task settlement. */
+  taskKind?: 'dev' | 'review' | null
   /** Current controller cannot prove whether the in-flight task is alive. */
   taskUnknown?: boolean
   /** The host supervisor or an explicit task outcome proves termination. */
@@ -170,7 +172,7 @@ export function deriveWorkflowStatus(facts: WorkflowFacts): WorkflowStatus {
 
   if (facts.prMerged) return 'passed'
   // A live task outranks the linked PR and any verdict bound to an older HEAD.
-  if (facts.taskRunning) return facts.stage === 'reviewing' ? 'reviewing' : 'developing'
+  if (facts.taskRunning) return facts.taskKind === 'review' || facts.stage === 'reviewing' ? 'reviewing' : 'developing'
   if (facts.taskUnknown) return 'task-unknown'
   if (facts.taskInterrupted || (facts.stage === 'developing' && facts.devInterrupted)) return 'interrupted'
   // When the worktree cannot be inspected, preserve a known passing verdict

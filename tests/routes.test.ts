@@ -17,6 +17,7 @@ import {
   startTaskLog,
   type IssueWorkflow,
 } from '../src/infra/state.ts'
+import { createFakeJobs } from './fake-jobs.ts'
 
 function included(body: unknown, status = 200, headers: Record<string, string> = {}): string {
   return [
@@ -111,6 +112,7 @@ function createHandler(
 ): RequestListener {
   let handler: RequestListener | null = null
   const ctx = {
+    jobs: createFakeJobs(),
     skills: { register: () => () => {} },
     webServer: {
       register(route: { handler: RequestListener }) {

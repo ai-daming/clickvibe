@@ -20,14 +20,14 @@
 恢复时严格区分三种证据状态:
 
 - `running`:当前 local task 或 `ctx.jobs` 确认任务仍在运行;状态保持开发中/Review 中,所有启动入口继续禁用。
-- `task-unknown`:只有“当前控制器看不到”的证据,或 registry 查询异常/旧记录缺少 host job ID;状态显示「任务状态未知」,禁止恢复开发、重新 Review和自动跑到底,等待探活恢复或先从宿主任务视图明确停止。
-- `interrupted`:用户明确停止、进程失败/超时、host job 已终态,或新 registry 确认旧 job ID 不存在;此时才提供恢复动作。
+- `task-unknown`:只有“当前控制器看不到”的证据、registry 查询异常,或无 host job ID 的旧任务仍可能属于当前宿主进程;状态显示「任务状态未知」,禁止恢复开发、重新 Review和自动跑到底,等待探活恢复或先从宿主任务视图明确停止。
+- `interrupted`:用户明确停止、进程失败/超时、host job 已终态、新 registry 确认旧 job ID 不存在,或旧格式 task ID 的签发时间明确早于当前 DSH 进程启动边界且当前 registry 无同标签任务;此时才提供恢复动作。后一个判断证明任务属于已经销毁的宿主进程,不是用 PID、日志新鲜度或本地 step 猜存活。
 
 确认中断后的操作:
 
 - 开发/返工中断:使用「恢复开发」,只在原 agent 归属匹配时续接已记录的 session;session 缺失、归属不匹配或被 agent 拒绝时按既有规则降级为同一 worktree 的全新会话。
 - Review 中断:确认旧宿主任务已经停止后使用「重新 Review」,重新审查当前 HEAD;不得沿用未物化结论的旧 Review。
-- 自动跑到底:保持 `paused / session-interrupted`,由人完成上述恢复动作或重新挂起自动跑;系统不得根据本地 step/时间戳自动双开任务。
+- 自动跑到底:只有任务失败/停止/超时或上述宿主终止证据才使用 `session-interrupted`;宿主 registry/controller/占位错误使用 `controller-error`,由人处理后重新挂起。系统不得根据本地 step 或日志时间戳自动双开任务。
 
 方案评估与选型:
 

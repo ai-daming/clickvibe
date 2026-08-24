@@ -112,7 +112,9 @@ export async function startDevelop(
   ctx: Context,
   payload: unknown,
   authorizedSnapshot: IssuePromptSnapshot | null,
-): Promise<{ ok: true; taskId: string; worktree: string; branch: string } | { ok: false; error: string }> {
+): Promise<
+  { ok: true; taskId: string; worktree: string; branch: string } | { ok: false; error: string; controllerError?: true }
+> {
   const body = (payload ?? {}) as { url?: unknown; agent?: unknown; context?: unknown; automatic?: unknown }
   const url = String(body.url ?? '').trim()
   let agent: DevelopAgent
@@ -245,7 +247,7 @@ export async function startDevelop(
   if (!ownershipGate.allowed) {
     return ownershipGate.running && workflow.devTaskId
       ? { ok: true, taskId: workflow.devTaskId, worktree: workflow.worktree, branch: workflow.branch }
-      : { ok: false, error: ownershipGate.error }
+      : { ok: false, error: ownershipGate.error, controllerError: true }
   }
 
   // 已有开发任务在跑:复用
@@ -265,7 +267,11 @@ export async function startDevelop(
     hostReservation = reserveHostTask(ctx, live)
   } catch (error) {
     finishTask(live, 'failed', 1)
-    return { ok: false, error: `宿主任务占位失败:${String(error instanceof Error ? error.message : error)}` }
+    return {
+      ok: false,
+      error: `宿主任务占位失败:${String(error instanceof Error ? error.message : error)}`,
+      controllerError: true,
+    }
   }
   if (!hostReservation.created) {
     finishTask(live, 'stopped', null)

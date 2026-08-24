@@ -66,7 +66,7 @@ import { notifyAutoRunCompletion } from './auto-run-signal.ts'
 export async function startReview(
   ctx: Context,
   payload: unknown,
-): Promise<{ ok: true; taskId: string } | { ok: false; error: string }> {
+): Promise<{ ok: true; taskId: string } | { ok: false; error: string; controllerError?: true }> {
   const body = (payload ?? {}) as { url?: unknown; agent?: unknown; context?: unknown; freshSession?: unknown }
   const url = String(body.url ?? '').trim()
   const extraContext = typeof body.context === 'string' ? body.context.trim() : ''
@@ -105,7 +105,7 @@ export async function startReview(
     const activeTaskId = workflow.reviewTaskId ?? workflow.devTaskId
     return ownershipGate.running && activeTaskId
       ? { ok: true, taskId: activeTaskId }
-      : { ok: false, error: ownershipGate.error }
+      : { ok: false, error: ownershipGate.error, controllerError: true }
   }
   if (!existsSync(workflow.worktree)) {
     return { ok: false, error: `worktree 不存在: ${workflow.worktree}` }
@@ -207,7 +207,11 @@ export async function startReview(
     hostReservation = reserveHostTask(ctx, live)
   } catch (error) {
     finishTask(live, 'failed', 1)
-    return { ok: false, error: `宿主任务占位失败:${String(error instanceof Error ? error.message : error)}` }
+    return {
+      ok: false,
+      error: `宿主任务占位失败:${String(error instanceof Error ? error.message : error)}`,
+      controllerError: true,
+    }
   }
   if (!hostReservation.created) {
     finishTask(live, 'stopped', null)

@@ -64,7 +64,7 @@ export function reserveHostTask(
   ctx: Context,
   task: LiveTask,
 ): { created: true; hostJobId: string | null } | { created: false; taskId: string } {
-  if (!ctx.jobs) return { created: true, hostJobId: null }
+  if (!ctx.jobs) throw new Error('宿主任务 registry 不可用,拒绝启动无所有权任务')
   const prefix = `clickvibe:${task.workflowKey}:`
   const existing = ctx.jobs
     .list()

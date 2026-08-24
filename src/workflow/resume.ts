@@ -43,7 +43,7 @@ import { notifyAutoRunCompletion } from './auto-run-signal.ts'
 export async function resumeDevelop(
   ctx: Context,
   payload: unknown,
-): Promise<{ ok: true; taskId: string } | { ok: false; error: string }> {
+): Promise<{ ok: true; taskId: string } | { ok: false; error: string; controllerError?: true }> {
   const body = (payload ?? {}) as { url?: unknown; context?: unknown; freshSession?: unknown }
   const url = String(body.url ?? '').trim()
   const extraContext = typeof body.context === 'string' ? body.context.trim() : ''
@@ -58,8 +58,10 @@ export async function resumeDevelop(
     return { ok: false, error: '该 issue 尚无开发记录,无法续会话' }
   }
   const ownershipGate = taskLaunchDecision(observeWorkflowTask(ctx as unknown as TaskOwnershipContext, workflow))
-  if (!ownershipGate.allowed && !workflow.devInterrupted) {
-    return ownershipGate.running ? { ok: true, taskId: workflow.devTaskId } : { ok: false, error: ownershipGate.error }
+  if (!ownershipGate.allowed) {
+    return ownershipGate.running
+      ? { ok: true, taskId: workflow.devTaskId }
+      : { ok: false, error: ownershipGate.error, controllerError: true }
   }
 
   const availability = deriveFreshSessionAvailability(
@@ -139,7 +141,11 @@ export async function resumeDevelop(
     finishTask(live, 'failed', 1)
     workflow.devInterrupted = true
     await saveWorkflow(workflow)
-    return { ok: false, error: `宿主任务占位失败:${String(error instanceof Error ? error.message : error)}` }
+    return {
+      ok: false,
+      error: `宿主任务占位失败:${String(error instanceof Error ? error.message : error)}`,
+      controllerError: true,
+    }
   }
   if (!hostReservation.created) {
     finishTask(live, 'stopped', null)

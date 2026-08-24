@@ -198,6 +198,7 @@ export async function deriveWorkflowState(
     (taskId) => liveTasks.get(taskId)?.startedAt ?? null,
   )
   const taskRunning = ownership.state === 'running'
+  const taskKind = ownership.state === 'running' ? ownership.kind : null
   const taskInterrupted =
     ownership.state === 'interrupted' || (workflow.stage === 'developing' && workflow.devInterrupted)
   const taskUnknown = !taskInterrupted && ownership.state === 'unknown'
@@ -218,6 +219,7 @@ export async function deriveWorkflowState(
     stage: workflow.stage,
     devInterrupted: workflow.devInterrupted,
     taskRunning,
+    taskKind,
     taskUnknown,
     taskInterrupted,
     head,

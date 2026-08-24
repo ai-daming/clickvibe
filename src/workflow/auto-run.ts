@@ -163,6 +163,7 @@ async function applyDecision(ctx: Context, key: string, decision: AutoRunDecisio
     merged?: boolean
     cleanupPending?: boolean
     gateFailures?: unknown[]
+    controllerError?: boolean
   }
   switch (decision.action) {
     case 'develop':

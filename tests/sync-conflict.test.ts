@@ -14,6 +14,7 @@ import {
   type IssueWorkflow,
 } from '../src/index.ts'
 import { applyDevRunOutcome, loadWorkflow, readLogTail, saveWorkflow } from '../src/infra/state.ts'
+import { createFakeJobs } from './fake-jobs.ts'
 
 const execFileAsync = promisify(execFile)
 
@@ -308,6 +309,7 @@ test('an interrupted rework on a conflicted worktree resumes instead of re-synci
  *  immediate non-zero exit (the "session died at once" shape). */
 function capturingShellCtx(launches: { command: string; prompt: string }[]) {
   return {
+    jobs: createFakeJobs(),
     shell: {
       resolve(spec: unknown) {
         return spec

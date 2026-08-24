@@ -14,6 +14,7 @@ import {
   saveWorkflow,
 } from '../infra/state.ts'
 import type { TaskMetrics } from '../infra/task-log-store.ts'
+import { observeWorkflowTask, type TaskOwnershipContext } from '../infra/task-ownership.ts'
 
 /** Consume incremental dev log/status for one task. */
 export async function pollDevelop(payload: unknown): Promise<
@@ -222,11 +223,33 @@ export async function stopTask(
   if (!task) {
     const stored = await findTaskHistory(taskId)
     const currentWorkflow = stored
-      ? stored.workflow
+      ? ((await loadWorkflow(stored.workflow.key)) ?? stored.workflow)
       : (await loadAllWorkflows()).find((workflow) => workflow.devTaskId === taskId || workflow.reviewTaskId === taskId)
     if (!currentWorkflow) return { ok: false, error: `未知任务 ${taskId}` }
     const kind = stored?.kind ?? (currentWorkflow.devTaskId === taskId ? 'dev' : 'review')
-    const hostJobId = kind === 'dev' ? currentWorkflow.devHostJobId : currentWorkflow.reviewHostJobId
+    let hostJobId = kind === 'dev' ? currentWorkflow.devHostJobId : currentWorkflow.reviewHostJobId
+    const ownership = observeWorkflowTask(ctx as unknown as TaskOwnershipContext, currentWorkflow)
+    if (ownership.state === 'interrupted') {
+      if (kind === 'dev') {
+        currentWorkflow.stage = 'developing'
+        currentWorkflow.devInterrupted = true
+      } else {
+        currentWorkflow.stage = 'review-ready'
+      }
+      await saveWorkflow(currentWorkflow)
+      return { ok: true, taskId, stopped: false }
+    }
+    if (!hostJobId && ctx.jobs) {
+      const label = `clickvibe:${currentWorkflow.key}:${kind}:${taskId}`
+      try {
+        hostJobId = String(
+          ctx.jobs.list().find((job) => job.label === label && (job.status === 'running' || job.status === 'stopping'))
+            ?.id ?? '',
+        )
+      } catch (error) {
+        return { ok: false, error: `宿主任务查询失败:${String(error instanceof Error ? error.message : error)}` }
+      }
+    }
     if (!hostJobId || !ctx.jobs) {
       return { ok: false, error: `任务 ${taskId} 的宿主归属无法确认,请在宿主任务视图停止后刷新` }
     }
