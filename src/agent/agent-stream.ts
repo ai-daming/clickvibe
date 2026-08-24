@@ -10,6 +10,7 @@ export type { AgentKind } from '../infra/contracts.ts'
 
 import type { AgentKind } from '../infra/contracts.ts'
 
+import { LineBuffer } from '../infra/line-buffer.ts'
 import { type LiveLogKind, type TokenUsage, tokenUsage } from '../infra/live-output.ts'
 
 export interface StatusLine {
@@ -31,6 +32,34 @@ export function lossyAgentOutputNotice(read: {
   return spillFiles.length > 0
     ? `[clickvibe] 宿主流式缓冲已丢失部分 Agent 输出；可从宿主 spill 文件恢复：${spillFiles.join('；')}`
     : '[clickvibe] 宿主流式缓冲已丢失部分 Agent 输出；宿主未提供 spill 文件，缺口无法从 ClickVibe 日志恢复'
+}
+
+/**
+ * Split host spill text into lines using the same line-buffer semantics the
+ * live delta stream flows through (
+ and split chunks normalize the same
+ * way), so recovered lines match delivered lines byte-for-byte.
+ */
+function splitSpillLines(text: string): string[] {
+  const buffer = new LineBuffer()
+  return [...buffer.appendChunk(text), ...buffer.flush()].filter((line) => line !== '')
+}
+
+/**
+ * Lines the host spill file holds that the live delta stream never delivered.
+ * The host keeps only a bounded in-memory tail and drops the head; the spill
+ * file is byte-complete, so re-parsing these lines fills the gap. Idempotent:
+ * a line already delivered is skipped, so re-reading the same spill never
+ * duplicates panel lines.
+ */
+export function recoverSpillLines(spillText: string, deliveredLines: ReadonlySet<string>): string[] {
+  return splitSpillLines(spillText).filter((line) => !deliveredLines.has(line))
+}
+
+/** Closing notice once missing agent lines were recovered from host spill files. */
+export function spillRecoveryNotice(recoveredPaths: string[], lineCount: number): string | null {
+  if (recoveredPaths.length === 0 || lineCount <= 0) return null
+  return `[clickvibe] 已从宿主 spill 文件恢复 ${lineCount} 行缺失的 Agent 输出: ${recoveredPaths.join('；')}`
 }
 
 /** Classify a tool name into a friendly "current action" label. */

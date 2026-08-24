@@ -27,6 +27,7 @@ import {
   liveWaiters,
   MAX_TASKS,
   notifyTask,
+  readHostSpillFile,
   resumeTaskGate,
   reviewTaskGate,
   TASK_LOG_LINES,
@@ -34,7 +35,13 @@ import {
   TASK_TIMEOUT_MS,
 } from '../infra/runtime.ts'
 import { appendTaskLog, startTaskLog, type IssueWorkflow } from '../infra/state.ts'
-import { type AgentKind, lossyAgentOutputNotice, parseAgentChunk } from './agent-stream.ts'
+import {
+  type AgentKind,
+  lossyAgentOutputNotice,
+  parseAgentChunk,
+  recoverSpillLines,
+  spillRecoveryNotice,
+} from './agent-stream.ts'
 
 /** Start (or restart) a dev task in the live map with status parsing. */
 export function createLiveTask(
@@ -115,6 +122,61 @@ export function finishTask(
   scheduleTaskCleanup(task)
 }
 
+/**
+ * Fill the gap the host's bounded streaming buffer dropped (lossy read): read
+ * the byte-complete spill file, re-parse only the lines the live delta stream
+ * never delivered, and append them to the task log before a closing notice.
+ * Runs inline in the awaited drain so session ids hidden in the gap are
+ * captured before settle decides resume fallbacks. Per-path in-flight guard
+ * prevents concurrent duplicate recovery; content dedupe is keyed on the
+ * delivered-line set, so later lossy reads of the same (grown) spill recover
+ * only the still-missing lines.
+ */
+async function recoverLossyOutput(
+  task: LiveTask,
+  read: { stdoutSpillPath?: string; stderrSpillPath?: string },
+  deliveredLines: ReadonlySet<string>,
+  recoveredInFlight: Set<string>,
+  onSessionId: (sessionId: string) => void,
+): Promise<void> {
+  const streams = [
+    ['stdout', read.stdoutSpillPath],
+    ['stderr', read.stderrSpillPath],
+  ] as const
+  for (const [label, spillPath] of streams) {
+    if (!spillPath || recoveredInFlight.has(spillPath)) continue
+    recoveredInFlight.add(spillPath)
+    try {
+      const missing = recoverSpillLines(await readHostSpillFile(spillPath), deliveredLines)
+      if (missing.length === 0) continue
+      const parsed = parseAgentChunk(task.agent as AgentKind, missing.join('\n'))
+      if (parsed.lines.length === 0) continue
+      for (const line of parsed.lines) {
+        pushTaskLine(task, {
+          source: 'agent',
+          agent: task.agent as AgentKind,
+          kind: line.kind,
+          text: line.text,
+          ...(line.usage ? { usage: line.usage } : {}),
+        })
+      }
+      if (parsed.sessionId) onSessionId(parsed.sessionId)
+      const notice = spillRecoveryNotice([label + ' ' + spillPath], missing.length)
+      if (notice) pushTaskLine(task, notice)
+    } catch (error) {
+      pushTaskLine(
+        task,
+        '[clickvibe] 无法读取宿主 spill 文件 ' +
+          spillPath +
+          ': ' +
+          String(error instanceof Error ? error.message : error),
+      )
+    } finally {
+      recoveredInFlight.delete(spillPath)
+    }
+  }
+}
+
 export function attachAgentProcess(
   ctx: Context,
   task: LiveTask,
@@ -159,12 +221,18 @@ export function attachAgentProcess(
     task.process = process
     const startedAt = Date.now()
     let sawSessionId = false
+    // 已投递的原始行与正在恢复的 spill 路径:补缺失行时按内容去重、防并发重复恢复
+    const deliveredLines = new Set<string>()
+    const recoveredInFlight = new Set<string>()
 
     // 轮询读取 agent 输出,解析为状态行,写入内存缓冲 + 落盘日志
-    const drain = (flush = false) => {
+    const drain = async (flush = false) => {
       const read = process.readOutput()
       const rawLines = read.delta === '' ? [] : task.rawLog.appendChunk(read.delta)
       if (flush) rawLines.push(...task.rawLog.flush())
+      for (const rawLine of rawLines) {
+        if (rawLine !== '') deliveredLines.add(rawLine)
+      }
       if (rawLines.length > 0) {
         const parsed = parseAgentChunk(task.agent as AgentKind, rawLines.join('\n'))
         for (const line of parsed.lines) {
@@ -182,13 +250,22 @@ export function attachAgentProcess(
         }
       }
       const lossNotice = lossyAgentOutputNotice(read)
-      if (lossNotice) pushTaskLine(task, lossNotice)
+      if (lossNotice) {
+        pushTaskLine(task, lossNotice)
+        // spill 文件字节完整,把被宿主内存缓冲丢弃的头部事件补回面板与落盘日志
+        await recoverLossyOutput(task, read, deliveredLines, recoveredInFlight, (sessionId) => {
+          sawSessionId = true
+          task.sessionId = sessionId
+        })
+      }
     }
-    const pump = setInterval(() => drain(), 250)
+    const pump = setInterval(() => {
+      void drain()
+    }, 250)
 
     const settle = async (processError?: unknown): Promise<void> => {
       clearInterval(pump)
-      drain(true)
+      await drain(true)
       if (processError !== undefined) {
         pushTaskLine(
           task,
