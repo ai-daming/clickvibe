@@ -316,7 +316,7 @@ export async function handleCommand(
         : workflow.stage === 'developing'
           ? workflow.devTaskId
           : null
-    const taskId = ownership.state === 'running' ? ownership.taskId : persistedTaskId
+    const taskId = ownership.state === 'running' || ownership.state === 'unknown' ? ownership.taskId : persistedTaskId
     if (!taskId) return { status: 400, body: { ok: false, action: 'stop', error: '该 issue 没有运行中的任务' } }
     if (ownership.state === 'unknown' && !confirmedStopped) {
       return {

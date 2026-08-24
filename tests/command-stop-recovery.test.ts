@@ -44,8 +44,9 @@ function workflowFixture(key: string, home: string): IssueWorkflow {
 
 async function runCommand(
   payload: Record<string, unknown>,
+  ctx: Record<string, unknown> = {},
 ): Promise<{ status: number; body: Record<string, unknown> }> {
-  const result = await handleCommand({} as never, request, payload)
+  const result = await handleCommand(ctx as never, request, payload)
   return { status: result.status, body: result.body as Record<string, unknown> }
 }
 
@@ -82,6 +83,32 @@ test('stop command explicitly confirms task-unknown dev and review through the s
     const reviewConfirmed = await runCommand({ command: 'stop #111', confirmedStopped: true })
     assert.equal(reviewConfirmed.status, 200, JSON.stringify(reviewConfirmed.body))
     assert.equal((await loadWorkflow(key))?.stage, 'review-ready')
+
+    const settling = await loadWorkflow(key)
+    if (!settling) throw new Error('workflow missing before stage-advanced recovery')
+    settling.stage = 'review-ready'
+    settling.devTaskId = 'dev-3000-settling'
+    settling.devHostJobId = 'host-dev-3000'
+    settling.devInterrupted = false
+    await saveWorkflow(settling)
+    const registryOffline = {
+      jobs: {
+        list(): never {
+          throw new Error('registry offline')
+        },
+        get(): never {
+          throw new Error('registry offline')
+        },
+      },
+    }
+    const settlingPreview = await runCommand({ command: 'stop #111' }, registryOffline)
+    assert.equal(settlingPreview.status, 200, JSON.stringify(settlingPreview.body))
+    assert.equal(settlingPreview.body.needsConfirmation, true)
+    assert.equal(settlingPreview.body.taskId, 'dev-3000-settling')
+    const settlingConfirmed = await runCommand({ command: 'stop #111', confirmedStopped: true }, registryOffline)
+    assert.equal(settlingConfirmed.status, 200, JSON.stringify(settlingConfirmed.body))
+    assert.equal(settlingConfirmed.body.taskId, 'dev-3000-settling')
+    assert.equal((await loadWorkflow(key))?.devInterrupted, true)
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome

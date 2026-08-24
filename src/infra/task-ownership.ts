@@ -27,7 +27,13 @@ export type TaskOwnership =
       kind: 'dev' | 'review'
       taskId: string
     }
-  | { state: 'unknown'; startedAt: null; source: 'no-proof' | 'registry-error' }
+  | {
+      state: 'unknown'
+      startedAt: null
+      source: 'no-proof' | 'registry-error'
+      kind: 'dev' | 'review'
+      taskId: string
+    }
   | {
       state: 'interrupted'
       startedAt: number | null
@@ -63,6 +69,21 @@ function expectedTask(workflow: OwnershipFields): TaskRef | null {
   return kind === null ? null : (taskRefs(workflow).find((task) => task.kind === kind) ?? null)
 }
 
+function taskSequence(taskId: string): number {
+  const value = Number(taskId.match(/^[a-z]+-(\d+)-/)?.[1])
+  return Number.isSafeInteger(value) ? value : 0
+}
+
+/** Selects which persisted task reference is current; its timestamp is never treated as liveness proof. */
+function currentTask(workflow: OwnershipFields, tasks: TaskRef[]): TaskRef | null {
+  const expected = expectedTask(workflow)
+  if (expected) return expected
+  return tasks.reduce<TaskRef | null>((latest, task) => {
+    if (!latest) return task
+    return taskSequence(task.taskId) >= taskSequence(latest.taskId) ? task : latest
+  }, null)
+}
+
 function expectedLabel(workflow: OwnershipFields, task: TaskRef): string {
   return `clickvibe:${workflow.key}:${task.kind}:${task.taskId}`
 }
@@ -79,6 +100,7 @@ export function observeTaskOwnership(
   localStartedAt?: (taskId: string) => number | null,
 ): TaskOwnership {
   const tasks = taskRefs(workflow)
+  const current = currentTask(workflow, tasks)
   for (const task of tasks) {
     if (localTaskRunning(task.taskId)) {
       return {
@@ -127,17 +149,39 @@ export function observeTaskOwnership(
     }
   }
 
-  if (registryFailed) return { state: 'unknown', startedAt: null, source: 'registry-error' }
+  if (registryFailed && current) {
+    return {
+      state: 'unknown',
+      startedAt: null,
+      source: 'registry-error',
+      kind: current.kind,
+      taskId: current.taskId,
+    }
+  }
   if (workflow.stage === 'developing' && workflow.devInterrupted) {
     return { state: 'interrupted', startedAt: null, source: 'explicit-outcome' }
   }
   const expected = expectedTask(workflow)
   if (!expected) return { state: 'none', startedAt: null, source: 'not-in-flight' }
-  if (!ctx.jobs) return { state: 'unknown', startedAt: null, source: 'no-proof' }
+  if (!ctx.jobs) {
+    return {
+      state: 'unknown',
+      startedAt: null,
+      source: 'no-proof',
+      kind: expected.kind,
+      taskId: expected.taskId,
+    }
+  }
 
   const snapshot = snapshots.get(expected.taskId)
   if (snapshot) return { state: 'interrupted', startedAt: snapshot.startedAt, source: 'host-terminal' }
-  return { state: 'unknown', startedAt: null, source: 'no-proof' }
+  return {
+    state: 'unknown',
+    startedAt: null,
+    source: 'no-proof',
+    kind: expected.kind,
+    taskId: expected.taskId,
+  }
 }
 
 export function taskLaunchDecision(ownership: TaskOwnership): TaskLaunchDecision {

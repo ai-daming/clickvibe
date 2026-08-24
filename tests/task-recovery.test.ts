@@ -143,7 +143,13 @@ test('missing ownership evidence remains unknown instead of claiming interruptio
     },
     () => false,
   )
-  assert.deepEqual(ownership, { state: 'unknown', startedAt: null, source: 'no-proof' })
+  assert.deepEqual(ownership, {
+    state: 'unknown',
+    startedAt: null,
+    source: 'no-proof',
+    kind: 'dev',
+    taskId: 'dev-task-1',
+  })
 })
 
 test('a live task remains visible after its workflow stage advances', () => {
@@ -191,7 +197,13 @@ test('a legacy task stays unknown after restart until its process termination is
     },
     () => false,
   )
-  assert.deepEqual(ownership, { state: 'unknown', startedAt: null, source: 'no-proof' })
+  assert.deepEqual(ownership, {
+    state: 'unknown',
+    startedAt: null,
+    source: 'no-proof',
+    kind: 'dev',
+    taskId: 'dev-1000-legacy',
+  })
   assert.equal(taskLaunchDecision(ownership).allowed, false)
 })
 
@@ -217,6 +229,12 @@ test('a persisted host job missing from a fresh registry is not proof that its c
     },
     () => false,
   )
-  assert.deepEqual(ownership, { state: 'unknown', startedAt: null, source: 'no-proof' })
+  assert.deepEqual(ownership, {
+    state: 'unknown',
+    startedAt: null,
+    source: 'no-proof',
+    kind: 'review',
+    taskId: 'review-1000-legacy',
+  })
   assert.equal(taskLaunchDecision(ownership).allowed, false)
 })
