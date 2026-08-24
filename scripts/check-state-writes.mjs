@@ -16,13 +16,25 @@ import ts from 'typescript'
 // rule 3 — snapshot/task mutations must be conditional (revision/lease
 //          argument required; a bare one-argument call is last-writer-wins).
 
-const MUTATION_NAMES = new Set(['saveWorkflow', 'saveWorkflowForTask', 'claimWorkflowTask', 'mutateWorkflowForTask'])
+const MUTATION_NAMES = new Set([
+  'saveWorkflow',
+  'saveWorkflowForTask',
+  'claimWorkflowTask',
+  'mutateWorkflowForTask',
+  'stopWorkflowTask',
+])
 const PATH_NAMES = new Set(['workflowPath', 'workflowStatePath'])
 const FACADE_FILE = /(^|\/)state\.ts$/
 const PERSISTENCE_FILE = /workflow-persistence\.ts$/
 
 const PATH_ALLOWED = new Set(['src/infra/workflow-persistence.ts', 'src/infra/state-layout.ts', 'src/infra/state.ts'])
 const IMPORT_ALLOWED = new Set(['src/infra/state.ts', 'src/infra/task-ownership.ts'])
+const CAPABILITY_CALL_ALLOWED = new Map([
+  ['claimWorkflowTask', new Set(['src/workflow/task-claim.ts'])],
+  ['mutateWorkflowForTask', new Set(['src/workflow/task-lease.ts'])],
+  ['saveWorkflowForTask', new Set()],
+  ['stopWorkflowTask', new Set(['src/workflow/task-api.ts'])],
+])
 
 async function collect(directory) {
   const entries = await readdir(directory, { withFileTypes: true })
@@ -144,6 +156,10 @@ for (const sourceFile of program.getSourceFiles()) {
     }
     if (ts.isCallExpression(node)) {
       const name = trackedCallName(node.expression)
+      const capabilityAllowed = name ? CAPABILITY_CALL_ALLOWED.get(name) : undefined
+      if (name && capabilityAllowed && !allowed(capabilityAllowed, relative)) {
+        failures.push(`${relative}: ${name} may only be called by its capability owner`)
+      }
       if (name && node.arguments.length < 2) {
         failures.push(`${relative}: ${name} called without expected-revision/lease argument (last-writer-wins)`)
       }

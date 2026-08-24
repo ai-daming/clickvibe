@@ -10,8 +10,8 @@ import {
   type IssueWorkflow,
   loadAllWorkflows,
   loadWorkflow,
-  mutateWorkflowForTask,
   readTaskLog,
+  stopWorkflowTask,
 } from '../infra/state.ts'
 import type { TaskMetrics } from '../infra/task-log-store.ts'
 import { observeWorkflowTask, type TaskOwnershipContext } from '../infra/task-ownership.ts'
@@ -283,8 +283,5 @@ export async function stopTask(
 }
 
 function markTaskStopped(workflow: IssueWorkflow, kind: 'dev' | 'review', taskId: string) {
-  return mutateWorkflowForTask(workflow, { kind, taskId }, (current) => {
-    current.stage = kind === 'dev' ? 'developing' : 'review-ready'
-    if (kind === 'dev') current.devInterrupted = true
-  })
+  return stopWorkflowTask(workflow, { kind, taskId })
 }

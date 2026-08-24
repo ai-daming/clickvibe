@@ -3,18 +3,14 @@ import { detectLinkedPr } from '../github/pr.ts'
 import { shellQuote } from '../infra/develop-core.ts'
 import { readDeliveryStats } from '../infra/git.ts'
 import { parseUrl, runCommand } from '../infra/runtime.ts'
-import {
-  appendLog,
-  type IssueWorkflow,
-  loadWorkflow,
-  mutateWorkflowForTask,
-  type WorkflowEvent,
-} from '../infra/state.ts'
+import type { LiveTask } from '../infra/runtime.ts'
+import { appendLog, type IssueWorkflow, loadWorkflow, type WorkflowEvent } from '../infra/state.ts'
 import { deriveEventRound } from './delivery-audit.ts'
 import { buildDevComment, buildReviewComment } from './delivery-comment.ts'
 import { extractGithubCommentId } from './delivery-publication.ts'
 import { publishDeliveryComment } from './delivery-publish.ts'
 import { workflowBaseBranch } from './state-view.ts'
+import { mutateLiveTaskWorkflow } from './task-lease.ts'
 
 /** Record one dev/rework delivery and publish its matching GitHub node. */
 export async function recordDevDelivery(
@@ -24,7 +20,7 @@ export async function recordDevDelivery(
   head: string | null,
   fixedIssues: string[],
   kind: 'dev' | 'rework' | 'resume',
-  taskId: string,
+  live: LiveTask,
   userContext = '',
   durationMs?: number,
 ): Promise<void> {
@@ -36,7 +32,7 @@ export async function recordDevDelivery(
     : undefined
   const at = new Date().toISOString()
   let event!: WorkflowEvent
-  const saved = await mutateWorkflowForTask(current, { kind: 'dev', taskId }, (latest) => {
+  const saved = await mutateLiveTaskWorkflow(live, current, (latest) => {
     event = {
       kind,
       at,
@@ -45,7 +41,7 @@ export async function recordDevDelivery(
       round: deriveEventRound(latest.events),
       agent,
       ...(stats ? { stats } : {}),
-      taskId,
+      taskId: live.taskId,
       fixed: fixedIssues.length,
       note: `${agent} 完成开发${kind === 'rework' ? '(按 review 意见返工)' : ''}`,
       ...(userContext !== '' ? { userContext } : {}),
@@ -64,7 +60,7 @@ export async function recordDevDelivery(
     stats,
     at: event.at,
   })
-  await publishDeliveryComment(ctx, current, event, body, { kind: 'dev', taskId })
+  await publishDeliveryComment(ctx, current, event, body, live)
   if (fixedIssues.length > 0 && kind !== 'dev') await markPreviousReviewFixed(ctx, current, round, agent)
 }
 

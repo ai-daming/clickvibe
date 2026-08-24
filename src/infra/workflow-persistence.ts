@@ -11,6 +11,14 @@ export interface WorkflowTaskCredential {
   taskId: string
 }
 
+declare const workflowTaskLeaseBrand: unique symbol
+
+/** Opaque lifecycle capability signed by a successful task claim/commit. */
+export interface WorkflowTaskLease extends WorkflowTaskCredential {
+  readonly taskStateRevision: number
+  readonly [workflowTaskLeaseBrand]: true
+}
+
 export interface WorkflowTaskClaim extends WorkflowTaskCredential {
   agent: 'codex' | 'claude'
   hostJobId: string
@@ -24,19 +32,28 @@ export interface WorkflowTaskExpectation {
 }
 
 type Committed = { status: 'committed'; revision: number; taskStateRevision: number }
+type TaskCommitted = Committed & { lease: WorkflowTaskLease }
 type RevisionConflict = { status: 'revision-conflict'; currentRevision: number; currentTaskStateRevision: number }
 type OwnershipLost = {
   status: 'ownership-lost'
   currentRevision: number | null
   currentTaskStateRevision: number | null
 }
+type ConditionalRevisionConflict = {
+  status: 'revision-conflict'
+  currentRevision: number | null
+  currentTaskStateRevision?: number
+}
+type ConditionalCommitResult = Committed | OwnershipLost | ConditionalRevisionConflict
 
-export type WorkflowTaskCommitResult = Committed | OwnershipLost | RevisionConflict
+export type WorkflowTaskCommitResult = TaskCommitted | OwnershipLost | RevisionConflict
 
 export type WorkflowTaskClaimResult =
-  | Committed
+  | TaskCommitted
   | (OwnershipLost & { currentTask: WorkflowTaskCredential | null })
   | RevisionConflict
+
+export type WorkflowTaskStopResult = Committed | OwnershipLost
 
 export class WorkflowConflictError extends Error {
   readonly currentRevision: number | null
@@ -72,6 +89,10 @@ export function currentWorkflowTaskRef(workflow: OwnershipFields): WorkflowTaskC
 function ownsCurrentTask(workflow: OwnershipFields, credential: WorkflowTaskCredential): boolean {
   const current = currentWorkflowTaskRef(workflow)
   return current?.kind === credential.kind && current.taskId === credential.taskId
+}
+
+function signWorkflowTaskLease(task: WorkflowTaskCredential, taskStateRevision: number): WorkflowTaskLease {
+  return Object.freeze({ kind: task.kind, taskId: task.taskId, taskStateRevision }) as WorkflowTaskLease
 }
 
 export function workflowRevision(workflow: Pick<IssueWorkflow, 'revision'>): number | null {
@@ -207,9 +228,11 @@ async function commit(
   current: IssueWorkflow | null,
   source: IssueWorkflow,
   revision: number,
+  forceTaskStateAdvance = false,
 ): Promise<Committed> {
   const currentTaskStateRevision = current ? storedTaskStateRevision(current) : storedTaskStateRevision(source)
-  const taskStateRevision = currentTaskStateRevision + Number(current !== null && taskStateChanged(current, source))
+  const taskStateRevision =
+    currentTaskStateRevision + Number(current !== null && (forceTaskStateAdvance || taskStateChanged(current, source)))
   const next = { ...source, revision: revision + 1, taskStateRevision, updatedAt: Date.now() }
   await atomicWrite(path, next)
   Object.assign(target, next)
@@ -221,7 +244,8 @@ async function conditionalCommit(
   expectedRevision: number | null,
   task?: WorkflowTaskCredential,
   expectedTaskStateRevision?: number,
-): Promise<WorkflowTaskCommitResult | { status: 'revision-conflict'; currentRevision: number | null }> {
+  forceTaskStateAdvance = false,
+): Promise<ConditionalCommitResult> {
   const path = workflowStatePath(workflow)
   const release = await acquireLock(path)
   try {
@@ -238,7 +262,7 @@ async function conditionalCommit(
       if (currentTaskStateRevision === null) return { status: 'revision-conflict', currentRevision }
       return { status: 'revision-conflict', currentRevision, currentTaskStateRevision }
     }
-    return await commit(path, workflow, current, workflow, currentRevision ?? 0)
+    return await commit(path, workflow, current, workflow, currentRevision ?? 0, forceTaskStateAdvance)
   } finally {
     await release()
   }
@@ -301,7 +325,8 @@ export async function claimWorkflowTaskState(
       if (claim.prNumber !== undefined) next.prNumber = claim.prNumber
       next.stage = 'reviewing'
     }
-    return await commit(path, workflow, current, next, currentRevision ?? 0)
+    const committed = await commit(path, workflow, current, next, currentRevision ?? 0, true)
+    return { ...committed, lease: signWorkflowTaskLease(claim, committed.taskStateRevision) }
   } finally {
     await release()
   }
@@ -310,30 +335,29 @@ export async function claimWorkflowTaskState(
 /** Distinguish a retryable same-owner revision from permanent capability loss. */
 export async function saveWorkflowStateForTask(
   workflow: IssueWorkflow,
-  credential: WorkflowTaskCredential,
+  lease: WorkflowTaskLease,
   expectedRevision: number,
-  expectedTaskStateRevision: number,
 ): Promise<WorkflowTaskCommitResult> {
-  return conditionalCommit(
-    workflow,
-    expectedRevision,
-    credential,
-    expectedTaskStateRevision,
-  ) as Promise<WorkflowTaskCommitResult>
+  const result = await conditionalCommit(workflow, expectedRevision, lease, lease.taskStateRevision)
+  if (result.status === 'revision-conflict' && result.currentTaskStateRevision === undefined) {
+    return { status: 'ownership-lost', currentRevision: result.currentRevision, currentTaskStateRevision: null }
+  }
+  return result.status === 'committed'
+    ? { ...result, lease: signWorkflowTaskLease(lease, result.taskStateRevision) }
+    : (result as OwnershipLost | RevisionConflict)
 }
 
 /** Reapply one pure task mutation after metadata-only revisions without holding the file lock. */
 export async function mutateWorkflowStateForTask(
   workflow: IssueWorkflow,
-  credential: WorkflowTaskCredential,
+  lease: WorkflowTaskLease,
   mutate: (current: IssueWorkflow) => void,
 ): Promise<Exclude<WorkflowTaskCommitResult, { status: 'revision-conflict' }>> {
   let current = workflow
-  const expectedTaskStateRevision = storedTaskStateRevision(workflow)
   while (true) {
     const next = structuredClone(current)
     mutate(next)
-    const result = await saveWorkflowStateForTask(next, credential, storedRevision(current), expectedTaskStateRevision)
+    const result = await saveWorkflowStateForTask(next, lease, storedRevision(current))
     if (result.status === 'committed') {
       Object.assign(workflow, next)
       return result
@@ -341,6 +365,35 @@ export async function mutateWorkflowStateForTask(
     if (result.status === 'ownership-lost') return result
     const reloaded = await readCurrent(workflowStatePath(workflow))
     if (!reloaded) return { status: 'ownership-lost', currentRevision: null, currentTaskStateRevision: null }
+    current = reloaded
+  }
+}
+
+/** Controller-only stop transition: exact task + frozen observation, always revoking the prior task lease. */
+export async function stopWorkflowTaskState(
+  workflow: IssueWorkflow,
+  task: WorkflowTaskCredential,
+): Promise<WorkflowTaskStopResult> {
+  let current = workflow
+  const expectedTaskStateRevision = storedTaskStateRevision(workflow)
+  while (true) {
+    const next = structuredClone(current)
+    next.stage = task.kind === 'dev' ? 'developing' : 'review-ready'
+    if (task.kind === 'dev') next.devInterrupted = true
+    const result = await conditionalCommit(next, storedRevision(current), task, expectedTaskStateRevision, true)
+    if (result.status === 'committed') {
+      Object.assign(workflow, next)
+      return result
+    }
+    if (result.status === 'ownership-lost') return result
+    const reloaded = await readCurrent(workflowStatePath(workflow))
+    if (!reloaded || storedTaskStateRevision(reloaded) !== expectedTaskStateRevision) {
+      return {
+        status: 'ownership-lost',
+        currentRevision: reloaded ? storedRevision(reloaded) : null,
+        currentTaskStateRevision: reloaded ? storedTaskStateRevision(reloaded) : null,
+      }
+    }
     current = reloaded
   }
 }

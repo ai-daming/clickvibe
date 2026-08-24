@@ -174,6 +174,7 @@ export function createLiveTask(
     status: 'running',
     exitCode: null,
     sessionId,
+    workflowLease: null,
   }
   liveTasks.set(taskId, task)
   logTaskDiagnostic('live-task-set', { taskId, workflowKey: workflow.key, kind, status: task.status, closed: false })

@@ -4,11 +4,11 @@
 
 | # | Invariant | Construction (`file`: behavior) |
 |---|---|---|
-| 1 | Metadata and lifecycle ordering are durable and distinct. | `infra/state.ts`: legacy `revision` and `taskStateRevision` normalize to `0`; `infra/workflow-persistence.ts`: every commit increments `revision`, while the centralized lifecycle-field comparison increments `taskStateRevision` exactly once. |
-| 2 | No unconditional or capability-only task mutation exists. | `infra/workflow-persistence.ts`: general writes require `expectedRevision`; task writes require `expectedRevision`, `{kind,taskId}`, and the frozen `expectedTaskStateRevision`. |
+| 1 | Metadata and lifecycle ordering are durable and distinct. | `infra/state.ts`: legacy `revision` and `taskStateRevision` normalize to `0`; `infra/workflow-persistence.ts`: every commit increments `revision`, while a lifecycle-field transition or explicit stop/claim advances `taskStateRevision` exactly once. |
+| 2 | A running task cannot refresh its lifecycle capability from persisted state. | `infra/workflow-persistence.ts`: claim signs an opaque, frozen `WorkflowTaskLease {kind,taskId,taskStateRevision}`; `infra/runtime.ts`: `LiveTask` stores that lease; `workflow/task-lease.ts`: every callback mutation requires the stored lease and serially replaces it only with the lease returned by its own successful commit. No workflow snapshot can construct a callback lease. |
 | 3 | Validation and commit are one awaited cross-process critical section. | `infra/workflow-persistence.ts`: the hard-link lock encloses reread, JSON validation, both tokens, capability validation, increment, temp write and rename; `commit()` is awaited before `finally` releases the lock. |
-| 4 | A task starts as one complete generation. | `agent/task-supervisor.ts`: a successful reservation has a non-empty `hostJobId`; develop/resume/review freeze the current task expectation immediately after the ownership gate; `workflow/task-claim.ts` atomically commits `taskId+hostJobId+stage+agent` plus session reset/PR metadata before Agent launch and settles losers. |
-| 5 | Same-generation metadata cannot replay an obsolete lifecycle intent. | `infra/workflow-persistence.ts`: task mutation may retry a `revision-conflict` only against its original `taskStateRevision`; a lifecycle-token change returns `ownership-lost`. Claim retries retain the gate-frozen task ref and lifecycle token. |
+| 4 | A task starts as one complete generation. | `agent/task-supervisor.ts`: a successful reservation has a non-empty `hostJobId`; develop/resume/review freeze the current task expectation immediately after the ownership gate; `workflow/task-claim.ts` atomically commits `taskId+hostJobId+stage+agent`, stores the returned lease on `LiveTask`, then launches the Agent; losers are settled without a lease or launch. |
+| 5 | Same-generation metadata cannot replay an obsolete lifecycle intent. | `infra/workflow-persistence.ts`: callback mutation may retry a `revision-conflict` only with its lease's original `taskStateRevision`; a lifecycle-token change returns `ownership-lost`. Claim retries retain the gate-frozen task ref and lifecycle token. `stopWorkflowTaskState` is a separate controller-only transition that always advances `taskStateRevision`, permanently invalidating the stopped `LiveTask` lease. |
 | 6 | Current task has one observed answer. | `infra/task-ownership.ts`: ownership carries exact `{kind,taskId}`; launch/reuse/deadline/stop consumers use it without stage/order guessing. |
 | 7 | Conflict classes retain meaning and locks are not re-entered. | `infra/workflow-persistence.ts`: callbacks run outside the lock; results distinguish `committed`, `ownership-lost`, and `revision-conflict+currentRevision+currentTaskStateRevision`; I/O/lock/JSON errors throw. |
 | 8 | Missing is not death. | `infra/task-ownership.ts`: local/registry absence yields `unknown` and keeps launch closed; only explicit outcome or supervisor terminal state yields `interrupted`. |
@@ -40,15 +40,15 @@
 | `workflow/merge.failCleanup` | cleanup error | ✓ revision |
 | `workflow/merge.archiveWorkflow` | archive/auto-run | ✓ revision |
 | `workflow/sync` success/conflict/failure | events | ✓ revision |
-| `workflow/dev-completion.finalizeDevRun` | dev terminal/session | ✓ capability + lifecycle CAS; metadata-only retry |
-| `workflow/develop-start` synchronous failure | dev interrupted | ✓ capability + lifecycle CAS; metadata-only retry |
-| `workflow/resume` fallback/exit | dev state/session | ✓ capability + lifecycle CAS; metadata-only retry |
-| `workflow/review-flow` failure/parse/verdict | review state/result/session/events | ✓ capability + lifecycle CAS; metadata-only retry |
-| `workflow/review-flow` cleanup failure | review stage | ✓ capability + lifecycle CAS; metadata-only retry |
-| `workflow/review-flow` comment/fallback | publication/session | ✓ capability + lifecycle CAS; metadata-only retry |
-| `workflow/dev-delivery.recordDevDelivery` | dev event/PR | ✓ capability + lifecycle CAS; metadata-only retry |
-| `workflow/delivery-publish` | publication | ✓ capability + lifecycle CAS; metadata-only retry |
-| `workflow/task-api.stopTask` all states | interrupted stage/gate | ✓ capability + lifecycle CAS; metadata-only retry |
+| `workflow/dev-completion.finalizeDevRun` | dev terminal/session | ✓ serialized `LiveTask.workflowLease`; returned lease forwarded |
+| `workflow/develop-start` synchronous failure | dev interrupted | ✓ serialized `LiveTask.workflowLease`; no snapshot-derived token |
+| `workflow/resume` fallback/exit | dev state/session | ✓ serialized `LiveTask.workflowLease`; no snapshot-derived token |
+| `workflow/review-flow` failure/parse/verdict | review state/result/session/events | ✓ serialized `LiveTask.workflowLease`; returned lease forwarded |
+| `workflow/review-flow` cleanup failure | review stage | ✓ serialized `LiveTask.workflowLease`; no snapshot-derived token |
+| `workflow/review-flow` comment/fallback | publication/session | ✓ serialized `LiveTask.workflowLease`; returned lease forwarded |
+| `workflow/dev-delivery.recordDevDelivery` | dev event/PR | ✓ serialized `LiveTask.workflowLease`; returned lease forwarded |
+| `workflow/delivery-publish` | publication | ✓ serialized `LiveTask.workflowLease`; returned lease forwarded |
+| `workflow/task-api.stopTask` all states | interrupted stage/gate | ✓ controller-only stop transition; exact task ref + frozen expectation; always revokes prior lease |
 
 ## Current-task consumer enumeration
 

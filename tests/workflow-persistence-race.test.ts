@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import test from 'node:test'
-import { waitForTaskPersistence } from '../src/agent/task-supervisor.ts'
+import { finishTask, waitForTaskPersistence } from '../src/agent/task-supervisor.ts'
 import { LineLog } from '../src/infra/develop-core.ts'
 import { LineBuffer } from '../src/infra/line-buffer.ts'
 import type { LiveTask } from '../src/infra/runtime.ts'
@@ -19,6 +19,7 @@ import {
   saveWorkflowForTask,
   statePath,
   WorkflowConflictError,
+  type WorkflowTaskLease,
 } from '../src/infra/state.ts'
 import { observeTaskOwnership, workflowTaskExpectation } from '../src/infra/task-ownership.ts'
 import { establishTaskClaim } from '../src/workflow/task-claim.ts'
@@ -75,12 +76,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       continue
     }
     const saved = input.credential
-      ? (await saveWorkflowForTask(
-          input.workflow,
-          input.credential,
-          input.expectedRevision,
-          input.expectedTaskStateRevision,
-        )).status === 'committed'
+      ? (await saveWorkflowForTask(input.workflow, input.credential, input.expectedRevision)).status === 'committed'
       : (await saveWorkflow(input.workflow, input.expectedRevision), true)
     console.log(JSON.stringify({ saved }))
   } catch (error) {
@@ -111,7 +107,7 @@ async function startWorker(home: string) {
         child.stdin.write(
           `${JSON.stringify({
             workflow,
-            credential,
+            credential: credential ? { ...credential, taskStateRevision: workflow.taskStateRevision ?? 0 } : undefined,
             expectedRevision: workflow.revision ?? null,
             expectedTaskStateRevision: workflow.taskStateRevision ?? 0,
           })}\n`,
@@ -136,6 +132,14 @@ function workflow(taskId: string, marker: string, issueNumber: number): IssueWor
     updatedAt: 0,
     events: [{ kind: 'note', at: marker, note: marker.repeat(64 * 1024) }],
   } as IssueWorkflow
+}
+
+function testLease(
+  workflow: Pick<IssueWorkflow, 'taskStateRevision'>,
+  kind: 'dev' | 'review',
+  taskId: string,
+): WorkflowTaskLease {
+  return { kind, taskId, taskStateRevision: workflow.taskStateRevision ?? 0 } as WorkflowTaskLease
 }
 
 test('cross-process task writes and resume claims preserve the winning generation', async (t) => {
@@ -254,12 +258,7 @@ test('persistence keeps revision, capability, claim and I/O outcomes distinct', 
     current.prNumber = '5000'
     await saveWorkflow(current, current.revision ?? 0)
     assert.deepEqual(
-      await saveWorkflowForTask(
-        stale,
-        { kind: 'review', taskId: stale.reviewTaskId! },
-        stale.revision ?? 0,
-        stale.taskStateRevision ?? 0,
-      ),
+      await saveWorkflowForTask(stale, testLease(stale, 'review', stale.reviewTaskId!), stale.revision ?? 0),
       {
         status: 'revision-conflict',
         currentRevision: current.revision,
@@ -270,12 +269,7 @@ test('persistence keeps revision, capability, claim and I/O outcomes distinct', 
     successor.reviewTaskId = 'review-7000-successor'
     await saveWorkflow(successor, successor.revision ?? 0)
     assert.deepEqual(
-      await saveWorkflowForTask(
-        stale,
-        { kind: 'review', taskId: stale.reviewTaskId! },
-        current.revision ?? 0,
-        stale.taskStateRevision ?? 0,
-      ),
+      await saveWorkflowForTask(stale, testLease(stale, 'review', stale.reviewTaskId!), current.revision ?? 0),
       {
         status: 'ownership-lost',
         currentRevision: successor.revision,
@@ -351,12 +345,16 @@ test('a completed task rejects late claim and stop intents from its previous lif
     const staleClaim = structuredClone(running)
     const claimExpectation = workflowTaskExpectation(staleClaim)
     const staleStop = structuredClone(running)
-    const completion = await mutateWorkflowForTask(running, { kind: 'dev', taskId: running.devTaskId! }, (current) => {
-      current.stage = 'review-ready'
-      current.devSessionId = 'session-8200-completed'
-      current.devSessionAgent = 'codex'
-      current.devInterrupted = false
-    })
+    const completion = await mutateWorkflowForTask(
+      running,
+      testLease(running, 'dev', running.devTaskId!),
+      (current) => {
+        current.stage = 'review-ready'
+        current.devSessionId = 'session-8200-completed'
+        current.devSessionAgent = 'codex'
+        current.devInterrupted = false
+      },
+    )
     assert.equal(completion.status, 'committed')
     assert.equal(running.taskStateRevision, 1)
 
@@ -373,6 +371,7 @@ test('a completed task rejects late claim and stop intents from its previous lif
       status: 'running',
       exitCode: null,
       sessionId: null,
+      workflowLease: null,
     }
     assert.deepEqual(
       await establishTaskClaim(
@@ -395,7 +394,7 @@ test('a completed task rejects late claim and stop intents from its previous lif
 
     const lateStop = await mutateWorkflowForTask(
       staleStop,
-      { kind: 'dev', taskId: staleStop.devTaskId! },
+      testLease(staleStop, 'dev', staleStop.devTaskId!),
       (current) => {
         current.stage = 'developing'
         current.devInterrupted = true

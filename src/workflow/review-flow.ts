@@ -42,7 +42,6 @@ import {
   issueKey,
   loadAllWorkflows,
   loadWorkflow,
-  mutateWorkflowForTask,
   readLogTail,
   recordSessionId,
   resolveSessionForAgent,
@@ -62,6 +61,7 @@ import { type ReviewIssueContract } from './merge-gates.ts'
 import { resolveReviewStartWorkflow } from './review-start.ts'
 import { workflowBaseBranch } from './state-view.ts'
 import { establishTaskClaim } from './task-claim.ts'
+import { mutateLiveTaskWorkflow } from './task-lease.ts'
 import { notifyAutoRunCompletion } from './auto-run-signal.ts'
 
 /** Start a review task on the dev branch with codex/claude. */
@@ -256,7 +256,7 @@ export async function startReview(
     let recoveryError = ''
     try {
       if (current) {
-        await mutateWorkflowForTask(current, { kind: 'review', taskId: live.taskId }, (latest) => {
+        await mutateLiveTaskWorkflow(live, current, (latest) => {
           latest.stage = 'review-ready'
         })
       }
@@ -287,7 +287,7 @@ export async function startReview(
       if (live.status !== 'done' || exitCode !== 0) {
         const interrupted = await loadWorkflow(workflow.key)
         if (interrupted) {
-          await mutateWorkflowForTask(interrupted, { kind: 'review', taskId: live.taskId }, (latest) => {
+          await mutateLiveTaskWorkflow(live, interrupted, (latest) => {
             recordSessionId(latest, 'review', newSessionId, agent)
             latest.stage = 'review-ready'
           })
@@ -301,7 +301,7 @@ export async function startReview(
         pushTaskLine(live, `[clickvibe] review 结论解析异常:${resolved.parseError ?? '原因未知'},需要重新 Review`)
         const invalid = await loadWorkflow(workflow.key)
         if (invalid) {
-          await mutateWorkflowForTask(invalid, { kind: 'review', taskId: live.taskId }, (latest) => {
+          await mutateLiveTaskWorkflow(live, invalid, (latest) => {
             recordSessionId(latest, 'review', newSessionId, agent)
             latest.reviewResult = null
             latest.stage = 'review-ready'
@@ -343,16 +343,12 @@ export async function startReview(
           // 用户附加说明只进本地事件时间线,不进 GitHub 评论(issue #54)。
           ...(extraContext !== '' ? { userContext: extraContext } : {}),
         }
-        const verdictSaved = await mutateWorkflowForTask(
-          reloaded,
-          { kind: 'review', taskId: live.taskId },
-          (latest) => {
-            latest.reviewResult = { passed, issues }
-            latest.stage = passed ? 'passed' : 'review-ready'
-            recordSessionId(latest, 'review', newSessionId, agent)
-            latest.events = [...(latest.events ?? []), event]
-          },
-        )
+        const verdictSaved = await mutateLiveTaskWorkflow(live, reloaded, (latest) => {
+          latest.reviewResult = { passed, issues }
+          latest.stage = passed ? 'passed' : 'review-ready'
+          recordSessionId(latest, 'review', newSessionId, agent)
+          latest.events = [...(latest.events ?? []), event]
+        })
         if (verdictSaved.status === 'ownership-lost') {
           notifyAutoRunCompletion(ctx, workflow.key, 'done')
           return
@@ -368,17 +364,14 @@ export async function startReview(
           stats,
           at: event.at,
         })
-        const published = await publishDeliveryComment(ctx, reloaded, event, body, {
-          kind: 'review',
-          taskId: live.taskId,
-        })
+        const published = await publishDeliveryComment(ctx, reloaded, event, body, live)
         if (!published) {
           notifyAutoRunCompletion(ctx, workflow.key, 'done')
           return
         }
         if (event.publication?.status === 'posted' && event.publication.url && reloaded.reviewResult) {
           const commentUrl = event.publication.url
-          await mutateWorkflowForTask(reloaded, { kind: 'review', taskId: live.taskId }, (latest) => {
+          await mutateLiveTaskWorkflow(live, reloaded, (latest) => {
             if (latest.reviewResult) latest.reviewResult.commentUrl = commentUrl
           })
         }
@@ -404,7 +397,7 @@ export async function startReview(
           prepare: async () => {
             const reloaded = await loadWorkflow(workflow.key)
             if (!reloaded) throw new Error('Review workflow 不存在,不再启动会话回退')
-            const saved = await mutateWorkflowForTask(reloaded, { kind: 'review', taskId: live.taskId }, (latest) => {
+            const saved = await mutateLiveTaskWorkflow(live, reloaded, (latest) => {
               clearStaleSessionId(latest, 'review', sessionId)
             })
             if (saved.status === 'ownership-lost') throw new Error('旧 Review 任务已被新代替换,不再启动会话回退')

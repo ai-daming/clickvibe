@@ -26,8 +26,8 @@ import {
   workflowRevision,
   workflowStatePath,
 } from './workflow-persistence.ts'
-export { WorkflowConflictError } from './workflow-persistence.ts'
-export type { WorkflowTaskClaim, WorkflowTaskCredential } from './workflow-persistence.ts'
+export { stopWorkflowTaskState as stopWorkflowTask, WorkflowConflictError } from './workflow-persistence.ts'
+export type * from './workflow-persistence.ts'
 export { claimWorkflowTask, mutateWorkflowForTask, saveWorkflow, saveWorkflowForTask, workflowRevision }
 export { issueKey } from './state-layout.ts'
 export type WorkflowStage =

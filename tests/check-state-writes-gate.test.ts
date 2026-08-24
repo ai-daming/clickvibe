@@ -144,6 +144,33 @@ test('gate fails on direct persistence imports and stray path references', async
   )
 })
 
+test('gate confines claim, callback mutation and stop to their capability owners', async () => {
+  await withFixtures(
+    {
+      'src/infra/state.ts': [
+        'export async function claimWorkflowTask(...x: unknown[]) { void x }',
+        'export async function mutateWorkflowForTask(...x: unknown[]) { void x }',
+        'export async function stopWorkflowTask(...x: unknown[]) { void x }',
+      ].join('\n'),
+      'src/workflow/bypass.ts': [
+        "import { claimWorkflowTask, mutateWorkflowForTask, stopWorkflowTask } from '../infra/state.ts'",
+        'export async function f(w: unknown, token: unknown) {',
+        '  await claimWorkflowTask(w, token)',
+        '  await mutateWorkflowForTask(w, token)',
+        '  await stopWorkflowTask(w, token)',
+        '}',
+      ].join('\n'),
+    },
+    (directory) => {
+      const result = runGate(directory)
+      assert.equal(result.status, 1, `expected failure, got:\n${result.stdout}${result.stderr}`)
+      for (const name of ['claimWorkflowTask', 'mutateWorkflowForTask', 'stopWorkflowTask']) {
+        assert.match(result.stderr ?? '', new RegExp(`${name} may only be called by its capability owner`))
+      }
+    },
+  )
+})
+
 test('gate passes on conditional calls and whitelisted persistence modules', async () => {
   await withFixtures(
     {

@@ -29,13 +29,7 @@ import {
 import { buildFreshAgentCommand, buildResumeAgentCommand } from '../infra/develop-core.ts'
 import { buildMergePreface } from '../infra/git.ts'
 import { type LiveTask, parseUrl, readWorktreeHead, resumeTaskGate, runCommand, taskId } from '../infra/runtime.ts'
-import {
-  clearStaleSessionId,
-  issueKey,
-  loadWorkflow,
-  mutateWorkflowForTask,
-  resolveSessionForAgent,
-} from '../infra/state.ts'
+import { clearStaleSessionId, issueKey, loadWorkflow, resolveSessionForAgent } from '../infra/state.ts'
 import {
   observeWorkflowTask,
   taskLaunchDecision,
@@ -45,6 +39,7 @@ import {
 import { recordDevDelivery } from './dev-delivery.ts'
 import { establishTaskClaim } from './task-claim.ts'
 import { finalizeDevRun } from './dev-completion.ts'
+import { mutateLiveTaskWorkflow } from './task-lease.ts'
 import { deriveFreshSessionAvailability, selectSessionLaunch } from './fresh-session.ts'
 import { workflowBaseBranch } from './state-view.ts'
 import { notifyAutoRunCompletion } from './auto-run-signal.ts'
@@ -194,21 +189,11 @@ export async function resumeDevelop(
       const reloaded = await loadWorkflow(workflow.key)
       if (reloaded) {
         const fixedIssues = reloaded.reviewResult?.passed === false ? [...reloaded.reviewResult.issues] : []
-        await finalizeDevRun(reloaded, live.taskId, live.status, exitCode, newSessionId, agent, async () => {
+        await finalizeDevRun(reloaded, live, live.status, exitCode, newSessionId, agent, async () => {
           // rework 完成:旧的 review 结论已归档到 events,回到"待 review",
           // 不能继续显示"Review 未通过"让用户无限重复点
           const head = await readWorktreeHead(ctx, workflow.worktree)
-          await recordDevDelivery(
-            ctx,
-            reloaded,
-            agent,
-            head,
-            fixedIssues,
-            'resume',
-            live.taskId,
-            extraContext,
-            durationMs,
-          )
+          await recordDevDelivery(ctx, reloaded, agent, head, fixedIssues, 'resume', live, extraContext, durationMs)
         })
       }
       notifyAutoRunCompletion(ctx, workflow.key, live.status === 'running' ? 'failed' : live.status)
@@ -219,7 +204,7 @@ export async function resumeDevelop(
           prepare: async () => {
             const reloaded = await loadWorkflow(workflow.key)
             if (!reloaded) throw new Error('开发 workflow 不存在,不再启动会话回退')
-            const saved = await mutateWorkflowForTask(reloaded, { kind: 'dev', taskId: live.taskId }, (current) => {
+            const saved = await mutateLiveTaskWorkflow(live, reloaded, (current) => {
               clearStaleSessionId(current, 'dev', sessionId)
             })
             if (saved.status === 'ownership-lost') throw new Error('旧开发任务已被新代替换,不再启动会话回退')

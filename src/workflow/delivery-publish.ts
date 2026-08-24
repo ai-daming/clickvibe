@@ -1,15 +1,10 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { githubRest } from '../github/rest.ts'
 import { shellQuote } from '../infra/develop-core.ts'
-import { parseUrl, runCommand } from '../infra/runtime.ts'
-import {
-  appendLog,
-  type IssueWorkflow,
-  mutateWorkflowForTask,
-  type WorkflowEvent,
-  type WorkflowTaskCredential,
-} from '../infra/state.ts'
+import { type LiveTask, parseUrl, runCommand } from '../infra/runtime.ts'
+import { appendLog, type IssueWorkflow, type WorkflowEvent } from '../infra/state.ts'
 import { extractGithubCommentUrl } from './delivery-publication.ts'
+import { mutateLiveTaskWorkflow } from './task-lease.ts'
 
 /** Publish a delivery node only while its originating task still owns workflow writes. */
 export async function publishDeliveryComment(
@@ -17,7 +12,7 @@ export async function publishDeliveryComment(
   workflow: IssueWorkflow,
   event: WorkflowEvent,
   body: string,
-  expectedTask: WorkflowTaskCredential,
+  live: LiveTask,
 ): Promise<boolean> {
   const target = workflow.prNumber ? 'pr' : 'issue'
   const targetUrl = workflow.prNumber
@@ -50,7 +45,7 @@ export async function publishDeliveryComment(
     )
   }
   const publication = event.publication
-  const saved = await mutateWorkflowForTask(workflow, expectedTask, (latest) => {
+  const saved = await mutateLiveTaskWorkflow(live, workflow, (latest) => {
     const storedEvent = latest.events.find(
       (candidate) => candidate.kind === event.kind && candidate.taskId === event.taskId && candidate.at === event.at,
     )

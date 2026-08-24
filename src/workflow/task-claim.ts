@@ -24,7 +24,10 @@ export async function establishTaskClaim(
     let expectedRevision = workflowRevision(workflow)
     while (true) {
       const result = await claimWorkflowTask(workflow, claim, expectedRevision, expectation)
-      if (result.status === 'committed') return { ok: true, claimed: true, taskId: claim.taskId }
+      if (result.status === 'committed') {
+        live.workflowLease = result.lease
+        return { ok: true, claimed: true, taskId: claim.taskId }
+      }
       if (result.status === 'revision-conflict') {
         expectedRevision = result.currentRevision
         continue

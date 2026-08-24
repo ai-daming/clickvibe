@@ -47,7 +47,7 @@ import {
   runCommand,
   taskId,
 } from '../infra/runtime.ts'
-import { type IssueWorkflow, issueKey, loadWorkflow, mutateWorkflowForTask } from '../infra/state.ts'
+import { type IssueWorkflow, issueKey, loadWorkflow } from '../infra/state.ts'
 import {
   observeWorkflowTask,
   taskLaunchDecision,
@@ -62,6 +62,7 @@ import { checkIssueContract } from './issue-contract.ts'
 import { firstDevelopmentFor } from './repository-state.ts'
 import { recordDevDelivery } from './dev-delivery.ts'
 import { establishTaskClaim } from './task-claim.ts'
+import { mutateLiveTaskWorkflow } from './task-lease.ts'
 import { notifyAutoRunCompletion } from './auto-run-signal.ts'
 
 export async function resolveAutomaticFirstDevelopment(
@@ -324,7 +325,7 @@ export async function startDevelop(
         const reloaded = await loadWorkflow(workflow.key)
         if (reloaded) {
           const fixedIssues = reloaded.reviewResult?.passed === false ? [...reloaded.reviewResult.issues] : []
-          await finalizeDevRun(reloaded, live.taskId, live.status, exitCode, sessionId, agent, async () => {
+          await finalizeDevRun(reloaded, live, live.status, exitCode, sessionId, agent, async () => {
             // 开发完成(含 rework):旧的 review 结论已归档到 events 历史,
             // 当前回到"待 review"——不能继续显示"Review 未通过"
             const head = await readWorktreeHead(ctx, workflow.worktree)
@@ -335,7 +336,7 @@ export async function startDevelop(
               head,
               fixedIssues,
               deriveDevelopmentEventKind(firstDevelopment, extraContext),
-              live.taskId,
+              live,
               extraContext,
               durationMs,
             )
@@ -347,7 +348,7 @@ export async function startDevelop(
       pushTaskLine(live, `[clickvibe] 失败: ${String(error instanceof Error ? error.message : error)}`)
       const reloaded = await loadWorkflow(workflow.key)
       if (reloaded) {
-        await mutateWorkflowForTask(reloaded, { kind: 'dev', taskId: live.taskId }, (current) => {
+        await mutateLiveTaskWorkflow(live, reloaded, (current) => {
           current.stage = 'developing'
           current.devInterrupted = true
         })
