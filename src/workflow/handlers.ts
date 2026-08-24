@@ -31,12 +31,12 @@ import {
   ensureConfiguredRepoFresh,
   expandHome,
   fetchTtlMs,
-  liveTasks,
   loadConfig,
   parseUrl,
   privilegedRequestError,
 } from '../infra/runtime.ts'
 import { issueKey, loadAllArchivedWorkflows, loadAllWorkflows, loadWorkflow } from '../infra/state.ts'
+import { observeWorkflowTask, type TaskOwnershipContext } from '../infra/task-ownership.ts'
 import {
   COMMAND_HELP_TEXT,
   type CommandAction,
@@ -210,7 +210,9 @@ export async function handleCommand(
     authorizationDigest?: unknown
     target?: unknown
     override?: unknown
+    confirmedStopped?: unknown
   }
+  const confirmedStopped = confirm.confirmedStopped === true
   const authorization = {
     ...(confirm.authorizationId !== undefined ? { authorizationId: String(confirm.authorizationId) } : {}),
     ...(confirm.authorizationDigest !== undefined ? { authorizationDigest: String(confirm.authorizationDigest) } : {}),
@@ -298,7 +300,7 @@ export async function handleCommand(
     autoRun = applyPreviousAutoRunAgents(autoRun, command.autoRunAgentOverrides, previous)
   }
 
-  // 直接执行类:sync/stop 不需要一次性授权;dryrun 只需回环校验(在 develop 分支内)
+  // 直接执行类:sync/stop 不需要一次性授权;未知任务的 stop 仍要求显式确认。
   if (command.action === 'sync') {
     return formatWriteOutcome(command.action, await execute('sync', { url }))
   }
@@ -306,11 +308,33 @@ export async function handleCommand(
     const key = parseUrl(url)
     if (!key) return { status: 400, body: { ok: false, action: 'stop', error: '目标 URL 无效' } }
     const workflow = await loadWorkflow(issueKey(`${key.owner}/${key.repo}`, key.number))
-    const taskId = [workflow?.devTaskId, workflow?.reviewTaskId].find(
-      (id) => id !== null && id !== undefined && liveTasks.has(id) && !liveTasks.get(id)!.closed,
-    )
+    if (!workflow) return { status: 400, body: { ok: false, action: 'stop', error: '该 issue 没有运行中的任务' } }
+    const ownership = observeWorkflowTask(ctx as unknown as TaskOwnershipContext, workflow)
+    const persistedTaskId =
+      workflow.stage === 'reviewing'
+        ? workflow.reviewTaskId
+        : workflow.stage === 'developing'
+          ? workflow.devTaskId
+          : null
+    const taskId = ownership.state === 'running' ? ownership.taskId : persistedTaskId
     if (!taskId) return { status: 400, body: { ok: false, action: 'stop', error: '该 issue 没有运行中的任务' } }
-    return formatWriteOutcome(command.action, await execute('stop', { taskId }))
+    if (ownership.state === 'unknown' && !confirmedStopped) {
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          action: 'stop',
+          taskId,
+          needsConfirmation: true,
+          text: '当前控制器无法确认旧任务生死。请先在宿主任务视图或系统进程中确认旧 agent 已停止,再携带 confirmedStopped=true 重发同一 stop 命令以解除双开门禁。',
+          confirmation: { confirmedStopped: true },
+        },
+      }
+    }
+    if (ownership.state === 'none') {
+      return { status: 400, body: { ok: false, action: 'stop', error: '该 issue 没有运行中的任务' } }
+    }
+    return formatWriteOutcome(command.action, await execute('stop', { taskId, confirmedStopped }))
   }
   if (command.action === 'develop' && command.agent === 'dryrun') {
     return formatWriteOutcome(command.action, await execute('develop', { url, agent: 'dryrun' }))
