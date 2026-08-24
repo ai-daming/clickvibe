@@ -43,7 +43,9 @@ export type TaskOwnership =
       taskId: string
     }
 
-export type TaskLaunchDecision = { allowed: true } | { allowed: false; running: boolean; error: string }
+export type TaskLaunchDecision =
+  | { allowed: true; task: WorkflowTaskRef | null }
+  | { allowed: false; running: boolean; task: WorkflowTaskRef; error: string }
 
 type OwnershipFields = Pick<
   IssueWorkflow,
@@ -196,16 +198,25 @@ export function observeTaskOwnership(
 
 export function taskLaunchDecision(ownership: TaskOwnership): TaskLaunchDecision {
   if (ownership.state === 'running') {
-    return { allowed: false, running: true, error: '该 issue 当前有任务运行,请等待或停止后再试' }
+    return {
+      allowed: false,
+      running: true,
+      task: { kind: ownership.kind, taskId: ownership.taskId },
+      error: '该 issue 当前有任务运行,请等待或停止后再试',
+    }
   }
   if (ownership.state === 'unknown') {
     return {
       allowed: false,
       running: false,
+      task: { kind: ownership.kind, taskId: ownership.taskId },
       error: '当前控制器无法确认旧任务生死,为避免双开已禁止启动;请先停止宿主任务或等待状态恢复',
     }
   }
-  return { allowed: true }
+  return {
+    allowed: true,
+    task: ownership.state === 'interrupted' ? { kind: ownership.kind, taskId: ownership.taskId } : null,
+  }
 }
 
 export function observeWorkflowTask(ctx: TaskOwnershipContext, workflow: IssueWorkflow): TaskOwnership {

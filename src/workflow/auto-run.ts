@@ -12,7 +12,12 @@ import {
   workflowRevision,
 } from '../infra/state.ts'
 import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
-import { observeWorkflowTask, type TaskOwnershipContext } from '../infra/task-ownership.ts'
+import {
+  observeWorkflowTask,
+  taskLaunchDecision,
+  type TaskOwnershipContext,
+  type WorkflowTaskRef,
+} from '../infra/task-ownership.ts'
 import { createPullRequest } from './create-pr.ts'
 import { startDevelop } from './develop-start.ts'
 import { mergeAndCleanup } from './merge.ts'
@@ -38,15 +43,10 @@ const queued = new Map<string, AutoRunTaskOutcome | undefined>()
 const deadlineTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const observationTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
-// 与 derive 同源:按 workflow 记录的 dev/review taskId 查 live 任务,
-// 避免 workflowKey 匹配不一致导致「任务活着却判无任务」(issue #111)。
-function liveTaskFor(workflow: { devTaskId: string | null; reviewTaskId: string | null }): LiveTask | null {
-  for (const taskId of [workflow.devTaskId, workflow.reviewTaskId]) {
-    if (taskId === null) continue
-    const task = liveTasks.get(taskId)
-    if (task && !task.closed) return task
-  }
-  return null
+function liveTaskFor(taskRef: WorkflowTaskRef | null): LiveTask | null {
+  if (!taskRef) return null
+  const task = liveTasks.get(taskRef.taskId)
+  return task && !task.closed ? task : null
 }
 
 async function persistDecision(key: string, decision: Exclude<AutoRunDecision, { kind: 'manual' }>): Promise<void> {
@@ -133,19 +133,22 @@ function clearDeadline(key: string): void {
   deadlineTimers.delete(key)
 }
 
-function armDeadline(key: string, deadline: string): void {
+function armDeadline(ctx: Context, key: string, deadline: string): void {
   clearDeadline(key)
   const delay = Math.max(0, Date.parse(deadline) - Date.now())
   const timer = setTimeout(
     () => {
       void (async () => {
         if (Date.now() < Date.parse(deadline)) {
-          armDeadline(key, deadline)
+          armDeadline(ctx, key, deadline)
           return
         }
         await pauseAutoRun(key, 'budget-exhausted')
         const workflow = await loadWorkflow(key)
-        liveTaskFor(workflow ?? { devTaskId: null, reviewTaskId: null })?.process?.kill()
+        if (workflow) {
+          const gate = taskLaunchDecision(observeWorkflowTask(ctx as unknown as TaskOwnershipContext, workflow))
+          if (!gate.allowed && gate.running) liveTaskFor(gate.task)?.process?.kill()
+        }
       })()
     },
     Math.min(delay, 2_147_483_647),
@@ -314,7 +317,7 @@ export async function startAutoRun(
     { kind: 'auto-run', at: startedAt, round: 0, note: '自动跑到底已启动' },
     workflowRevision(ensured.workflow) ?? 0,
   )
-  armDeadline(key, ensured.workflow.autoRun.deadline)
+  armDeadline(ctx, key, ensured.workflow.autoRun.deadline)
   requestAutoRunReconcile(ctx, key)
   return { ok: true, workflowKey: key }
 }

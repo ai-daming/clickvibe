@@ -33,8 +33,8 @@ import {
   clearStaleSessionId,
   issueKey,
   loadWorkflow,
+  mutateWorkflowForTask,
   resolveSessionForAgent,
-  saveWorkflowForTask,
 } from '../infra/state.ts'
 import { observeWorkflowTask, taskLaunchDecision, type TaskOwnershipContext } from '../infra/task-ownership.ts'
 import { recordDevDelivery } from './dev-delivery.ts'
@@ -67,7 +67,7 @@ export async function resumeDevelop(
   const ownershipGate = taskLaunchDecision(observeWorkflowTask(ctx as unknown as TaskOwnershipContext, workflow))
   if (!ownershipGate.allowed) {
     return ownershipGate.running
-      ? { ok: true, taskId: workflow.devTaskId }
+      ? { ok: true, taskId: ownershipGate.task.taskId }
       : { ok: false, error: ownershipGate.error, controllerError: true }
   }
 
@@ -209,13 +209,10 @@ export async function resumeDevelop(
           prepare: async () => {
             const reloaded = await loadWorkflow(workflow.key)
             if (!reloaded) throw new Error('开发 workflow 不存在,不再启动会话回退')
-            clearStaleSessionId(reloaded, 'dev', sessionId)
-            const saved = await saveWorkflowForTask(
-              reloaded,
-              { kind: 'dev', taskId: live.taskId },
-              reloaded.revision ?? 0,
-            )
-            if (!saved) throw new Error('旧开发任务已被新代替换,不再启动会话回退')
+            const saved = await mutateWorkflowForTask(reloaded, { kind: 'dev', taskId: live.taskId }, (current) => {
+              clearStaleSessionId(current, 'dev', sessionId)
+            })
+            if (saved.status === 'ownership-lost') throw new Error('旧开发任务已被新代替换,不再启动会话回退')
             const fallbackPrompt = await buildResumePrompt(
               ctx,
               workflow,

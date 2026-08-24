@@ -41,14 +41,13 @@ import {
   automaticDependencyValidationClock,
   expandHome,
   type LiveTask,
-  liveTasks,
   loadConfig,
   parseUrl,
   readWorktreeHead,
   runCommand,
   taskId,
 } from '../infra/runtime.ts'
-import { type IssueWorkflow, issueKey, loadWorkflow, saveWorkflowForTask } from '../infra/state.ts'
+import { type IssueWorkflow, issueKey, loadWorkflow, mutateWorkflowForTask } from '../infra/state.ts'
 import { observeWorkflowTask, taskLaunchDecision, type TaskOwnershipContext } from '../infra/task-ownership.ts'
 import { deriveAutoDevelopment } from './auto-development.ts'
 import { deriveDevelopmentEventKind } from './delivery-audit.ts'
@@ -246,14 +245,9 @@ export async function startDevelop(
 
   const ownershipGate = taskLaunchDecision(observeWorkflowTask(ctx as unknown as TaskOwnershipContext, workflow))
   if (!ownershipGate.allowed) {
-    return ownershipGate.running && workflow.devTaskId
-      ? { ok: true, taskId: workflow.devTaskId, worktree: workflow.worktree, branch: workflow.branch }
+    return ownershipGate.running
+      ? { ok: true, taskId: ownershipGate.task.taskId, worktree: workflow.worktree, branch: workflow.branch }
       : { ok: false, error: ownershipGate.error, controllerError: true }
-  }
-
-  // 已有开发任务在跑:复用
-  if (workflow.devTaskId && liveTasks.has(workflow.devTaskId) && !liveTasks.get(workflow.devTaskId)!.closed) {
-    return { ok: true, taskId: workflow.devTaskId, worktree: workflow.worktree, branch: workflow.branch }
   }
 
   const taskIdValue = taskId('dev')
@@ -342,9 +336,10 @@ export async function startDevelop(
       pushTaskLine(live, `[clickvibe] 失败: ${String(error instanceof Error ? error.message : error)}`)
       const reloaded = await loadWorkflow(workflow.key)
       if (reloaded) {
-        reloaded.stage = 'developing'
-        reloaded.devInterrupted = true
-        await saveWorkflowForTask(reloaded, { kind: 'dev', taskId: live.taskId }, reloaded.revision ?? 0)
+        await mutateWorkflowForTask(reloaded, { kind: 'dev', taskId: live.taskId }, (current) => {
+          current.stage = 'developing'
+          current.devInterrupted = true
+        })
       }
       notifyAutoRunCompletion(ctx, workflow.key, 'failed')
       finishTask(live, 'failed', 1)

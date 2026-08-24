@@ -12,8 +12,21 @@ export interface WorkflowTaskCredential {
 
 export interface WorkflowTaskClaim extends WorkflowTaskCredential {
   agent: 'codex' | 'claude'
-  hostJobId: string | null
+  hostJobId: string
 }
+
+type Committed = { status: 'committed'; revision: number }
+type RevisionConflict = { status: 'revision-conflict'; currentRevision: number }
+
+export type WorkflowTaskCommitResult =
+  | Committed
+  | { status: 'ownership-lost'; currentRevision: number | null }
+  | RevisionConflict
+
+export type WorkflowTaskClaimResult =
+  | Committed
+  | { status: 'ownership-lost'; currentRevision: number | null; currentTask: WorkflowTaskCredential | null }
+  | RevisionConflict
 
 export class WorkflowConflictError extends Error {
   readonly currentRevision: number | null
@@ -134,27 +147,26 @@ async function atomicWrite(path: string, workflow: IssueWorkflow): Promise<void>
   }
 }
 
+async function commit(path: string, target: IssueWorkflow, source: IssueWorkflow, revision: number): Promise<number> {
+  const next = { ...source, revision: revision + 1, updatedAt: Date.now() }
+  await atomicWrite(path, next)
+  Object.assign(target, next)
+  return next.revision
+}
+
 async function conditionalCommit(
   workflow: IssueWorkflow,
   expectedRevision: number | null,
   task?: WorkflowTaskCredential,
-): Promise<{ committed: true } | { committed: false; currentRevision: number | null }> {
+): Promise<WorkflowTaskCommitResult | { status: 'revision-conflict'; currentRevision: number | null }> {
   const path = workflowStatePath(workflow)
   const release = await acquireLock(path)
   try {
     const current = await readCurrent(path)
     const currentRevision = current ? storedRevision(current) : null
-    if (currentRevision !== expectedRevision || (task && (!current || !ownsCurrentTask(current, task)))) {
-      return { committed: false, currentRevision }
-    }
-    const next = {
-      ...workflow,
-      revision: (currentRevision ?? 0) + 1,
-      updatedAt: Date.now(),
-    }
-    await atomicWrite(path, next)
-    Object.assign(workflow, next)
-    return { committed: true }
+    if (task && (!current || !ownsCurrentTask(current, task))) return { status: 'ownership-lost', currentRevision }
+    if (currentRevision !== expectedRevision) return { status: 'revision-conflict', currentRevision }
+    return { status: 'committed', revision: await commit(path, workflow, workflow, currentRevision ?? 0) }
   } finally {
     await release()
   }
@@ -163,7 +175,7 @@ async function conditionalCommit(
 /** Commit one snapshot only if its durable revision is still current. */
 export async function saveWorkflowState(workflow: IssueWorkflow, expectedRevision: number | null): Promise<void> {
   const result = await conditionalCommit(workflow, expectedRevision)
-  if (!result.committed) throw new WorkflowConflictError(result.currentRevision)
+  if (result.status !== 'committed') throw new WorkflowConflictError(result.currentRevision)
 }
 
 /** Establish one complete task generation; no intermediate owner can be persisted. */
@@ -171,29 +183,70 @@ export async function claimWorkflowTaskState(
   workflow: IssueWorkflow,
   claim: WorkflowTaskClaim,
   expectedRevision: number | null,
-): Promise<void> {
-  const next: IssueWorkflow = { ...workflow }
-  if (claim.kind === 'dev') {
-    next.devAgent = claim.agent
-    next.devTaskId = claim.taskId
-    next.devHostJobId = claim.hostJobId
-    next.devInterrupted = false
-    next.stage = 'developing'
-  } else {
-    next.reviewAgent = claim.agent
-    next.reviewTaskId = claim.taskId
-    next.reviewHostJobId = claim.hostJobId
-    next.stage = 'reviewing'
+): Promise<WorkflowTaskClaimResult> {
+  if (typeof claim.hostJobId !== 'string' || claim.hostJobId.trim() === '') {
+    throw new Error('task claim hostJobId must be non-empty')
   }
-  await saveWorkflowState(next, expectedRevision)
-  Object.assign(workflow, next)
+  const path = workflowStatePath(workflow)
+  const expectedTask = currentWorkflowTaskRef(workflow)
+  const release = await acquireLock(path)
+  try {
+    const current = await readCurrent(path)
+    const currentRevision = current ? storedRevision(current) : null
+    const currentTask = current ? currentWorkflowTaskRef(current) : null
+    if (currentTask?.kind !== expectedTask?.kind || currentTask?.taskId !== expectedTask?.taskId) {
+      return { status: 'ownership-lost', currentRevision, currentTask }
+    }
+    if (currentRevision !== expectedRevision) {
+      if (currentRevision === null) return { status: 'ownership-lost', currentRevision, currentTask }
+      return { status: 'revision-conflict', currentRevision }
+    }
+    const next: IssueWorkflow = { ...(current ?? workflow) }
+    if (claim.kind === 'dev') {
+      next.devAgent = claim.agent
+      next.devTaskId = claim.taskId
+      next.devHostJobId = claim.hostJobId
+      next.devInterrupted = false
+      next.stage = 'developing'
+    } else {
+      next.reviewAgent = claim.agent
+      next.reviewTaskId = claim.taskId
+      next.reviewHostJobId = claim.hostJobId
+      next.stage = 'reviewing'
+    }
+    return { status: 'committed', revision: await commit(path, workflow, next, currentRevision ?? 0) }
+  } finally {
+    await release()
+  }
 }
 
-/** A false result means only capability/revision conflict; persistence errors throw. */
+/** Distinguish a retryable same-owner revision from permanent capability loss. */
 export async function saveWorkflowStateForTask(
   workflow: IssueWorkflow,
   credential: WorkflowTaskCredential,
   expectedRevision: number,
-): Promise<boolean> {
-  return (await conditionalCommit(workflow, expectedRevision, credential)).committed
+): Promise<WorkflowTaskCommitResult> {
+  return conditionalCommit(workflow, expectedRevision, credential) as Promise<WorkflowTaskCommitResult>
+}
+
+/** Reapply one pure task mutation after metadata-only revisions without holding the file lock. */
+export async function mutateWorkflowStateForTask(
+  workflow: IssueWorkflow,
+  credential: WorkflowTaskCredential,
+  mutate: (current: IssueWorkflow) => void,
+): Promise<Exclude<WorkflowTaskCommitResult, { status: 'revision-conflict' }>> {
+  let current = workflow
+  while (true) {
+    const next = structuredClone(current)
+    mutate(next)
+    const result = await saveWorkflowStateForTask(next, credential, storedRevision(current))
+    if (result.status === 'committed') {
+      Object.assign(workflow, next)
+      return result
+    }
+    if (result.status === 'ownership-lost') return result
+    const reloaded = await readCurrent(workflowStatePath(workflow))
+    if (!reloaded) return { status: 'ownership-lost', currentRevision: null }
+    current = reloaded
+  }
 }

@@ -1,13 +1,6 @@
 import { finishTask } from '../agent/task-supervisor.ts'
 import type { LiveTask } from '../infra/runtime.ts'
-import {
-  claimWorkflowTask,
-  type IssueWorkflow,
-  loadWorkflow,
-  WorkflowConflictError,
-  type WorkflowTaskClaim,
-  workflowRevision,
-} from '../infra/state.ts'
+import { claimWorkflowTask, type IssueWorkflow, type WorkflowTaskClaim, workflowRevision } from '../infra/state.ts'
 
 export type TaskClaimResult =
   | { ok: true; claimed: true; taskId: string }
@@ -21,18 +14,21 @@ export async function establishTaskClaim(
   claim: WorkflowTaskClaim,
 ): Promise<TaskClaimResult> {
   try {
-    await claimWorkflowTask(workflow, claim, workflowRevision(workflow))
-    return { ok: true, claimed: true, taskId: claim.taskId }
+    let expectedRevision = workflowRevision(workflow)
+    while (true) {
+      const result = await claimWorkflowTask(workflow, claim, expectedRevision)
+      if (result.status === 'committed') return { ok: true, claimed: true, taskId: claim.taskId }
+      if (result.status === 'revision-conflict') {
+        expectedRevision = result.currentRevision
+        continue
+      }
+      finishTask(live, 'stopped', null)
+      return result.currentTask
+        ? { ok: true, claimed: false, taskId: result.currentTask.taskId }
+        : { ok: false, error: 'workflow task ownership disappeared while claiming' }
+    }
   } catch (error) {
     finishTask(live, 'stopped', null)
-    if (error instanceof WorkflowConflictError) {
-      const current = await loadWorkflow(workflow.key)
-      const currentTaskId = claim.kind === 'dev' ? current?.devTaskId : current?.reviewTaskId
-      const currentStage = claim.kind === 'dev' ? 'developing' : 'reviewing'
-      if (current?.stage === currentStage && currentTaskId) {
-        return { ok: true, claimed: false, taskId: currentTaskId }
-      }
-    }
     return { ok: false, error: String(error instanceof Error ? error.message : error) }
   }
 }

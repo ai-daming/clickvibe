@@ -1,4 +1,4 @@
-import { applyDevRunOutcome, type IssueWorkflow, type SessionAgent, saveWorkflowForTask } from '../infra/state.ts'
+import { applyDevRunOutcome, type IssueWorkflow, type SessionAgent, mutateWorkflowForTask } from '../infra/state.ts'
 
 /** Persist the actionable completion state before starting slower delivery enrichment. */
 export async function finalizeDevRun(
@@ -10,8 +10,11 @@ export async function finalizeDevRun(
   agent: SessionAgent,
   deliver: () => Promise<void>,
 ): Promise<boolean> {
-  const completed = applyDevRunOutcome(workflow, status, exitCode, sessionId, agent)
-  if (!(await saveWorkflowForTask(workflow, { kind: 'dev', taskId }, workflow.revision ?? 0))) return false
+  let completed = false
+  const result = await mutateWorkflowForTask(workflow, { kind: 'dev', taskId }, (current) => {
+    completed = applyDevRunOutcome(current, status, exitCode, sessionId, agent)
+  })
+  if (result.status === 'ownership-lost') return false
   if (completed) await deliver()
   return completed
 }

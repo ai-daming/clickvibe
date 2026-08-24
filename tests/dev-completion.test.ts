@@ -38,15 +38,27 @@ test('successful dev completion is durable before slow delivery work begins', as
   process.env.HOME = tempHome
   try {
     const current = workflow()
-    await saveWorkflow(current, current.revision ?? null)
+    await saveWorkflow(current, null)
+    const staleTaskSnapshot = structuredClone(current)
+    current.issueSnapshot = { url: current.url, title: 'metadata advanced', body: '', state: 'OPEN', updatedAt: 'now' }
+    await saveWorkflow(current, current.revision ?? 0)
     let deliveryStarted = false
-    const completed = await finalizeDevRun(current, current.devTaskId!, 'done', 0, 'session-106', 'codex', async () => {
-      deliveryStarted = true
-      const visible = await loadWorkflow(current.key)
-      assert.equal(visible?.stage, 'review-ready')
-      assert.equal(visible?.devInterrupted, false)
-      assert.equal(visible?.reviewResult, null)
-    })
+    const completed = await finalizeDevRun(
+      staleTaskSnapshot,
+      current.devTaskId!,
+      'done',
+      0,
+      'session-106',
+      'codex',
+      async () => {
+        deliveryStarted = true
+        const visible = await loadWorkflow(current.key)
+        assert.equal(visible?.stage, 'review-ready')
+        assert.equal(visible?.devInterrupted, false)
+        assert.equal(visible?.reviewResult, null)
+        assert.equal(visible?.issueSnapshot?.title, 'metadata advanced')
+      },
+    )
 
     assert.equal(completed, true)
     assert.equal(deliveryStarted, true)

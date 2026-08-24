@@ -6,13 +6,20 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import test from 'node:test'
-import { type IssueWorkflow, loadWorkflow, saveWorkflow, statePath, WorkflowConflictError } from '../src/infra/state.ts'
-import { observeTaskOwnership, taskLaunchDecision } from '../src/infra/task-ownership.ts'
-import { stopTask } from '../src/workflow/task-api.ts'
+import {
+  claimWorkflowTask,
+  type IssueWorkflow,
+  loadWorkflow,
+  saveWorkflow,
+  saveWorkflowForTask,
+  statePath,
+  WorkflowConflictError,
+} from '../src/infra/state.ts'
+import { observeTaskOwnership } from '../src/infra/task-ownership.ts'
 
 const workerSource = `
 import { createInterface } from 'node:readline'
-import { claimWorkflowTask, saveWorkflow, saveWorkflowForTask, WorkflowConflictError } from './src/infra/state.ts'
+import { saveWorkflow, saveWorkflowForTask, WorkflowConflictError } from './src/infra/state.ts'
 import { resumeDevelop } from './src/workflow/resume.ts'
 let agentStarts = 0
 let jobSequence = 0
@@ -61,10 +68,8 @@ for await (const line of createInterface({ input: process.stdin })) {
       console.log(JSON.stringify({ result, agentStarts: agentStarts - before }))
       continue
     }
-    const saved = input.claim
-      ? (await claimWorkflowTask(input.workflow, input.claim, input.expectedRevision), true)
-      : input.credential
-      ? await saveWorkflowForTask(input.workflow, input.credential, input.expectedRevision)
+    const saved = input.credential
+      ? (await saveWorkflowForTask(input.workflow, input.credential, input.expectedRevision)).status === 'committed'
       : (await saveWorkflow(input.workflow, input.expectedRevision), true)
     console.log(JSON.stringify({ saved }))
   } catch (error) {
@@ -94,11 +99,6 @@ async function startWorker(home: string) {
         responses.push((response) => resolve(Boolean(response.saved)))
         child.stdin.write(`${JSON.stringify({ workflow, credential, expectedRevision: workflow.revision ?? null })}\n`)
       }),
-    claim: (workflow: IssueWorkflow, claim: { kind: 'dev'; taskId: string; agent: 'codex'; hostJobId: string }) =>
-      new Promise<boolean>((resolve) => {
-        responses.push((response) => resolve(Boolean(response.saved)))
-        child.stdin.write(`${JSON.stringify({ workflow, claim, expectedRevision: workflow.revision ?? null })}\n`)
-      }),
     resume: (url: string) =>
       new Promise<{ result: { ok: boolean; taskId?: string; error?: string }; agentStarts: number }>((resolve) => {
         responses.push((response) => resolve(response as never))
@@ -120,32 +120,74 @@ function workflow(taskId: string, marker: string, issueNumber: number): IssueWor
   } as IssueWorkflow
 }
 
-test('task credential and commit are indivisible across host processes', async () => {
+test('cross-process task writes and resume claims preserve the winning generation', async (t) => {
   const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-workflow-cas-'))
   const previousHome = process.env.HOME
   process.env.HOME = tempHome
   const staleWorker = await startWorker(tempHome)
   const successorWorker = await startWorker(tempHome)
   try {
-    for (let round = 0; round < 100; round += 1) {
-      const oldTaskId = `review-${1000 + round}-old`
-      const nextTaskId = `review-${9000 + round}-current`
-      const initial = workflow(oldTaskId, 'initial', 1000 + round)
-      await saveWorkflow(initial, null)
-      const stale = structuredClone(initial)
-      stale.stage = 'review-ready'
-      stale.events[0].note = 'stale'.repeat(64 * 1024)
-      const successor = workflow(nextTaskId, 'successor', 1000 + round)
-      successor.revision = initial.revision
-      assert.equal(await successorWorker.run(successor), true)
-      assert.equal(await staleWorker.run(stale, { kind: 'review', taskId: oldTaskId }), false)
-
-      const raw = await readFile(statePath(initial), 'utf8')
-      assert.doesNotThrow(() => JSON.parse(raw), `round ${round} exposed partial workflow JSON`)
-      const persisted = await loadWorkflow(initial.key)
-      assert.equal(persisted?.reviewTaskId, nextTaskId, `round ${round} let the stale host overwrite its successor`)
-      assert.equal(persisted?.stage, 'reviewing')
-    }
+    await t.test('a stale task writer cannot replace its successor', async () => {
+      for (let round = 0; round < 100; round += 1) {
+        const oldTaskId = `review-${1000 + round}-old`
+        const nextTaskId = `review-${9000 + round}-current`
+        const initial = workflow(oldTaskId, 'initial', 1000 + round)
+        await saveWorkflow(initial, null)
+        const stale = structuredClone(initial)
+        stale.stage = 'review-ready'
+        stale.events[0].note = 'stale'.repeat(64 * 1024)
+        const successor = workflow(nextTaskId, 'successor', 1000 + round)
+        successor.revision = initial.revision
+        assert.equal(await successorWorker.run(successor), true)
+        assert.equal(await staleWorker.run(stale, { kind: 'review', taskId: oldTaskId }), false)
+        const raw = await readFile(statePath(initial), 'utf8')
+        assert.doesNotThrow(() => JSON.parse(raw))
+        const persisted = await loadWorkflow(initial.key)
+        assert.equal(persisted?.reviewTaskId, nextTaskId, `round ${round} let the stale host overwrite its successor`)
+        assert.equal(persisted?.stage, 'reviewing')
+      }
+    })
+    await t.test('competing resume controllers launch only the winner', async () => {
+      for (let round = 0; round < 20; round += 1) {
+        const initial = workflow(`review-${round}-previous`, 'initial', 3000 + round)
+        Object.assign(initial, {
+          stage: 'developing',
+          worktree: tempHome,
+          branch: `issue-${3000 + round}`,
+          devAgent: 'codex',
+          devTaskId: `dev-${round}-interrupted`,
+          devSessionId: null,
+          devSessionAgent: null,
+          devInterrupted: true,
+          reviewTaskId: null,
+          prNumber: null,
+        })
+        await saveWorkflow(initial, null)
+        const [first, second] = await Promise.all([
+          staleWorker.resume(initial.url),
+          successorWorker.resume(initial.url),
+        ])
+        assert.equal(first.agentStarts + second.agentStarts, 1, `round ${round} launched more than one Agent`)
+        assert.equal(
+          Number(first.result.ok) + Number(second.result.ok),
+          1,
+          `round ${round} accepted the stale controller`,
+        )
+        const persisted = (await loadWorkflow(initial.key))!
+        assert.ok(persisted.devTaskId && persisted.devHostJobId)
+        const job = {
+          id: persisted.devHostJobId!,
+          kind: 'clickvibe',
+          label: `clickvibe:${initial.key}:dev:${persisted.devTaskId}`,
+          status: 'running' as const,
+          startedAt: Date.now(),
+        }
+        assert.equal(
+          observeTaskOwnership({ jobs: { list: () => [job], get: () => job } }, persisted, () => false).state,
+          'running',
+        )
+      }
+    })
     const recovered = workflow('review-9999-before', 'recovered', 9999)
     await saveWorkflow(recovered, null)
     recovered.reviewTaskId = 'review-9999-recovered'
@@ -153,161 +195,17 @@ test('task credential and commit are indivisible across host processes', async (
     await saveWorkflow(recovered, recovered.revision ?? 0)
     assert.equal((await loadWorkflow(recovered.key))?.reviewTaskId, recovered.reviewTaskId)
   } finally {
-    staleWorker.process.stdin.end()
-    successorWorker.process.stdin.end()
-    await Promise.all([once(staleWorker.process, 'exit'), once(successorWorker.process, 'exit')])
+    const exits = [once(staleWorker.process, 'exit'), once(successorWorker.process, 'exit')]
+    staleWorker.process.kill()
+    successorWorker.process.kill()
+    await Promise.all(exits)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
   }
 })
 
-test('a stale resume controller cannot replace the current host reservation', async () => {
-  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-workflow-resume-cas-'))
-  const previousHome = process.env.HOME
-  process.env.HOME = tempHome
-  const slowController = await startWorker(tempHome)
-  const currentController = await startWorker(tempHome)
-  try {
-    for (let round = 0; round < 100; round += 1) {
-      const initial = workflow(`review-${round}-previous`, 'initial', 2000 + round)
-      initial.stage = 'review-ready'
-      await saveWorkflow(initial, null)
-
-      const slowTaskId = `dev-${1000 + round}-slow`
-      const slow = structuredClone(initial)
-
-      const currentTaskId = `dev-${9000 + round}-current`
-      const currentHostJobId = `job-${9000 + round}-current`
-      const current = structuredClone(initial)
-
-      assert.equal(
-        await currentController.claim(current, {
-          kind: 'dev',
-          taskId: currentTaskId,
-          agent: 'codex',
-          hostJobId: currentHostJobId,
-        }),
-        true,
-      )
-      assert.equal(
-        await slowController.claim(slow, {
-          kind: 'dev',
-          taskId: slowTaskId,
-          agent: 'codex',
-          hostJobId: `job-${1000 + round}-slow`,
-        }),
-        false,
-      )
-
-      const persisted = await loadWorkflow(initial.key)
-      assert.ok(persisted)
-      const jobs = {
-        list: () => [
-          {
-            id: currentHostJobId,
-            kind: 'clickvibe',
-            label: `clickvibe:${initial.key}:dev:${currentTaskId}`,
-            status: 'running' as const,
-            startedAt: Date.now(),
-          },
-        ],
-        get: () => {
-          throw new Error('unknown job')
-        },
-      }
-      const ownership = observeTaskOwnership({ jobs }, persisted, () => false)
-      assert.equal(ownership.state, 'running', `round ${round} hid the current host reservation`)
-      assert.equal(ownership.state === 'running' ? ownership.taskId : null, currentTaskId)
-      assert.equal(taskLaunchDecision(ownership).allowed, false)
-
-      if (round === 99) {
-        const staleConfirmation = await stopTask({ jobs } as never, {
-          taskId: slowTaskId,
-          confirmedStopped: true,
-        })
-        assert.deepEqual(staleConfirmation, { ok: false, error: `未知任务 ${slowTaskId}` })
-        const afterConfirmation = await loadWorkflow(initial.key)
-        assert.ok(afterConfirmation)
-        assert.equal(taskLaunchDecision(observeTaskOwnership({ jobs }, afterConfirmation, () => false)).allowed, false)
-      }
-    }
-  } finally {
-    slowController.process.stdin.end()
-    currentController.process.stdin.end()
-    await Promise.all([once(slowController.process, 'exit'), once(currentController.process, 'exit')])
-    if (previousHome === undefined) delete process.env.HOME
-    else process.env.HOME = previousHome
-    await rm(tempHome, { recursive: true, force: true })
-  }
-})
-
-test('two host processes running resumeDevelop launch only the winning generation', async () => {
-  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-real-resume-cas-'))
-  const previousHome = process.env.HOME
-  process.env.HOME = tempHome
-  const firstController = await startWorker(tempHome)
-  const secondController = await startWorker(tempHome)
-  try {
-    for (let round = 0; round < 20; round += 1) {
-      const initial = workflow(`review-${round}-previous`, 'initial', 3000 + round)
-      initial.stage = 'developing'
-      initial.worktree = tempHome
-      initial.branch = `issue-${3000 + round}`
-      initial.devAgent = 'codex'
-      initial.devTaskId = `dev-${round}-interrupted`
-      initial.devSessionId = null
-      initial.devSessionAgent = null
-      initial.devInterrupted = true
-      initial.reviewTaskId = null
-      initial.prNumber = null
-      await saveWorkflow(initial, null)
-
-      const [first, second] = await Promise.all([
-        firstController.resume(initial.url),
-        secondController.resume(initial.url),
-      ])
-      assert.equal(first.agentStarts + second.agentStarts, 1, `round ${round} launched more than one Agent`)
-      assert.equal(
-        Number(first.result.ok) + Number(second.result.ok),
-        1,
-        `round ${round} did not reject the stale controller`,
-      )
-
-      const persisted = await loadWorkflow(initial.key)
-      assert.ok(persisted?.devTaskId)
-      assert.ok(persisted.devHostJobId)
-      assert.equal(persisted.stage, 'developing')
-      const jobs = {
-        list: () => [
-          {
-            id: persisted.devHostJobId!,
-            kind: 'clickvibe',
-            label: `clickvibe:${initial.key}:dev:${persisted.devTaskId}`,
-            status: 'running' as const,
-            startedAt: Date.now(),
-          },
-        ],
-        get: () => {
-          throw new Error('unknown job')
-        },
-      }
-      assert.equal(observeTaskOwnership({ jobs }, persisted, () => false).state, 'running')
-      assert.equal(taskLaunchDecision(observeTaskOwnership({ jobs }, persisted, () => false)).allowed, false)
-    }
-  } finally {
-    const firstExit = once(firstController.process, 'exit')
-    const secondExit = once(secondController.process, 'exit')
-    firstController.process.kill()
-    secondController.process.kill()
-    await Promise.all([firstExit, secondExit])
-    if (previousHome === undefined) delete process.env.HOME
-    else process.env.HOME = previousHome
-    await rm(tempHome, { recursive: true, force: true })
-  }
-})
-
-test('revision conflict is distinct from corrupted persistence', async () => {
+test('persistence keeps revision, capability, claim and I/O outcomes distinct', async () => {
   const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-workflow-errors-'))
   const previousHome = process.env.HOME
   process.env.HOME = tempHome
@@ -318,6 +216,46 @@ test('revision conflict is distinct from corrupted persistence', async () => {
     const stale = structuredClone(current)
     stale.revision = 0
     await assert.rejects(() => saveWorkflow(stale, 0), WorkflowConflictError)
+
+    current.prNumber = '5000'
+    await saveWorkflow(current, current.revision ?? 0)
+    assert.deepEqual(
+      await saveWorkflowForTask(stale, { kind: 'review', taskId: stale.reviewTaskId! }, stale.revision ?? 0),
+      { status: 'revision-conflict', currentRevision: current.revision },
+    )
+    const successor = structuredClone(current)
+    successor.reviewTaskId = 'review-7000-successor'
+    await saveWorkflow(successor, successor.revision ?? 0)
+    assert.deepEqual(
+      await saveWorkflowForTask(stale, { kind: 'review', taskId: stale.reviewTaskId! }, current.revision ?? 0),
+      { status: 'ownership-lost', currentRevision: successor.revision },
+    )
+
+    const claimant = workflow('review-8100-interrupted', 'claim', 8100)
+    claimant.stage = 'review-ready'
+    await saveWorkflow(claimant, null)
+    await assert.rejects(
+      () =>
+        claimWorkflowTask(
+          claimant,
+          { kind: 'review', taskId: 'invalid', agent: 'codex', hostJobId: null as never },
+          claimant.revision ?? 0,
+        ),
+      /hostJobId/,
+    )
+    const staleClaim = structuredClone(claimant)
+    claimant.prNumber = '8100'
+    await saveWorkflow(claimant, claimant.revision ?? 0)
+    const claim = { kind: 'review' as const, taskId: 'review-9100-new', agent: 'codex' as const, hostJobId: 'job-9100' }
+    const conflict = await claimWorkflowTask(staleClaim, claim, staleClaim.revision ?? 0)
+    assert.deepEqual(conflict, { status: 'revision-conflict', currentRevision: claimant.revision })
+    assert.equal((await claimWorkflowTask(staleClaim, claim, conflict.currentRevision)).status, 'committed')
+    assert.deepEqual(
+      (({ reviewTaskId, reviewHostJobId, prNumber }) => ({ reviewTaskId, reviewHostJobId, prNumber }))(
+        (await loadWorkflow(claimant.key))!,
+      ),
+      { reviewTaskId: claim.taskId, reviewHostJobId: claim.hostJobId, prNumber: '8100' },
+    )
 
     await writeFile(statePath(current), '{broken json')
     await assert.rejects(

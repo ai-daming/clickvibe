@@ -42,10 +42,10 @@ import {
   issueKey,
   loadAllWorkflows,
   loadWorkflow,
+  mutateWorkflowForTask,
   readLogTail,
   recordSessionId,
   resolveSessionForAgent,
-  saveWorkflowForTask,
   type WorkflowEvent,
 } from '../infra/state.ts'
 import { observeWorkflowTask, taskLaunchDecision, type TaskOwnershipContext } from '../infra/task-ownership.ts'
@@ -99,9 +99,8 @@ export async function startReview(
   workflow = resolvedStart.workflow
   const ownershipGate = taskLaunchDecision(observeWorkflowTask(ctx as unknown as TaskOwnershipContext, workflow))
   if (!ownershipGate.allowed) {
-    const activeTaskId = workflow.reviewTaskId ?? workflow.devTaskId
-    return ownershipGate.running && activeTaskId
-      ? { ok: true, taskId: activeTaskId }
+    return ownershipGate.running
+      ? { ok: true, taskId: ownershipGate.task.taskId }
       : { ok: false, error: ownershipGate.error, controllerError: true }
   }
   if (!existsSync(workflow.worktree)) {
@@ -251,8 +250,9 @@ export async function startReview(
     let recoveryError = ''
     try {
       if (current) {
-        current.stage = 'review-ready'
-        await saveWorkflowForTask(current, { kind: 'review', taskId: live.taskId }, current.revision ?? 0)
+        await mutateWorkflowForTask(current, { kind: 'review', taskId: live.taskId }, (latest) => {
+          latest.stage = 'review-ready'
+        })
       }
     } catch (recoveryFailure) {
       recoveryError = `;恢复状态持久化失败:${String(
@@ -281,9 +281,10 @@ export async function startReview(
       if (live.status !== 'done' || exitCode !== 0) {
         const interrupted = await loadWorkflow(workflow.key)
         if (interrupted) {
-          recordSessionId(interrupted, 'review', newSessionId, agent)
-          interrupted.stage = 'review-ready'
-          await saveWorkflowForTask(interrupted, { kind: 'review', taskId: live.taskId }, interrupted.revision ?? 0)
+          await mutateWorkflowForTask(interrupted, { kind: 'review', taskId: live.taskId }, (latest) => {
+            recordSessionId(latest, 'review', newSessionId, agent)
+            latest.stage = 'review-ready'
+          })
         }
         notifyAutoRunCompletion(ctx, workflow.key, live.status === 'running' ? 'failed' : live.status)
         return
@@ -294,10 +295,11 @@ export async function startReview(
         pushTaskLine(live, `[clickvibe] review 结论解析异常:${resolved.parseError ?? '原因未知'},需要重新 Review`)
         const invalid = await loadWorkflow(workflow.key)
         if (invalid) {
-          recordSessionId(invalid, 'review', newSessionId, agent)
-          invalid.reviewResult = null
-          invalid.stage = 'review-ready'
-          await saveWorkflowForTask(invalid, { kind: 'review', taskId: live.taskId }, invalid.revision ?? 0)
+          await mutateWorkflowForTask(invalid, { kind: 'review', taskId: live.taskId }, (latest) => {
+            recordSessionId(latest, 'review', newSessionId, agent)
+            latest.reviewResult = null
+            latest.stage = 'review-ready'
+          })
         }
         notifyAutoRunCompletion(ctx, workflow.key, 'failed')
         return
@@ -320,10 +322,6 @@ export async function startReview(
           reviewedHead,
         )
         const round = deriveEventRound(reloaded.events)
-        reloaded.reviewResult = { passed, issues }
-        reloaded.stage = passed ? 'passed' : 'review-ready' // 有问题 → 可回开发(rework)
-        // 记录 review 会话 id(供下次 review 续会话)
-        recordSessionId(reloaded, 'review', newSessionId, agent)
         const event: WorkflowEvent = {
           kind: 'review',
           at: new Date().toISOString(),
@@ -339,8 +337,17 @@ export async function startReview(
           // 用户附加说明只进本地事件时间线,不进 GitHub 评论(issue #54)。
           ...(extraContext !== '' ? { userContext: extraContext } : {}),
         }
-        reloaded.events = [...(reloaded.events ?? []), event]
-        if (!(await saveWorkflowForTask(reloaded, { kind: 'review', taskId: live.taskId }, reloaded.revision ?? 0))) {
+        const verdictSaved = await mutateWorkflowForTask(
+          reloaded,
+          { kind: 'review', taskId: live.taskId },
+          (latest) => {
+            latest.reviewResult = { passed, issues }
+            latest.stage = passed ? 'passed' : 'review-ready'
+            recordSessionId(latest, 'review', newSessionId, agent)
+            latest.events = [...(latest.events ?? []), event]
+          },
+        )
+        if (verdictSaved.status === 'ownership-lost') {
           notifyAutoRunCompletion(ctx, workflow.key, 'done')
           return
         }
@@ -364,8 +371,10 @@ export async function startReview(
           return
         }
         if (event.publication?.status === 'posted' && event.publication.url && reloaded.reviewResult) {
-          reloaded.reviewResult.commentUrl = event.publication.url
-          await saveWorkflowForTask(reloaded, { kind: 'review', taskId: live.taskId }, reloaded.revision ?? 0)
+          const commentUrl = event.publication.url
+          await mutateWorkflowForTask(reloaded, { kind: 'review', taskId: live.taskId }, (latest) => {
+            if (latest.reviewResult) latest.reviewResult.commentUrl = commentUrl
+          })
         }
         const approval = await approvePassedReview(
           {
@@ -389,13 +398,10 @@ export async function startReview(
           prepare: async () => {
             const reloaded = await loadWorkflow(workflow.key)
             if (!reloaded) throw new Error('Review workflow 不存在,不再启动会话回退')
-            clearStaleSessionId(reloaded, 'review', sessionId)
-            const saved = await saveWorkflowForTask(
-              reloaded,
-              { kind: 'review', taskId: live.taskId },
-              reloaded.revision ?? 0,
-            )
-            if (!saved) throw new Error('旧 Review 任务已被新代替换,不再启动会话回退')
+            const saved = await mutateWorkflowForTask(reloaded, { kind: 'review', taskId: live.taskId }, (latest) => {
+              clearStaleSessionId(latest, 'review', sessionId)
+            })
+            if (saved.status === 'ownership-lost') throw new Error('旧 Review 任务已被新代替换,不再启动会话回退')
             const fallbackPrompt = await buildReviewPrompt(
               ctx,
               workflow,

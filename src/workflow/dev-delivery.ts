@@ -3,7 +3,13 @@ import { detectLinkedPr } from '../github/pr.ts'
 import { shellQuote } from '../infra/develop-core.ts'
 import { readDeliveryStats } from '../infra/git.ts'
 import { parseUrl, runCommand } from '../infra/runtime.ts'
-import { appendLog, type IssueWorkflow, loadWorkflow, saveWorkflowForTask, type WorkflowEvent } from '../infra/state.ts'
+import {
+  appendLog,
+  type IssueWorkflow,
+  loadWorkflow,
+  mutateWorkflowForTask,
+  type WorkflowEvent,
+} from '../infra/state.ts'
 import { deriveEventRound } from './delivery-audit.ts'
 import { buildDevComment, buildReviewComment } from './delivery-comment.ts'
 import { extractGithubCommentId } from './delivery-publication.ts'
@@ -24,26 +30,31 @@ export async function recordDevDelivery(
 ): Promise<void> {
   const current = await loadWorkflow(workflow.key)
   if (!current) return
-  if (!current.prNumber) current.prNumber = await detectLinkedPr(ctx, current.repoKey, current.branch)
+  const detectedPr = current.prNumber ?? (await detectLinkedPr(ctx, current.repoKey, current.branch))
   const stats = head
     ? await readDeliveryStats(ctx, current.worktree, workflowBaseBranch(current.baseRef), head)
     : undefined
-  const round = deriveEventRound(current.events)
-  const event: WorkflowEvent = {
-    kind,
-    at: new Date().toISOString(),
-    ...(Number.isFinite(durationMs) ? { durationMs: Math.max(0, durationMs ?? 0) } : {}),
-    hash: head ?? undefined,
-    round,
-    agent,
-    ...(stats ? { stats } : {}),
-    taskId,
-    fixed: fixedIssues.length,
-    note: `${agent} 完成开发${kind === 'rework' ? '(按 review 意见返工)' : ''}`,
-    ...(userContext !== '' ? { userContext } : {}),
-  }
-  current.events = [...(current.events ?? []), event]
-  if (!(await saveWorkflowForTask(current, { kind: 'dev', taskId }, current.revision ?? 0))) return
+  const at = new Date().toISOString()
+  let event!: WorkflowEvent
+  const saved = await mutateWorkflowForTask(current, { kind: 'dev', taskId }, (latest) => {
+    event = {
+      kind,
+      at,
+      ...(Number.isFinite(durationMs) ? { durationMs: Math.max(0, durationMs ?? 0) } : {}),
+      hash: head ?? undefined,
+      round: deriveEventRound(latest.events),
+      agent,
+      ...(stats ? { stats } : {}),
+      taskId,
+      fixed: fixedIssues.length,
+      note: `${agent} 完成开发${kind === 'rework' ? '(按 review 意见返工)' : ''}`,
+      ...(userContext !== '' ? { userContext } : {}),
+    }
+    if (!latest.prNumber) latest.prNumber = detectedPr
+    latest.events = [...(latest.events ?? []), event]
+  })
+  if (saved.status === 'ownership-lost') return
+  const round = event.round ?? deriveEventRound(current.events)
   const body = buildDevComment({
     commit: head ?? 'unknown',
     issueNumber: parseUrl(current.url)?.number ?? 'unknown',

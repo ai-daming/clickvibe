@@ -75,7 +75,7 @@ function hostJobOutcome(task: LiveTask, status: LiveTask['status']): JobOutcome 
 export function reserveHostTask(
   ctx: Context,
   task: LiveTask,
-): { created: true; hostJobId: string | null } | { created: false; taskId: string } {
+): { created: true; hostJobId: string } | { created: false; taskId: string } {
   if (!ctx.jobs) throw new Error('宿主任务 registry 不可用,拒绝启动无所有权任务')
   const prefix = `clickvibe:${task.workflowKey}:`
   const existing = ctx.jobs
@@ -114,6 +114,10 @@ export function reserveHostTask(
       done,
     }),
   })
+  if (hostJobId === null || hostJobId === undefined || String(hostJobId).trim() === '') {
+    settle('failed')
+    throw new Error('宿主任务 registry 返回空 hostJobId')
+  }
   const reservation = { hostJobId: String(hostJobId), settle }
   hostReservations.set(task, reservation)
   logTaskDiagnostic('host-job-register', {

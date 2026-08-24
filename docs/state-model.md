@@ -57,7 +57,7 @@ workflow 每次提交都携带持久化 revision;所有普通写要求 expected 
 | **软** | review 结论(通过 + 问题列表) | 本地事件 / comment meta | 见降级链 |
 | **软** | 结论绑定的 HEAD | 本地事件 / comment meta | 同上 |
 | **软** | 会话 id + agent 归属(续会话用) | 本地(进程/文件) | 缺失/归属未知/跨 agent → 降级为全新会话 |
-| **软** | 任务是否在跑 | 进程本地 | 唯一非 git/GitHub 事实,天然临时;可推导出"中断"结论 |
+| **软** | 任务运行/归属 | 宿主 `ctx.jobs` + 当前进程 live handle | supervisor 活跃态可证明 `running`;仅 local miss 或 registry 缺失只能得到 `task-unknown`,不得推导中断 |
 | **软** | comment meta(事件流水) | GitHub 评论 | 只影响时间线展示,不影响判断 |
 
 ## 三、按钮决策表(按优先级)

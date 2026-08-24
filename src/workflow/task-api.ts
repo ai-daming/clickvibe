@@ -10,8 +10,8 @@ import {
   type IssueWorkflow,
   loadAllWorkflows,
   loadWorkflow,
+  mutateWorkflowForTask,
   readTaskLog,
-  saveWorkflowForTask,
 } from '../infra/state.ts'
 import type { TaskMetrics } from '../infra/task-log-store.ts'
 import { observeWorkflowTask, type TaskOwnershipContext } from '../infra/task-ownership.ts'
@@ -238,13 +238,8 @@ export async function stopTask(
     const kind = ownership.kind
     let hostJobId = kind === 'dev' ? currentWorkflow.devHostJobId : currentWorkflow.reviewHostJobId
     if (ownership.state === 'interrupted' || (ownership.state === 'unknown' && confirmedStopped)) {
-      if (kind === 'dev') {
-        currentWorkflow.stage = 'developing'
-        currentWorkflow.devInterrupted = true
-      } else {
-        currentWorkflow.stage = 'review-ready'
-      }
-      if (!(await saveWorkflowForTask(currentWorkflow, { kind, taskId }, currentWorkflow.revision ?? 0))) {
+      const saved = await markTaskStopped(currentWorkflow, kind, taskId)
+      if (saved.status === 'ownership-lost') {
         return { ok: false, error: '任务请求已过期:当前任务代次已变化,请刷新后重试' }
       }
       return { ok: true, taskId, stopped: false }
@@ -265,13 +260,8 @@ export async function stopTask(
     }
     try {
       const result = ctx.jobs.kill(hostJobId as JobId, undefined, `ClickVibe stop ${taskId}`)
-      if (kind === 'dev') {
-        currentWorkflow.stage = 'developing'
-        currentWorkflow.devInterrupted = true
-      } else {
-        currentWorkflow.stage = 'review-ready'
-      }
-      if (!(await saveWorkflowForTask(currentWorkflow, { kind, taskId }, currentWorkflow.revision ?? 0))) {
+      const saved = await markTaskStopped(currentWorkflow, kind, taskId)
+      if (saved.status === 'ownership-lost') {
         return { ok: false, error: '任务请求已过期:当前任务代次已变化,请刷新后重试' }
       }
       return { ok: true, taskId, stopped: result === 'requested' }
@@ -287,13 +277,14 @@ export async function stopTask(
   void (async () => {
     const workflow = await loadWorkflow(task.workflowKey)
     if (!workflow) return
-    if (task.kind === 'dev') {
-      workflow.stage = 'developing'
-      workflow.devInterrupted = true
-    } else {
-      workflow.stage = 'review-ready'
-    }
-    await saveWorkflowForTask(workflow, { kind: task.kind, taskId: task.taskId }, workflow.revision ?? 0)
+    await markTaskStopped(workflow, task.kind, task.taskId)
   })()
   return { ok: true, taskId, stopped }
+}
+
+function markTaskStopped(workflow: IssueWorkflow, kind: 'dev' | 'review', taskId: string) {
+  return mutateWorkflowForTask(workflow, { kind, taskId }, (current) => {
+    current.stage = kind === 'dev' ? 'developing' : 'review-ready'
+    if (kind === 'dev') current.devInterrupted = true
+  })
 }

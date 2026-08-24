@@ -5,8 +5,8 @@ import { parseUrl, runCommand } from '../infra/runtime.ts'
 import {
   appendLog,
   type IssueWorkflow,
+  mutateWorkflowForTask,
   type WorkflowEvent,
-  saveWorkflowForTask,
   type WorkflowTaskCredential,
 } from '../infra/state.ts'
 import { extractGithubCommentUrl } from './delivery-publication.ts'
@@ -49,5 +49,12 @@ export async function publishDeliveryComment(
       `[clickvibe] GitHub 评论发布失败: ${message}`,
     )
   }
-  return saveWorkflowForTask(workflow, expectedTask, workflow.revision ?? 0)
+  const publication = event.publication
+  const saved = await mutateWorkflowForTask(workflow, expectedTask, (latest) => {
+    const storedEvent = latest.events.find(
+      (candidate) => candidate.kind === event.kind && candidate.taskId === event.taskId && candidate.at === event.at,
+    )
+    if (storedEvent) storedEvent.publication = publication
+  })
+  return saved.status === 'committed'
 }

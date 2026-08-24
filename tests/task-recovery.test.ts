@@ -152,26 +152,32 @@ test('missing ownership evidence remains unknown instead of claiming interruptio
   })
 })
 
-test('a live task remains visible after its workflow stage advances', () => {
+test('the launch gate returns the exact host-confirmed task after stage drift', () => {
+  const key = 'owner/repo/issue-111-gate-ref'
+  const reviewJob = {
+    id: 'job-review-current',
+    kind: 'clickvibe',
+    label: `clickvibe:${key}:review:review-2000-current`,
+    status: 'running' as const,
+    startedAt: 2_000,
+  }
   const ownership = observeTaskOwnership(
-    {},
+    { jobs: { list: () => [reviewJob], get: () => reviewJob } },
     {
-      key: 'owner-repo-111',
-      stage: 'review-ready',
-      devTaskId: 'dev-2000-task',
-      reviewTaskId: null,
-      devHostJobId: null,
-      reviewHostJobId: null,
+      key,
+      stage: 'developing',
+      devTaskId: 'dev-1000-old',
+      devHostJobId: 'job-dev-old',
+      reviewTaskId: 'review-2000-current',
+      reviewHostJobId: reviewJob.id,
     },
-    (taskId) => taskId === 'dev-2000-task',
-    () => 789,
+    () => false,
   )
-  assert.deepEqual(ownership, {
-    state: 'running',
-    startedAt: 789,
-    source: 'local-map',
-    kind: 'dev',
-    taskId: 'dev-2000-task',
+  assert.deepEqual(taskLaunchDecision(ownership), {
+    allowed: false,
+    running: true,
+    task: { kind: 'review', taskId: 'review-2000-current' },
+    error: '该 issue 当前有任务运行,请等待或停止后再试',
   })
 })
 

@@ -20,6 +20,7 @@ import {
 } from './task-log-store.ts'
 import {
   claimWorkflowTaskState as claimWorkflowTask,
+  mutateWorkflowStateForTask as mutateWorkflowForTask,
   saveWorkflowState as saveWorkflow,
   saveWorkflowStateForTask as saveWorkflowForTask,
   workflowRevision,
@@ -27,7 +28,7 @@ import {
 } from './workflow-persistence.ts'
 export { WorkflowConflictError } from './workflow-persistence.ts'
 export type { WorkflowTaskClaim, WorkflowTaskCredential } from './workflow-persistence.ts'
-export { claimWorkflowTask, saveWorkflow, saveWorkflowForTask, workflowRevision }
+export { claimWorkflowTask, mutateWorkflowForTask, saveWorkflow, saveWorkflowForTask, workflowRevision }
 export { issueKey } from './state-layout.ts'
 export type WorkflowStage =
   | 'idle' // 未开始开发
