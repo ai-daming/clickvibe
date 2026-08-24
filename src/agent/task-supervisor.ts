@@ -36,7 +36,7 @@ import {
 } from '../infra/runtime.ts'
 import { appendTaskLog, startTaskLog, type IssueWorkflow } from '../infra/state.ts'
 import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
-import { type AgentKind, parseAgentChunk } from './agent-stream.ts'
+import { type AgentKind, lossyAgentOutputNotice, parseAgentChunk } from './agent-stream.ts'
 
 declare module '@deepseek-ai/dsh-jobs' {
   interface JobKindMap {
@@ -312,9 +312,8 @@ export function attachAgentProcess(
           task.sessionId = parsed.sessionId
         }
       }
-      if (read.lossy) {
-        pushTaskLine(task, '[clickvibe] Agent 原始输出被截断(日志过长)')
-      }
+      const lossNotice = lossyAgentOutputNotice(read)
+      if (lossNotice) pushTaskLine(task, lossNotice)
     }
     const pump = setInterval(() => drain(), 250)
 
