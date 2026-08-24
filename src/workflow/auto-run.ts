@@ -14,8 +14,11 @@ import {
   autoRunFailureReason,
   autoRunRetryDelay,
   decideAutoRun,
+  isOrphanedAutoRun,
   validateAutoRunConfig,
 } from './auto-run-policy.ts'
+import type { AutoRunState, IssueWorkflow } from '../infra/state.ts'
+import type { LiveTask } from '../infra/runtime.ts'
 import { registerAutoRunReconciler } from './auto-run-signal.ts'
 import { enrichWorkflowStates } from './repository-state.ts'
 import { resumeDevelop } from './resume.ts'
@@ -27,8 +30,15 @@ const queued = new Map<string, AutoRunTaskOutcome | undefined>()
 const deadlineTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const observationTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
-function liveTaskFor(key: string) {
-  return [...liveTasks.values()].find((task) => task.workflowKey === key && !task.closed) ?? null
+// 与 derive 同源:按 workflow 记录的 dev/review taskId 查 live 任务,
+// 避免 workflowKey 匹配不一致导致「任务活着却判无任务」(issue #111)。
+function liveTaskFor(workflow: { devTaskId: string | null; reviewTaskId: string | null }): LiveTask | null {
+  for (const taskId of [workflow.devTaskId, workflow.reviewTaskId]) {
+    if (taskId === null) continue
+    const task = liveTasks.get(taskId)
+    if (task && !task.closed) return task
+  }
+  return null
 }
 
 async function persistDecision(key: string, decision: Exclude<AutoRunDecision, { kind: 'manual' }>): Promise<void> {
@@ -44,6 +54,13 @@ async function persistDecision(key: string, decision: Exclude<AutoRunDecision, {
 async function pauseAutoRun(key: string, reason: AutoRunPausedReason): Promise<void> {
   const workflow = await loadWorkflow(key)
   if (!workflow?.autoRun || workflow.autoRun.status !== 'running') return
+  // 诊断停靠点:暂停瞬间的 live 任务事实,方便事后核对是否误判孤儿(issue #111)。
+  console.warn(
+    `[clickvibe] autoRun 暂停 reason=${reason} key=${key} step=${workflow.autoRun.step ?? 0} ` +
+      `devTaskId=${workflow.devTaskId ?? '-'} reviewTaskId=${workflow.reviewTaskId ?? '-'} ` +
+      `devLive=${workflow.devTaskId ? (liveTasks.get(workflow.devTaskId) && !liveTasks.get(workflow.devTaskId)!.closed ? 'yes' : 'no') : '-'} ` +
+      `reviewLive=${workflow.reviewTaskId ? (liveTasks.get(workflow.reviewTaskId) && !liveTasks.get(workflow.reviewTaskId)!.closed ? 'yes' : 'no') : '-'}`,
+  )
   workflow.autoRun.status = 'paused'
   workflow.autoRun.pausedReason = reason
   workflow.autoRun.lastObservedAt = new Date().toISOString()
@@ -109,7 +126,8 @@ function armDeadline(key: string, deadline: string): void {
           return
         }
         await pauseAutoRun(key, 'budget-exhausted')
-        liveTaskFor(key)?.process?.kill()
+        const workflow = await loadWorkflow(key)
+        liveTaskFor(workflow ?? { devTaskId: null, reviewTaskId: null })?.process?.kill()
       })()
     },
     Math.min(delay, 2_147_483_647),
@@ -243,9 +261,11 @@ export async function startAutoRun(
     return { ok: false, error: 'Issue 快照已变化,拒绝使用旧授权启动自动跑到底' }
   }
   const key = issueKey(`${parsed.owner}/${parsed.repo}`, parsed.number)
-  if (liveTaskFor(key)) return { ok: false, error: '该 issue 当前有任务运行,请等待或停止后再启动自动跑到底' }
   const ensured = await ensureWorktree(ctx, parsed)
   if (!ensured.ok) return ensured
+  if (liveTaskFor(ensured.workflow)) {
+    return { ok: false, error: '该 issue 当前有任务运行,请等待或停止后再启动自动跑到底' }
+  }
   const startedAt = new Date().toISOString()
   ensured.workflow.issueSnapshot = authorizedSnapshot
   ensured.workflow.autoRun = {
@@ -266,14 +286,17 @@ export async function startAutoRun(
 }
 
 export async function pauseOrphanedAutoRuns(
-  workflows: readonly { key: string; autoRun?: { status: string } }[],
+  workflows: readonly (IssueWorkflow & { autoRun?: AutoRunState })[],
 ): Promise<void> {
   for (const candidate of workflows) {
     if (
-      candidate.autoRun?.status !== 'running' ||
       running.has(candidate.key) ||
       observationTimers.has(candidate.key) ||
-      liveTaskFor(candidate.key)
+      !isOrphanedAutoRun(candidate, (taskId: string | null) => {
+        if (taskId === null) return false
+        const task = liveTasks.get(taskId)
+        return task !== undefined && !task.closed
+      })
     )
       continue
     await pauseAutoRun(candidate.key, 'session-interrupted')

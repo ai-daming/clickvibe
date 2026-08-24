@@ -5,6 +5,7 @@ import {
   autoRunFailureReason,
   autoRunRetryDelay,
   decideAutoRun,
+  isOrphanedAutoRun,
   validateAutoRunConfig,
 } from '../src/workflow/auto-run-policy.ts'
 import type { AutoRunState, WorkflowEvent } from '../src/infra/state.ts'
@@ -77,6 +78,46 @@ test('controller triggers only actions derived by the authoritative state view',
       reviewEvents: [],
     }),
     { kind: 'pause', reason: 'session-interrupted', rounds: 0, unresolved: [] },
+  )
+})
+
+test('orphan detection never pauses a fresh or task-owned auto-run (issue #111 止血)', () => {
+  // 起步窗口:刚启动、还没推进过任何动作 → 绝不判孤儿,等 reconcile 建任务。
+  assert.equal(
+    isOrphanedAutoRun({ autoRun: { status: 'running', step: 0 }, devTaskId: null, reviewTaskId: null }, () => false),
+    false,
+  )
+  // 推进过(step>0)但 dev/review 任一任务活着 → 不判孤儿(任务在跑,不暂停)。
+  assert.equal(
+    isOrphanedAutoRun(
+      { autoRun: { status: 'running', step: 2 }, devTaskId: 'dev-1', reviewTaskId: null },
+      (id) => id === 'dev-1',
+    ),
+    false,
+  )
+  assert.equal(
+    isOrphanedAutoRun(
+      { autoRun: { status: 'running', step: 1 }, devTaskId: null, reviewTaskId: 'rev-1' },
+      (id) => id === 'rev-1',
+    ),
+    false,
+  )
+  // 推进过、但 dev/review 两个 taskId 都查不到 live 任务 → 真正的孤儿,才暂停。
+  assert.equal(
+    isOrphanedAutoRun(
+      { autoRun: { status: 'running', step: 1 }, devTaskId: 'dev-1', reviewTaskId: 'rev-1' },
+      () => false,
+    ),
+    true,
+  )
+  // 非 running 或没有 autoRun → 一律不判孤儿。
+  assert.equal(
+    isOrphanedAutoRun({ autoRun: { status: 'paused', step: 3 }, devTaskId: null, reviewTaskId: null }, () => false),
+    false,
+  )
+  assert.equal(
+    isOrphanedAutoRun({ devTaskId: null, reviewTaskId: null }, () => false),
+    false,
   )
 })
 

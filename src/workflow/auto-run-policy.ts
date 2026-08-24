@@ -75,6 +75,26 @@ function paused(reason: AutoRunPausedReason, reviews: ReturnType<typeof aggregat
   return { kind: 'pause', reason, ...reviews }
 }
 
+/**
+ * 孤儿自动跑判定(issue #111 止血):只有「已推进过动作(step>0)、且 dev/review
+ * 两个 taskId 都查不到存活任务」的 running 才判孤儿。
+ * 刚启动(step=0)留给 reconcile 建任务,绝不抢先暂停;任务活着(任一 taskId
+ * 命中 live 任务)绝不暂停——与 derive 的 taskId 判定同一事实源。
+ */
+export function isOrphanedAutoRun(
+  workflow: {
+    autoRun?: { status: AutoRunState['status']; step?: number }
+    devTaskId: string | null
+    reviewTaskId: string | null
+  },
+  live: (taskId: string | null) => boolean,
+): boolean {
+  const autoRun = workflow.autoRun
+  if (!autoRun || autoRun.status !== 'running') return false
+  if ((autoRun.step ?? 0) === 0) return false
+  return !live(workflow.devTaskId) && !live(workflow.reviewTaskId)
+}
+
 export function autoRunRetryDelay(now: number, deadline: number): number | null {
   const remaining = deadline - now
   return remaining <= 0 ? null : Math.min(AUTO_RUN_RETRY_MS, remaining)
