@@ -74,9 +74,9 @@ R4-R8 是同一件事(重复推导不一致),R9-R10 是另一件事(写入无并
 
 同一母题的 CRITICAL 连续 ≥2 轮出现(本例 R7-R10 连续 4 轮),循环必须停止"逐条修复"模式,切换为"重设计轮":产出半页不变量文档 + 机制级方案,经确认后再实现。dev 侧不会自己喊停(它的激励是过本轮 review),停机判定必须在 review 侧。
 
-## 机器门禁(已实现:`pnpm run check:state-writes`)
+## 机器门禁(已实现:`pnpm run check:state-writes`,AST 解析)
 
-脚本 `scripts/check-state-writes.mjs`,已接入 `check` 复合链与 CI,执行原则 2/4 的三条边界规则:
+脚本 `scripts/check-state-writes.mjs` 基于 TypeScript AST(非文本正则)追踪 import 别名、const 重绑定与命名空间导入,负向 fixture(`tests/check-state-writes-gate.test.ts`)锁定所有已知绕过路径——门禁自身也有必须失败的测试。已接入 `check` 复合链与 CI,执行原则 2/4 的三条边界规则:
 
 1. **状态路径白名单**:workflow 状态文件路径(`workflowPath`/`workflowStatePath`)只允许在持久化层解析(`workflow-persistence.ts` 写入、`state-layout.ts` 定义、`state.ts` facade);其他文件触及即 CI 红。路径独占同时保证写入只能是持久化层的 temp + rename 原子写。
 2. **持久化模块独占**:`workflow-persistence.ts` 只允许被 `state.ts`(facade)与 `task-ownership.ts`(纯选择器)import;上层直接 import 即 CI 红。
