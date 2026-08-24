@@ -11,6 +11,7 @@ Ordinary review answers "does this round's patch work?". This skill answers "why
 
 - Never review only the current diff. If review history exists and you did not read it, the review is invalid.
 - Never output a CRITICAL finding without answering the invariant question for it (step 3).
+- Never declare an invariant enforced without a completed enumeration table (step 4). Dynamic reproduction is not a substitute for enumeration.
 - Verify by reproduction: a CRITICAL claim must be demonstrated (run a regression, construct the interleaving, count failures over iterations), not inferred from reading code. If you cannot reproduce it, downgrade to a suspicion and say so with a confidence level.
 - `stop-and-redesign` is a first-class verdict. Do not soften it into another fix list.
 
@@ -40,14 +41,26 @@ For each current finding, state: new theme, or recurrence of theme X (rounds N, 
 - **Code root cause**: what missing invariant makes this entire class possible? Answer explicitly: "what construction would make this class impossible by design?" (single writer + atomic commit, capability in the API signature, one answering source, type-level ownership...). If the only answer you can produce is "add a check before the operation", you have not found the root cause.
 - **Process root cause**: why did this bug survive to this round? (nobody asked the cross-round question / the guard was scoped to the previous finding / the test encoded the author's mental model). Only answerable with history — which is why step 1 is non-negotiable.
 
-### 4. Fix-altitude judgment
+### 4. Static invariant audit (mandatory, before any dynamic testing)
+
+For each declared invariant (and each invariant the current fix claims to enforce), enumerate ALL code paths that could violate it — not the ones the fix touched, all of them:
+
+- Every caller of every mutation API (grep the unconditional/legacy variants too, not just the new credentialed one).
+- Every consumer of the single answering source (anyone re-deriving "what is current" locally).
+- Every write entry point to the shared state (files, registries, caches).
+
+Produce an explicit enumeration table: path → invariant it could violate → protected by construction / protected by caller discipline / unprotected. Any row that is not "protected by construction" is a finding — **no dynamic reproduction required**. Existence-class gaps (which paths bypass the mechanism) are statically enumerable and must be found ALL AT ONCE in this step; finding them one per round means this step was skipped.
+
+Dynamic adversarial testing (see Hard requirements: verify by reproduction) remains necessary but only for ordering-class holes the table cannot see (logic inside the critical section, lock semantics, recovery paths). Enumeration first, interleaving second.
+
+### 5. Fix-altitude judgment
 
 For the fix under review (or proposed): mechanism-level or call-site-level?
 
 - Mechanism-level: the invariant is enforced by a type, a storage primitive, or a serialization point; violators cannot be written.
 - Call-site-level: correctness depends on every caller remembering to check. Allowed only as registered debt with a convergence deadline.
 
-### 5. Verdict
+### 6. Verdict
 
 Exactly one of:
 
