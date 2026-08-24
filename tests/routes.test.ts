@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { apply, fetchRepositoryIssues } from '../src/index.ts'
-import { encodeLiveLogEvent } from '../src/infra/live-output.ts'
+import { decodeLiveLogLine, encodeLiveLogEvent } from '../src/infra/live-output.ts'
 import {
   appendLog,
   appendTaskLog,
@@ -1790,6 +1790,139 @@ test('invalid exact dev session falls back once to a fresh session on the same t
     })
     assert.equal(delivery?.publication?.status, 'posted')
     assert.equal(delivery?.publication?.target, 'pr')
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('lossy agent output recovers the missing head from the host spill file into the panel and session id', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-spill-recovery-'))
+  process.env.HOME = tempHome
+  try {
+    const worktree = join(tempHome, 'worktree')
+    await mkdir(worktree, { recursive: true })
+    const workflow = interruptedWorkflow('o-r-931', 'https://github.com/o/r/issues/931', worktree)
+    workflow.devSessionId = null
+    workflow.devSessionAgent = null
+    await saveWorkflow(workflow, null)
+    const currentIssue = {
+      url: workflow.url,
+      title: 'recover issue',
+      body: '## 验收标准\n- recover',
+      state: 'OPEN',
+      updatedAt: '2026-08-22T08:00:00Z',
+      comments: [],
+    }
+    const spillFile = join(tempHome, 'agent-stdout.log')
+    await writeFile(
+      spillFile,
+      [
+        '{"type":"thread.started","thread_id":"recovered-session"}',
+        '{"type":"item.completed","item":{"type":"agent_message","text":"lost in the host buffer"}}',
+        '',
+      ].join('\n'),
+    )
+    const starts: Array<{ command: string; prompt: string }> = []
+    const comments: Array<{ command: string; body: string }> = []
+    const handler = createHandler(
+      async (spec) => {
+        const api = githubApi(spec.command, { item: currentIssue })
+        if (api) return api
+        if (spec.command === 'git rev-parse --short HEAD')
+          return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
+        if (spec.command.startsWith('git merge-base '))
+          return { exitCode: 0, stdout: { text: 'base123\n' }, stderr: { text: '' } }
+        if (spec.command.startsWith('git log '))
+          return { exitCode: 0, stdout: { text: 'abc123\u001f完成实现\n' }, stderr: { text: '' } }
+        if (spec.command.startsWith('git diff --numstat '))
+          return { exitCode: 0, stdout: { text: '1\t1\tsrc/recovered.ts\n' }, stderr: { text: '' } }
+        if (spec.command.startsWith('gh issue comment')) {
+          comments.push({ command: spec.command, body: spec.stdin ?? '' })
+          return {
+            exitCode: 0,
+            stdout: { text: 'https://github.com/o/r/issues/931#issuecomment-1' },
+            stderr: { text: '' },
+          }
+        }
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      },
+      (spec) => {
+        starts.push({ command: spec.command, prompt: spec.stdin ?? '' })
+        let read = false
+        return {
+          status: 'running',
+          exitCode: 0,
+          done: new Promise<void>((resolve) => setTimeout(resolve, 30)),
+          readOutput() {
+            if (read) return { delta: '', lossy: false }
+            read = true
+            return {
+              delta: '{"type":"item.completed","item":{"type":"agent_message","text":"visible tail"}}\n',
+              lossy: true,
+              stdoutSpillPath: spillFile,
+            }
+          },
+          kill() {
+            return true
+          },
+        }
+      },
+    )
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+    const authorized = (await post(
+      handler,
+      '/clickvibe/api/authorize',
+      {
+        action: 'resume',
+        url: workflow.url,
+        agent: 'codex',
+        context: '',
+      },
+      headers,
+    )) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
+    const resumed = (await post(
+      handler,
+      '/clickvibe/api/resume',
+      {
+        url: workflow.url,
+        agent: 'codex',
+        context: '',
+        authorizationId: authorized.body.authorizationId,
+        authorizationDigest: authorized.body.authorizationDigest,
+      },
+      headers,
+    )) as { status: number; body: { ok: boolean; taskId?: string } }
+    assert.equal(resumed.status, 200, JSON.stringify(resumed.body))
+    assert.ok(resumed.body.taskId)
+    const completed = await waitForTask(handler, resumed.body.taskId)
+
+    assert.ok(
+      completed.delta.some((line) => line.includes('visible tail')),
+      'live tail rendered',
+    )
+    assert.ok(
+      completed.delta.some((line) => line.includes('lost in the host buffer')),
+      'recovered head rendered',
+    )
+    assert.ok(
+      completed.delta.some((line) => line.includes('已从宿主 spill 文件恢复 2 行缺失的 Agent 输出')),
+      'recovery notice rendered',
+    )
+    assert.ok(
+      completed.delta.some((line) => line.includes('宿主流式缓冲已丢失部分 Agent 输出')),
+      'lossy gap notice rendered',
+    )
+    assert.equal(starts.length, 1)
+    assert.equal(comments.length, 1)
+    const reloaded = await loadWorkflow(workflow.key)
+    assert.equal(reloaded?.devSessionId, 'recovered-session')
+    assert.equal(reloaded?.devSessionAgent, 'codex')
+    const historyEvents = (await readLogHistory(workflow.key, 'dev')).map(decodeLiveLogLine)
+    assert.ok(historyEvents.some((event) => event.text.includes('lost in the host buffer')))
+    assert.ok(historyEvents.some((event) => event.text.includes('已从宿主 spill 文件恢复 2 行')))
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome

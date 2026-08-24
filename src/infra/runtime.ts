@@ -257,6 +257,11 @@ export async function runCommand(
   return out.text.trim()
 }
 
+/** Read a host subprocess spill file: the byte-complete stream beyond the in-memory cap. */
+export async function readHostSpillFile(path: string): Promise<string> {
+  return readFile(path, 'utf8')
+}
+
 export function fetchTtlMs(config: ClickVibeConfig): number {
   const seconds = Number(config.fetchTtlSeconds ?? DEFAULT_FETCH_TTL_SECONDS)
   return Math.min(60, Math.max(30, Number.isFinite(seconds) ? seconds : DEFAULT_FETCH_TTL_SECONDS)) * 1000
