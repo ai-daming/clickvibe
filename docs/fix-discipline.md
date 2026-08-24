@@ -90,6 +90,7 @@ R4-R8 是同一件事(重复推导不一致),R9-R10 是另一件事(写入无并
 | 检查与动作之间窗口 | TOCTOU,校验必须进临界区 | check-then-act |
 | 半写状态可见 | torn write | temp + rename 原子提交 |
 | 多处对"当前是谁"答案不一致 | 单一事实源缺失 | single writer / 单一应答源 |
+| 多个排序域互不知晓(回调队列 vs 控制器动作) | 单写者命令日志 / actor | 全部生命周期动作进同一串行域;fencing token 只是它的组成部分,不是完全体 |
 
 #111 的 R9-R16 用八轮从零推导出了 fencing token 的完整形态——该结果在教科书里已存在。推导之前先问:"这是不是上表里的某个已知问题?"匹配则直接按模式的完整形态实现(一步到底,不做半成品),不匹配再进入自行推导。
 
@@ -100,6 +101,8 @@ R4-R8 是同一件事(重复推导不一致),R9-R10 是另一件事(写入无并
 1. **状态路径白名单**:workflow 状态文件路径(`workflowPath`/`workflowStatePath`)只允许在持久化层解析(`workflow-persistence.ts` 写入、`state-layout.ts` 定义、`state.ts` facade);其他文件触及即 CI 红。路径独占同时保证写入只能是持久化层的 temp + rename 原子写。
 2. **持久化模块独占**:`workflow-persistence.ts` 只允许被 `state.ts`(facade)与 `task-ownership.ts`(纯选择器)import;上层直接 import 即 CI 红。
 3. **条件提交**:任何 `saveWorkflow`/`saveWorkflowForTask`/`claimWorkflowTask`/`mutateWorkflowForTask` 的无 revision/凭证参数调用(单参数裸调用 = 无条件 last-writer-wins)即 CI 红。
+
+> 定位:门禁是**绊线(heuristic tripwire)**,不是边界。语法级追踪原理上无法证明能力边界(值可经对象属性、高阶参数等任意形态传播,#111 三轮绕过实证);真正的边界 = 模块私有/API 面不暴露 raw mutator(构造级)。raw mutator 移除后,本门禁降级为回归绊线保留。
 
 ## 适用范围
 
