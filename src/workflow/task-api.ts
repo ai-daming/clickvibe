@@ -11,6 +11,7 @@ import {
   type IssueWorkflow,
   loadAllWorkflows,
   loadWorkflow,
+  readLogHistory,
   readTaskLog,
 } from '../infra/state.ts'
 import type { TaskMetrics } from '../infra/task-log-store.ts'
@@ -118,12 +119,13 @@ export async function getTaskHistory(req: IncomingMessage): Promise<
   const cursor = target.live?.log.read(Number.MAX_SAFE_INTEGER).cursor ?? 0
   const history = target.taskId
     ? await readTaskLog(target.workflow, target.kind, target.taskId)
-    : {
-        encodedLines: [],
-        events: [],
-        lines: [],
-        metrics: { startedAt: null, endedAt: null, durationMs: null, status: null, exitCode: null },
-      }
+    : await (() => {
+        const metrics = { startedAt: null, endedAt: null, durationMs: null, status: null, exitCode: null }
+        return readLogHistory(target.key, target.kind).then((encodedLines) => {
+          const events = encodedLines.map(decodeLiveLogLine)
+          return { encodedLines, events, lines: events.map((event) => event.text), metrics }
+        })
+      })()
   const events = history.events
   return {
     ok: true,

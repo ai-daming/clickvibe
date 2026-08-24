@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
+import { commitWorkflowFixture } from './workflow-fixture.ts'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import type { LiveTask } from '../src/infra/runtime.ts'
-import { loadWorkflow, type IssueWorkflow, commitWorkflow, type WorkflowTaskLease } from '../src/infra/state.ts'
+import { loadWorkflow, type IssueWorkflow, type WorkflowTaskLease } from '../src/infra/state.ts'
 import { finalizeDevRun } from '../src/workflow/dev-completion.ts'
 
 function workflow(): IssueWorkflow {
@@ -39,11 +40,11 @@ test('successful dev completion is durable before slow delivery work begins', as
   process.env.HOME = tempHome
   try {
     const current = workflow()
-    await commitWorkflow(current, null)
+    await commitWorkflowFixture(current, null)
     assert.equal(current.taskStateRevision, 0)
     const staleTaskSnapshot = structuredClone(current)
     current.issueSnapshot = { url: current.url, title: 'metadata advanced', body: '', state: 'OPEN', updatedAt: 'now' }
-    await commitWorkflow(current, current.revision ?? 0)
+    await commitWorkflowFixture(current, current.revision ?? 0)
     assert.equal(current.taskStateRevision, 0)
     let deliveryStarted = false
     const live = {

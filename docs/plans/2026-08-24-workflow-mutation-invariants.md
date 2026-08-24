@@ -1,6 +1,6 @@
 # Workflow mutation invariants (#111 redesign)
 
-## Round 17 abstraction contract: one workflow command domain
+## Round 17-18 abstraction contract: one workflow command domain and two write capabilities
 
 The prior model had three independent ordering domains: ordinary snapshot
 writes, a per-`LiveTask` callback queue, and controller stop writes launched by
@@ -12,7 +12,7 @@ left the callback verdict current.
 
 The replacement abstraction has these invariants:
 
-1. Every mutation of one workflow—ordinary update, claim, callback mutation,
+1. Every mutation of one workflow—metadata update, claim, callback mutation,
    stop, completion, verdict, and failure—is a command in the same domain keyed
    by the workflow state path. One in-process queue orders local commands; the
    existing per-path cross-process lock supplies the same commit order across
@@ -25,14 +25,27 @@ The replacement abstraction has these invariants:
    durable. Commands ordered after stop still carry the old lease and are
    rejected as `ownership-lost`.
 4. Raw persistence mutators are private implementation details of the command
-   domain. `infra/state.ts` exposes only the revision-checked ordinary command;
-   claim, task mutation, and stop are reachable only through their semantic
-   command owners. Passing a function through an object or higher-order helper
-   cannot bypass an invariant because there is no raw mutator export to pass.
+   domain. The only ordinary public write accepts a storage identity plus an
+   exact `WorkflowMetadataPatch`; task-state keys are `never` in that type and
+   rejected again after the durable reread. Claim, task mutation, and stop
+   accept the same narrow identity plus their capability, never a caller-owned
+   `IssueWorkflow` snapshot. Passing a function through an object or
+   higher-order helper cannot bypass an invariant because no exported function
+   can commit an arbitrary workflow object.
 
 This construction makes the previous “multiple ordering domains” state
 unrepresentable: all commands converge before acquiring the same durable
 serialization boundary, and stop cannot acknowledge completion outside it.
+
+Round 18 also removes the disguised raw path (`commitWorkflow`, previously
+renamed from `saveWorkflow`). `workflow-metadata.ts` owns the exact metadata
+field set; protected lifecycle/identity/revision keys are `never` in the patch
+type and are checked again after the locked reread. The facade export snapshot
+and TypeScript-symbol test cover the real module surfaces instead of a selected
+name blacklist. Consequently, a claim → stop → reload sequence has no public
+API that can replay `stage`, verdict, interruption, task id, or session fields;
+only a still-valid task lease can submit those fields, and stop has already
+revoked that lease.
 
 ## Invariants and enforcing construction
 
@@ -40,11 +53,11 @@ serialization boundary, and stop cannot acknowledge completion outside it.
 |---|---|---|
 | 1 | Metadata and lifecycle ordering are durable and distinct. | `infra/workflow-persistence.ts`: every public mutation first enters the workflow-path command queue, then the cross-process lock; every commit increments `revision`, while a lifecycle-field transition or explicit stop/claim advances `taskStateRevision` exactly once. Legacy counters normalize to `0`. |
 | 2 | A running task cannot refresh its lifecycle capability from persisted state. | `infra/workflow-persistence.ts`: claim signs an opaque, frozen `WorkflowTaskLease {kind,taskId,taskStateRevision}`; `infra/runtime.ts`: `LiveTask` stores it; `workflow/task-lease.ts`: callback commands require that stored lease and replace it only with the lease returned by their own commit. No workflow snapshot can construct a callback lease. |
-| 3 | Validation, mutation, commit and result share one awaited command domain. | `infra/workflow-persistence.ts`: `enqueueWorkflowCommand` orders ordinary, claim, callback and stop commands by durable workflow path; the hard-link lock encloses reread, validation, increment, temp write and rename; callers receive a result only after `commit()` and lock release. |
+| 3 | Validation, mutation, commit and result share one awaited command domain. | `infra/workflow-persistence.ts`: `enqueueWorkflowCommand` orders metadata, claim, callback and stop commands by durable workflow path; the hard-link lock encloses reread, validation, increment, temp write and rename; callers receive a result only after `commit()` and lock release. |
 | 4 | A task starts as one complete generation. | `agent/task-supervisor.ts`: a successful reservation has a non-empty `hostJobId`; develop/resume/review freeze the current task expectation immediately after the ownership gate; `workflow/task-claim.ts` atomically commits `taskId+hostJobId+stage+agent`, stores the returned lease on `LiveTask`, then launches the Agent; losers are settled without a lease or launch. |
 | 5 | Stop is an irreversible chain terminator for the prior task lease. | `infra/workflow-persistence.ts`: `stopWorkflowTaskCommand` runs in the same command order as callbacks, rereads the exact current task, supersedes commands already ordered before it, clears stopped Review verdict/session state, and always advances `taskStateRevision`. `workflow/task-api.ts` awaits that durable result before returning `stopped:true`; later callback commands retain the old lease and return `ownership-lost`. |
 | 6 | Current task has one observed answer. | `infra/task-ownership.ts`: ownership carries exact `{kind,taskId}`; launch/reuse/deadline/stop consumers use it without stage/order guessing. |
-| 7 | Conflict classes retain meaning and raw writes are not an API. | `infra/workflow-persistence.ts`: callback functions run outside the file lock but inside the workflow command entry; results distinguish `committed`, `ownership-lost`, and revision conflict; raw snapshot/task/stop mutators remain private. `infra/state.ts` exposes only `commitWorkflow`, while semantic owners import their one command. The state-write script is a module-boundary tripwire, not an unsound value-flow proof. |
+| 7 | Conflict classes retain meaning and raw writes are not an API. | `infra/workflow-persistence.ts`: results distinguish `committed`, `ownership-lost`, and revision conflict; raw snapshot/task/stop mutators remain private. `infra/state.ts` exposes `commitWorkflowMetadata(identity, expectedRevision, patch)` and no whole-object writer. Runtime export snapshots plus TypeScript symbol inspection reject new facade exports and any exported writer whose first parameter is a complete `IssueWorkflow`; the state-write script remains a secondary module-boundary tripwire. |
 | 8 | Missing is not death. | `infra/task-ownership.ts`: local/registry absence yields `unknown` and keeps launch closed; only explicit outcome or supervisor terminal state yields `interrupted`. |
 
 ## Static mutation enumeration
@@ -55,19 +68,19 @@ serialization boundary, and stop cannot acknowledge completion outside it.
 | `agent/prompts.resolvePromptSnapshot` fallback | issue snapshot | ✓ command domain + revision |
 | `agent/worktree.ensureWorktree` | worktree/branch/base | ✓ command domain + revision |
 | `infra/state.appendEvent` | events | ✓ command domain + revision |
-| `infra/state.migrateLegacyWorkflowFile` | initial file | ✓ command domain + create-only |
+| `infra/state.migrateLegacyWorkflowFile` | legacy file placement | ✓ create-only hard link; never overwrites an existing workflow |
 | `infra/state.archiveWorkflow` | delivery archive | ✓ command domain + revision |
-| `infra/state.appendLog` legacy id | task id | ✓ command domain + revision |
+| `infra/state.appendLog` without task id | compatibility log only | ✓ no workflow-state mutation; history reads the legacy log fallback |
 | `workflow/auto-run.persistDecision` | cursor | ✓ command domain + revision |
 | `workflow/auto-run.pauseAutoRun` | pause/event | ✓ command domain + revision |
 | `workflow/auto-run.completeAutoRun` | completion/event | ✓ command domain + revision |
-| `workflow/auto-run.applyDecision(rework)` | dev agent | ✓ command domain + revision |
+| `workflow/auto-run.applyDecision(rework)` | no direct lifecycle write | ✓ resume claim selects the configured auto-run agent and establishes it atomically |
 | `workflow/auto-run.startAutoRun` | config/event | ✓ command domain + revision |
 | `workflow/create-pr.createPullRequest` | PR number | ✓ command domain + revision |
 | `workflow/develop-start` via `task-claim` | dev generation | ✓ command domain + gate-frozen ref + lifecycle CAS + non-empty host id |
 | `workflow/resume` via `task-claim` | dev generation/session reset | ✓ command domain + gate-frozen ref + lifecycle CAS + non-empty host id |
 | `workflow/review-flow` via `task-claim` | review generation/PR/session | ✓ command domain + gate-frozen ref + lifecycle CAS + non-empty host id |
-| `workflow/review-start` recovery | review-ready cache | ✓ command domain + create/revision |
+| `workflow/review-start` recovery | PR/base/worktree metadata | ✓ metadata command; durable lifecycle remains `idle` until the review claim atomically writes `reviewing` |
 | `workflow/merge` override event | events | ✓ command domain + revision |
 | `workflow/merge` delivery | delivery | ✓ command domain + revision |
 | `workflow/merge.persistStep` | cleanup progress | ✓ command domain + revision |

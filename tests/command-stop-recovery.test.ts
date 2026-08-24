@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
+import { commitWorkflowFixture } from './workflow-fixture.ts'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import type { IncomingMessage } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { issueKey, loadWorkflow, commitWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
+import { issueKey, loadWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
 import { handleCommand } from '../src/workflow/handlers.ts'
 
 const request = {
@@ -59,7 +60,7 @@ test('stop command explicitly confirms task-unknown dev and review through the s
     await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), `repos:\n  o/r: ${join(tempHome, 'repo')}\n`)
     const key = issueKey('o/r', '111')
     const workflow = workflowFixture(key, tempHome)
-    await commitWorkflow(workflow, null)
+    await commitWorkflowFixture(workflow, null)
 
     const preview = await runCommand({ command: 'stop #111' })
     assert.equal(preview.status, 200, JSON.stringify(preview.body))
@@ -77,7 +78,7 @@ test('stop command explicitly confirms task-unknown dev and review through the s
     if (!recovered) throw new Error('workflow missing after development confirmation')
     recovered.stage = 'reviewing'
     recovered.reviewTaskId = 'review-2000-legacy'
-    await commitWorkflow(recovered, recovered.revision ?? null)
+    await commitWorkflowFixture(recovered, recovered.revision ?? null)
     const reviewPreview = await runCommand({ command: 'stop #111' })
     assert.equal(reviewPreview.body.needsConfirmation, true)
     assert.equal(reviewPreview.body.taskId, 'review-2000-legacy')
@@ -91,7 +92,7 @@ test('stop command explicitly confirms task-unknown dev and review through the s
     settling.devTaskId = 'dev-3000-settling'
     settling.devHostJobId = 'host-dev-3000'
     settling.devInterrupted = false
-    await commitWorkflow(settling, settling.revision ?? null)
+    await commitWorkflowFixture(settling, settling.revision ?? null)
     const registryOffline = {
       jobs: {
         list(): never {

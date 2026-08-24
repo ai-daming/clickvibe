@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { commitWorkflowFixture } from './workflow-fixture.ts'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer, request, type RequestListener } from 'node:http'
 import { tmpdir } from 'node:os'
@@ -13,7 +14,6 @@ import {
   loadAllArchivedWorkflows,
   loadWorkflow,
   readLogHistory,
-  commitWorkflow,
   startTaskLog,
   type IssueWorkflow,
 } from '../src/infra/state.ts'
@@ -557,7 +557,7 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
         issueContract: { bodyHash: issueBodyHash(reviewedBody), updatedAt: '2026-08-22T00:00:00Z' },
       },
     ]
-    await commitWorkflow(workflow, workflow.revision ?? null)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
 
     let merged = false
     let issueClosed = false
@@ -725,7 +725,7 @@ test('/merge rejects a stale review hash before invoking gh pr merge', async () 
     workflow.stage = 'passed'
     workflow.reviewResult = { passed: true, issues: [] }
     workflow.events = [{ kind: 'review', at: 'now', hash: '1111111', verdict: { passed: true, issues: [] } }]
-    await commitWorkflow(workflow, workflow.revision ?? null)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const commands: string[] = []
     const handler = createHandler(async (spec) => {
       commands.push(spec.command)
@@ -780,7 +780,7 @@ test('/merge authorization rejects a changed acceptance contract with the same P
         },
       },
     ]
-    await commitWorkflow(workflow, workflow.revision ?? null)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const commands: string[] = []
     const handler = createHandler(async (spec) => {
       commands.push(spec.command)
@@ -856,7 +856,7 @@ test('/merge gate rejection offers manual override that merges once and audits t
         issueContract: { bodyHash: issueBodyHash(reviewedBody), updatedAt: '2026-08-22T00:00:00Z' },
       },
     ]
-    await commitWorkflow(workflow, workflow.revision ?? null)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
 
     let merged = false
     let issueClosed = false
@@ -1029,7 +1029,7 @@ test('/merge manual override refuses gate failures not covered by the confirmati
         },
       },
     ]
-    await commitWorkflow(workflow, workflow.revision ?? null)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     // 授权时:哈希一致、契约已变更 → 只放行 contract-changed;
     // 合并时:Issue 契约读取失败(合并路径强制刷新)→ 新增 contract-unreadable
     // 失败项,未被确认覆盖 → 拒绝,且不写放行审计。
@@ -1142,7 +1142,7 @@ test('cleanup failure keeps merged terminal state and retries without merging ag
         issueContract: { bodyHash: issueBodyHash(reviewedBody), updatedAt: '2026-08-22T00:00:00Z' },
       },
     ]
-    await commitWorkflow(workflow, workflow.revision ?? null)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
 
     let merged = false
     let removeAttempts = 0
@@ -1250,7 +1250,7 @@ test('/state uses the live GitHub issue state instead of the stored issueState',
       join(tempHome, 'missing-worktree'),
     )
     workflow.issueState = 'OPEN'
-    await commitWorkflow(workflow, workflow.revision ?? null)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const handler = createHandler(async (spec) => {
       const api = githubApi(spec.command, {
         item: { url: workflow.url, number: 23, state: 'CLOSED' },
@@ -1473,7 +1473,7 @@ test('/history restores the complete disk log by task id after Host restart', as
   try {
     const workflow = interruptedWorkflow('o-r-903', 'https://github.com/o/r/issues/903', join(tempHome, 'worktree'))
     workflow.devTaskId = 'dev-before-restart'
-    await commitWorkflow(workflow, workflow.revision ?? null)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     await appendLog(workflow.key, 'dev', 'thinking one')
     await appendLog(workflow.key, 'dev', 'thinking two')
 
@@ -1499,7 +1499,7 @@ test('/history queries an older round by project and issue while binding the rou
     const older = 'dev-1720000000000-older'
     const current = 'dev-1720000005000-current'
     workflow.devTaskId = current
-    await commitWorkflow(workflow, workflow.revision ?? null)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     await startTaskLog(workflow, 'dev', older)
     await appendTaskLog(workflow, 'dev', older, 1, 'older round')
     await startTaskLog(workflow, 'dev', current)
@@ -1529,7 +1529,7 @@ test('/history restores structured agent records and keeps legacy lines compatib
   try {
     const workflow = interruptedWorkflow('o-r-906', 'https://github.com/o/r/issues/906', join(tempHome, 'worktree'))
     workflow.devTaskId = 'dev-1720000000000-event'
-    await commitWorkflow(workflow, workflow.revision ?? null)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     await appendLog(
       workflow.key,
       'dev',
@@ -1561,7 +1561,7 @@ test('/history accepts a safe workflow key and rejects unknown or traversal targ
   process.env.HOME = tempHome
   try {
     const workflow = interruptedWorkflow('o-r-904', 'https://github.com/o/r/issues/904', join(tempHome, 'worktree'))
-    await commitWorkflow(workflow, workflow.revision ?? null)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     await appendLog(workflow.key, 'review', 'review history')
     const handler = createHandler()
 
@@ -1652,7 +1652,7 @@ test('invalid exact dev session falls back once to a fresh session on the same t
         url: 'https://github.com/o/r/pull/29#issuecomment-99',
       },
     })
-    await commitWorkflow(workflow, workflow.revision ?? null)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     await appendLog(workflow.key, 'dev', 'prior run must be rotated')
     const starts: Array<{ command: string; workdir?: string; prompt: string }> = []
     const comments: Array<{ command: string; body: string }> = []
@@ -1807,7 +1807,7 @@ test('lossy agent output recovers the missing head from the host spill file into
     const workflow = interruptedWorkflow('o-r-931', 'https://github.com/o/r/issues/931', worktree)
     workflow.devSessionId = null
     workflow.devSessionAgent = null
-    await commitWorkflow(workflow, null)
+    await commitWorkflowFixture(workflow, null)
     const currentIssue = {
       url: workflow.url,
       title: 'recover issue',
@@ -1939,7 +1939,7 @@ test('completed development without a PR appends its Dev Meta comment to the iss
     await mkdir(worktree, { recursive: true })
     const workflow = interruptedWorkflow('o-r-920', 'https://github.com/o/r/issues/920', worktree)
     workflow.prNumber = null
-    await commitWorkflow(workflow, workflow.revision ?? null)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const comments: Array<{ command: string; body: string }> = []
     const prompts: string[] = []
     const handler = createHandler(
@@ -2035,7 +2035,7 @@ test('concurrent resume requests reserve one workflow task before refreshing the
     const workflow = interruptedWorkflow('o-r-930', 'https://github.com/o/r/issues/930', worktree)
     workflow.prNumber = null
     workflow.devSessionId = null
-    await commitWorkflow(workflow, workflow.revision ?? null)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     let issueReads = 0
     let starts = 0
     const currentIssue = {
@@ -2133,7 +2133,7 @@ test('comment publication failure keeps the delivery event and stores a bounded 
     await mkdir(worktree, { recursive: true })
     const workflow = interruptedWorkflow('o-r-921', 'https://github.com/o/r/issues/921', worktree)
     workflow.reviewResult = { passed: false, issues: ['must remain traceable'] }
-    await commitWorkflow(workflow, workflow.revision ?? null)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const handler = createHandler(
       async (spec) => {
         if (spec.command === 'git rev-parse --short HEAD') {
@@ -2216,7 +2216,7 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     workflow.stage = 'review-ready'
     workflow.reviewSessionId = 'dead-review'
     workflow.reviewSessionAgent = 'codex'
-    await commitWorkflow(workflow, workflow.revision ?? null)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const starts: Array<{ command: string; prompt: string }> = []
     const reviewedBody = '## 验收标准\n- frozen review contract'
     const reviewedUpdatedAt = '2026-08-22T01:02:03Z'
@@ -2390,7 +2390,7 @@ test('duplicate review requests reuse the reserved task before fetching the Issu
     await mkdir(worktree, { recursive: true })
     const workflow = interruptedWorkflow('o-r-920', 'https://github.com/o/r/issues/920', worktree)
     workflow.stage = 'review-ready'
-    await commitWorkflow(workflow, workflow.revision ?? null)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
 
     let issueCalls = 0
     let notifyIssueEntered!: () => void
@@ -2511,7 +2511,7 @@ test('cross-agent review starts fresh and an empty failed verdict requires re-re
     workflow.reviewSessionId = 'codex-review'
     workflow.reviewSessionAgent = 'codex'
     workflow.reviewResult = { passed: false, issues: ['old issue'] }
-    await commitWorkflow(workflow, workflow.revision ?? null)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const starts: string[] = []
     const reviewedBody = '## 验收标准\n- current contract'
     const handler = createHandler(
@@ -3704,7 +3704,7 @@ test('resume (rework) carries the user context next to the review feedback and a
     await mkdir(worktree, { recursive: true })
     const workflow = interruptedWorkflow('o-r-921', 'https://github.com/o/r/issues/921', worktree)
     workflow.reviewResult = { passed: false, issues: ['修复竞态', '补充失败测试'] }
-    await commitWorkflow(workflow, workflow.revision ?? null)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const prompts: string[] = []
     const currentIssue = {
       url: workflow.url,
@@ -3799,7 +3799,7 @@ test('review with user context appends it to the prompt and audits it in the rev
     await mkdir(worktree, { recursive: true })
     const workflow = interruptedWorkflow('o-r-922', 'https://github.com/o/r/issues/922', worktree)
     workflow.stage = 'review-ready'
-    await commitWorkflow(workflow, workflow.revision ?? null)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const starts: Array<{ command: string; prompt: string }> = []
     const reviewedBody = '## 验收标准\n- review context'
     const currentIssue = {

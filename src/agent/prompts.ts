@@ -26,7 +26,7 @@ import { readWorktreeHead } from '../infra/runtime.ts'
 import {
   type IssueWorkflow,
   issueBodyHash,
-  commitWorkflow,
+  commitWorkflowMetadata,
   WorkflowConflictError,
   workflowRevision,
 } from '../infra/state.ts'
@@ -95,7 +95,13 @@ export async function resolvePromptSnapshot(
 
 async function persistPromptWorkflow(workflow: IssueWorkflow): Promise<string | null> {
   try {
-    await commitWorkflow(workflow, workflowRevision(workflow))
+    Object.assign(
+      workflow,
+      await commitWorkflowMetadata(workflow, workflowRevision(workflow), {
+        issueSnapshot: workflow.issueSnapshot,
+        issueState: workflow.issueState,
+      }),
+    )
     return null
   } catch (error) {
     return error instanceof WorkflowConflictError

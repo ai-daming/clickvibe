@@ -28,7 +28,7 @@ import {
   type IssueWorkflow,
   issueKey,
   loadWorkflow,
-  commitWorkflow,
+  commitWorkflowMetadata,
   WorkflowConflictError,
   workflowRevision,
 } from '../infra/state.ts'
@@ -220,7 +220,14 @@ export async function ensureWorktree(
   }
 
   try {
-    await commitWorkflow(workflow, workflowRevision(workflow))
+    Object.assign(
+      workflow,
+      await commitWorkflowMetadata(workflow, workflowRevision(workflow), {
+        worktree: workflow.worktree,
+        branch: workflow.branch,
+        baseRef: workflow.baseRef,
+      }),
+    )
   } catch (error) {
     return {
       ok: false,

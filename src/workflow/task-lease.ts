@@ -17,7 +17,10 @@ export function mutateLiveTaskWorkflow(
   const lease = live.workflowLease
   if (!lease) return Promise.reject(new Error(`task ${live.taskId} has no workflow lease`))
   return mutateWorkflowTaskCommand(workflow, lease, mutate).then((result) => {
-    if (result.status === 'committed') live.workflowLease = result.lease
+    if (result.status === 'committed') {
+      Object.assign(workflow, result.workflow)
+      live.workflowLease = result.lease
+    }
     return result
   })
 }

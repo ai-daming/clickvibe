@@ -15,7 +15,13 @@ const PATH_ALLOWED = new Set(['src/infra/workflow-persistence.ts', 'src/infra/st
 const PERSISTENCE_IMPORTS = new Map([
   [
     'src/infra/state.ts',
-    new Set(['WorkflowConflictError', 'commitWorkflowCommand', 'workflowRevision', 'workflowStatePath']),
+    new Set([
+      'WorkflowConflictError',
+      'WorkflowMetadataPatch',
+      'commitWorkflowMetadataCommand',
+      'workflowRevision',
+      'workflowStatePath',
+    ]),
   ],
   [
     'src/infra/task-ownership.ts',

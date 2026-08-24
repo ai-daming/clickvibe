@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { commitWorkflowFixture } from './workflow-fixture.ts'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -11,7 +12,6 @@ import {
   readLogHistory,
   readTaskLog,
   recordSessionId,
-  commitWorkflow,
   startTaskLog,
   resolveSessionForAgent,
   type IssueWorkflow,
@@ -26,7 +26,7 @@ test('persistent log snapshots preserve append order without truncating history'
     state.key = 'o-r-3'
     state.url = 'https://github.com/o/r/issues/3'
     state.devTaskId = 'dev-1720000000000-order'
-    await commitWorkflow(state, state.revision ?? null)
+    await commitWorkflowFixture(state, state.revision ?? null)
     await startTaskLog(state, 'dev', state.devTaskId)
     const writes = Array.from({ length: 2100 }, (_, index) =>
       appendTaskLog(state, 'dev', state.devTaskId!, index + 1, `line-${index}`),
@@ -52,12 +52,12 @@ test('a new task log generation preserves the prior run and selects the current 
     state.key = 'o-r-4'
     state.url = 'https://github.com/o/r/issues/4'
     state.devTaskId = 'dev-1720000000000-prior'
-    await commitWorkflow(state, state.revision ?? null)
+    await commitWorkflowFixture(state, state.revision ?? null)
     await startTaskLog(state, 'dev', state.devTaskId)
     await appendTaskLog(state, 'dev', state.devTaskId, 1, 'prior run')
     const priorTaskId = state.devTaskId
     state.devTaskId = 'dev-1720000005000-current'
-    await commitWorkflow(state, state.revision ?? null)
+    await commitWorkflowFixture(state, state.revision ?? null)
     await startTaskLog(state, 'dev', state.devTaskId)
     await appendLog(state.key, 'dev', 'current one')
     await appendLog(state.key, 'dev', 'current two')

@@ -25,6 +25,7 @@ export async function establishTaskClaim(
     while (true) {
       const result = await claimWorkflowTaskCommand(workflow, claim, expectedRevision, expectation)
       if (result.status === 'committed') {
+        Object.assign(workflow, result.workflow)
         live.workflowLease = result.lease
         return { ok: true, claimed: true, taskId: claim.taskId }
       }

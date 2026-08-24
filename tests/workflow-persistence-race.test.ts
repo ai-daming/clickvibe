@@ -6,12 +6,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import test from 'node:test'
+import { commitWorkflowFixture } from './workflow-fixture.ts'
 import { finishTask, waitForTaskPersistence } from '../src/agent/task-supervisor.ts'
 import { LineLog } from '../src/infra/develop-core.ts'
 import { LineBuffer } from '../src/infra/line-buffer.ts'
 import type { LiveTask } from '../src/infra/runtime.ts'
 import {
-  commitWorkflow,
+  commitWorkflowMetadata,
   type IssueWorkflow,
   loadWorkflow,
   statePath,
@@ -24,8 +25,8 @@ import { establishTaskClaim } from '../src/workflow/task-claim.ts'
 
 const workerSource = `
 import { createInterface } from 'node:readline'
-import { commitWorkflow, WorkflowConflictError } from './src/infra/state.ts'
-import { mutateWorkflowTaskCommand } from './src/infra/workflow-persistence.ts'
+import { WorkflowConflictError } from './src/infra/state.ts'
+import { commitWorkflowMetadataCommand, mutateWorkflowTaskCommand } from './src/infra/workflow-persistence.ts'
 import { resumeDevelop } from './src/workflow/resume.ts'
 let agentStarts = 0
 let jobSequence = 0
@@ -76,7 +77,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     }
     const saved = input.credential
       ? (await mutateWorkflowTaskCommand(input.workflow, input.credential, (current) => Object.assign(current, input.workflow))).status === 'committed'
-      : (await commitWorkflow(input.workflow, input.expectedRevision), true)
+      : (await commitWorkflowMetadataCommand(input.workflow, input.expectedRevision, input.metadata), true)
     console.log(JSON.stringify({ saved }))
   } catch (error) {
     console.log(JSON.stringify(error instanceof WorkflowConflictError
@@ -100,7 +101,11 @@ async function startWorker(home: string) {
   })
   return {
     process: child,
-    run: (workflow: IssueWorkflow, credential?: { kind: 'review'; taskId: string }) =>
+    run: (
+      workflow: IssueWorkflow,
+      credential?: { kind: 'review'; taskId: string },
+      metadata?: { prNumber?: string | null },
+    ) =>
       new Promise<boolean>((resolve) => {
         responses.push((response) => resolve(Boolean(response.saved)))
         child.stdin.write(
@@ -109,6 +114,7 @@ async function startWorker(home: string) {
             credential: credential ? { ...credential, taskStateRevision: workflow.taskStateRevision ?? 0 } : undefined,
             expectedRevision: workflow.revision ?? null,
             expectedTaskStateRevision: workflow.taskStateRevision ?? 0,
+            metadata,
           })}\n`,
         )
       }),
@@ -153,13 +159,22 @@ test('cross-process task writes and resume claims preserve the winning generatio
         const oldTaskId = `review-${1000 + round}-old`
         const nextTaskId = `review-${9000 + round}-current`
         const initial = workflow(oldTaskId, 'initial', 1000 + round)
-        await commitWorkflow(initial, null)
+        await commitWorkflowFixture(initial, null)
         const stale = structuredClone(initial)
         stale.stage = 'review-ready'
         stale.events[0].note = 'stale'.repeat(64 * 1024)
-        const successor = workflow(nextTaskId, 'successor', 1000 + round)
-        successor.revision = initial.revision
-        assert.equal(await successorWorker.run(successor), true)
+        const successor = await claimWorkflowTaskCommand(
+          initial,
+          {
+            kind: 'review',
+            taskId: nextTaskId,
+            agent: 'codex',
+            hostJobId: `job-${nextTaskId}`,
+          },
+          initial.revision ?? null,
+          workflowTaskExpectation(initial),
+        )
+        assert.equal(successor.status, 'committed')
         assert.equal(await staleWorker.run(stale, { kind: 'review', taskId: oldTaskId }), false)
         const raw = await readFile(statePath(initial), 'utf8')
         assert.doesNotThrow(() => JSON.parse(raw))
@@ -183,7 +198,7 @@ test('cross-process task writes and resume claims preserve the winning generatio
           reviewTaskId: null,
           prNumber: null,
         })
-        await commitWorkflow(initial, null)
+        await commitWorkflowFixture(initial, null)
         const [first, second] = await Promise.all([
           staleWorker.resume(initial.url),
           successorWorker.resume(initial.url),
@@ -226,11 +241,10 @@ test('cross-process task writes and resume claims preserve the winning generatio
       }
     })
     const recovered = workflow('review-9999-before', 'recovered', 9999)
-    await commitWorkflow(recovered, null)
-    recovered.reviewTaskId = 'review-9999-recovered'
+    await commitWorkflowFixture(recovered, null)
     await writeFile(`${statePath(recovered)}.lock`, JSON.stringify({ pid: 2_147_483_647, token: 'dead-host' }))
-    await commitWorkflow(recovered, recovered.revision ?? 0)
-    assert.equal((await loadWorkflow(recovered.key))?.reviewTaskId, recovered.reviewTaskId)
+    assert.equal(await staleWorker.run(recovered, undefined, { prNumber: '9999' }), true)
+    assert.equal((await loadWorkflow(recovered.key))?.prNumber, '9999')
   } finally {
     const exits = [once(staleWorker.process, 'exit'), once(successorWorker.process, 'exit')]
     staleWorker.process.kill()
@@ -248,14 +262,14 @@ test('persistence keeps revision, capability, claim and I/O outcomes distinct', 
   process.env.HOME = tempHome
   try {
     const current = workflow('review-5000-current', 'current', 5000)
-    await commitWorkflow(current, null)
+    await commitWorkflowFixture(current, null)
 
     const stale = structuredClone(current)
     stale.revision = 0
-    await assert.rejects(() => commitWorkflow(stale, 0), WorkflowConflictError)
+    await assert.rejects(() => commitWorkflowMetadata(stale, 0, { prNumber: 'stale' }), WorkflowConflictError)
 
     current.prNumber = '5000'
-    await commitWorkflow(current, current.revision ?? 0)
+    Object.assign(current, await commitWorkflowMetadata(current, current.revision ?? 0, { prNumber: current.prNumber }))
     const metadataRetry = await mutateWorkflowTaskCommand(
       stale,
       testLease(stale, 'review', stale.reviewTaskId!),
@@ -264,9 +278,20 @@ test('persistence keeps revision, capability, claim and I/O outcomes distinct', 
       },
     )
     assert.equal(metadataRetry.status, 'committed')
-    const successor = structuredClone(stale)
-    successor.reviewTaskId = 'review-7000-successor'
-    await commitWorkflow(successor, successor.revision ?? 0)
+    if (metadataRetry.status !== 'committed') assert.fail('task metadata retry did not commit')
+    const successor = await claimWorkflowTaskCommand(
+      metadataRetry.workflow,
+      {
+        kind: 'review',
+        taskId: 'review-7000-successor',
+        agent: 'codex',
+        hostJobId: 'job-review-7000-successor',
+      },
+      metadataRetry.revision,
+      workflowTaskExpectation(metadataRetry.workflow),
+    )
+    assert.equal(successor.status, 'committed')
+    if (successor.status !== 'committed') assert.fail('successor claim did not commit')
     assert.deepEqual(
       await mutateWorkflowTaskCommand(stale, testLease(stale, 'review', stale.reviewTaskId!), () => undefined),
       {
@@ -278,7 +303,7 @@ test('persistence keeps revision, capability, claim and I/O outcomes distinct', 
 
     const claimant = workflow('review-8100-interrupted', 'claim', 8100)
     claimant.stage = 'review-ready'
-    await commitWorkflow(claimant, null)
+    await commitWorkflowFixture(claimant, null)
     await assert.rejects(
       () =>
         claimWorkflowTaskCommand(
@@ -291,7 +316,10 @@ test('persistence keeps revision, capability, claim and I/O outcomes distinct', 
     )
     const staleClaim = structuredClone(claimant)
     claimant.prNumber = '8100'
-    await commitWorkflow(claimant, claimant.revision ?? 0)
+    Object.assign(
+      claimant,
+      await commitWorkflowMetadata(claimant, claimant.revision ?? 0, { prNumber: claimant.prNumber }),
+    )
     const claim = { kind: 'review' as const, taskId: 'review-9100-new', agent: 'codex' as const, hostJobId: 'job-9100' }
     const expectation = workflowTaskExpectation(staleClaim)
     const conflict = await claimWorkflowTaskCommand(staleClaim, claim, staleClaim.revision ?? 0, expectation)
@@ -313,7 +341,7 @@ test('persistence keeps revision, capability, claim and I/O outcomes distinct', 
 
     await writeFile(statePath(current), '{broken json')
     await assert.rejects(
-      () => commitWorkflow(current, current.revision ?? 0),
+      () => commitWorkflowMetadata(current, current.revision ?? 0, { prNumber: current.prNumber }),
       (error: unknown) => error instanceof SyntaxError,
     )
   } finally {
@@ -340,7 +368,7 @@ test('a completed task rejects late claim and stop intents from its previous lif
   })
   let losingTask: LiveTask | null = null
   try {
-    await commitWorkflow(running, null)
+    await commitWorkflowFixture(running, null)
     const staleClaim = structuredClone(running)
     const claimExpectation = workflowTaskExpectation(staleClaim)
     const staleStop = structuredClone(running)
@@ -355,6 +383,8 @@ test('a completed task rejects late claim and stop intents from its previous lif
       },
     )
     assert.equal(completion.status, 'committed')
+    if (completion.status !== 'committed') assert.fail('completion did not commit')
+    Object.assign(running, completion.workflow)
     assert.equal(running.taskStateRevision, 1)
 
     losingTask = {

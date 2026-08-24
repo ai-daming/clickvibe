@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
+import { commitWorkflowFixture } from './workflow-fixture.ts'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { issueKey, loadWorkflow, commitWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
+import { issueKey, loadWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
 import { requestAutoRunReconcile } from '../src/workflow/auto-run.ts'
 
 test('a reconcile exception is preserved as controller-error, never session-interrupted', async () => {
@@ -51,7 +52,7 @@ test('a reconcile exception is preserved as controller-error, never session-inte
       updatedAt: Date.now(),
       events: [],
     }
-    await commitWorkflow(workflow, workflow.revision ?? null)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const ctx = Object.defineProperty({}, 'jobs', {
       get() {
         throw new Error('forced reconcile failure')

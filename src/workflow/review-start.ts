@@ -3,7 +3,7 @@ import { basename, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { fetchGithubPrFact, readConfiguredBranchFacts } from '../github/facts.ts'
 import { expandHome, loadConfig } from '../infra/runtime.ts'
-import { type IssueWorkflow, issueKey, commitWorkflow, workflowRevision } from '../infra/state.ts'
+import { type IssueWorkflow, issueKey, commitWorkflowMetadata, workflowRevision } from '../infra/state.ts'
 import { observeWorkflowTask, taskLaunchDecision, type TaskOwnershipContext } from '../infra/task-ownership.ts'
 import { deriveWorkflowState } from './derive.ts'
 import { deriveReviewStartDecision, type ReviewStartDecision, type WorkflowFacts } from './state-view.ts'
@@ -123,7 +123,17 @@ export async function resolveReviewStartWorkflow(
 
   workflow.prNumber = prLookup.pr?.number ?? workflow.prNumber
   if (!workflow.baseRef && prLookup.pr?.baseRefName) workflow.baseRef = `origin/${prLookup.pr.baseRefName}`
+  Object.assign(
+    workflow,
+    await commitWorkflowMetadata(workflow, workflowRevision(workflow), {
+      worktree: workflow.worktree,
+      branch: workflow.branch,
+      prNumber: workflow.prNumber,
+      issueState: workflow.issueState,
+      baseRef: workflow.baseRef,
+      events: workflow.events,
+    }),
+  )
   workflow.stage = 'review-ready'
-  await commitWorkflow(workflow, workflowRevision(workflow))
   return { ok: true, workflow }
 }

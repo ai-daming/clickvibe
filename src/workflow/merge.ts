@@ -44,9 +44,10 @@ import {
 import {
   appendEvent,
   archiveWorkflow,
+  type IssueWorkflow,
   issueKey,
   loadWorkflow,
-  commitWorkflow,
+  commitWorkflowMetadata,
   workflowRevision,
 } from '../infra/state.ts'
 import { collectMergeGateFailures, type MergeGateFailure, mergeGateRejection } from './merge-gates.ts'
@@ -70,6 +71,18 @@ export type MergeAuthorizationPreview =
       mergeFlag: '--merge'
       cleanup: string[]
     }
+
+async function persistMergeMetadata(workflow: IssueWorkflow): Promise<void> {
+  Object.assign(
+    workflow,
+    await commitWorkflowMetadata(workflow, workflowRevision(workflow), {
+      delivery: workflow.delivery,
+      issueState: workflow.issueState,
+      autoRun: workflow.autoRun,
+      events: workflow.events,
+    }),
+  )
+}
 
 export async function mergeAuthorizationPreview(ctx: Context, url: string): Promise<MergeAuthorizationPreview> {
   const parsed = parseUrl(url)
@@ -321,7 +334,7 @@ export async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): P
       cleanup: { worktree: false, localBranch: false, remoteBranch: false, issue: false },
     }
     try {
-      await commitWorkflow(workflow, workflowRevision(workflow))
+      await persistMergeMetadata(workflow)
     } catch (error) {
       return {
         ok: false,
@@ -340,14 +353,14 @@ export async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): P
   const persistStep = async (): Promise<void> => {
     delivery.status = 'cleanup-pending'
     delete delivery.lastError
-    await commitWorkflow(workflow, workflowRevision(workflow))
+    await persistMergeMetadata(workflow)
   }
   const failCleanup = async (label: string, error: unknown): Promise<MergeResult> => {
     const detail = String(error instanceof Error ? error.message : error)
     delivery.status = 'cleanup-pending'
     delivery.lastError = `${label}: ${detail}`
     try {
-      await commitWorkflow(workflow, workflowRevision(workflow))
+      await persistMergeMetadata(workflow)
     } catch (persistError) {
       return {
         ok: false,

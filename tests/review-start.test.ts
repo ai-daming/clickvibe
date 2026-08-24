@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
+import { commitWorkflowFixture } from './workflow-fixture.ts'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { loadWorkflow, commitWorkflow } from '../src/infra/state.ts'
+import { loadWorkflow } from '../src/infra/state.ts'
 import { resolveReviewStartWorkflow, reviewStartError } from '../src/workflow/review-start.ts'
 
 function included(body: unknown): string {
@@ -98,12 +99,14 @@ test('review start recovers a missing workflow from matching branch, commit, and
     if (!resolved.ok) return
     assert.equal(resolved.workflow.stage, 'review-ready')
     assert.equal(resolved.workflow.prNumber, '105')
-    assert.equal((await loadWorkflow('o-r-106'))?.stage, 'review-ready')
+    // Recovery persists only Git/GitHub metadata. The review claim is the
+    // first command allowed to advance durable lifecycle state.
+    assert.equal((await loadWorkflow('o-r-106'))?.stage, 'idle')
 
     resolved.workflow.stage = 'developing'
     resolved.workflow.devInterrupted = true
     resolved.workflow.reviewResult = { passed: false, issues: ['resume this rework'] }
-    await commitWorkflow(resolved.workflow, resolved.workflow.revision ?? null)
+    await commitWorkflowFixture(resolved.workflow, resolved.workflow.revision ?? null)
     const interrupted = await resolveReviewStartWorkflow(
       ctx as never,
       { kind: 'issue', owner: 'o', repo: 'r', number: '106' },

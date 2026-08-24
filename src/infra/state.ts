@@ -1,6 +1,6 @@
 /** Project-scoped workflow state and task-log compatibility facade. */
 import { createHash } from 'node:crypto'
-import { appendFile, mkdir, readFile, readdir, rm } from 'node:fs/promises'
+import { appendFile, link, mkdir, readFile, readdir, rm } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { isAutoRunState } from './contracts.ts'
@@ -18,10 +18,16 @@ import {
   type TaskLogKind,
   type TaskLogRead,
 } from './task-log-store.ts'
-import { commitWorkflowCommand as commitWorkflow, workflowRevision, workflowStatePath } from './workflow-persistence.ts'
+import {
+  commitWorkflowMetadataCommand,
+  type WorkflowMetadataPatch,
+  workflowRevision,
+  workflowStatePath,
+} from './workflow-persistence.ts'
 export { WorkflowConflictError } from './workflow-persistence.ts'
 export type * from './workflow-persistence.ts'
-export { commitWorkflow, workflowRevision }
+export { workflowRevision }
+export { applyDevRunOutcome, clearStaleSessionId, recordSessionId, resolveSessionForAgent } from './workflow-session.ts'
 export { issueKey } from './state-layout.ts'
 export type WorkflowStage =
   | 'idle' // 未开始开发
@@ -119,78 +125,24 @@ export interface IssueContractSnapshot {
   /** GitHub 在冻结快照时返回的 updatedAt，保留作审计证据。 */
   updatedAt: string
 }
+
+type WorkflowMetadataState = WorkflowStorageIdentity &
+  Pick<
+    IssueWorkflow,
+    'worktree' | 'branch' | 'prNumber' | 'issueState' | 'baseRef' | 'delivery' | 'issueSnapshot' | 'autoRun' | 'events'
+  >
+
+/** Persist metadata without accepting any lifecycle field or whole workflow snapshot. */
+export function commitWorkflowMetadata(
+  identity: WorkflowStorageIdentity,
+  expectedRevision: number | null,
+  patch: WorkflowMetadataPatch,
+): Promise<IssueWorkflow> {
+  return commitWorkflowMetadataCommand(identity, expectedRevision, patch)
+}
+
 export function issueBodyHash(body: string): string {
   return createHash('sha256').update(body, 'utf8').digest('hex')
-}
-
-/** Apply the durable state shared by initial-development and resumed runs. */
-export function applyDevRunOutcome(
-  workflow: IssueWorkflow,
-  status: 'running' | 'done' | 'failed' | 'stopped' | 'timed_out',
-  exitCode: number | null,
-  sessionId: string | null,
-  agent: SessionAgent,
-): boolean {
-  const completed = status === 'done' && exitCode === 0
-  workflow.stage = completed ? 'review-ready' : 'developing'
-  workflow.devInterrupted = !completed
-  // The session starts before the task completes. Keep its id even when the
-  // process is later killed or exits non-zero so recovery resumes this session.
-  recordSessionId(workflow, 'dev', sessionId, agent)
-  if (completed) workflow.reviewResult = null
-  return completed
-}
-
-/** Persist a session id together with the agent family that emitted it. */
-export function recordSessionId(
-  workflow: IssueWorkflow,
-  kind: 'dev' | 'review',
-  sessionId: string | null,
-  agent: SessionAgent,
-): void {
-  if (!sessionId) return
-  if (kind === 'dev') {
-    workflow.devSessionId = sessionId
-    workflow.devSessionAgent = agent
-  } else {
-    workflow.reviewSessionId = sessionId
-    workflow.reviewSessionAgent = agent
-  }
-}
-
-/** Validate ownership before resume; legacy/unknown/mismatched owners are stale. */
-export function resolveSessionForAgent(
-  workflow: IssueWorkflow,
-  kind: 'dev' | 'review',
-  agent: SessionAgent,
-): { sessionId: string | null; invalid: boolean } {
-  const idField = kind === 'dev' ? 'devSessionId' : 'reviewSessionId'
-  const agentField = kind === 'dev' ? 'devSessionAgent' : 'reviewSessionAgent'
-  const sessionId = workflow[idField]
-  if (!sessionId) {
-    workflow[agentField] = null
-    return { sessionId: null, invalid: false }
-  }
-  if (workflow[agentField] !== agent) {
-    workflow[idField] = null
-    workflow[agentField] = null
-    return { sessionId: null, invalid: true }
-  }
-  return { sessionId, invalid: false }
-}
-
-/** Clear only the rejected id, never a newer session captured concurrently. */
-export function clearStaleSessionId(
-  workflow: IssueWorkflow,
-  kind: 'dev' | 'review',
-  rejectedSessionId: string,
-): boolean {
-  const field = kind === 'dev' ? 'devSessionId' : 'reviewSessionId'
-  const agentField = kind === 'dev' ? 'devSessionAgent' : 'reviewSessionAgent'
-  if (workflow[field] !== rejectedSessionId) return false
-  workflow[field] = null
-  workflow[agentField] = null
-  return true
 }
 
 function normalizeWorkflow(workflow: IssueWorkflow): IssueWorkflow {
@@ -207,13 +159,26 @@ function normalizeWorkflow(workflow: IssueWorkflow): IssueWorkflow {
 
 /** Append one event to a workflow and persist. */
 export async function appendEvent(
-  workflow: IssueWorkflow,
+  workflow: WorkflowMetadataState,
   event: WorkflowEvent,
   expectedRevision: number,
 ): Promise<void> {
   workflow.events = workflow.events ?? []
   workflow.events.push(event)
-  await commitWorkflow(workflow, expectedRevision)
+  Object.assign(
+    workflow,
+    await commitWorkflowMetadata(workflow, expectedRevision, {
+      worktree: workflow.worktree,
+      branch: workflow.branch,
+      prNumber: workflow.prNumber,
+      issueState: workflow.issueState,
+      baseRef: workflow.baseRef,
+      delivery: workflow.delivery,
+      issueSnapshot: workflow.issueSnapshot,
+      autoRun: workflow.autoRun,
+      events: workflow.events,
+    }),
+  )
 }
 
 /** Derive the per-issue state directory. */
@@ -295,7 +260,10 @@ async function migrateLegacyWorkflowFile(path: string): Promise<void> {
   try {
     const existing = await readWorkflowFile(destination)
     if (existing && existing.key !== workflow.key) throw new Error('workflow migration target belongs to another issue')
-    if (!existing) await commitWorkflow(workflow, null)
+    if (!existing) {
+      await mkdir(join(destination, '..'), { recursive: true })
+      await link(path, destination)
+    }
     await rm(path)
     await migrateWorkflowLogs(workflow)
   } catch {
@@ -372,11 +340,23 @@ export async function loadAllArchivedWorkflows(): Promise<IssueWorkflow[]> {
   return workflows.sort((a, b) => b.updatedAt - a.updatedAt)
 }
 
-export async function archiveWorkflow(workflow: IssueWorkflow, expectedRevision: number): Promise<void> {
-  await commitWorkflow(workflow, expectedRevision)
+export async function archiveWorkflow(workflow: WorkflowMetadataState, expectedRevision: number): Promise<void> {
+  Object.assign(
+    workflow,
+    await commitWorkflowMetadata(workflow, expectedRevision, {
+      delivery: workflow.delivery,
+      issueState: workflow.issueState,
+      autoRun: workflow.autoRun,
+      events: workflow.events,
+    }),
+  )
 }
 
-export async function startTaskLog(workflow: IssueWorkflow, kind: TaskLogKind, taskId: string): Promise<void> {
+export async function startTaskLog(
+  workflow: WorkflowStorageIdentity,
+  kind: TaskLogKind,
+  taskId: string,
+): Promise<void> {
   try {
     await createTaskLog(stateDir(), workflow, kind, taskId)
   } catch {
@@ -385,7 +365,7 @@ export async function startTaskLog(workflow: IssueWorkflow, kind: TaskLogKind, t
 }
 
 export async function appendTaskLog(
-  workflow: IssueWorkflow,
+  workflow: WorkflowStorageIdentity,
   kind: TaskLogKind,
   taskId: string,
   sequence: number,
@@ -399,7 +379,11 @@ export async function appendTaskLog(
   }
 }
 
-export async function readTaskLog(workflow: IssueWorkflow, kind: TaskLogKind, taskId: string): Promise<TaskLogRead> {
+export async function readTaskLog(
+  workflow: WorkflowStorageIdentity,
+  kind: TaskLogKind,
+  taskId: string,
+): Promise<TaskLogRead> {
   return readTaskLogRecords(stateDir(), workflow, kind, taskId)
 }
 
@@ -409,11 +393,7 @@ export async function appendLog(key: string, kind: 'dev' | 'review', line: strin
     const workflow = await loadWorkflow(key)
     let taskId = kind === 'dev' ? workflow?.devTaskId : workflow?.reviewTaskId
     if (workflow && !taskId) {
-      taskId = `legacy-${kind}-${Date.now()}`
-      if (kind === 'dev') workflow.devTaskId = taskId
-      else workflow.reviewTaskId = taskId
-      await commitWorkflow(workflow, workflowRevision(workflow))
-      await migrateWorkflowLogs(workflow)
+      taskId = null
     }
     if (workflow && taskId) {
       await appendTaskLogNext(stateDir(), workflow, kind, taskId, line)
@@ -447,7 +427,7 @@ export async function resetLog(key: string, kind: 'dev' | 'review'): Promise<voi
 /** Read the complete durable log at an ordered snapshot boundary. */
 export async function readLogHistory(key: string, kind: 'dev' | 'review'): Promise<string[]> {
   const workflow = await loadWorkflow(key)
-  if (!workflow) {
+  const readLegacy = async (): Promise<string[]> => {
     try {
       const raw = await readFile(join(stateDir(), key, `${kind}.log`), 'utf8')
       const lines = raw.split('\n')
@@ -457,8 +437,9 @@ export async function readLogHistory(key: string, kind: 'dev' | 'review'): Promi
       return []
     }
   }
+  if (!workflow) return readLegacy()
   const taskId = kind === 'dev' ? workflow.devTaskId : workflow.reviewTaskId
-  if (!taskId) return []
+  if (!taskId) return readLegacy()
   return (await readTaskLog(workflow, kind, taskId)).encodedLines
 }
 

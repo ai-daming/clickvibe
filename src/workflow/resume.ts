@@ -81,7 +81,7 @@ export async function resumeDevelop(
     return { ok: false, error: '当前轮次未超过阈值,或没有可放弃的开发会话' }
   }
 
-  const agent = workflow.devAgent ?? 'codex'
+  const agent = workflow.autoRun?.status === 'running' ? workflow.autoRun.devAgent : (workflow.devAgent ?? 'codex')
   const ownedDevSession = freshSession
     ? { sessionId: null, invalid: false }
     : resolveSessionForAgent(structuredClone(workflow), 'dev', agent)

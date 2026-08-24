@@ -1,11 +1,18 @@
 import assert from 'node:assert/strict'
+import { commitWorkflowFixture } from './workflow-fixture.ts'
 import { mkdtemp, readdir, rm, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import test from 'node:test'
 import { createLiveTask, finishTask, waitForTaskPersistence } from '../src/agent/task-supervisor.ts'
 import { type LiveTask, liveTasks } from '../src/infra/runtime.ts'
-import { type IssueWorkflow, loadWorkflow, commitWorkflow, statePath } from '../src/infra/state.ts'
+import {
+  commitWorkflowMetadata,
+  type IssueWorkflow,
+  loadWorkflow,
+  statePath,
+  type WorkflowMetadataPatch,
+} from '../src/infra/state.ts'
 import { workflowTaskExpectation } from '../src/infra/task-ownership.ts'
 import { establishTaskClaim } from '../src/workflow/task-claim.ts'
 import { mutateLiveTaskWorkflow } from '../src/workflow/task-lease.ts'
@@ -68,7 +75,7 @@ test('stop revokes the claimed LiveTask lease even when late review code reloads
   const initial = reviewReady(tempHome)
   let live: LiveTask | null = null
   try {
-    await commitWorkflow(initial, null)
+    await commitWorkflowFixture(initial, null)
     const expectation = workflowTaskExpectation(initial)
     live = createLiveTask('review-8300-running', initial, 'review', 'codex', null)
     assert.deepEqual(
@@ -124,6 +131,17 @@ test('stop revokes the claimed LiveTask lease even when late review code reloads
     })
     assert.equal(lateVerdict.status, 'ownership-lost')
 
+    for (const forbidden of [
+      { stage: 'passed' },
+      { reviewSessionId: 'session-after-stop', reviewResult: { passed: true, issues: [] } },
+    ]) {
+      await assert.rejects(
+        () =>
+          commitWorkflowMetadata(reloaded, reloaded.revision ?? null, forbidden as unknown as WorkflowMetadataPatch),
+        /workflow metadata patch cannot write/,
+      )
+    }
+
     const persisted = (await loadWorkflow(initial.key))!
     assert.equal(persisted.stage, 'review-ready')
     assert.equal(persisted.reviewResult, null)
@@ -152,7 +170,7 @@ test('stop is an awaited chain terminator in the workflow command order', async 
       initial.key = `owner/repo/issue-command-${round}`
       initial.url = `https://github.com/owner/repo/issues/${8400 + round}`
       const taskId = `review-${8400 + round}-running`
-      await commitWorkflow(initial, null)
+      await commitWorkflowFixture(initial, null)
       const live = createLiveTask(taskId, initial, 'review', 'codex', null)
       try {
         assert.equal(
