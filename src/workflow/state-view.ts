@@ -48,7 +48,7 @@ export function githubCompareUrl(
 }
 
 export type WorkflowStageInput = 'idle' | 'developing' | 'review-ready' | 'reviewing' | 'passed'
-export type WorkflowStatus = WorkflowStageInput
+export type WorkflowStatus = WorkflowStageInput | 'interrupted'
 export type IssueContractStatus = 'current' | 'changed' | 'unknown'
 export type IssueContractUnknownReason = 'missing-review-snapshot' | 'current-contract-unavailable' | null
 
@@ -161,6 +161,10 @@ export function deriveWorkflowStatus(facts: WorkflowFacts): WorkflowStatus {
   if (facts.prMerged) return 'passed'
   // A live task outranks the linked PR and any verdict bound to an older HEAD.
   if (facts.taskRunning) return facts.stage === 'reviewing' ? 'reviewing' : 'developing'
+  // A persisted in-flight stage without its host-owned process is a recovery
+  // state, never ordinary review-ready. This is deliberately not "running":
+  // after host teardown there is no process handle that can prove liveness.
+  if (facts.stage === 'developing' || facts.stage === 'reviewing') return 'interrupted'
   // When the worktree cannot be inspected, preserve a known passing verdict
   // unless there is positive evidence of a newer commit. This matches the
   // pre-derived-state behavior without treating a known changed HEAD as current.
@@ -199,6 +203,8 @@ export function workflowStatusLabel(
       return '待 review'
     case 'reviewing':
       return 'review 中'
+    case 'interrupted':
+      return '任务已中断'
     case 'passed':
       return '✅ 已通过'
   }
@@ -290,13 +296,15 @@ export function deriveNextAction(facts: WorkflowFacts): NextAction {
     return action(
       'resume',
       '恢复开发',
-      facts.devInterrupted ? '开发曾中断,续上次 agent 会话' : '开发任务已失联(Host 重启?),尝试恢复会话',
+      facts.devInterrupted
+        ? '确认旧宿主任务已停止后,续上次 agent 会话恢复开发'
+        : '确认旧宿主任务已停止后,尝试恢复失联的开发会话',
     )
   }
   // review 中断:reviewing 但没有存活任务 → 重新 review。
   if (facts.stage === 'reviewing') {
     return reviewStart.allowed
-      ? action('review', '重新 Review', '上次 review 中断,重新审查当前代码')
+      ? action('review', '重新 Review', '确认旧宿主任务已停止后,重新审查当前代码')
       : action('none', '无', '当前事实不足以重新启动 Review')
   }
 

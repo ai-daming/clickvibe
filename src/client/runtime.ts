@@ -188,7 +188,7 @@ export function reviewVerdictView(input: ReviewVerdictInput): ReviewVerdictView 
 }
 
 export function workflowStatusLabel(
-  status: 'idle' | 'developing' | 'review-ready' | 'reviewing' | 'passed',
+  status: 'idle' | 'developing' | 'review-ready' | 'reviewing' | 'interrupted' | 'passed',
   reviewPassed: boolean | null,
   verdictCurrent: boolean | undefined,
   issueContractStatus?: 'current' | 'changed' | 'unknown',
@@ -197,6 +197,7 @@ export function workflowStatusLabel(
   if (status === 'idle') return '未开发'
   if (status === 'developing') return '开发中'
   if (status === 'reviewing') return 'review 中'
+  if (status === 'interrupted') return '任务已中断'
   if (status === 'passed') return '✅ 已通过'
   if (reviewPassed !== null && verdictCurrent === false) {
     return issueContractStatus === 'unknown' && issueContractUnknownReason === 'current-contract-unavailable'

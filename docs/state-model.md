@@ -13,6 +13,24 @@
 
 `workflow.autoRun` 同样只是可选的自动推进配置与审计缓存,不替代 git/GitHub 事实。字段缺失或结构无效时直接退回手动模式;`running` 只消费实时 `deriveNextAction`。Host 重启后若没有对应 live task,降级为 `paused / session-interrupted`,绝不从本地游标猜测下一步。轮(round)与步(step)两个计数的定义、推进规则与展示位置见 [docs/round-and-step.md](round-and-step.md)。
 
+### 宿主重启与任务恢复
+
+**操作要求:**重启 `dsh web`、更新宿主或卸载 ClickVibe 前,必须先在面板停止所有开发/Review 任务并等待状态不再显示「任务进行中」。当前 DSH 的 `shell.start()` 只返回调用进程持有的句柄;shell/subprocess 服务销毁时会终止其后台进程,不存在可跨宿主进程重启重新接管的稳定任务 ID。
+
+重启后若持久化阶段仍是 `developing` / `reviewing`,但新宿主没有对应 live task,状态必须显示「任务已中断」,不能倒退成普通「开发中」「待 review」或继续显示「任务进行中」:
+
+- 开发/返工中断:使用「恢复开发」,只在原 agent 归属匹配时续接已记录的 session;session 缺失、归属不匹配或被 agent 拒绝时按既有规则降级为同一 worktree 的全新会话。
+- Review 中断:确认旧宿主任务已经停止后使用「重新 Review」,重新审查当前 HEAD;不得沿用未物化结论的旧 Review。
+- 自动跑到底:保持 `paused / session-interrupted`,由人完成上述恢复动作或重新挂起自动跑;系统不得根据本地 step/时间戳自动双开任务。
+
+方案评估与选型:
+
+| 方案 | 可行性 | 结论 |
+|---|---|---|
+| 任务亲和重入(agent session + 原 worktree) | 当前已有 session ID、agent 归属校验与失效回退;宿主重启后可安全启动一个新进程继续 | **本期选用**;配合显式「任务已中断」状态和人工恢复动作 |
+| 宿主重启时插件接管旧任务 | 当前 shell 句柄无查询/接管 API;DSH `ctx.jobs` 也仅是进程内注册表,可覆盖同一宿主进程内的插件重载,不能跨真正的宿主重启 | 本期不实现;若后续接入 `ctx.jobs`,仅声明覆盖插件重载,不可宣称跨进程恢复 |
+| 运行探活(PID/进程扫描/agent 日志游标) | shell 契约不暴露稳定 PID;扫描命令行或看日志新鲜度既不能证明所有权,也不能安全停止/接管 | 拒绝;这会把本地游标猜测冒充运行事实 |
+
 ## 二、事实分级
 
 | 级别 | 事实 | 来源 | 获取手段 |

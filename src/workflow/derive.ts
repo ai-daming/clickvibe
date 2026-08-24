@@ -34,6 +34,7 @@ import {
   type NextAction,
   type ReviewStartDecision,
   type WorkflowFacts,
+  type WorkflowStatus,
   workflowBaseBranch,
 } from './state-view.ts'
 
@@ -71,7 +72,7 @@ export interface WorkflowDerived {
   verdictCurrent: boolean
   nextAction: NextAction
   reviewStart: ReviewStartDecision
-  status: 'idle' | 'developing' | 'review-ready' | 'reviewing' | 'passed'
+  status: WorkflowStatus
   baseBranch: string
   freshSession: FreshSessionAvailability
 }

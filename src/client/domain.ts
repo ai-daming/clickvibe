@@ -101,11 +101,13 @@ export interface Workflow {
     hasNewCommits: boolean
     verdictCurrent: boolean
     nextAction: NextAction
-    status: 'idle' | 'developing' | 'review-ready' | 'reviewing' | 'passed'
+    status: WorkflowStatus
     baseBranch: string
     freshSession: { round: number; develop: boolean; review: boolean }
   }
 }
+
+export type WorkflowStatus = Workflow['stage'] | 'interrupted'
 
 export type NextActionKind =
   | 'develop'
@@ -172,7 +174,7 @@ export function fmtTime(iso: string): string {
   }
 }
 
-export function stageLabel(stage: Workflow['stage'], workflow: Workflow | null): string {
+export function stageLabel(stage: WorkflowStatus, workflow: Workflow | null): string {
   return workflowStatusLabel(
     stage,
     workflow?.reviewResult?.passed ?? null,
