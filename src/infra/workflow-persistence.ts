@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { link, mkdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { IssueWorkflow } from './state.ts'
@@ -40,24 +40,59 @@ export function workflowStatePath(workflow: WorkflowStorageIdentity): string {
   return workflowPath(join(homedir(), '.clickvibe', 'state'), workflow)
 }
 
-const queueSymbol = Symbol.for('clickvibe.workflow-write-queues')
-type QueueGlobal = typeof globalThis & { [queueSymbol]?: Map<string, Promise<void>> }
-const queueGlobal = globalThis as QueueGlobal
-if (!queueGlobal[queueSymbol]) queueGlobal[queueSymbol] = new Map()
-const writeQueues = queueGlobal[queueSymbol]
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH'
+  }
+}
+
+async function recoverDeadLock(lockPath: string): Promise<void> {
+  try {
+    const owner = JSON.parse(await readFile(lockPath, 'utf8')) as { pid: number; token: string }
+    if (!owner.token || processAlive(owner.pid)) return
+    // A token-specific hard link is an atomic recovery claim. Only its creator
+    // may unlink the stale lock, so a competing recovery cannot remove a new lock.
+    await link(lockPath, `${lockPath}.stale-${owner.token}`)
+    await unlink(lockPath)
+  } catch {
+    // The owner is alive, another process recovered it, or the lock disappeared.
+  }
+}
+
+async function acquireLock(path: string): Promise<() => Promise<void>> {
+  const lockPath = `${path}.lock`
+  const token = `${process.pid}-${randomBytes(8).toString('hex')}`
+  const candidate = `${lockPath}.${token}.candidate`
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(candidate, JSON.stringify({ pid: process.pid, token }), 'utf8')
+  const deadline = Date.now() + 10_000
+  try {
+    while (true) {
+      try {
+        await link(candidate, lockPath)
+        return () => unlink(lockPath).catch(() => undefined)
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        if (code !== 'EEXIST') throw error
+        await recoverDeadLock(lockPath)
+        if (Date.now() >= deadline) throw new Error(`workflow lock timeout: ${path}`)
+        await new Promise<void>((resolve) => setTimeout(resolve, 5))
+      }
+    }
+  } finally {
+    await unlink(candidate).catch(() => undefined)
+  }
+}
 
 async function serialize<T>(path: string, operation: () => Promise<T>): Promise<T> {
-  const previous = writeQueues.get(path) ?? Promise.resolve()
-  const result = previous.catch(() => undefined).then(operation)
-  const settled = result.then(
-    () => undefined,
-    () => undefined,
-  )
-  writeQueues.set(path, settled)
+  const release = await acquireLock(path)
   try {
-    return await result
+    return await operation()
   } finally {
-    if (writeQueues.get(path) === settled) writeQueues.delete(path)
+    await release()
   }
 }
 

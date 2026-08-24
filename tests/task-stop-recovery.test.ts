@@ -10,23 +10,20 @@ import type { IssueWorkflow } from '../src/infra/state.ts'
 import { loadAllArchivedWorkflows, loadWorkflow, saveWorkflow, startTaskLog } from '../src/infra/state.ts'
 import { stopTask } from '../src/workflow/task-api.ts'
 
-test('stop API requires explicit confirmation before releasing an unknown legacy task', async () => {
-  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-stop-legacy-'))
-  const previousHome = process.env.HOME
-  process.env.HOME = tempHome
-  const workflow: IssueWorkflow = {
+function workflowFixture(home: string, overrides: Partial<IssueWorkflow> = {}): IssueWorkflow {
+  return {
     key: 'owner-repo-111',
     url: 'https://github.com/owner/repo/issues/111',
     repoKey: 'owner/repo',
-    worktree: tempHome,
+    worktree: home,
     branch: 'clickvibe-issue-111',
     stage: 'developing',
     devAgent: 'codex',
-    devTaskId: 'dev-1-legacy',
-    devSessionId: 'legacy-session',
+    devTaskId: 'dev-1-current',
+    devSessionId: 'dev-session',
     devSessionAgent: 'codex',
     devInterrupted: false,
-    reviewAgent: null,
+    reviewAgent: 'codex',
     reviewTaskId: null,
     reviewSessionId: null,
     reviewSessionAgent: null,
@@ -36,7 +33,19 @@ test('stop API requires explicit confirmation before releasing an unknown legacy
     baseRef: 'origin/main @ 82e55b2',
     updatedAt: Date.now(),
     events: [],
+    ...overrides,
   }
+}
+
+test('stop API requires explicit confirmation before releasing an unknown legacy task', async () => {
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-stop-legacy-'))
+  const previousHome = process.env.HOME
+  process.env.HOME = tempHome
+  const workflow = workflowFixture(tempHome, {
+    devTaskId: 'dev-1-legacy',
+    devSessionId: 'legacy-session',
+    reviewAgent: null,
+  })
   try {
     await saveWorkflow(workflow)
     const blocked = await stopTask(
@@ -93,29 +102,16 @@ test('stop API rejects a stale unknown-task confirmation after review became cur
   const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-stop-current-task-'))
   const previousHome = process.env.HOME
   process.env.HOME = tempHome
-  const workflow: IssueWorkflow = {
+  const workflow = workflowFixture(tempHome, {
     key: 'owner-repo-111-current',
-    url: 'https://github.com/owner/repo/issues/111',
-    repoKey: 'owner/repo',
-    worktree: tempHome,
-    branch: 'clickvibe-issue-111',
     stage: 'passed',
-    devAgent: 'codex',
     devTaskId: 'dev-1000-old',
     devSessionId: 'legacy-session',
-    devSessionAgent: 'codex',
-    devInterrupted: false,
-    reviewAgent: 'codex',
     reviewTaskId: 'review-2000-current',
     reviewSessionId: 'review-session',
     reviewSessionAgent: 'codex',
     reviewResult: { passed: true, issues: [] },
-    prNumber: '114',
-    issueState: 'OPEN',
-    baseRef: 'origin/main @ 82e55b2',
-    updatedAt: Date.now(),
-    events: [],
-  }
+  })
   const registryOffline = {
     jobs: {
       list(): never {
@@ -160,30 +156,12 @@ test('stop API cannot use stale history to kill the current running task of the 
   const staleTaskId = 'dev-2000-stale'
   const currentTaskId = 'dev-3000-current'
   const currentHostJobId = 'job-dev-current'
-  const workflow: IssueWorkflow = {
+  const workflow = workflowFixture(tempHome, {
     key: 'owner-repo-111-running',
-    url: 'https://github.com/owner/repo/issues/111',
-    repoKey: 'owner/repo',
-    worktree: tempHome,
-    branch: 'clickvibe-issue-111',
-    stage: 'developing',
-    devAgent: 'codex',
     devTaskId: currentTaskId,
     devHostJobId: currentHostJobId,
     devSessionId: 'current-session',
-    devSessionAgent: 'codex',
-    devInterrupted: false,
-    reviewAgent: 'codex',
-    reviewTaskId: null,
-    reviewSessionId: null,
-    reviewSessionAgent: null,
-    reviewResult: null,
-    prNumber: '114',
-    issueState: 'OPEN',
-    baseRef: 'origin/main @ 82e55b2',
-    updatedAt: Date.now(),
-    events: [],
-  }
+  })
   const killed: string[] = []
   const currentJob = {
     id: currentHostJobId,
@@ -251,31 +229,16 @@ test('stop API binds host-terminal interruption to the current task in both kind
   try {
     for (const scenario of scenarios) {
       const currentHostJobId = `job-${scenario.currentTaskId}`
-      const workflow: IssueWorkflow = {
+      const workflow = workflowFixture(tempHome, {
         key: `owner-repo-111-${scenario.name}`,
-        url: 'https://github.com/owner/repo/issues/111',
-        repoKey: 'owner/repo',
-        worktree: tempHome,
-        branch: 'clickvibe-issue-111',
         stage: scenario.stage,
-        devAgent: 'codex',
         devTaskId: scenario.currentKind === 'dev' ? scenario.currentTaskId : scenario.staleTaskId,
         devHostJobId: scenario.currentKind === 'dev' ? currentHostJobId : null,
-        devSessionId: 'dev-session',
-        devSessionAgent: 'codex',
-        devInterrupted: false,
-        reviewAgent: 'codex',
         reviewTaskId: scenario.currentKind === 'review' ? scenario.currentTaskId : scenario.staleTaskId,
         reviewHostJobId: scenario.currentKind === 'review' ? currentHostJobId : null,
         reviewSessionId: 'review-session',
         reviewSessionAgent: 'codex',
-        reviewResult: null,
-        prNumber: '114',
-        issueState: 'OPEN',
-        baseRef: 'origin/main @ 82e55b2',
-        updatedAt: Date.now(),
-        events: [],
-      }
+      })
       const terminalJob = {
         id: currentHostJobId,
         kind: 'clickvibe-agent',
@@ -318,29 +281,14 @@ test('stop API binds an explicit interrupted outcome to the current development 
   const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-stop-explicit-current-'))
   const previousHome = process.env.HOME
   process.env.HOME = tempHome
-  const workflow: IssueWorkflow = {
+  const workflow = workflowFixture(tempHome, {
     key: 'owner-repo-111-explicit-current',
-    url: 'https://github.com/owner/repo/issues/111',
-    repoKey: 'owner/repo',
-    worktree: tempHome,
-    branch: 'clickvibe-issue-111',
-    stage: 'developing',
-    devAgent: 'codex',
     devTaskId: 'dev-5000-current',
-    devSessionId: 'dev-session',
-    devSessionAgent: 'codex',
     devInterrupted: true,
-    reviewAgent: 'codex',
     reviewTaskId: 'review-4000-stale',
     reviewSessionId: 'review-session',
     reviewSessionAgent: 'codex',
-    reviewResult: null,
-    prNumber: '114',
-    issueState: 'OPEN',
-    baseRef: 'origin/main @ 82e55b2',
-    updatedAt: Date.now(),
-    events: [],
-  }
+  })
   try {
     await saveWorkflow(workflow)
     const stale = await stopTask({} as never, { taskId: workflow.reviewTaskId, confirmedStopped: true })
@@ -365,29 +313,12 @@ test('stopping a stale local task cannot overwrite the current task generation',
   process.env.HOME = tempHome
   const staleTaskId = 'dev-6000-stale'
   const currentTaskId = 'dev-7000-current'
-  const workflow: IssueWorkflow = {
+  const workflow = workflowFixture(tempHome, {
     key: 'owner-repo-111-local-current',
-    url: 'https://github.com/owner/repo/issues/111',
-    repoKey: 'owner/repo',
-    worktree: tempHome,
-    branch: 'clickvibe-issue-111',
-    stage: 'developing',
-    devAgent: 'codex',
     devTaskId: currentTaskId,
     devSessionId: 'current-session',
-    devSessionAgent: 'codex',
-    devInterrupted: false,
     reviewAgent: null,
-    reviewTaskId: null,
-    reviewSessionId: null,
-    reviewSessionAgent: null,
-    reviewResult: null,
-    prNumber: '114',
-    issueState: 'OPEN',
-    baseRef: 'origin/main @ 82e55b2',
-    updatedAt: Date.now(),
-    events: [],
-  }
+  })
   let killed = false
   try {
     await saveWorkflow(workflow)
@@ -436,29 +367,15 @@ test('historical task data cannot mutate an archived workflow', async () => {
   const previousHome = process.env.HOME
   process.env.HOME = tempHome
   const taskId = 'review-8000-history-only'
-  const workflow: IssueWorkflow = {
+  const workflow = workflowFixture(tempHome, {
     key: 'owner-repo-111-history-only',
-    url: 'https://github.com/owner/repo/issues/111',
-    repoKey: 'owner/repo',
-    worktree: tempHome,
-    branch: 'clickvibe-issue-111',
     stage: 'reviewing',
-    devAgent: 'codex',
     devTaskId: 'dev-7000-complete',
     devSessionId: 'history-session',
-    devSessionAgent: 'codex',
-    devInterrupted: false,
-    reviewAgent: 'codex',
     reviewTaskId: taskId,
     reviewHostJobId: 'job-history-only',
     reviewSessionId: 'review-session',
     reviewSessionAgent: 'codex',
-    reviewResult: null,
-    prNumber: '114',
-    issueState: 'OPEN',
-    baseRef: 'origin/main @ 82e55b2',
-    updatedAt: Date.now(),
-    events: [],
     delivery: {
       status: 'archived',
       mergedAt: new Date().toISOString(),
@@ -466,7 +383,7 @@ test('historical task data cannot mutate an archived workflow', async () => {
       mergeStrategy: 'merge',
       cleanup: { worktree: true, localBranch: true, remoteBranch: true, issue: true },
     },
-  }
+  })
   const killed: string[] = []
   try {
     await saveWorkflow(workflow)
