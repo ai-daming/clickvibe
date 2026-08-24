@@ -81,7 +81,7 @@ ClickVibe 是一个 DSH Web 插件:右侧面板把 GitHub issue 变成「开发 
 
 ## 5. 工程流程与门禁
 
-- 本地交付链:`pnpm install && pnpm run typecheck && pnpm run build && pnpm test`,再跑覆盖率(≥85%)、`pnpm run lint`(biome)、`pnpm run check:size`(行数门禁);四者全绿才算完成。
+- 本地交付链:`pnpm install && pnpm run typecheck && pnpm run build && pnpm test`,再跑覆盖率(≥85%)、`pnpm run lint`(biome)、`pnpm run check:size`(行数门禁)、`pnpm run check:state-writes`(状态写入边界门禁,见 §2.5);全部全绿才算完成。
 - 覆盖率命令(以仓库实际 node 版本为准,门禁 PR 固化):
   - node ≥22:`node --experimental-test-coverage --test tests/*.test.ts`(报告);
   - node 23+/24 LTS 阈值硬门禁:`node --test --test-coverage --test-coverage-statements=85 --test-coverage-branches=85 --test-coverage-functions=85 --test-coverage-lines=85 tests/*.test.ts`。
