@@ -103,7 +103,7 @@ test('review start recovers a missing workflow from matching branch, commit, and
     resolved.workflow.stage = 'developing'
     resolved.workflow.devInterrupted = true
     resolved.workflow.reviewResult = { passed: false, issues: ['resume this rework'] }
-    await saveWorkflow(resolved.workflow)
+    await saveWorkflow(resolved.workflow, resolved.workflow.revision ?? null)
     const interrupted = await resolveReviewStartWorkflow(
       ctx as never,
       { kind: 'issue', owner: 'o', repo: 'r', number: '106' },

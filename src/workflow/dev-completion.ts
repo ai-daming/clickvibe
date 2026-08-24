@@ -11,7 +11,7 @@ export async function finalizeDevRun(
   deliver: () => Promise<void>,
 ): Promise<boolean> {
   const completed = applyDevRunOutcome(workflow, status, exitCode, sessionId, agent)
-  if (!(await saveWorkflowForTask(workflow, { kind: 'dev', taskId }))) return false
+  if (!(await saveWorkflowForTask(workflow, { kind: 'dev', taskId }, workflow.revision ?? 0))) return false
   if (completed) await deliver()
   return completed
 }

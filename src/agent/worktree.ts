@@ -23,7 +23,15 @@ import { basename, dirname, join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { buildWorktreeAddCommand, decideWorktreeRecovery, shellQuote } from '../infra/develop-core.ts'
 import { expandHome, loadConfig, runCommand } from '../infra/runtime.ts'
-import { appendLog, type IssueWorkflow, issueKey, loadWorkflow, saveWorkflow } from '../infra/state.ts'
+import {
+  appendLog,
+  type IssueWorkflow,
+  issueKey,
+  loadWorkflow,
+  saveWorkflow,
+  WorkflowConflictError,
+  workflowRevision,
+} from '../infra/state.ts'
 
 /** Create (or reuse) the workflow record and the worktree+branch. */
 export async function ensureWorktree(
@@ -211,7 +219,17 @@ export async function ensureWorktree(
     await appendLog(workflow.key, 'dev', `[clickvibe] 开发基线: ${workflow.baseRef}`)
   }
 
-  await saveWorkflow(workflow)
+  try {
+    await saveWorkflow(workflow, workflowRevision(workflow))
+  } catch (error) {
+    return {
+      ok: false,
+      error:
+        error instanceof WorkflowConflictError
+          ? 'Workflow 已由另一控制器推进,请刷新后重试'
+          : `Workflow 持久化失败:${String(error instanceof Error ? error.message : error)}`,
+    }
+  }
   return { ok: true, workflow, worktree, branch }
 }
 

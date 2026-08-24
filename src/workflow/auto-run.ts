@@ -3,7 +3,14 @@ import { ensureWorktree } from '../agent/worktree.ts'
 import { fetchIssue, issueSnapshot } from '../github/issue.ts'
 import { type IssuePromptSnapshot } from '../infra/develop-core.ts'
 import { liveTasks, parseUrl } from '../infra/runtime.ts'
-import { appendEvent, type AutoRunPausedReason, issueKey, loadWorkflow, saveWorkflow } from '../infra/state.ts'
+import {
+  appendEvent,
+  type AutoRunPausedReason,
+  issueKey,
+  loadWorkflow,
+  saveWorkflow,
+  workflowRevision,
+} from '../infra/state.ts'
 import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
 import { observeWorkflowTask, type TaskOwnershipContext } from '../infra/task-ownership.ts'
 import { createPullRequest } from './create-pr.ts'
@@ -49,7 +56,7 @@ async function persistDecision(key: string, decision: Exclude<AutoRunDecision, {
   workflow.autoRun.unresolved = decision.unresolved
   if (decision.kind === 'trigger') workflow.autoRun.step = decision.step
   workflow.autoRun.lastObservedAt = new Date().toISOString()
-  await saveWorkflow(workflow)
+  await saveWorkflow(workflow, workflowRevision(workflow))
 }
 
 async function pauseAutoRun(key: string, reason: AutoRunPausedReason): Promise<void> {
@@ -67,13 +74,17 @@ async function pauseAutoRun(key: string, reason: AutoRunPausedReason): Promise<v
   workflow.autoRun.status = 'paused'
   workflow.autoRun.pausedReason = reason
   workflow.autoRun.lastObservedAt = new Date().toISOString()
-  await appendEvent(workflow, {
-    kind: 'auto-run',
-    at: new Date().toISOString(),
-    round: workflow.autoRun.rounds,
-    step: workflow.autoRun.step,
-    note: `自动跑到底已暂停:${reason}`,
-  })
+  await appendEvent(
+    workflow,
+    {
+      kind: 'auto-run',
+      at: new Date().toISOString(),
+      round: workflow.autoRun.rounds,
+      step: workflow.autoRun.step,
+      note: `自动跑到底已暂停:${reason}`,
+    },
+    workflowRevision(workflow) ?? 0,
+  )
   clearDeadline(key)
   clearObservation(key)
 }
@@ -83,13 +94,17 @@ async function completeAutoRun(key: string): Promise<void> {
   if (!workflow?.autoRun || workflow.autoRun.status !== 'running') return
   workflow.autoRun.status = 'completed'
   workflow.autoRun.pausedReason = null
-  await appendEvent(workflow, {
-    kind: 'auto-run',
-    at: new Date().toISOString(),
-    round: workflow.autoRun.rounds,
-    step: workflow.autoRun.step,
-    note: '自动跑到底已收敛,等待人工合并',
-  })
+  await appendEvent(
+    workflow,
+    {
+      kind: 'auto-run',
+      at: new Date().toISOString(),
+      round: workflow.autoRun.rounds,
+      step: workflow.autoRun.step,
+      note: '自动跑到底已收敛,等待人工合并',
+    },
+    workflowRevision(workflow) ?? 0,
+  )
   clearDeadline(key)
   clearObservation(key)
 }
@@ -181,7 +196,7 @@ async function applyDecision(ctx: Context, key: string, decision: AutoRunDecisio
       break
     case 'rework':
       workflow.devAgent = workflow.autoRun.devAgent
-      await saveWorkflow(workflow)
+      await saveWorkflow(workflow, workflowRevision(workflow))
       result = await resumeDevelop(ctx, { url: workflow.url })
       break
     case 'sync':
@@ -294,7 +309,11 @@ export async function startAutoRun(
     lastObservedAt: null,
     pausedReason: null,
   }
-  await appendEvent(ensured.workflow, { kind: 'auto-run', at: startedAt, round: 0, note: '自动跑到底已启动' })
+  await appendEvent(
+    ensured.workflow,
+    { kind: 'auto-run', at: startedAt, round: 0, note: '自动跑到底已启动' },
+    workflowRevision(ensured.workflow) ?? 0,
+  )
   armDeadline(key, ensured.workflow.autoRun.deadline)
   requestAutoRunReconcile(ctx, key)
   return { ok: true, workflowKey: key }

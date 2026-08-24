@@ -49,5 +49,5 @@ export async function publishDeliveryComment(
       `[clickvibe] GitHub 评论发布失败: ${message}`,
     )
   }
-  return saveWorkflowForTask(workflow, expectedTask)
+  return saveWorkflowForTask(workflow, expectedTask, workflow.revision ?? 0)
 }

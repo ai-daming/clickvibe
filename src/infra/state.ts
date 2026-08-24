@@ -19,13 +19,15 @@ import {
   type TaskLogRead,
 } from './task-log-store.ts'
 import {
+  claimWorkflowTaskState as claimWorkflowTask,
   saveWorkflowState as saveWorkflow,
   saveWorkflowStateForTask as saveWorkflowForTask,
-  saveWorkflowStateStrict as saveWorkflowStrict,
+  workflowRevision,
   workflowStatePath,
 } from './workflow-persistence.ts'
-export type { WorkflowTaskCredential } from './workflow-persistence.ts'
-export { saveWorkflow, saveWorkflowForTask, saveWorkflowStrict }
+export { WorkflowConflictError } from './workflow-persistence.ts'
+export type { WorkflowTaskClaim, WorkflowTaskCredential } from './workflow-persistence.ts'
+export { claimWorkflowTask, saveWorkflow, saveWorkflowForTask, workflowRevision }
 export { issueKey } from './state-layout.ts'
 export type WorkflowStage =
   | 'idle' // 未开始开发
@@ -79,6 +81,8 @@ export interface IssueWorkflow {
   issueSnapshot?: PromptSnapshot
   /** Optional controller cache; missing or invalid state never blocks manual actions. */
   autoRun?: AutoRunState
+  /** Durable compare-and-swap token. Missing legacy values normalize to zero. */
+  revision?: number
   updatedAt: number
   /** 完整历史事件链:每次开发提交/review/恢复各一条,按时间追加。 */
   events: WorkflowEvent[]
@@ -202,14 +206,19 @@ function normalizeWorkflow(workflow: IssueWorkflow): IssueWorkflow {
   if (!workflow.devSessionId) workflow.devSessionAgent = null
   if (!workflow.reviewSessionId) workflow.reviewSessionAgent = null
   if (!isAutoRunState(workflow.autoRun)) delete workflow.autoRun
+  if (workflow.revision === undefined) workflow.revision = 0
   return workflow
 }
 
 /** Append one event to a workflow and persist. */
-export async function appendEvent(workflow: IssueWorkflow, event: WorkflowEvent): Promise<void> {
+export async function appendEvent(
+  workflow: IssueWorkflow,
+  event: WorkflowEvent,
+  expectedRevision: number,
+): Promise<void> {
   workflow.events = workflow.events ?? []
   workflow.events.push(event)
-  await saveWorkflow(workflow)
+  await saveWorkflow(workflow, expectedRevision)
 }
 
 /** Derive the per-issue state directory. */
@@ -291,7 +300,7 @@ async function migrateLegacyWorkflowFile(path: string): Promise<void> {
   try {
     const existing = await readWorkflowFile(destination)
     if (existing && existing.key !== workflow.key) throw new Error('workflow migration target belongs to another issue')
-    if (!existing) await saveWorkflowStrict(workflow)
+    if (!existing) await saveWorkflow(workflow, null)
     await rm(path)
     await migrateWorkflowLogs(workflow)
   } catch {
@@ -368,8 +377,8 @@ export async function loadAllArchivedWorkflows(): Promise<IssueWorkflow[]> {
   return workflows.sort((a, b) => b.updatedAt - a.updatedAt)
 }
 
-export async function archiveWorkflow(workflow: IssueWorkflow): Promise<void> {
-  await saveWorkflowStrict(workflow)
+export async function archiveWorkflow(workflow: IssueWorkflow, expectedRevision: number): Promise<void> {
+  await saveWorkflow(workflow, expectedRevision)
 }
 
 export async function startTaskLog(workflow: IssueWorkflow, kind: TaskLogKind, taskId: string): Promise<void> {
@@ -408,7 +417,7 @@ export async function appendLog(key: string, kind: 'dev' | 'review', line: strin
       taskId = `legacy-${kind}-${Date.now()}`
       if (kind === 'dev') workflow.devTaskId = taskId
       else workflow.reviewTaskId = taskId
-      await saveWorkflow(workflow)
+      await saveWorkflow(workflow, workflowRevision(workflow))
       await migrateWorkflowLogs(workflow)
     }
     if (workflow && taskId) {

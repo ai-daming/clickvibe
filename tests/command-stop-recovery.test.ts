@@ -58,7 +58,8 @@ test('stop command explicitly confirms task-unknown dev and review through the s
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
     await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), `repos:\n  o/r: ${join(tempHome, 'repo')}\n`)
     const key = issueKey('o/r', '111')
-    await saveWorkflow(workflowFixture(key, tempHome))
+    const workflow = workflowFixture(key, tempHome)
+    await saveWorkflow(workflow, null)
 
     const preview = await runCommand({ command: 'stop #111' })
     assert.equal(preview.status, 200, JSON.stringify(preview.body))
@@ -76,7 +77,7 @@ test('stop command explicitly confirms task-unknown dev and review through the s
     if (!recovered) throw new Error('workflow missing after development confirmation')
     recovered.stage = 'reviewing'
     recovered.reviewTaskId = 'review-2000-legacy'
-    await saveWorkflow(recovered)
+    await saveWorkflow(recovered, recovered.revision ?? null)
     const reviewPreview = await runCommand({ command: 'stop #111' })
     assert.equal(reviewPreview.body.needsConfirmation, true)
     assert.equal(reviewPreview.body.taskId, 'review-2000-legacy')
@@ -90,7 +91,7 @@ test('stop command explicitly confirms task-unknown dev and review through the s
     settling.devTaskId = 'dev-3000-settling'
     settling.devHostJobId = 'host-dev-3000'
     settling.devInterrupted = false
-    await saveWorkflow(settling)
+    await saveWorkflow(settling, settling.revision ?? null)
     const registryOffline = {
       jobs: {
         list(): never {

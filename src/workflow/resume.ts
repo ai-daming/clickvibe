@@ -34,11 +34,11 @@ import {
   issueKey,
   loadWorkflow,
   resolveSessionForAgent,
-  saveWorkflow,
   saveWorkflowForTask,
 } from '../infra/state.ts'
 import { observeWorkflowTask, taskLaunchDecision, type TaskOwnershipContext } from '../infra/task-ownership.ts'
-import { recordDevDelivery } from './review-flow.ts'
+import { recordDevDelivery } from './dev-delivery.ts'
+import { establishTaskClaim } from './task-claim.ts'
 import { finalizeDevRun } from './dev-completion.ts'
 import { deriveFreshSessionAvailability, selectSessionLaunch } from './fresh-session.ts'
 import { workflowBaseBranch } from './state-view.ts'
@@ -109,11 +109,6 @@ export async function resumeDevelop(
     finishTask(live, 'failed', 1)
     return { ok: false, error: resolvedSnapshot.error }
   }
-  workflow.devTaskId = live.taskId
-  workflow.devHostJobId = null
-  workflow.devInterrupted = false
-  workflow.stage = 'developing'
-  await saveWorkflow(workflow)
   if (ownedDevSession.invalid) {
     pushTaskLine(live, '[clickvibe] dev sessionId 归属缺失或与当前 agent 不一致,已清除并启动全新会话')
   }
@@ -146,8 +141,6 @@ export async function resumeDevelop(
     hostReservation = reserveHostTask(ctx, live)
   } catch (error) {
     finishTask(live, 'failed', 1)
-    workflow.devInterrupted = true
-    await saveWorkflowForTask(workflow, { kind: 'dev', taskId: live.taskId })
     return {
       ok: false,
       error: `宿主任务占位失败:${String(error instanceof Error ? error.message : error)}`,
@@ -158,8 +151,20 @@ export async function resumeDevelop(
     finishTask(live, 'stopped', null)
     return { ok: true, taskId: hostReservation.taskId }
   }
-  workflow.devHostJobId = hostReservation.hostJobId
-  await saveWorkflow(workflow)
+  const claim = await establishTaskClaim(workflow, live, {
+    kind: 'dev',
+    taskId: live.taskId,
+    hostJobId: hostReservation.hostJobId,
+    agent,
+  })
+  if (!claim.ok) {
+    return {
+      ok: false,
+      error: `建立开发任务所有权失败:${claim.error}`,
+      controllerError: true,
+    }
+  }
+  if (!claim.claimed) return { ok: true, taskId: claim.taskId }
 
   pushTaskLine(
     live,
@@ -205,7 +210,11 @@ export async function resumeDevelop(
             const reloaded = await loadWorkflow(workflow.key)
             if (!reloaded) throw new Error('开发 workflow 不存在,不再启动会话回退')
             clearStaleSessionId(reloaded, 'dev', sessionId)
-            const saved = await saveWorkflowForTask(reloaded, { kind: 'dev', taskId: live.taskId })
+            const saved = await saveWorkflowForTask(
+              reloaded,
+              { kind: 'dev', taskId: live.taskId },
+              reloaded.revision ?? 0,
+            )
             if (!saved) throw new Error('旧开发任务已被新代替换,不再启动会话回退')
             const fallbackPrompt = await buildResumePrompt(
               ctx,

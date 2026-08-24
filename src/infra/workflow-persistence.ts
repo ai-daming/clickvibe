@@ -10,6 +10,21 @@ export interface WorkflowTaskCredential {
   taskId: string
 }
 
+export interface WorkflowTaskClaim extends WorkflowTaskCredential {
+  agent: 'codex' | 'claude'
+  hostJobId: string | null
+}
+
+export class WorkflowConflictError extends Error {
+  readonly currentRevision: number | null
+
+  constructor(currentRevision: number | null) {
+    super('workflow revision conflict')
+    this.name = 'WorkflowConflictError'
+    this.currentRevision = currentRevision
+  }
+}
+
 type OwnershipFields = Pick<IssueWorkflow, 'stage' | 'devTaskId' | 'reviewTaskId'>
 
 function taskSequence(taskId: string): number {
@@ -34,6 +49,10 @@ export function currentWorkflowTaskRef(workflow: OwnershipFields): WorkflowTaskC
 function ownsCurrentTask(workflow: OwnershipFields, credential: WorkflowTaskCredential): boolean {
   const current = currentWorkflowTaskRef(workflow)
   return current?.kind === credential.kind && current.taskId === credential.taskId
+}
+
+export function workflowRevision(workflow: Pick<IssueWorkflow, 'revision'>): number | null {
+  return workflow.revision ?? null
 }
 
 export function workflowStatePath(workflow: WorkflowStorageIdentity): string {
@@ -87,18 +106,25 @@ async function acquireLock(path: string): Promise<() => Promise<void>> {
   }
 }
 
-async function serialize<T>(path: string, operation: () => Promise<T>): Promise<T> {
-  const release = await acquireLock(path)
+function storedRevision(workflow: IssueWorkflow): number {
+  if (workflow.revision === undefined) return 0
+  if (!Number.isSafeInteger(workflow.revision) || workflow.revision < 0) {
+    throw new Error('invalid workflow revision')
+  }
+  return workflow.revision
+}
+
+async function readCurrent(path: string): Promise<IssueWorkflow | null> {
   try {
-    return await operation()
-  } finally {
-    await release()
+    return JSON.parse(await readFile(path, 'utf8')) as IssueWorkflow
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
   }
 }
 
 async function atomicWrite(path: string, workflow: IssueWorkflow): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
-  workflow.updatedAt = Date.now()
   const temporary = `${path}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`
   try {
     await writeFile(temporary, JSON.stringify(workflow, null, 2), { encoding: 'utf8', mode: 0o600 })
@@ -108,30 +134,66 @@ async function atomicWrite(path: string, workflow: IssueWorkflow): Promise<void>
   }
 }
 
-export async function saveWorkflowStateStrict(workflow: IssueWorkflow): Promise<void> {
+async function conditionalCommit(
+  workflow: IssueWorkflow,
+  expectedRevision: number | null,
+  task?: WorkflowTaskCredential,
+): Promise<{ committed: true } | { committed: false; currentRevision: number | null }> {
   const path = workflowStatePath(workflow)
-  await serialize(path, () => atomicWrite(path, workflow))
+  const release = await acquireLock(path)
+  try {
+    const current = await readCurrent(path)
+    const currentRevision = current ? storedRevision(current) : null
+    if (currentRevision !== expectedRevision || (task && (!current || !ownsCurrentTask(current, task)))) {
+      return { committed: false, currentRevision }
+    }
+    const next = {
+      ...workflow,
+      revision: (currentRevision ?? 0) + 1,
+      updatedAt: Date.now(),
+    }
+    await atomicWrite(path, next)
+    Object.assign(workflow, next)
+    return { committed: true }
+  } finally {
+    await release()
+  }
 }
 
-export async function saveWorkflowState(workflow: IssueWorkflow): Promise<void> {
-  await saveWorkflowStateStrict(workflow).catch(() => undefined)
+/** Commit one snapshot only if its durable revision is still current. */
+export async function saveWorkflowState(workflow: IssueWorkflow, expectedRevision: number | null): Promise<void> {
+  const result = await conditionalCommit(workflow, expectedRevision)
+  if (!result.committed) throw new WorkflowConflictError(result.currentRevision)
 }
 
-/** Validate the task capability after taking the per-workflow lock, then atomically commit. */
+/** Establish one complete task generation; no intermediate owner can be persisted. */
+export async function claimWorkflowTaskState(
+  workflow: IssueWorkflow,
+  claim: WorkflowTaskClaim,
+  expectedRevision: number | null,
+): Promise<void> {
+  const next: IssueWorkflow = { ...workflow }
+  if (claim.kind === 'dev') {
+    next.devAgent = claim.agent
+    next.devTaskId = claim.taskId
+    next.devHostJobId = claim.hostJobId
+    next.devInterrupted = false
+    next.stage = 'developing'
+  } else {
+    next.reviewAgent = claim.agent
+    next.reviewTaskId = claim.taskId
+    next.reviewHostJobId = claim.hostJobId
+    next.stage = 'reviewing'
+  }
+  await saveWorkflowState(next, expectedRevision)
+  Object.assign(workflow, next)
+}
+
+/** A false result means only capability/revision conflict; persistence errors throw. */
 export async function saveWorkflowStateForTask(
   workflow: IssueWorkflow,
   credential: WorkflowTaskCredential,
+  expectedRevision: number,
 ): Promise<boolean> {
-  const path = workflowStatePath(workflow)
-  return serialize(path, async () => {
-    let current: IssueWorkflow
-    try {
-      current = JSON.parse(await readFile(path, 'utf8')) as IssueWorkflow
-    } catch {
-      return false
-    }
-    if (!ownsCurrentTask(current, credential)) return false
-    await atomicWrite(path, workflow)
-    return true
-  }).catch(() => false)
+  return (await conditionalCommit(workflow, expectedRevision, credential)).committed
 }

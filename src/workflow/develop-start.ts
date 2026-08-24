@@ -48,7 +48,7 @@ import {
   runCommand,
   taskId,
 } from '../infra/runtime.ts'
-import { type IssueWorkflow, issueKey, loadWorkflow, saveWorkflow, saveWorkflowForTask } from '../infra/state.ts'
+import { type IssueWorkflow, issueKey, loadWorkflow, saveWorkflowForTask } from '../infra/state.ts'
 import { observeWorkflowTask, taskLaunchDecision, type TaskOwnershipContext } from '../infra/task-ownership.ts'
 import { deriveAutoDevelopment } from './auto-development.ts'
 import { deriveDevelopmentEventKind } from './delivery-audit.ts'
@@ -56,7 +56,8 @@ import { finalizeDevRun } from './dev-completion.ts'
 import { deriveWorkflowState } from './derive.ts'
 import { checkIssueContract } from './issue-contract.ts'
 import { firstDevelopmentFor } from './repository-state.ts'
-import { recordDevDelivery } from './review-flow.ts'
+import { recordDevDelivery } from './dev-delivery.ts'
+import { establishTaskClaim } from './task-claim.ts'
 import { notifyAutoRunCompletion } from './auto-run-signal.ts'
 
 export async function resolveAutomaticFirstDevelopment(
@@ -284,12 +285,22 @@ export async function startDevelop(
   }
   // LiveTask creation opened a new immutable JSONL generation. Previous task
   // files remain queryable and are never truncated.
-  workflow.devAgent = agent
-  workflow.devTaskId = taskIdValue
-  workflow.devHostJobId = hostReservation.hostJobId
-  workflow.devInterrupted = false
-  workflow.stage = 'developing'
-  await saveWorkflow(workflow)
+  const claim = await establishTaskClaim(workflow, live, {
+    kind: 'dev',
+    taskId: taskIdValue,
+    hostJobId: hostReservation.hostJobId,
+    agent,
+  })
+  if (!claim.ok) {
+    return {
+      ok: false,
+      error: `建立开发任务所有权失败:${claim.error}`,
+      controllerError: true,
+    }
+  }
+  if (!claim.claimed) {
+    return { ok: true, taskId: claim.taskId, worktree: workflow.worktree, branch: workflow.branch }
+  }
 
   void (async () => {
     try {
@@ -333,7 +344,7 @@ export async function startDevelop(
       if (reloaded) {
         reloaded.stage = 'developing'
         reloaded.devInterrupted = true
-        await saveWorkflowForTask(reloaded, { kind: 'dev', taskId: live.taskId })
+        await saveWorkflowForTask(reloaded, { kind: 'dev', taskId: live.taskId }, reloaded.revision ?? 0)
       }
       notifyAutoRunCompletion(ctx, workflow.key, 'failed')
       finishTask(live, 'failed', 1)

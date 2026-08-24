@@ -17,7 +17,7 @@
 
 **操作要求:**重启 `dsh web`、更新宿主或卸载 ClickVibe 前,必须先在面板停止所有开发/Review 任务并等待状态不再显示「任务进行中」。DSH 的 `ctx.jobs` 是同一宿主进程内的稳定 supervisor,可跨 ClickVibe 插件重载/模块实例查询和停止任务;它不是跨进程持久化服务。真正的宿主重启会销毁 registry,但不能据此断言旧 agent 子进程已终止。
 
-workflow 状态写入使用跨进程文件锁串行化;任务凭证复核、读取当前代次和 temp/rename 提交在同一锁内完成。旧宿主进程即使迟到收尾,也不能越过新宿主已提交的任务代次。锁宿主进程死亡只用于回收写锁,不得用来推断 agent 子进程死亡。
+workflow 每次提交都携带持久化 revision;所有普通写要求 expected revision,任务回调额外要求 task capability。跨进程文件锁把重读当前文件、revision/凭证复核、revision 递增和 temp/rename 提交包成一个不可分割的临界区。任务启动先取得宿主 reservation,再用一次条件提交同时建立 `taskId + hostJobId + stage + agent`;竞争失败的 reservation 在 Agent 启动前即被结算。旧宿主进程即使迟到收尾,也不能越过新宿主已提交的任务代次。锁宿主进程死亡只用于回收写锁,不得用来推断 agent 子进程死亡。
 
 恢复时严格区分三种证据状态:
 

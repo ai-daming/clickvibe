@@ -26,7 +26,7 @@ test('persistent log snapshots preserve append order without truncating history'
     state.key = 'o-r-3'
     state.url = 'https://github.com/o/r/issues/3'
     state.devTaskId = 'dev-1720000000000-order'
-    await saveWorkflow(state)
+    await saveWorkflow(state, state.revision ?? null)
     await startTaskLog(state, 'dev', state.devTaskId)
     const writes = Array.from({ length: 2100 }, (_, index) =>
       appendTaskLog(state, 'dev', state.devTaskId!, index + 1, `line-${index}`),
@@ -52,12 +52,12 @@ test('a new task log generation preserves the prior run and selects the current 
     state.key = 'o-r-4'
     state.url = 'https://github.com/o/r/issues/4'
     state.devTaskId = 'dev-1720000000000-prior'
-    await saveWorkflow(state)
+    await saveWorkflow(state, state.revision ?? null)
     await startTaskLog(state, 'dev', state.devTaskId)
     await appendTaskLog(state, 'dev', state.devTaskId, 1, 'prior run')
     const priorTaskId = state.devTaskId
     state.devTaskId = 'dev-1720000005000-current'
-    await saveWorkflow(state)
+    await saveWorkflow(state, state.revision ?? null)
     await startTaskLog(state, 'dev', state.devTaskId)
     await appendLog(state.key, 'dev', 'current one')
     await appendLog(state.key, 'dev', 'current two')

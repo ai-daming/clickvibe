@@ -51,7 +51,7 @@ test('a reconcile exception is preserved as controller-error, never session-inte
       updatedAt: Date.now(),
       events: [],
     }
-    await saveWorkflow(workflow)
+    await saveWorkflow(workflow, workflow.revision ?? null)
     const ctx = Object.defineProperty({}, 'jobs', {
       get() {
         throw new Error('forced reconcile failure')

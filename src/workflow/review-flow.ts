@@ -29,15 +29,13 @@ import {
   pushTaskLine,
   reserveHostTask,
 } from '../agent/task-supervisor.ts'
-import { detectLinkedPr } from '../github/pr.ts'
 import { approvePassedReview } from '../github/review-approval.ts'
-import { buildFreshAgentCommand, buildResumeAgentCommand, parseAgent, shellQuote } from '../infra/develop-core.ts'
+import { buildFreshAgentCommand, buildResumeAgentCommand, parseAgent } from '../infra/develop-core.ts'
 import { decodeLiveLogLine } from '../infra/live-output.ts'
 import { readDeliveryStats } from '../infra/git.ts'
 import { clearReviewResultFile, loadReviewResult, REVIEW_RESULT_RELATIVE_PATH } from '../infra/review-result.ts'
 import { type LiveTask, parseUrl, readWorktreeHead, reviewTaskGate, runCommand, taskId } from '../infra/runtime.ts'
 import {
-  appendLog,
   clearStaleSessionId,
   type IssueWorkflow,
   issueBodyHash,
@@ -47,19 +45,18 @@ import {
   readLogTail,
   recordSessionId,
   resolveSessionForAgent,
-  saveWorkflow,
   saveWorkflowForTask,
   type WorkflowEvent,
 } from '../infra/state.ts'
 import { observeWorkflowTask, taskLaunchDecision, type TaskOwnershipContext } from '../infra/task-ownership.ts'
-import { buildDevComment, buildReviewComment } from './delivery-comment.ts'
+import { buildReviewComment } from './delivery-comment.ts'
 import { deriveEventRound } from './delivery-audit.ts'
 import { deriveFreshSessionAvailability, selectSessionLaunch } from './fresh-session.ts'
-import { extractGithubCommentId } from './delivery-publication.ts'
 import { publishDeliveryComment } from './delivery-publish.ts'
 import { type ReviewIssueContract } from './merge-gates.ts'
 import { resolveReviewStartWorkflow } from './review-start.ts'
 import { workflowBaseBranch } from './state-view.ts'
+import { establishTaskClaim } from './task-claim.ts'
 import { notifyAutoRunCompletion } from './auto-run-signal.ts'
 
 /** Start a review task on the dev branch with codex/claude. */
@@ -182,24 +179,34 @@ export async function startReview(
   }
 
   if (ownedReviewSession.invalid) {
-    await saveWorkflow(workflow)
     pushTaskLine(live, '[clickvibe] review sessionId 归属缺失或与当前 agent 不一致,已清除并启动全新会话')
   }
 
   // 记录关联 PR(若 review 的是 PR 且未记录)
   if (parsed.kind === 'pr' && !workflow.prNumber) {
     workflow.prNumber = parsed.number
-    await saveWorkflow(workflow)
   }
 
-  // A prior run's file must never become the next run's verdict.
+  // Finish all fallible, read-only prompt preparation before reserving durable
+  // ownership. Only the controller that commits the task claim may clear the
+  // shared result file or launch the Agent.
+  const agentCommand = sessionId ? buildResumeAgentCommand(agent, sessionId) : buildFreshAgentCommand(agent)
+  let prompt: string
   try {
-    await clearReviewResultFile(workflow.worktree)
+    prompt = await buildReviewPrompt(
+      ctx,
+      workflow,
+      resolvedSnapshot,
+      reviewedHead,
+      sessionId,
+      extraContext,
+      freshSession,
+    )
   } catch (error) {
     const message = String(error instanceof Error ? error.message : error)
-    pushTaskLine(live, `[clickvibe] 无法清除旧 review 结论文件: ${message}`)
+    pushTaskLine(live, `[clickvibe] 无法构建 Review 提示词: ${message}`)
     finishTask(live, 'failed', 1)
-    return { ok: false, error: `无法清除旧 review 结论文件: ${message}` }
+    return { ok: false, error: `无法构建 Review 提示词: ${message}` }
   }
 
   let hostReservation: ReturnType<typeof reserveHostTask>
@@ -217,23 +224,44 @@ export async function startReview(
     finishTask(live, 'stopped', null)
     return { ok: true, taskId: hostReservation.taskId }
   }
-  workflow.reviewAgent = agent
-  workflow.reviewTaskId = live.taskId
-  workflow.reviewHostJobId = hostReservation.hostJobId
-  workflow.stage = 'reviewing'
-  await saveWorkflow(workflow)
+  const claim = await establishTaskClaim(workflow, live, {
+    kind: 'review',
+    taskId: live.taskId,
+    hostJobId: hostReservation.hostJobId,
+    agent,
+  })
+  if (!claim.ok) {
+    return {
+      ok: false,
+      error: `建立 Review 任务所有权失败:${claim.error}`,
+      controllerError: true,
+    }
+  }
+  if (!claim.claimed) return { ok: true, taskId: claim.taskId }
 
-  // 仅续接归属匹配的精确会话;旧状态无 owner 或跨 agent 时直接全新 review。
-  const agentCommand = sessionId ? buildResumeAgentCommand(agent, sessionId) : buildFreshAgentCommand(agent)
-  const prompt = await buildReviewPrompt(
-    ctx,
-    workflow,
-    resolvedSnapshot,
-    reviewedHead,
-    sessionId,
-    extraContext,
-    freshSession,
-  )
+  // A prior run's file must never become the next run's verdict. This side
+  // effect is after the cross-process claim, so a losing controller cannot
+  // erase the winner's result.
+  try {
+    await clearReviewResultFile(workflow.worktree)
+  } catch (error) {
+    const message = String(error instanceof Error ? error.message : error)
+    pushTaskLine(live, `[clickvibe] 无法清除旧 review 结论文件: ${message}`)
+    const current = await loadWorkflow(workflow.key)
+    let recoveryError = ''
+    try {
+      if (current) {
+        current.stage = 'review-ready'
+        await saveWorkflowForTask(current, { kind: 'review', taskId: live.taskId }, current.revision ?? 0)
+      }
+    } catch (recoveryFailure) {
+      recoveryError = `;恢复状态持久化失败:${String(
+        recoveryFailure instanceof Error ? recoveryFailure.message : recoveryFailure,
+      )}`
+    }
+    finishTask(live, 'failed', 1)
+    return { ok: false, error: `无法清除旧 review 结论文件: ${message}${recoveryError}` }
+  }
 
   pushTaskLine(
     live,
@@ -255,7 +283,7 @@ export async function startReview(
         if (interrupted) {
           recordSessionId(interrupted, 'review', newSessionId, agent)
           interrupted.stage = 'review-ready'
-          await saveWorkflowForTask(interrupted, { kind: 'review', taskId: live.taskId })
+          await saveWorkflowForTask(interrupted, { kind: 'review', taskId: live.taskId }, interrupted.revision ?? 0)
         }
         notifyAutoRunCompletion(ctx, workflow.key, live.status === 'running' ? 'failed' : live.status)
         return
@@ -269,7 +297,7 @@ export async function startReview(
           recordSessionId(invalid, 'review', newSessionId, agent)
           invalid.reviewResult = null
           invalid.stage = 'review-ready'
-          await saveWorkflowForTask(invalid, { kind: 'review', taskId: live.taskId })
+          await saveWorkflowForTask(invalid, { kind: 'review', taskId: live.taskId }, invalid.revision ?? 0)
         }
         notifyAutoRunCompletion(ctx, workflow.key, 'failed')
         return
@@ -312,7 +340,7 @@ export async function startReview(
           ...(extraContext !== '' ? { userContext: extraContext } : {}),
         }
         reloaded.events = [...(reloaded.events ?? []), event]
-        if (!(await saveWorkflowForTask(reloaded, { kind: 'review', taskId: live.taskId }))) {
+        if (!(await saveWorkflowForTask(reloaded, { kind: 'review', taskId: live.taskId }, reloaded.revision ?? 0))) {
           notifyAutoRunCompletion(ctx, workflow.key, 'done')
           return
         }
@@ -337,7 +365,7 @@ export async function startReview(
         }
         if (event.publication?.status === 'posted' && event.publication.url && reloaded.reviewResult) {
           reloaded.reviewResult.commentUrl = event.publication.url
-          await saveWorkflowForTask(reloaded, { kind: 'review', taskId: live.taskId })
+          await saveWorkflowForTask(reloaded, { kind: 'review', taskId: live.taskId }, reloaded.revision ?? 0)
         }
         const approval = await approvePassedReview(
           {
@@ -362,7 +390,11 @@ export async function startReview(
             const reloaded = await loadWorkflow(workflow.key)
             if (!reloaded) throw new Error('Review workflow 不存在,不再启动会话回退')
             clearStaleSessionId(reloaded, 'review', sessionId)
-            const saved = await saveWorkflowForTask(reloaded, { kind: 'review', taskId: live.taskId })
+            const saved = await saveWorkflowForTask(
+              reloaded,
+              { kind: 'review', taskId: live.taskId },
+              reloaded.revision ?? 0,
+            )
             if (!saved) throw new Error('旧 Review 任务已被新代替换,不再启动会话回退')
             const fallbackPrompt = await buildReviewPrompt(
               ctx,
@@ -383,97 +415,3 @@ export async function startReview(
 
   return { ok: true, taskId: live.taskId }
 }
-
-/** Record one dev/rework delivery and publish its matching GitHub node. */
-export async function recordDevDelivery(
-  ctx: Context,
-  workflow: IssueWorkflow,
-  agent: 'codex' | 'claude',
-  head: string | null,
-  fixedIssues: string[],
-  kind: 'dev' | 'rework' | 'resume',
-  taskIdValue: string,
-  userContext = '',
-  durationMs?: number,
-): Promise<void> {
-  const current = await loadWorkflow(workflow.key)
-  if (!current) return
-  if (!current.prNumber) {
-    const pr = await detectLinkedPr(ctx, current.repoKey, current.branch)
-    if (pr) current.prNumber = pr
-  }
-  const stats = head
-    ? await readDeliveryStats(ctx, current.worktree, workflowBaseBranch(current.baseRef), head)
-    : undefined
-  const round = deriveEventRound(current.events)
-  const event: WorkflowEvent = {
-    kind,
-    at: new Date().toISOString(),
-    ...(Number.isFinite(durationMs) ? { durationMs: Math.max(0, durationMs ?? 0) } : {}),
-    hash: head ?? undefined,
-    round,
-    agent,
-    ...(stats ? { stats } : {}),
-    taskId: taskIdValue,
-    fixed: fixedIssues.length,
-    note: `${agent} 完成开发${kind === 'rework' ? '(按 review 意见返工)' : ''}`,
-    // 用户附加说明只进本地事件时间线,不进 GitHub 评论(issue #54)。
-    ...(userContext !== '' ? { userContext } : {}),
-  }
-  current.events = [...(current.events ?? []), event]
-  if (!(await saveWorkflowForTask(current, { kind: 'dev', taskId: taskIdValue }))) return
-  const issueNumber = parseUrl(current.url)?.number ?? 'unknown'
-  const body = buildDevComment({
-    commit: head ?? 'unknown',
-    issueNumber,
-    fixedIssues,
-    agent,
-    round,
-    stats,
-    at: event.at,
-  })
-  await publishDeliveryComment(ctx, current, event, body, { kind: 'dev', taskId: taskIdValue })
-  if (fixedIssues.length > 0 && kind !== 'dev') {
-    await markPreviousReviewFixed(ctx, current, round, agent)
-  }
-}
-
-async function markPreviousReviewFixed(
-  ctx: Context,
-  workflow: IssueWorkflow,
-  fixedRound: number,
-  fallbackAgent: 'codex' | 'claude',
-): Promise<void> {
-  const reviewEvent = [...workflow.events]
-    .reverse()
-    .find((candidate) => candidate.kind === 'review' && candidate.verdict?.passed === false)
-  if (!reviewEvent?.verdict) return
-  const commentUrl = reviewEvent.publication?.url ?? workflow.reviewResult?.commentUrl
-  const commentId = commentUrl ? extractGithubCommentId(commentUrl) : undefined
-  if (!commentId) return
-  const issueNumber = parseUrl(workflow.url)?.number ?? 'unknown'
-  const body = buildReviewComment({
-    commit: reviewEvent.hash ?? 'unknown',
-    issueNumber,
-    passed: false,
-    issues: reviewEvent.verdict.issues,
-    agent: reviewEvent.agent ?? workflow.reviewAgent ?? fallbackAgent,
-    round: reviewEvent.round ?? Math.max(1, fixedRound - 1),
-    fixedRound,
-    stats: reviewEvent.stats,
-    at: reviewEvent.at,
-  })
-  try {
-    await runCommand(
-      ctx,
-      `gh api ${shellQuote(`repos/${workflow.repoKey}/issues/comments/${commentId}`)} --method PATCH --input -`,
-      { stdin: JSON.stringify({ body }), timeoutMs: 30000 },
-    )
-    await appendLog(workflow.key, 'dev', `[clickvibe] 已标注上一轮 Review 评论:第 ${fixedRound} 轮已修复`)
-  } catch (error) {
-    const message = String(error instanceof Error ? error.message : error).slice(0, 500)
-    await appendLog(workflow.key, 'dev', `[clickvibe] Review 评论修复标注失败(不影响交付): ${message}`)
-  }
-}
-
-export { publishDeliveryComment } from './delivery-publish.ts'

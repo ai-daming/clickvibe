@@ -244,7 +244,7 @@ export async function stopTask(
       } else {
         currentWorkflow.stage = 'review-ready'
       }
-      if (!(await saveWorkflowForTask(currentWorkflow, { kind, taskId }))) {
+      if (!(await saveWorkflowForTask(currentWorkflow, { kind, taskId }, currentWorkflow.revision ?? 0))) {
         return { ok: false, error: '任务请求已过期:当前任务代次已变化,请刷新后重试' }
       }
       return { ok: true, taskId, stopped: false }
@@ -271,7 +271,7 @@ export async function stopTask(
       } else {
         currentWorkflow.stage = 'review-ready'
       }
-      if (!(await saveWorkflowForTask(currentWorkflow, { kind, taskId }))) {
+      if (!(await saveWorkflowForTask(currentWorkflow, { kind, taskId }, currentWorkflow.revision ?? 0))) {
         return { ok: false, error: '任务请求已过期:当前任务代次已变化,请刷新后重试' }
       }
       return { ok: true, taskId, stopped: result === 'requested' }
@@ -293,7 +293,7 @@ export async function stopTask(
     } else {
       workflow.stage = 'review-ready'
     }
-    await saveWorkflowForTask(workflow, { kind: task.kind, taskId: task.taskId })
+    await saveWorkflowForTask(workflow, { kind: task.kind, taskId: task.taskId }, workflow.revision ?? 0)
   })()
   return { ok: true, taskId, stopped }
 }

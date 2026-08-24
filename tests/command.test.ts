@@ -176,7 +176,7 @@ test('status command returns readable workflow state derived from the same /stat
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
     await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), `repos:\n  o/r: ${join(tempHome, 'missing-repo')}\n`)
     const workflow = workflowFixture('o-r-23', 'https://github.com/o/r/issues/23', join(tempHome, 'missing-worktree'))
-    await saveWorkflow(workflow)
+    await saveWorkflow(workflow, workflow.revision ?? null)
     const item = {
       url: workflow.url,
       number: 23,
@@ -413,7 +413,7 @@ test('merge command surfaces every gate failure and supports the manual override
         issueContract: { bodyHash: issueBodyHash('## 验收标准\n- old'), updatedAt: '2026-08-22T00:00:00Z' },
       },
     ]
-    await saveWorkflow(workflow)
+    await saveWorkflow(workflow, workflow.revision ?? null)
     const handler = createHandler(
       async ({ command }) => {
         const api = githubApi(command, {

@@ -47,7 +47,7 @@ test('stop API requires explicit confirmation before releasing an unknown legacy
     reviewAgent: null,
   })
   try {
-    await saveWorkflow(workflow)
+    await saveWorkflow(workflow, workflow.revision ?? null)
     const blocked = await stopTask(
       {
         jobs: {
@@ -84,7 +84,7 @@ test('stop API requires explicit confirmation before releasing an unknown legacy
     if (!recovered) throw new Error('workflow missing after development recovery')
     recovered.stage = 'reviewing'
     recovered.reviewTaskId = 'review-2-legacy'
-    await saveWorkflow(recovered)
+    await saveWorkflow(recovered, recovered.revision ?? null)
     const reviewResult = await stopTask({ jobs: { list: () => [] } } as never, {
       taskId: recovered.reviewTaskId,
       confirmedStopped: true,
@@ -123,7 +123,7 @@ test('stop API rejects a stale unknown-task confirmation after review became cur
     },
   }
   try {
-    await saveWorkflow(workflow)
+    await saveWorkflow(workflow, workflow.revision ?? null)
     const stale = await stopTask(registryOffline as never, {
       taskId: workflow.devTaskId,
       confirmedStopped: true,
@@ -179,7 +179,7 @@ test('stop API cannot use stale history to kill the current running task of the 
     },
   }
   try {
-    await saveWorkflow(workflow)
+    await saveWorkflow(workflow, workflow.revision ?? null)
     await startTaskLog(workflow, 'dev', staleTaskId)
 
     const result = await stopTask({ jobs } as never, { taskId: staleTaskId, confirmedStopped: true })
@@ -227,10 +227,12 @@ test('stop API binds host-terminal interruption to the current task in both kind
     },
   ]
   try {
-    for (const scenario of scenarios) {
+    for (const [index, scenario] of scenarios.entries()) {
+      const issueNumber = 1_111 + index
       const currentHostJobId = `job-${scenario.currentTaskId}`
       const workflow = workflowFixture(tempHome, {
-        key: `owner-repo-111-${scenario.name}`,
+        key: `owner-repo-${issueNumber}-${scenario.name}`,
+        url: `https://github.com/owner/repo/issues/${issueNumber}`,
         stage: scenario.stage,
         devTaskId: scenario.currentKind === 'dev' ? scenario.currentTaskId : scenario.staleTaskId,
         devHostJobId: scenario.currentKind === 'dev' ? currentHostJobId : null,
@@ -247,7 +249,7 @@ test('stop API binds host-terminal interruption to the current task in both kind
         startedAt: 4_000,
       }
       const jobs = { list: () => [terminalJob], get: () => terminalJob }
-      await saveWorkflow(workflow)
+      await saveWorkflow(workflow, workflow.revision ?? null)
 
       const stale = await stopTask({ jobs } as never, {
         taskId: scenario.staleTaskId,
@@ -290,7 +292,7 @@ test('stop API binds an explicit interrupted outcome to the current development 
     reviewSessionAgent: 'codex',
   })
   try {
-    await saveWorkflow(workflow)
+    await saveWorkflow(workflow, workflow.revision ?? null)
     const stale = await stopTask({} as never, { taskId: workflow.reviewTaskId, confirmedStopped: true })
     assert.deepEqual(stale, {
       ok: false,
@@ -321,7 +323,7 @@ test('stopping a stale local task cannot overwrite the current task generation',
   })
   let killed = false
   try {
-    await saveWorkflow(workflow)
+    await saveWorkflow(workflow, workflow.revision ?? null)
     liveTasks.set(staleTaskId, {
       taskId: staleTaskId,
       workflowKey: workflow.key,
@@ -386,7 +388,7 @@ test('historical task data cannot mutate an archived workflow', async () => {
   })
   const killed: string[] = []
   try {
-    await saveWorkflow(workflow)
+    await saveWorkflow(workflow, workflow.revision ?? null)
     await startTaskLog(workflow, 'review', taskId)
     const result = await stopTask(
       {

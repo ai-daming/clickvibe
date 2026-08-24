@@ -38,7 +38,7 @@ test('successful dev completion is durable before slow delivery work begins', as
   process.env.HOME = tempHome
   try {
     const current = workflow()
-    await saveWorkflow(current)
+    await saveWorkflow(current, current.revision ?? null)
     let deliveryStarted = false
     const completed = await finalizeDevRun(current, current.devTaskId!, 'done', 0, 'session-106', 'codex', async () => {
       deliveryStarted = true
