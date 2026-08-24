@@ -48,7 +48,12 @@ import {
   taskId,
 } from '../infra/runtime.ts'
 import { type IssueWorkflow, issueKey, loadWorkflow, mutateWorkflowForTask } from '../infra/state.ts'
-import { observeWorkflowTask, taskLaunchDecision, type TaskOwnershipContext } from '../infra/task-ownership.ts'
+import {
+  observeWorkflowTask,
+  taskLaunchDecision,
+  type TaskOwnershipContext,
+  workflowTaskExpectation,
+} from '../infra/task-ownership.ts'
 import { deriveAutoDevelopment } from './auto-development.ts'
 import { deriveDevelopmentEventKind } from './delivery-audit.ts'
 import { finalizeDevRun } from './dev-completion.ts'
@@ -249,6 +254,7 @@ export async function startDevelop(
       ? { ok: true, taskId: ownershipGate.task.taskId, worktree: workflow.worktree, branch: workflow.branch }
       : { ok: false, error: ownershipGate.error, controllerError: true }
   }
+  const claimExpectation = workflowTaskExpectation(workflow)
 
   const taskIdValue = taskId('dev')
   let live: LiveTask
@@ -279,12 +285,17 @@ export async function startDevelop(
   }
   // LiveTask creation opened a new immutable JSONL generation. Previous task
   // files remain queryable and are never truncated.
-  const claim = await establishTaskClaim(workflow, live, {
-    kind: 'dev',
-    taskId: taskIdValue,
-    hostJobId: hostReservation.hostJobId,
-    agent,
-  })
+  const claim = await establishTaskClaim(
+    workflow,
+    live,
+    {
+      kind: 'dev',
+      taskId: taskIdValue,
+      hostJobId: hostReservation.hostJobId,
+      agent,
+    },
+    claimExpectation,
+  )
   if (!claim.ok) {
     return {
       ok: false,

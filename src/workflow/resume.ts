@@ -36,7 +36,12 @@ import {
   mutateWorkflowForTask,
   resolveSessionForAgent,
 } from '../infra/state.ts'
-import { observeWorkflowTask, taskLaunchDecision, type TaskOwnershipContext } from '../infra/task-ownership.ts'
+import {
+  observeWorkflowTask,
+  taskLaunchDecision,
+  type TaskOwnershipContext,
+  workflowTaskExpectation,
+} from '../infra/task-ownership.ts'
 import { recordDevDelivery } from './dev-delivery.ts'
 import { establishTaskClaim } from './task-claim.ts'
 import { finalizeDevRun } from './dev-completion.ts'
@@ -70,6 +75,7 @@ export async function resumeDevelop(
       ? { ok: true, taskId: ownershipGate.task.taskId }
       : { ok: false, error: ownershipGate.error, controllerError: true }
   }
+  const claimExpectation = workflowTaskExpectation(workflow)
 
   const availability = deriveFreshSessionAvailability(
     workflow.events,
@@ -83,13 +89,11 @@ export async function resumeDevelop(
   const agent = workflow.devAgent ?? 'codex'
   const ownedDevSession = freshSession
     ? { sessionId: null, invalid: false }
-    : resolveSessionForAgent(workflow, 'dev', agent)
+    : resolveSessionForAgent(structuredClone(workflow), 'dev', agent)
+  const resetSession =
+    freshSession || ownedDevSession.invalid || (!workflow.devSessionId && workflow.devSessionAgent !== null)
   const launch = selectSessionLaunch(freshSession, ownedDevSession)
   const sessionId = launch.sessionId
-  if (freshSession) {
-    workflow.devSessionId = null
-    workflow.devSessionAgent = null
-  }
   // Reserve synchronously before the snapshot's GitHub awaits. This is the
   // per-workflow invariant preventing double-clicked resume requests from
   // launching multiple agents against the same git worktree.
@@ -151,12 +155,18 @@ export async function resumeDevelop(
     finishTask(live, 'stopped', null)
     return { ok: true, taskId: hostReservation.taskId }
   }
-  const claim = await establishTaskClaim(workflow, live, {
-    kind: 'dev',
-    taskId: live.taskId,
-    hostJobId: hostReservation.hostJobId,
-    agent,
-  })
+  const claim = await establishTaskClaim(
+    workflow,
+    live,
+    {
+      kind: 'dev',
+      taskId: live.taskId,
+      hostJobId: hostReservation.hostJobId,
+      agent,
+      resetSession,
+    },
+    claimExpectation,
+  )
   if (!claim.ok) {
     return {
       ok: false,

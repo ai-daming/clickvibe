@@ -48,7 +48,12 @@ import {
   resolveSessionForAgent,
   type WorkflowEvent,
 } from '../infra/state.ts'
-import { observeWorkflowTask, taskLaunchDecision, type TaskOwnershipContext } from '../infra/task-ownership.ts'
+import {
+  observeWorkflowTask,
+  taskLaunchDecision,
+  type TaskOwnershipContext,
+  workflowTaskExpectation,
+} from '../infra/task-ownership.ts'
 import { buildReviewComment } from './delivery-comment.ts'
 import { deriveEventRound } from './delivery-audit.ts'
 import { deriveFreshSessionAvailability, selectSessionLaunch } from './fresh-session.ts'
@@ -103,6 +108,7 @@ export async function startReview(
       ? { ok: true, taskId: ownershipGate.task.taskId }
       : { ok: false, error: ownershipGate.error, controllerError: true }
   }
+  const claimExpectation = workflowTaskExpectation(workflow)
   if (!existsSync(workflow.worktree)) {
     return { ok: false, error: `worktree 不存在: ${workflow.worktree}` }
   }
@@ -116,13 +122,11 @@ export async function startReview(
   }
   const ownedReviewSession = freshSession
     ? { sessionId: null, invalid: false }
-    : resolveSessionForAgent(workflow, 'review', agent)
+    : resolveSessionForAgent(structuredClone(workflow), 'review', agent)
+  const resetSession =
+    freshSession || ownedReviewSession.invalid || (!workflow.reviewSessionId && workflow.reviewSessionAgent !== null)
   const launch = selectSessionLaunch(freshSession, ownedReviewSession)
   const sessionId = launch.sessionId
-  if (freshSession) {
-    workflow.reviewSessionId = null
-    workflow.reviewSessionAgent = null
-  }
   // workflow 校验后、冻结契约/HEAD 等任何 await 之前同步占位。重复请求会立即
   // 复用 taskId,不会重复支付 GitHub 刷新超时,也不会交错清理结论文件并双开 review。
   let reservation: { task: LiveTask; created: boolean }
@@ -181,11 +185,6 @@ export async function startReview(
     pushTaskLine(live, '[clickvibe] review sessionId 归属缺失或与当前 agent 不一致,已清除并启动全新会话')
   }
 
-  // 记录关联 PR(若 review 的是 PR 且未记录)
-  if (parsed.kind === 'pr' && !workflow.prNumber) {
-    workflow.prNumber = parsed.number
-  }
-
   // Finish all fallible, read-only prompt preparation before reserving durable
   // ownership. Only the controller that commits the task claim may clear the
   // shared result file or launch the Agent.
@@ -223,12 +222,19 @@ export async function startReview(
     finishTask(live, 'stopped', null)
     return { ok: true, taskId: hostReservation.taskId }
   }
-  const claim = await establishTaskClaim(workflow, live, {
-    kind: 'review',
-    taskId: live.taskId,
-    hostJobId: hostReservation.hostJobId,
-    agent,
-  })
+  const claim = await establishTaskClaim(
+    workflow,
+    live,
+    {
+      kind: 'review',
+      taskId: live.taskId,
+      hostJobId: hostReservation.hostJobId,
+      agent,
+      resetSession,
+      ...(parsed.kind === 'pr' && !workflow.prNumber ? { prNumber: parsed.number } : {}),
+    },
+    claimExpectation,
+  )
   if (!claim.ok) {
     return {
       ok: false,

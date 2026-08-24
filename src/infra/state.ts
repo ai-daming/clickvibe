@@ -82,8 +82,8 @@ export interface IssueWorkflow {
   issueSnapshot?: PromptSnapshot
   /** Optional controller cache; missing or invalid state never blocks manual actions. */
   autoRun?: AutoRunState
-  /** Durable compare-and-swap token. Missing legacy values normalize to zero. */
   revision?: number
+  taskStateRevision?: number
   updatedAt: number
   /** 完整历史事件链:每次开发提交/review/恢复各一条,按时间追加。 */
   events: WorkflowEvent[]
@@ -208,6 +208,7 @@ function normalizeWorkflow(workflow: IssueWorkflow): IssueWorkflow {
   if (!workflow.reviewSessionId) workflow.reviewSessionAgent = null
   if (!isAutoRunState(workflow.autoRun)) delete workflow.autoRun
   if (workflow.revision === undefined) workflow.revision = 0
+  if (workflow.taskStateRevision === undefined) workflow.taskStateRevision = 0
   return workflow
 }
 

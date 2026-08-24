@@ -1,6 +1,10 @@
 import type { IssueWorkflow } from './state.ts'
 import { liveTasks } from './runtime.ts'
-import { currentWorkflowTaskRef, type WorkflowTaskCredential } from './workflow-persistence.ts'
+import {
+  currentWorkflowTaskRef,
+  type WorkflowTaskCredential,
+  type WorkflowTaskExpectation,
+} from './workflow-persistence.ts'
 
 export interface HostJobSnapshot {
   id: string
@@ -53,6 +57,10 @@ type OwnershipFields = Pick<
 > & { devInterrupted?: boolean }
 
 export type WorkflowTaskRef = WorkflowTaskCredential
+
+export function workflowTaskExpectation(workflow: IssueWorkflow): WorkflowTaskExpectation {
+  return { task: currentWorkflowTaskRef(workflow), taskStateRevision: workflow.taskStateRevision ?? 0 }
+}
 
 interface TaskRef extends WorkflowTaskRef {
   hostJobId: string | null | undefined

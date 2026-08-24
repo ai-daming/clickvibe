@@ -6,16 +6,22 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import test from 'node:test'
+import { waitForTaskPersistence } from '../src/agent/task-supervisor.ts'
+import { LineLog } from '../src/infra/develop-core.ts'
+import { LineBuffer } from '../src/infra/line-buffer.ts'
+import type { LiveTask } from '../src/infra/runtime.ts'
 import {
   claimWorkflowTask,
   type IssueWorkflow,
   loadWorkflow,
+  mutateWorkflowForTask,
   saveWorkflow,
   saveWorkflowForTask,
   statePath,
   WorkflowConflictError,
 } from '../src/infra/state.ts'
-import { observeTaskOwnership } from '../src/infra/task-ownership.ts'
+import { observeTaskOwnership, workflowTaskExpectation } from '../src/infra/task-ownership.ts'
+import { establishTaskClaim } from '../src/workflow/task-claim.ts'
 
 const workerSource = `
 import { createInterface } from 'node:readline'
@@ -69,7 +75,12 @@ for await (const line of createInterface({ input: process.stdin })) {
       continue
     }
     const saved = input.credential
-      ? (await saveWorkflowForTask(input.workflow, input.credential, input.expectedRevision)).status === 'committed'
+      ? (await saveWorkflowForTask(
+          input.workflow,
+          input.credential,
+          input.expectedRevision,
+          input.expectedTaskStateRevision,
+        )).status === 'committed'
       : (await saveWorkflow(input.workflow, input.expectedRevision), true)
     console.log(JSON.stringify({ saved }))
   } catch (error) {
@@ -97,7 +108,14 @@ async function startWorker(home: string) {
     run: (workflow: IssueWorkflow, credential?: { kind: 'review'; taskId: string }) =>
       new Promise<boolean>((resolve) => {
         responses.push((response) => resolve(Boolean(response.saved)))
-        child.stdin.write(`${JSON.stringify({ workflow, credential, expectedRevision: workflow.revision ?? null })}\n`)
+        child.stdin.write(
+          `${JSON.stringify({
+            workflow,
+            credential,
+            expectedRevision: workflow.revision ?? null,
+            expectedTaskStateRevision: workflow.taskStateRevision ?? 0,
+          })}\n`,
+        )
       }),
     resume: (url: string) =>
       new Promise<{ result: { ok: boolean; taskId?: string; error?: string }; agentStarts: number }>((resolve) => {
@@ -167,13 +185,29 @@ test('cross-process task writes and resume claims preserve the winning generatio
           staleWorker.resume(initial.url),
           successorWorker.resume(initial.url),
         ])
-        assert.equal(first.agentStarts + second.agentStarts, 1, `round ${round} launched more than one Agent`)
-        assert.equal(
-          Number(first.result.ok) + Number(second.result.ok),
-          1,
-          `round ${round} accepted the stale controller`,
-        )
         const persisted = (await loadWorkflow(initial.key))!
+        assert.equal(
+          first.agentStarts + second.agentStarts,
+          1,
+          `round ${round} launched ${first.agentStarts + second.agentStarts} Agents: ${JSON.stringify({
+            first,
+            second,
+            persisted: {
+              stage: persisted.stage,
+              devTaskId: persisted.devTaskId,
+              devHostJobId: persisted.devHostJobId,
+              devInterrupted: persisted.devInterrupted,
+              revision: persisted.revision,
+              taskStateRevision: persisted.taskStateRevision,
+            },
+          })}`,
+        )
+        const successful = [first, second].filter((entry) => entry.result.ok)
+        assert.ok(successful.length >= 1, `round ${round} rejected both controllers`)
+        assert.ok(
+          successful.every((entry) => entry.result.taskId === persisted.devTaskId),
+          `round ${round} returned a non-winning task: ${JSON.stringify({ first, second })}`,
+        )
         assert.ok(persisted.devTaskId && persisted.devHostJobId)
         const job = {
           id: persisted.devHostJobId!,
@@ -220,15 +254,33 @@ test('persistence keeps revision, capability, claim and I/O outcomes distinct', 
     current.prNumber = '5000'
     await saveWorkflow(current, current.revision ?? 0)
     assert.deepEqual(
-      await saveWorkflowForTask(stale, { kind: 'review', taskId: stale.reviewTaskId! }, stale.revision ?? 0),
-      { status: 'revision-conflict', currentRevision: current.revision },
+      await saveWorkflowForTask(
+        stale,
+        { kind: 'review', taskId: stale.reviewTaskId! },
+        stale.revision ?? 0,
+        stale.taskStateRevision ?? 0,
+      ),
+      {
+        status: 'revision-conflict',
+        currentRevision: current.revision,
+        currentTaskStateRevision: current.taskStateRevision,
+      },
     )
     const successor = structuredClone(current)
     successor.reviewTaskId = 'review-7000-successor'
     await saveWorkflow(successor, successor.revision ?? 0)
     assert.deepEqual(
-      await saveWorkflowForTask(stale, { kind: 'review', taskId: stale.reviewTaskId! }, current.revision ?? 0),
-      { status: 'ownership-lost', currentRevision: successor.revision },
+      await saveWorkflowForTask(
+        stale,
+        { kind: 'review', taskId: stale.reviewTaskId! },
+        current.revision ?? 0,
+        stale.taskStateRevision ?? 0,
+      ),
+      {
+        status: 'ownership-lost',
+        currentRevision: successor.revision,
+        currentTaskStateRevision: successor.taskStateRevision,
+      },
     )
 
     const claimant = workflow('review-8100-interrupted', 'claim', 8100)
@@ -240,6 +292,7 @@ test('persistence keeps revision, capability, claim and I/O outcomes distinct', 
           claimant,
           { kind: 'review', taskId: 'invalid', agent: 'codex', hostJobId: null as never },
           claimant.revision ?? 0,
+          workflowTaskExpectation(claimant),
         ),
       /hostJobId/,
     )
@@ -247,9 +300,17 @@ test('persistence keeps revision, capability, claim and I/O outcomes distinct', 
     claimant.prNumber = '8100'
     await saveWorkflow(claimant, claimant.revision ?? 0)
     const claim = { kind: 'review' as const, taskId: 'review-9100-new', agent: 'codex' as const, hostJobId: 'job-9100' }
-    const conflict = await claimWorkflowTask(staleClaim, claim, staleClaim.revision ?? 0)
-    assert.deepEqual(conflict, { status: 'revision-conflict', currentRevision: claimant.revision })
-    assert.equal((await claimWorkflowTask(staleClaim, claim, conflict.currentRevision)).status, 'committed')
+    const expectation = workflowTaskExpectation(staleClaim)
+    const conflict = await claimWorkflowTask(staleClaim, claim, staleClaim.revision ?? 0, expectation)
+    assert.deepEqual(conflict, {
+      status: 'revision-conflict',
+      currentRevision: claimant.revision,
+      currentTaskStateRevision: claimant.taskStateRevision,
+    })
+    assert.equal(
+      (await claimWorkflowTask(staleClaim, claim, conflict.currentRevision, expectation)).status,
+      'committed',
+    )
     assert.deepEqual(
       (({ reviewTaskId, reviewHostJobId, prNumber }) => ({ reviewTaskId, reviewHostJobId, prNumber }))(
         (await loadWorkflow(claimant.key))!,
@@ -263,6 +324,96 @@ test('persistence keeps revision, capability, claim and I/O outcomes distinct', 
       (error: unknown) => error instanceof SyntaxError,
     )
   } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('a completed task rejects late claim and stop intents from its previous lifecycle state', async () => {
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-task-state-revision-'))
+  const previousHome = process.env.HOME
+  process.env.HOME = tempHome
+  const running = workflow('review-unused', 'task-state', 8200)
+  Object.assign(running, {
+    stage: 'developing',
+    devAgent: 'codex',
+    devTaskId: 'dev-8200-running',
+    devHostJobId: 'job-8200-running',
+    devSessionId: null,
+    devSessionAgent: null,
+    devInterrupted: false,
+    reviewTaskId: null,
+  })
+  let losingTask: LiveTask | null = null
+  try {
+    await saveWorkflow(running, null)
+    const staleClaim = structuredClone(running)
+    const claimExpectation = workflowTaskExpectation(staleClaim)
+    const staleStop = structuredClone(running)
+    const completion = await mutateWorkflowForTask(running, { kind: 'dev', taskId: running.devTaskId! }, (current) => {
+      current.stage = 'review-ready'
+      current.devSessionId = 'session-8200-completed'
+      current.devSessionAgent = 'codex'
+      current.devInterrupted = false
+    })
+    assert.equal(completion.status, 'committed')
+    assert.equal(running.taskStateRevision, 1)
+
+    losingTask = {
+      taskId: 'dev-9200-late-claim',
+      workflowKey: running.key,
+      workflow: staleClaim,
+      kind: 'dev',
+      agent: 'codex',
+      startedAt: Date.now(),
+      log: new LineLog(10),
+      rawLog: new LineBuffer(),
+      closed: false,
+      status: 'running',
+      exitCode: null,
+      sessionId: null,
+    }
+    assert.deepEqual(
+      await establishTaskClaim(
+        staleClaim,
+        losingTask,
+        {
+          kind: 'dev',
+          taskId: losingTask.taskId,
+          agent: 'codex',
+          hostJobId: 'job-9200-late-claim',
+          resetSession: true,
+        },
+        claimExpectation,
+      ),
+      { ok: true, claimed: false, taskId: 'dev-8200-running' },
+    )
+    assert.equal(losingTask.closed, true)
+    assert.equal(losingTask.status, 'stopped')
+    assert.equal(losingTask.sessionId, null)
+
+    const lateStop = await mutateWorkflowForTask(
+      staleStop,
+      { kind: 'dev', taskId: staleStop.devTaskId! },
+      (current) => {
+        current.stage = 'developing'
+        current.devInterrupted = true
+      },
+    )
+    assert.equal(lateStop.status, 'ownership-lost')
+    const persisted = (await loadWorkflow(running.key))!
+    assert.equal(persisted.stage, 'review-ready')
+    assert.equal(persisted.devInterrupted, false)
+    assert.equal(persisted.devTaskId, 'dev-8200-running')
+    assert.equal(persisted.devHostJobId, 'job-8200-running')
+    assert.equal(persisted.devSessionId, 'session-8200-completed')
+    assert.equal(persisted.taskStateRevision, 1)
+  } finally {
+    if (losingTask) {
+      if (losingTask.cleanup) clearTimeout(losingTask.cleanup)
+      await waitForTaskPersistence(losingTask)
+    }
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })

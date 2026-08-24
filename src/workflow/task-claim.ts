@@ -1,6 +1,12 @@
 import { finishTask } from '../agent/task-supervisor.ts'
 import type { LiveTask } from '../infra/runtime.ts'
-import { claimWorkflowTask, type IssueWorkflow, type WorkflowTaskClaim, workflowRevision } from '../infra/state.ts'
+import {
+  claimWorkflowTask,
+  type IssueWorkflow,
+  type WorkflowTaskClaim,
+  type WorkflowTaskCredential,
+  workflowRevision,
+} from '../infra/state.ts'
 
 export type TaskClaimResult =
   | { ok: true; claimed: true; taskId: string }
@@ -12,11 +18,12 @@ export async function establishTaskClaim(
   workflow: IssueWorkflow,
   live: LiveTask,
   claim: WorkflowTaskClaim,
+  expectation: { task: WorkflowTaskCredential | null; taskStateRevision: number },
 ): Promise<TaskClaimResult> {
   try {
     let expectedRevision = workflowRevision(workflow)
     while (true) {
-      const result = await claimWorkflowTask(workflow, claim, expectedRevision)
+      const result = await claimWorkflowTask(workflow, claim, expectedRevision, expectation)
       if (result.status === 'committed') return { ok: true, claimed: true, taskId: claim.taskId }
       if (result.status === 'revision-conflict') {
         expectedRevision = result.currentRevision

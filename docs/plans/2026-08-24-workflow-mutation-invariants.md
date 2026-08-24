@@ -4,13 +4,13 @@
 
 | # | Invariant | Construction (`file`: behavior) |
 |---|---|---|
-| 1 | Every commit has durable ordering. | `infra/workflow-persistence.ts`: legacy revision is `0`; a successful locked commit increments exactly once. |
-| 2 | No unconditional mutation exists. | `infra/workflow-persistence.ts`: revision writes require `expectedRevision`; task writes require revision plus `{kind,taskId}`. |
-| 3 | Validation and commit are indivisible across processes. | `infra/workflow-persistence.ts`: hard-link lock encloses reread, JSON validation, revision/capability validation, increment, temp write and rename. |
-| 4 | A task starts as one complete generation. | `agent/task-supervisor.ts`: successful reservation has non-empty `hostJobId`; `workflow/task-claim.ts` commits `taskId+hostJobId+stage+agent` before Agent launch and settles losers. |
-| 5 | Current task has one observed answer. | `infra/task-ownership.ts`: ownership carries exact `{kind,taskId}`; launch/reuse/deadline/stop consumers use it without stage/order guessing. |
-| 6 | Locks are not re-entered. | `infra/workflow-persistence.ts`: caller mutation callbacks run outside the lock; the locked primitive receives a finished snapshot. |
-| 7 | Conflict classes retain meaning. | `infra/workflow-persistence.ts`: task commit returns `committed`, `ownership-lost`, or `revision-conflict+currentRevision`; I/O/lock/JSON errors throw. |
+| 1 | Metadata and lifecycle ordering are durable and distinct. | `infra/state.ts`: legacy `revision` and `taskStateRevision` normalize to `0`; `infra/workflow-persistence.ts`: every commit increments `revision`, while the centralized lifecycle-field comparison increments `taskStateRevision` exactly once. |
+| 2 | No unconditional or capability-only task mutation exists. | `infra/workflow-persistence.ts`: general writes require `expectedRevision`; task writes require `expectedRevision`, `{kind,taskId}`, and the frozen `expectedTaskStateRevision`. |
+| 3 | Validation and commit are one awaited cross-process critical section. | `infra/workflow-persistence.ts`: the hard-link lock encloses reread, JSON validation, both tokens, capability validation, increment, temp write and rename; `commit()` is awaited before `finally` releases the lock. |
+| 4 | A task starts as one complete generation. | `agent/task-supervisor.ts`: a successful reservation has a non-empty `hostJobId`; develop/resume/review freeze the current task expectation immediately after the ownership gate; `workflow/task-claim.ts` atomically commits `taskId+hostJobId+stage+agent` plus session reset/PR metadata before Agent launch and settles losers. |
+| 5 | Same-generation metadata cannot replay an obsolete lifecycle intent. | `infra/workflow-persistence.ts`: task mutation may retry a `revision-conflict` only against its original `taskStateRevision`; a lifecycle-token change returns `ownership-lost`. Claim retries retain the gate-frozen task ref and lifecycle token. |
+| 6 | Current task has one observed answer. | `infra/task-ownership.ts`: ownership carries exact `{kind,taskId}`; launch/reuse/deadline/stop consumers use it without stage/order guessing. |
+| 7 | Conflict classes retain meaning and locks are not re-entered. | `infra/workflow-persistence.ts`: callbacks run outside the lock; results distinguish `committed`, `ownership-lost`, and `revision-conflict+currentRevision+currentTaskStateRevision`; I/O/lock/JSON errors throw. |
 | 8 | Missing is not death. | `infra/task-ownership.ts`: local/registry absence yields `unknown` and keeps launch closed; only explicit outcome or supervisor terminal state yields `interrupted`. |
 
 ## Static mutation enumeration
@@ -30,9 +30,9 @@
 | `workflow/auto-run.applyDecision(rework)` | dev agent | ✓ revision |
 | `workflow/auto-run.startAutoRun` | config/event | ✓ revision |
 | `workflow/create-pr.createPullRequest` | PR number | ✓ revision |
-| `workflow/develop-start` via `task-claim` | dev generation | ✓ claim-retry/non-empty host id |
-| `workflow/resume` via `task-claim` | dev generation | ✓ claim-retry/non-empty host id |
-| `workflow/review-flow` via `task-claim` | review generation/PR/session | ✓ claim-retry/non-empty host id |
+| `workflow/develop-start` via `task-claim` | dev generation | ✓ gate-frozen ref + lifecycle CAS + non-empty host id |
+| `workflow/resume` via `task-claim` | dev generation/session reset | ✓ gate-frozen ref + lifecycle CAS + non-empty host id |
+| `workflow/review-flow` via `task-claim` | review generation/PR/session | ✓ gate-frozen ref + lifecycle CAS + non-empty host id |
 | `workflow/review-start` recovery | review-ready cache | ✓ create/revision |
 | `workflow/merge` override event | events | ✓ revision |
 | `workflow/merge` delivery | delivery | ✓ revision |
@@ -40,15 +40,15 @@
 | `workflow/merge.failCleanup` | cleanup error | ✓ revision |
 | `workflow/merge.archiveWorkflow` | archive/auto-run | ✓ revision |
 | `workflow/sync` success/conflict/failure | events | ✓ revision |
-| `workflow/dev-completion.finalizeDevRun` | dev terminal/session | ✓ task-retry |
-| `workflow/develop-start` synchronous failure | dev interrupted | ✓ task-retry |
-| `workflow/resume` fallback/exit | dev state/session | ✓ task-retry |
-| `workflow/review-flow` failure/parse/verdict | review state/result/session/events | ✓ task-retry |
-| `workflow/review-flow` cleanup failure | review stage | ✓ task-retry |
-| `workflow/review-flow` comment/fallback | publication/session | ✓ task-retry |
-| `workflow/dev-delivery.recordDevDelivery` | dev event/PR | ✓ task-retry |
-| `workflow/delivery-publish` | publication | ✓ task-retry |
-| `workflow/task-api.stopTask` all states | interrupted stage/gate | ✓ task-retry |
+| `workflow/dev-completion.finalizeDevRun` | dev terminal/session | ✓ capability + lifecycle CAS; metadata-only retry |
+| `workflow/develop-start` synchronous failure | dev interrupted | ✓ capability + lifecycle CAS; metadata-only retry |
+| `workflow/resume` fallback/exit | dev state/session | ✓ capability + lifecycle CAS; metadata-only retry |
+| `workflow/review-flow` failure/parse/verdict | review state/result/session/events | ✓ capability + lifecycle CAS; metadata-only retry |
+| `workflow/review-flow` cleanup failure | review stage | ✓ capability + lifecycle CAS; metadata-only retry |
+| `workflow/review-flow` comment/fallback | publication/session | ✓ capability + lifecycle CAS; metadata-only retry |
+| `workflow/dev-delivery.recordDevDelivery` | dev event/PR | ✓ capability + lifecycle CAS; metadata-only retry |
+| `workflow/delivery-publish` | publication | ✓ capability + lifecycle CAS; metadata-only retry |
+| `workflow/task-api.stopTask` all states | interrupted stage/gate | ✓ capability + lifecycle CAS; metadata-only retry |
 
 ## Current-task consumer enumeration
 
