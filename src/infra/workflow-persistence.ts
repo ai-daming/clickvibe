@@ -103,6 +103,28 @@ export function workflowStatePath(workflow: WorkflowStorageIdentity): string {
   return workflowPath(join(homedir(), '.clickvibe', 'state'), workflow)
 }
 
+const workflowCommandQueues = new Map<string, Promise<void>>()
+
+/**
+ * One local command order per durable workflow. Every exported mutation enters
+ * here before competing for the cross-process file lock, so callback, stop,
+ * claim and ordinary writes cannot form independent in-process ordering domains.
+ */
+function enqueueWorkflowCommand<T>(workflow: WorkflowStorageIdentity, execute: () => Promise<T>): Promise<T> {
+  const key = workflowStatePath(workflow)
+  const previous = workflowCommandQueues.get(key) ?? Promise.resolve()
+  const operation = previous.catch(() => undefined).then(execute)
+  const tail = operation.then(
+    () => undefined,
+    () => undefined,
+  )
+  workflowCommandQueues.set(key, tail)
+  void tail.finally(() => {
+    if (workflowCommandQueues.get(key) === tail) workflowCommandQueues.delete(key)
+  })
+  return operation
+}
+
 function processAlive(pid: number): boolean {
   try {
     process.kill(pid, 0)
@@ -269,13 +291,13 @@ async function conditionalCommit(
 }
 
 /** Commit one snapshot only if its durable revision is still current. */
-export async function saveWorkflowState(workflow: IssueWorkflow, expectedRevision: number | null): Promise<void> {
+async function saveWorkflowSnapshot(workflow: IssueWorkflow, expectedRevision: number | null): Promise<void> {
   const result = await conditionalCommit(workflow, expectedRevision)
   if (result.status !== 'committed') throw new WorkflowConflictError(result.currentRevision)
 }
 
 /** Establish one complete task generation; no intermediate owner can be persisted. */
-export async function claimWorkflowTaskState(
+async function claimWorkflowTask(
   workflow: IssueWorkflow,
   claim: WorkflowTaskClaim,
   expectedRevision: number | null,
@@ -333,7 +355,7 @@ export async function claimWorkflowTaskState(
 }
 
 /** Distinguish a retryable same-owner revision from permanent capability loss. */
-export async function saveWorkflowStateForTask(
+async function saveWorkflowForTask(
   workflow: IssueWorkflow,
   lease: WorkflowTaskLease,
   expectedRevision: number,
@@ -348,7 +370,7 @@ export async function saveWorkflowStateForTask(
 }
 
 /** Reapply one pure task mutation after metadata-only revisions without holding the file lock. */
-export async function mutateWorkflowStateForTask(
+async function mutateWorkflowForTask(
   workflow: IssueWorkflow,
   lease: WorkflowTaskLease,
   mutate: (current: IssueWorkflow) => void,
@@ -357,7 +379,7 @@ export async function mutateWorkflowStateForTask(
   while (true) {
     const next = structuredClone(current)
     mutate(next)
-    const result = await saveWorkflowStateForTask(next, lease, storedRevision(current))
+    const result = await saveWorkflowForTask(next, lease, storedRevision(current))
     if (result.status === 'committed') {
       Object.assign(workflow, next)
       return result
@@ -370,30 +392,63 @@ export async function mutateWorkflowStateForTask(
 }
 
 /** Controller-only stop transition: exact task + frozen observation, always revoking the prior task lease. */
-export async function stopWorkflowTaskState(
+async function stopWorkflowTask(
   workflow: IssueWorkflow,
   task: WorkflowTaskCredential,
 ): Promise<WorkflowTaskStopResult> {
-  let current = workflow
-  const expectedTaskStateRevision = storedTaskStateRevision(workflow)
-  while (true) {
+  const path = workflowStatePath(workflow)
+  const release = await acquireLock(path)
+  try {
+    const current = await readCurrent(path)
+    const currentRevision = current ? storedRevision(current) : null
+    const currentTaskStateRevision = current ? storedTaskStateRevision(current) : null
+    if (!current || !ownsCurrentTask(current, task)) {
+      return { status: 'ownership-lost', currentRevision, currentTaskStateRevision }
+    }
     const next = structuredClone(current)
     next.stage = task.kind === 'dev' ? 'developing' : 'review-ready'
-    if (task.kind === 'dev') next.devInterrupted = true
-    const result = await conditionalCommit(next, storedRevision(current), task, expectedTaskStateRevision, true)
-    if (result.status === 'committed') {
-      Object.assign(workflow, next)
-      return result
+    if (task.kind === 'dev') {
+      next.devInterrupted = true
+    } else {
+      next.reviewResult = null
+      next.reviewSessionId = null
+      next.reviewSessionAgent = null
     }
-    if (result.status === 'ownership-lost') return result
-    const reloaded = await readCurrent(workflowStatePath(workflow))
-    if (!reloaded || storedTaskStateRevision(reloaded) !== expectedTaskStateRevision) {
-      return {
-        status: 'ownership-lost',
-        currentRevision: reloaded ? storedRevision(reloaded) : null,
-        currentTaskStateRevision: reloaded ? storedTaskStateRevision(reloaded) : null,
-      }
-    }
-    current = reloaded
+    const committed = await commit(path, workflow, current, next, currentRevision ?? 0, true)
+    return committed
+  } finally {
+    await release()
   }
+}
+
+/** Revision-checked ordinary command; the only workflow mutation exposed by the state facade. */
+export function commitWorkflowCommand(workflow: IssueWorkflow, expectedRevision: number | null): Promise<void> {
+  return enqueueWorkflowCommand(workflow, () => saveWorkflowSnapshot(workflow, expectedRevision))
+}
+
+/** Semantic claim command. Raw claim persistence remains private to this module. */
+export function claimWorkflowTaskCommand(
+  workflow: IssueWorkflow,
+  claim: WorkflowTaskClaim,
+  expectedRevision: number | null,
+  expectation: WorkflowTaskExpectation,
+): Promise<WorkflowTaskClaimResult> {
+  return enqueueWorkflowCommand(workflow, () => claimWorkflowTask(workflow, claim, expectedRevision, expectation))
+}
+
+/** Semantic callback command. Its frozen lease is validated inside the durable critical section. */
+export function mutateWorkflowTaskCommand(
+  workflow: IssueWorkflow,
+  lease: WorkflowTaskLease,
+  mutate: (current: IssueWorkflow) => void,
+): Promise<Exclude<WorkflowTaskCommitResult, { status: 'revision-conflict' }>> {
+  return enqueueWorkflowCommand(workflow, () => mutateWorkflowForTask(workflow, lease, mutate))
+}
+
+/** Semantic stop command and chain terminator for the exact current task. */
+export function stopWorkflowTaskCommand(
+  workflow: IssueWorkflow,
+  task: WorkflowTaskCredential,
+): Promise<WorkflowTaskStopResult> {
+  return enqueueWorkflowCommand(workflow, () => stopWorkflowTask(workflow, task))
 }

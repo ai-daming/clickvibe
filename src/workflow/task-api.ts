@@ -4,6 +4,7 @@ import type { JobId } from '@deepseek-ai/dsh-jobs'
 import { finishTask, pushTaskLine } from '../agent/task-supervisor.ts'
 import { decodeLiveLogLine, type LiveLogEvent } from '../infra/live-output.ts'
 import { type LiveTask, liveTasks, liveWaiters } from '../infra/runtime.ts'
+import { stopWorkflowTaskCommand } from '../infra/workflow-persistence.ts'
 import {
   findTaskHistory,
   findWorkflowByIssue,
@@ -11,7 +12,6 @@ import {
   loadAllWorkflows,
   loadWorkflow,
   readTaskLog,
-  stopWorkflowTask,
 } from '../infra/state.ts'
 import type { TaskMetrics } from '../infra/task-log-store.ts'
 import { observeWorkflowTask, type TaskOwnershipContext } from '../infra/task-ownership.ts'
@@ -274,14 +274,17 @@ export async function stopTask(
   task.status = 'stopped'
   const stopped = task.process?.kill() ?? false
   if (!task.process) finishTask(task, 'stopped', null)
-  void (async () => {
-    const workflow = await loadWorkflow(task.workflowKey)
-    if (!workflow) return
-    await markTaskStopped(workflow, task.kind, task.taskId)
-  })()
+  const workflow = await loadWorkflow(task.workflowKey)
+  if (!workflow) return { ok: false, error: `任务 ${taskId} 已停止,但 workflow 不存在,无法提交撤销` }
+  const saved = await markTaskStopped(workflow, task.kind, task.taskId)
+  if (saved.status === 'ownership-lost') {
+    // A successor already revoked this stale local lease. The requested local
+    // process is stopped and no current workflow generation was modified.
+    return { ok: true, taskId, stopped }
+  }
   return { ok: true, taskId, stopped }
 }
 
 function markTaskStopped(workflow: IssueWorkflow, kind: 'dev' | 'review', taskId: string) {
-  return stopWorkflowTask(workflow, { kind, taskId })
+  return stopWorkflowTaskCommand(workflow, { kind, taskId })
 }

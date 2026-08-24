@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { loadWorkflow, saveWorkflow } from '../src/infra/state.ts'
+import { loadWorkflow, commitWorkflow } from '../src/infra/state.ts'
 import { resolveReviewStartWorkflow, reviewStartError } from '../src/workflow/review-start.ts'
 
 function included(body: unknown): string {
@@ -103,7 +103,7 @@ test('review start recovers a missing workflow from matching branch, commit, and
     resolved.workflow.stage = 'developing'
     resolved.workflow.devInterrupted = true
     resolved.workflow.reviewResult = { passed: false, issues: ['resume this rework'] }
-    await saveWorkflow(resolved.workflow, resolved.workflow.revision ?? null)
+    await commitWorkflow(resolved.workflow, resolved.workflow.revision ?? null)
     const interrupted = await resolveReviewStartWorkflow(
       ctx as never,
       { kind: 'issue', owner: 'o', repo: 'r', number: '106' },

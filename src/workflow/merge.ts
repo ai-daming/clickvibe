@@ -41,7 +41,14 @@ import {
   parseUrl,
   runCommand,
 } from '../infra/runtime.ts'
-import { appendEvent, archiveWorkflow, issueKey, loadWorkflow, saveWorkflow, workflowRevision } from '../infra/state.ts'
+import {
+  appendEvent,
+  archiveWorkflow,
+  issueKey,
+  loadWorkflow,
+  commitWorkflow,
+  workflowRevision,
+} from '../infra/state.ts'
 import { collectMergeGateFailures, type MergeGateFailure, mergeGateRejection } from './merge-gates.ts'
 import { workflowBaseBranch } from './state-view.ts'
 
@@ -314,7 +321,7 @@ export async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): P
       cleanup: { worktree: false, localBranch: false, remoteBranch: false, issue: false },
     }
     try {
-      await saveWorkflow(workflow, workflowRevision(workflow))
+      await commitWorkflow(workflow, workflowRevision(workflow))
     } catch (error) {
       return {
         ok: false,
@@ -333,14 +340,14 @@ export async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): P
   const persistStep = async (): Promise<void> => {
     delivery.status = 'cleanup-pending'
     delete delivery.lastError
-    await saveWorkflow(workflow, workflowRevision(workflow))
+    await commitWorkflow(workflow, workflowRevision(workflow))
   }
   const failCleanup = async (label: string, error: unknown): Promise<MergeResult> => {
     const detail = String(error instanceof Error ? error.message : error)
     delivery.status = 'cleanup-pending'
     delivery.lastError = `${label}: ${detail}`
     try {
-      await saveWorkflow(workflow, workflowRevision(workflow))
+      await commitWorkflow(workflow, workflowRevision(workflow))
     } catch (persistError) {
       return {
         ok: false,

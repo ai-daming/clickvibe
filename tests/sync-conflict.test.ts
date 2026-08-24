@@ -14,7 +14,7 @@ import {
   type IssueWorkflow,
 } from '../src/index.ts'
 import { liveTasks } from '../src/infra/runtime.ts'
-import { applyDevRunOutcome, loadWorkflow, readLogTail, saveWorkflow } from '../src/infra/state.ts'
+import { applyDevRunOutcome, loadWorkflow, readLogTail, commitWorkflow } from '../src/infra/state.ts'
 import { createFakeJobs } from './fake-jobs.ts'
 
 const execFileAsync = promisify(execFile)
@@ -193,7 +193,7 @@ test('sync pushes the clean merge commit to the existing PR branch (issue #45)',
   try {
     await withTempHome(root, async () => {
       const workflow = syncableWorkflow(worktree, branch)
-      await saveWorkflow(workflow, null)
+      await commitWorkflow(workflow, null)
 
       const result = await syncWorktree(ctx, { url: 'https://github.com/o/r/issues/45' })
       assert.equal(result.ok, true)
@@ -214,7 +214,7 @@ test('sync does not merge or push when the worktree has unrelated local changes 
   try {
     await withTempHome(root, async () => {
       const workflow = syncableWorkflow(worktree, branch)
-      await saveWorkflow(workflow, null)
+      await commitWorkflow(workflow, null)
       await writeFile(join(worktree, 'local-notes.md'), 'uncommitted local change\n')
 
       const result = await syncWorktree(ctx, { url: 'https://github.com/o/r/issues/45' })
@@ -235,7 +235,7 @@ test('sync keeps the conflicted merge scene and rework stays reachable (issue #2
   try {
     await withTempHome(root, async () => {
       const workflow = conflictedWorkflow(worktree)
-      await saveWorkflow(workflow, null)
+      await commitWorkflow(workflow, null)
 
       const result = await syncWorktree(ctx, { url: 'https://github.com/o/r/issues/26' })
       assert.equal(result.ok, false)
@@ -289,7 +289,7 @@ test('an interrupted rework on a conflicted worktree resumes instead of re-synci
   try {
     await withTempHome(root, async () => {
       const workflow = conflictedWorkflow(worktree)
-      await saveWorkflow(workflow, null)
+      await commitWorkflow(workflow, null)
       // 冲突:现场保留
       const result = await syncWorktree(ctx, { url: 'https://github.com/o/r/issues/26' })
       assert.equal((result as { conflict?: boolean }).conflict, true)
@@ -304,7 +304,7 @@ test('an interrupted rework on a conflicted worktree resumes instead of re-synci
       assert.equal(started.stage, 'developing')
       assert.equal(started.devInterrupted, true)
       assert.deepEqual(started.reviewResult, { passed: false, issues: ['README 内容冲突'] })
-      await saveWorkflow(started, started.revision ?? null)
+      await commitWorkflow(started, started.revision ?? null)
 
       // 门禁不得退回 sync(那只会再次冲突):唯一动作是恢复会话,
       // 恢复 prompt 会前置「先解决未完成的合并」指令。
@@ -365,7 +365,7 @@ test('review issues reach the agent across stale-session fallback on an interrup
   try {
     await withTempHome(root, async () => {
       const workflow = conflictedWorkflow(worktree)
-      await saveWorkflow(workflow, null)
+      await commitWorkflow(workflow, null)
       const result = await syncWorktree(ctx, { url: 'https://github.com/o/r/issues/26' })
       assert.equal((result as { conflict?: boolean }).conflict, true)
 
@@ -380,7 +380,7 @@ test('review issues reach the agent across stale-session fallback on an interrup
       interrupted.devTaskId = 'dev-old'
       interrupted.devSessionId = 'dev-session-1'
       interrupted.devSessionAgent = 'codex'
-      await saveWorkflow(interrupted, interrupted.revision ?? null)
+      await commitWorkflow(interrupted, interrupted.revision ?? null)
       const exact = await resumeDevelop(captureCtx, { url: 'https://github.com/o/r/issues/26' })
       assert.equal(exact.ok, true)
       await waitForTaskClosed(exact.taskId)
@@ -395,7 +395,7 @@ test('review issues reach the agent across stale-session fallback on an interrup
       assert.ok(mismatched)
       mismatched.devSessionId = 'dev-session-2'
       mismatched.devSessionAgent = 'claude'
-      await saveWorkflow(mismatched, mismatched.revision ?? null)
+      await commitWorkflow(mismatched, mismatched.revision ?? null)
       launches.length = 0
       const fresh = await resumeDevelop(captureCtx, { url: 'https://github.com/o/r/issues/26' })
       assert.equal(fresh.ok, true)

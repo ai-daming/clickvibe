@@ -8,7 +8,7 @@ import {
   type AutoRunPausedReason,
   issueKey,
   loadWorkflow,
-  saveWorkflow,
+  commitWorkflow,
   workflowRevision,
 } from '../infra/state.ts'
 import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
@@ -56,7 +56,7 @@ async function persistDecision(key: string, decision: Exclude<AutoRunDecision, {
   workflow.autoRun.unresolved = decision.unresolved
   if (decision.kind === 'trigger') workflow.autoRun.step = decision.step
   workflow.autoRun.lastObservedAt = new Date().toISOString()
-  await saveWorkflow(workflow, workflowRevision(workflow))
+  await commitWorkflow(workflow, workflowRevision(workflow))
 }
 
 async function pauseAutoRun(key: string, reason: AutoRunPausedReason): Promise<void> {
@@ -199,7 +199,7 @@ async function applyDecision(ctx: Context, key: string, decision: AutoRunDecisio
       break
     case 'rework':
       workflow.devAgent = workflow.autoRun.devAgent
-      await saveWorkflow(workflow, workflowRevision(workflow))
+      await commitWorkflow(workflow, workflowRevision(workflow))
       result = await resumeDevelop(ctx, { url: workflow.url })
       break
     case 'sync':

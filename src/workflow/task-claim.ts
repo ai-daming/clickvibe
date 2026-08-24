@@ -1,7 +1,7 @@
 import { finishTask } from '../agent/task-supervisor.ts'
 import type { LiveTask } from '../infra/runtime.ts'
+import { claimWorkflowTaskCommand } from '../infra/workflow-persistence.ts'
 import {
-  claimWorkflowTask,
   type IssueWorkflow,
   type WorkflowTaskClaim,
   type WorkflowTaskCredential,
@@ -23,7 +23,7 @@ export async function establishTaskClaim(
   try {
     let expectedRevision = workflowRevision(workflow)
     while (true) {
-      const result = await claimWorkflowTask(workflow, claim, expectedRevision, expectation)
+      const result = await claimWorkflowTaskCommand(workflow, claim, expectedRevision, expectation)
       if (result.status === 'committed') {
         live.workflowLease = result.lease
         return { ok: true, claimed: true, taskId: claim.taskId }

@@ -8,7 +8,7 @@ import {
   appendTaskLog,
   loadWorkflow,
   readTaskLog,
-  saveWorkflow,
+  commitWorkflow,
   startTaskLog,
   type IssueWorkflow,
 } from '../src/infra/state.ts'
@@ -61,7 +61,7 @@ test('task generations append valid structured JSONL independently and aggregate
   process.env.HOME = tempHome
   try {
     const workflow = fixture()
-    await saveWorkflow(workflow, workflow.revision ?? null)
+    await commitWorkflow(workflow, workflow.revision ?? null)
     const first = workflow.devTaskId!
     const second = 'dev-1720000005000-second'
     await startTaskLog(workflow, 'dev', first)

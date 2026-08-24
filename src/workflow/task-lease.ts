@@ -1,36 +1,23 @@
 import type { LiveTask } from '../infra/runtime.ts'
-import { type IssueWorkflow, mutateWorkflowForTask, type WorkflowTaskCommitResult } from '../infra/state.ts'
+import { mutateWorkflowTaskCommand, type WorkflowTaskCommitResult } from '../infra/workflow-persistence.ts'
+import type { IssueWorkflow } from '../infra/state.ts'
 
 type TaskMutationResult = Exclude<WorkflowTaskCommitResult, { status: 'revision-conflict' }>
 
-const taskMutationQueues = new WeakMap<LiveTask, Promise<void>>()
-
 /**
- * Serialize one live owner's lifecycle writes and forward only the lease
- * returned by its own successful commit. Persisted workflow reloads never
- * refresh this capability.
+ * Submit one callback command with the lease frozen on this LiveTask. The
+ * workflow-wide command domain serializes it with claims, stops and ordinary
+ * writes; a persisted reload never refreshes the capability.
  */
 export function mutateLiveTaskWorkflow(
   live: LiveTask,
   workflow: IssueWorkflow,
   mutate: (current: IssueWorkflow) => void,
 ): Promise<TaskMutationResult> {
-  const previous = taskMutationQueues.get(live) ?? Promise.resolve()
-  const operation = previous
-    .catch(() => undefined)
-    .then(async () => {
-      const lease = live.workflowLease
-      if (!lease) throw new Error(`task ${live.taskId} has no workflow lease`)
-      const result = await mutateWorkflowForTask(workflow, lease, mutate)
-      if (result.status === 'committed') live.workflowLease = result.lease
-      return result
-    })
-  taskMutationQueues.set(
-    live,
-    operation.then(
-      () => undefined,
-      () => undefined,
-    ),
-  )
-  return operation
+  const lease = live.workflowLease
+  if (!lease) return Promise.reject(new Error(`task ${live.taskId} has no workflow lease`))
+  return mutateWorkflowTaskCommand(workflow, lease, mutate).then((result) => {
+    if (result.status === 'committed') live.workflowLease = result.lease
+    return result
+  })
 }

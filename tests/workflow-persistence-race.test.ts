@@ -11,22 +11,21 @@ import { LineLog } from '../src/infra/develop-core.ts'
 import { LineBuffer } from '../src/infra/line-buffer.ts'
 import type { LiveTask } from '../src/infra/runtime.ts'
 import {
-  claimWorkflowTask,
+  commitWorkflow,
   type IssueWorkflow,
   loadWorkflow,
-  mutateWorkflowForTask,
-  saveWorkflow,
-  saveWorkflowForTask,
   statePath,
   WorkflowConflictError,
   type WorkflowTaskLease,
 } from '../src/infra/state.ts'
 import { observeTaskOwnership, workflowTaskExpectation } from '../src/infra/task-ownership.ts'
+import { claimWorkflowTaskCommand, mutateWorkflowTaskCommand } from '../src/infra/workflow-persistence.ts'
 import { establishTaskClaim } from '../src/workflow/task-claim.ts'
 
 const workerSource = `
 import { createInterface } from 'node:readline'
-import { saveWorkflow, saveWorkflowForTask, WorkflowConflictError } from './src/infra/state.ts'
+import { commitWorkflow, WorkflowConflictError } from './src/infra/state.ts'
+import { mutateWorkflowTaskCommand } from './src/infra/workflow-persistence.ts'
 import { resumeDevelop } from './src/workflow/resume.ts'
 let agentStarts = 0
 let jobSequence = 0
@@ -76,8 +75,8 @@ for await (const line of createInterface({ input: process.stdin })) {
       continue
     }
     const saved = input.credential
-      ? (await saveWorkflowForTask(input.workflow, input.credential, input.expectedRevision)).status === 'committed'
-      : (await saveWorkflow(input.workflow, input.expectedRevision), true)
+      ? (await mutateWorkflowTaskCommand(input.workflow, input.credential, (current) => Object.assign(current, input.workflow))).status === 'committed'
+      : (await commitWorkflow(input.workflow, input.expectedRevision), true)
     console.log(JSON.stringify({ saved }))
   } catch (error) {
     console.log(JSON.stringify(error instanceof WorkflowConflictError
@@ -154,7 +153,7 @@ test('cross-process task writes and resume claims preserve the winning generatio
         const oldTaskId = `review-${1000 + round}-old`
         const nextTaskId = `review-${9000 + round}-current`
         const initial = workflow(oldTaskId, 'initial', 1000 + round)
-        await saveWorkflow(initial, null)
+        await commitWorkflow(initial, null)
         const stale = structuredClone(initial)
         stale.stage = 'review-ready'
         stale.events[0].note = 'stale'.repeat(64 * 1024)
@@ -184,7 +183,7 @@ test('cross-process task writes and resume claims preserve the winning generatio
           reviewTaskId: null,
           prNumber: null,
         })
-        await saveWorkflow(initial, null)
+        await commitWorkflow(initial, null)
         const [first, second] = await Promise.all([
           staleWorker.resume(initial.url),
           successorWorker.resume(initial.url),
@@ -227,10 +226,10 @@ test('cross-process task writes and resume claims preserve the winning generatio
       }
     })
     const recovered = workflow('review-9999-before', 'recovered', 9999)
-    await saveWorkflow(recovered, null)
+    await commitWorkflow(recovered, null)
     recovered.reviewTaskId = 'review-9999-recovered'
     await writeFile(`${statePath(recovered)}.lock`, JSON.stringify({ pid: 2_147_483_647, token: 'dead-host' }))
-    await saveWorkflow(recovered, recovered.revision ?? 0)
+    await commitWorkflow(recovered, recovered.revision ?? 0)
     assert.equal((await loadWorkflow(recovered.key))?.reviewTaskId, recovered.reviewTaskId)
   } finally {
     const exits = [once(staleWorker.process, 'exit'), once(successorWorker.process, 'exit')]
@@ -249,27 +248,27 @@ test('persistence keeps revision, capability, claim and I/O outcomes distinct', 
   process.env.HOME = tempHome
   try {
     const current = workflow('review-5000-current', 'current', 5000)
-    await saveWorkflow(current, null)
+    await commitWorkflow(current, null)
 
     const stale = structuredClone(current)
     stale.revision = 0
-    await assert.rejects(() => saveWorkflow(stale, 0), WorkflowConflictError)
+    await assert.rejects(() => commitWorkflow(stale, 0), WorkflowConflictError)
 
     current.prNumber = '5000'
-    await saveWorkflow(current, current.revision ?? 0)
-    assert.deepEqual(
-      await saveWorkflowForTask(stale, testLease(stale, 'review', stale.reviewTaskId!), stale.revision ?? 0),
-      {
-        status: 'revision-conflict',
-        currentRevision: current.revision,
-        currentTaskStateRevision: current.taskStateRevision,
+    await commitWorkflow(current, current.revision ?? 0)
+    const metadataRetry = await mutateWorkflowTaskCommand(
+      stale,
+      testLease(stale, 'review', stale.reviewTaskId!),
+      (next) => {
+        next.issueState = 'OPEN'
       },
     )
-    const successor = structuredClone(current)
+    assert.equal(metadataRetry.status, 'committed')
+    const successor = structuredClone(stale)
     successor.reviewTaskId = 'review-7000-successor'
-    await saveWorkflow(successor, successor.revision ?? 0)
+    await commitWorkflow(successor, successor.revision ?? 0)
     assert.deepEqual(
-      await saveWorkflowForTask(stale, testLease(stale, 'review', stale.reviewTaskId!), current.revision ?? 0),
+      await mutateWorkflowTaskCommand(stale, testLease(stale, 'review', stale.reviewTaskId!), () => undefined),
       {
         status: 'ownership-lost',
         currentRevision: successor.revision,
@@ -279,10 +278,10 @@ test('persistence keeps revision, capability, claim and I/O outcomes distinct', 
 
     const claimant = workflow('review-8100-interrupted', 'claim', 8100)
     claimant.stage = 'review-ready'
-    await saveWorkflow(claimant, null)
+    await commitWorkflow(claimant, null)
     await assert.rejects(
       () =>
-        claimWorkflowTask(
+        claimWorkflowTaskCommand(
           claimant,
           { kind: 'review', taskId: 'invalid', agent: 'codex', hostJobId: null as never },
           claimant.revision ?? 0,
@@ -292,17 +291,17 @@ test('persistence keeps revision, capability, claim and I/O outcomes distinct', 
     )
     const staleClaim = structuredClone(claimant)
     claimant.prNumber = '8100'
-    await saveWorkflow(claimant, claimant.revision ?? 0)
+    await commitWorkflow(claimant, claimant.revision ?? 0)
     const claim = { kind: 'review' as const, taskId: 'review-9100-new', agent: 'codex' as const, hostJobId: 'job-9100' }
     const expectation = workflowTaskExpectation(staleClaim)
-    const conflict = await claimWorkflowTask(staleClaim, claim, staleClaim.revision ?? 0, expectation)
+    const conflict = await claimWorkflowTaskCommand(staleClaim, claim, staleClaim.revision ?? 0, expectation)
     assert.deepEqual(conflict, {
       status: 'revision-conflict',
       currentRevision: claimant.revision,
       currentTaskStateRevision: claimant.taskStateRevision,
     })
     assert.equal(
-      (await claimWorkflowTask(staleClaim, claim, conflict.currentRevision, expectation)).status,
+      (await claimWorkflowTaskCommand(staleClaim, claim, conflict.currentRevision, expectation)).status,
       'committed',
     )
     assert.deepEqual(
@@ -314,7 +313,7 @@ test('persistence keeps revision, capability, claim and I/O outcomes distinct', 
 
     await writeFile(statePath(current), '{broken json')
     await assert.rejects(
-      () => saveWorkflow(current, current.revision ?? 0),
+      () => commitWorkflow(current, current.revision ?? 0),
       (error: unknown) => error instanceof SyntaxError,
     )
   } finally {
@@ -341,11 +340,11 @@ test('a completed task rejects late claim and stop intents from its previous lif
   })
   let losingTask: LiveTask | null = null
   try {
-    await saveWorkflow(running, null)
+    await commitWorkflow(running, null)
     const staleClaim = structuredClone(running)
     const claimExpectation = workflowTaskExpectation(staleClaim)
     const staleStop = structuredClone(running)
-    const completion = await mutateWorkflowForTask(
+    const completion = await mutateWorkflowTaskCommand(
       running,
       testLease(running, 'dev', running.devTaskId!),
       (current) => {
@@ -392,7 +391,7 @@ test('a completed task rejects late claim and stop intents from its previous lif
     assert.equal(losingTask.status, 'stopped')
     assert.equal(losingTask.sessionId, null)
 
-    const lateStop = await mutateWorkflowForTask(
+    const lateStop = await mutateWorkflowTaskCommand(
       staleStop,
       testLease(staleStop, 'dev', staleStop.devTaskId!),
       (current) => {

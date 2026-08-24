@@ -18,17 +18,10 @@ import {
   type TaskLogKind,
   type TaskLogRead,
 } from './task-log-store.ts'
-import {
-  claimWorkflowTaskState as claimWorkflowTask,
-  mutateWorkflowStateForTask as mutateWorkflowForTask,
-  saveWorkflowState as saveWorkflow,
-  saveWorkflowStateForTask as saveWorkflowForTask,
-  workflowRevision,
-  workflowStatePath,
-} from './workflow-persistence.ts'
-export { stopWorkflowTaskState as stopWorkflowTask, WorkflowConflictError } from './workflow-persistence.ts'
+import { commitWorkflowCommand as commitWorkflow, workflowRevision, workflowStatePath } from './workflow-persistence.ts'
+export { WorkflowConflictError } from './workflow-persistence.ts'
 export type * from './workflow-persistence.ts'
-export { claimWorkflowTask, mutateWorkflowForTask, saveWorkflow, saveWorkflowForTask, workflowRevision }
+export { commitWorkflow, workflowRevision }
 export { issueKey } from './state-layout.ts'
 export type WorkflowStage =
   | 'idle' // 未开始开发
@@ -220,7 +213,7 @@ export async function appendEvent(
 ): Promise<void> {
   workflow.events = workflow.events ?? []
   workflow.events.push(event)
-  await saveWorkflow(workflow, expectedRevision)
+  await commitWorkflow(workflow, expectedRevision)
 }
 
 /** Derive the per-issue state directory. */
@@ -302,7 +295,7 @@ async function migrateLegacyWorkflowFile(path: string): Promise<void> {
   try {
     const existing = await readWorkflowFile(destination)
     if (existing && existing.key !== workflow.key) throw new Error('workflow migration target belongs to another issue')
-    if (!existing) await saveWorkflow(workflow, null)
+    if (!existing) await commitWorkflow(workflow, null)
     await rm(path)
     await migrateWorkflowLogs(workflow)
   } catch {
@@ -380,7 +373,7 @@ export async function loadAllArchivedWorkflows(): Promise<IssueWorkflow[]> {
 }
 
 export async function archiveWorkflow(workflow: IssueWorkflow, expectedRevision: number): Promise<void> {
-  await saveWorkflow(workflow, expectedRevision)
+  await commitWorkflow(workflow, expectedRevision)
 }
 
 export async function startTaskLog(workflow: IssueWorkflow, kind: TaskLogKind, taskId: string): Promise<void> {
@@ -419,7 +412,7 @@ export async function appendLog(key: string, kind: 'dev' | 'review', line: strin
       taskId = `legacy-${kind}-${Date.now()}`
       if (kind === 'dev') workflow.devTaskId = taskId
       else workflow.reviewTaskId = taskId
-      await saveWorkflow(workflow, workflowRevision(workflow))
+      await commitWorkflow(workflow, workflowRevision(workflow))
       await migrateWorkflowLogs(workflow)
     }
     if (workflow && taskId) {
