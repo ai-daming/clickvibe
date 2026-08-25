@@ -3322,13 +3322,14 @@ test('/fetch maps PR REST fields and latest reviews without any GraphQL read com
 
 test('rate-limit response opens a circuit and returns the friendly recovery time on later routes', async () => {
   const previousHome = process.env.HOME
-  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-rate-circuit-'))
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-rate-limit-circuit-'))
   process.env.HOME = tempHome
   try {
     const reset = Math.floor((Date.now() + 10 * 60_000) / 1000)
-    let requests = 0
-    const handler = createHandler(async () => {
-      requests++
+    let githubRequests = 0
+    const handler = createHandler(async (spec) => {
+      assert.match(spec.command, /^gh api /, `unexpected non-GitHub shell command: ${spec.command}`)
+      githubRequests++
       return {
         exitCode: 1,
         stdout: {
@@ -3350,7 +3351,7 @@ test('rate-limit response opens a circuit and returns the friendly recovery time
     assert.equal(second.status, 429)
     assert.match(first.body.error ?? '', /^GitHub 额度已用完,约 \d{2}:\d{2} 恢复$/)
     assert.equal(second.body.error, first.body.error)
-    assert.equal(requests, 1, 'open circuit must reject without another GitHub request')
+    assert.equal(githubRequests, 1, 'open circuit must reject without another GitHub request')
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
