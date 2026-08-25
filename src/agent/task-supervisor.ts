@@ -35,8 +35,8 @@ import {
   TASK_RETENTION_MS,
   TASK_TIMEOUT_MS,
 } from '../infra/runtime.ts'
-import { appendTaskLog, startTaskLog, type IssueWorkflow } from '../infra/state.ts'
-import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
+import { appendTaskLog, type IssueWorkflow, startTaskLog } from '../infra/state.ts'
+import { logTaskDiagnostic, waitForTaskDiagnosticPersistence } from '../infra/task-diagnostics.ts'
 import {
   type AgentKind,
   lossyAgentOutputNotice,
@@ -67,7 +67,10 @@ function persistTask(task: LiveTask, operation: () => Promise<void>): void {
 
 /** Await all best-effort log writes scheduled for one live task before releasing its storage. */
 export async function waitForTaskPersistence(task: LiveTask): Promise<void> {
-  await taskPersistence.get(task)?.catch(() => undefined)
+  await Promise.all([
+    taskPersistence.get(task)?.catch(() => undefined),
+    waitForTaskDiagnosticPersistence(task.workflowKey),
+  ])
 }
 
 function hostJobOutcome(task: LiveTask, status: LiveTask['status']): JobOutcome {
