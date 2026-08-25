@@ -9,7 +9,6 @@ import { DeliveryTimeline } from './delivery-timeline.tsx'
 import { AutoRunForm } from './auto-run-form.tsx'
 import { apiCall } from '../domain.ts'
 import { contextToSubmit } from '../action-context.ts'
-import { freshSessionEntry } from '../fresh-session.ts'
 
 export function DevSection({
   url,
@@ -32,6 +31,7 @@ export function DevSection({
     actionButtonClass,
     activeTaskId,
     agentChoice,
+    agentPolicy,
     busy,
     busyLabel,
     contextOpen,
@@ -42,7 +42,6 @@ export function DevSection({
     error,
     historyKind,
     lastDelivery,
-    lockedAgent,
     logEvents,
     mergeWithOverride,
     overrideEntryVisible,
@@ -51,7 +50,6 @@ export function DevSection({
     runAction,
     setAgentChoice,
     setContextText,
-    showAgentToggle,
     stage,
     startDev,
     startReview,
@@ -62,11 +60,11 @@ export function DevSection({
     resume,
     workflowEvents,
   } = useDevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoActionHandled, onDelivered })
-  const freshEntry = freshSessionEntry(effectiveAction.kind, derived?.freshSession)
+  const freshEntry = agentPolicy.freshEntry
   const unknownTaskId = selectUnknownTaskId(workflow)
   const runFreshSession = () => {
     const userContext = contextToSubmit(contextText)
-    if (freshEntry === 'develop') void resume(userContext, true)
+    if (freshEntry === 'develop') void resume(userContext, true, agentChoice)
     if (freshEntry === 'review') void startReview(agentChoice, userContext, true)
   }
   // 合并已完成:delivery 落盘,或动作已离开 merge/进入清理;任务仍在跑时不算(detail 会同时计时)。
@@ -217,28 +215,26 @@ export function DevSection({
 
       {/* 唯一动作 */}
       <div className="cv-dev-actions">
+        <div className="cv-agent-toggle" title={agentPolicy.tooltip}>
+          <button
+            className={agentChoice === 'codex' ? 'on' : ''}
+            onClick={() => setAgentChoice('codex')}
+            disabled={busy !== null || agentPolicy.disabled}
+          >
+            Codex
+          </button>
+          <button
+            className={agentChoice === 'claude' ? 'on' : ''}
+            onClick={() => setAgentChoice('claude')}
+            disabled={busy !== null || agentPolicy.disabled}
+          >
+            Claude
+          </button>
+        </div>
         {effectiveAction.kind === 'none' ? (
           <div className="cv-dev-noop">· {effectiveAction.hint}</div>
         ) : (
           <>
-            {showAgentToggle ? (
-              <div className="cv-agent-toggle" title={lockedAgent ? `Review 锁定 ${lockedAgent}` : '选择 agent'}>
-                <button
-                  className={agentChoice === 'codex' ? 'on' : ''}
-                  onClick={() => setAgentChoice('codex')}
-                  disabled={lockedAgent !== null && lockedAgent !== 'codex'}
-                >
-                  Codex
-                </button>
-                <button
-                  className={agentChoice === 'claude' ? 'on' : ''}
-                  onClick={() => setAgentChoice('claude')}
-                  disabled={lockedAgent !== null && lockedAgent !== 'claude'}
-                >
-                  Claude
-                </button>
-              </div>
-            ) : null}
             <button
               className={actionButtonClass}
               onClick={runAction}

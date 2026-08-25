@@ -26,7 +26,7 @@ import {
   pushTaskLine,
   reserveHostTask,
 } from '../agent/task-supervisor.ts'
-import { buildFreshAgentCommand, buildResumeAgentCommand } from '../infra/develop-core.ts'
+import { buildFreshAgentCommand, buildResumeAgentCommand, parseAgent } from '../infra/develop-core.ts'
 import { buildMergePreface } from '../infra/git.ts'
 import { type LiveTask, parseUrl, readWorktreeHead, resumeTaskGate, runCommand, taskId } from '../infra/runtime.ts'
 import { clearStaleSessionId, issueKey, loadWorkflow, resolveSessionForAgent } from '../infra/state.ts'
@@ -51,7 +51,7 @@ export async function resumeDevelop(
   ctx: Context,
   payload: unknown,
 ): Promise<{ ok: true; taskId: string } | { ok: false; error: string; controllerError?: true }> {
-  const body = (payload ?? {}) as { url?: unknown; context?: unknown; freshSession?: unknown }
+  const body = (payload ?? {}) as { url?: unknown; agent?: unknown; context?: unknown; freshSession?: unknown }
   const url = String(body.url ?? '').trim()
   const extraContext = typeof body.context === 'string' ? body.context.trim() : ''
   const freshSession = body.freshSession === true
@@ -81,7 +81,21 @@ export async function resumeDevelop(
     return { ok: false, error: '当前轮次未超过阈值,或没有可放弃的开发会话' }
   }
 
-  const agent = workflow.autoRun?.status === 'running' ? workflow.autoRun.devAgent : (workflow.devAgent ?? 'codex')
+  let requestedFreshAgent: 'codex' | 'claude' | null = null
+  if (freshSession) {
+    try {
+      const parsed = parseAgent(body.agent ?? workflow.devAgent ?? 'codex')
+      if (parsed === 'dryrun') return { ok: false, error: '恢复开发不支持 dryrun' }
+      requestedFreshAgent = parsed
+    } catch (error) {
+      return { ok: false, error: String(error instanceof Error ? error.message : error) }
+    }
+  }
+  const agent = freshSession
+    ? (requestedFreshAgent ?? workflow.devAgent ?? 'codex')
+    : workflow.autoRun?.status === 'running'
+      ? workflow.autoRun.devAgent
+      : (workflow.devAgent ?? 'codex')
   const ownedDevSession = freshSession
     ? { sessionId: null, invalid: false }
     : resolveSessionForAgent(structuredClone(workflow), 'dev', agent)

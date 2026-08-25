@@ -1,5 +1,6 @@
 import React from 'react'
 import { clearedContext, contextToSubmit, toggledContext } from './action-context.ts'
+import { deriveAgentChoicePolicy } from './agent-choice.ts'
 import { type AuthorizationPreview, authorizationSummary, expectedDevelopSnapshot } from './dev-authorization.ts'
 import { useDevStream } from './dev-stream.ts'
 import { type MergeGateFailure, type NextAction, OVERRIDE_REASON_MAX, type Workflow, apiCall } from './domain.ts'
@@ -44,10 +45,6 @@ export function useDevSection({
   }
   const { activeTaskId, historyKind, logEvents, openStream, setHistoryKind, setLogEvents, streamNotice, streamState } =
     useDevStream(workflow, refresh)
-  React.useEffect(() => {
-    const preferred = workflow?.reviewAgent ?? workflow?.devAgent
-    setAgentChoice(preferred ?? 'codex')
-  }, [workflow?.reviewAgent, workflow?.devAgent])
   const authorize = async (
     action: 'develop' | 'review' | 'resume' | 'create-pr' | 'merge',
     agent: 'codex' | 'claude' | null,
@@ -129,13 +126,13 @@ export function useDevSection({
       setBusy(null)
     }
   }
-  const resume = async (context?: string, freshSession = false) => {
+  const resume = async (context?: string, freshSession = false, freshAgent = agentChoice) => {
     setBusy('resuming')
     setError(null)
     setLogEvents([])
     setHistoryKind(null)
     try {
-      const agent = workflow?.devAgent ?? 'codex'
+      const agent = freshSession ? freshAgent : (workflow?.devAgent ?? 'codex')
       const authorization = await authorize('resume', agent, context ?? '', freshSession)
       if (!authorization) {
         setBusy(null)
@@ -366,6 +363,13 @@ export function useDevSection({
   }
   const issueClosed = String(issue.state ?? '').toUpperCase() === 'CLOSED'
   const effectiveAction = effectiveActionForIssue(issueClosed, nextAction, workflow !== null)
+  const agentPolicy = deriveAgentChoicePolicy(
+    effectiveAction.kind,
+    derived?.freshSession,
+    workflow?.devAgent,
+    workflow?.reviewAgent,
+  )
+  React.useEffect(() => setAgentChoice(agentPolicy.preferredAgent), [agentPolicy.preferredAgent])
   const runAction = () => {
     const userContext = contextToSubmit(contextText)
     switch (effectiveAction.kind) {
@@ -381,7 +385,7 @@ export function useDevSection({
         void resume(userContext)
         break
       case 'review':
-        void startReview(agentChoice, userContext)
+        void startReview(agentPolicy.continuationAgent ?? agentChoice, userContext)
         break
       case 'sync':
         void syncWorktree()
@@ -408,9 +412,6 @@ export function useDevSection({
     runAction()
     // The parent owns the one-shot trigger; use the currently rendered issue snapshot.
   }, [autoAction])
-  // review 锁定:从未 review 过则两个 agent 都可选;锁过只留那个
-  const lockedAgent = effectiveAction.kind === 'review' ? (workflow?.reviewAgent ?? null) : null
-  const showAgentToggle = effectiveAction.kind === 'develop' || effectiveAction.kind === 'review'
   // 附加说明(issue #54):仅 develop/resume/rework/review 支持;merge/cleanup/sync 不加。
   const contextSupported =
     effectiveAction.kind === 'develop' ||
@@ -465,6 +466,7 @@ export function useDevSection({
     actionButtonClass,
     activeTaskId,
     agentChoice,
+    agentPolicy,
     busy,
     busyLabel,
     contextOpen,
@@ -475,7 +477,6 @@ export function useDevSection({
     error,
     historyKind,
     lastDelivery,
-    lockedAgent,
     logEvents,
     mergeWithOverride,
     overrideEntryVisible,
@@ -484,7 +485,6 @@ export function useDevSection({
     runAction,
     setAgentChoice,
     setContextText,
-    showAgentToggle,
     stage,
     startDev,
     startReview,
