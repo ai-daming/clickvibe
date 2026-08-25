@@ -6,7 +6,7 @@
  * workflow/delivery-publication.ts. tests/runtime-contract.test.ts compares
  * both boundaries so a one-sided protocol or label change fails CI.
  */
-import type { WorkflowEvent } from './domain.ts'
+import type { Workflow, WorkflowEvent } from './domain.ts'
 
 export type AgentKind = 'codex' | 'claude'
 
@@ -111,6 +111,12 @@ export function selectHistoryTask(workflow: TaskHistoryWorkflow): { taskId: stri
   return { taskId: showReview ? workflow.reviewTaskId : workflow.devTaskId, expectRunning: false }
 }
 
+export function selectUnknownTaskId(
+  workflow: Pick<Workflow, 'stage' | 'devTaskId' | 'reviewTaskId' | 'derived'> | null,
+): string | null {
+  return workflow?.derived?.status === 'task-unknown' ? (workflow.derived.taskRef?.taskId ?? null) : null
+}
+
 function workflowBaseBranch(baseRef: string | null | undefined, defaultBranch = 'main'): string {
   const ref = String(baseRef ?? '')
     .split(/\s+@\s+/, 1)[0]
@@ -188,7 +194,7 @@ export function reviewVerdictView(input: ReviewVerdictInput): ReviewVerdictView 
 }
 
 export function workflowStatusLabel(
-  status: 'idle' | 'developing' | 'review-ready' | 'reviewing' | 'passed',
+  status: 'idle' | 'developing' | 'review-ready' | 'reviewing' | 'task-unknown' | 'interrupted' | 'passed',
   reviewPassed: boolean | null,
   verdictCurrent: boolean | undefined,
   issueContractStatus?: 'current' | 'changed' | 'unknown',
@@ -197,6 +203,8 @@ export function workflowStatusLabel(
   if (status === 'idle') return '未开发'
   if (status === 'developing') return '开发中'
   if (status === 'reviewing') return 'review 中'
+  if (status === 'task-unknown') return '任务状态未知'
+  if (status === 'interrupted') return '任务已中断'
   if (status === 'passed') return '✅ 已通过'
   if (reviewPassed !== null && verdictCurrent === false) {
     return issueContractStatus === 'unknown' && issueContractUnknownReason === 'current-contract-unavailable'

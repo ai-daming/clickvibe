@@ -3,7 +3,21 @@ import { ensureWorktree } from '../agent/worktree.ts'
 import { fetchIssue, issueSnapshot } from '../github/issue.ts'
 import { type IssuePromptSnapshot } from '../infra/develop-core.ts'
 import { liveTasks, parseUrl } from '../infra/runtime.ts'
-import { appendEvent, type AutoRunPausedReason, issueKey, loadWorkflow, saveWorkflow } from '../infra/state.ts'
+import {
+  appendEvent,
+  type AutoRunPausedReason,
+  issueKey,
+  loadWorkflow,
+  commitWorkflowMetadata,
+  workflowRevision,
+} from '../infra/state.ts'
+import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
+import {
+  observeWorkflowTask,
+  taskLaunchDecision,
+  type TaskOwnershipContext,
+  type WorkflowTaskRef,
+} from '../infra/task-ownership.ts'
 import { createPullRequest } from './create-pr.ts'
 import { startDevelop } from './develop-start.ts'
 import { mergeAndCleanup } from './merge.ts'
@@ -14,7 +28,6 @@ import {
   autoRunFailureReason,
   autoRunRetryDelay,
   decideAutoRun,
-  isOrphanedAutoRun,
   validateAutoRunConfig,
 } from './auto-run-policy.ts'
 import type { AutoRunState, IssueWorkflow } from '../infra/state.ts'
@@ -30,15 +43,10 @@ const queued = new Map<string, AutoRunTaskOutcome | undefined>()
 const deadlineTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const observationTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
-// 与 derive 同源:按 workflow 记录的 dev/review taskId 查 live 任务,
-// 避免 workflowKey 匹配不一致导致「任务活着却判无任务」(issue #111)。
-function liveTaskFor(workflow: { devTaskId: string | null; reviewTaskId: string | null }): LiveTask | null {
-  for (const taskId of [workflow.devTaskId, workflow.reviewTaskId]) {
-    if (taskId === null) continue
-    const task = liveTasks.get(taskId)
-    if (task && !task.closed) return task
-  }
-  return null
+function liveTaskFor(taskRef: WorkflowTaskRef | null): LiveTask | null {
+  if (!taskRef) return null
+  const task = liveTasks.get(taskRef.taskId)
+  return task && !task.closed ? task : null
 }
 
 async function persistDecision(key: string, decision: Exclude<AutoRunDecision, { kind: 'manual' }>): Promise<void> {
@@ -48,29 +56,38 @@ async function persistDecision(key: string, decision: Exclude<AutoRunDecision, {
   workflow.autoRun.unresolved = decision.unresolved
   if (decision.kind === 'trigger') workflow.autoRun.step = decision.step
   workflow.autoRun.lastObservedAt = new Date().toISOString()
-  await saveWorkflow(workflow)
+  Object.assign(
+    workflow,
+    await commitWorkflowMetadata(workflow, workflowRevision(workflow), { autoRun: workflow.autoRun }),
+  )
 }
 
 async function pauseAutoRun(key: string, reason: AutoRunPausedReason): Promise<void> {
   const workflow = await loadWorkflow(key)
   if (!workflow?.autoRun || workflow.autoRun.status !== 'running') return
-  // 诊断停靠点:暂停瞬间的 live 任务事实,方便事后核对是否误判孤儿(issue #111)。
-  console.warn(
-    `[clickvibe] autoRun 暂停 reason=${reason} key=${key} step=${workflow.autoRun.step ?? 0} ` +
-      `devTaskId=${workflow.devTaskId ?? '-'} reviewTaskId=${workflow.reviewTaskId ?? '-'} ` +
-      `devLive=${workflow.devTaskId ? (liveTasks.get(workflow.devTaskId) && !liveTasks.get(workflow.devTaskId)!.closed ? 'yes' : 'no') : '-'} ` +
-      `reviewLive=${workflow.reviewTaskId ? (liveTasks.get(workflow.reviewTaskId) && !liveTasks.get(workflow.reviewTaskId)!.closed ? 'yes' : 'no') : '-'}`,
-  )
+  logTaskDiagnostic('auto-run-pause', {
+    reason,
+    workflowKey: key,
+    step: workflow.autoRun.step ?? 0,
+    updatedAt: workflow.updatedAt,
+    devTaskId: workflow.devTaskId,
+    reviewTaskId: workflow.reviewTaskId,
+    liveTaskKeys: [...liveTasks.entries()].filter(([, task]) => !task.closed).map(([taskId]) => taskId),
+  })
   workflow.autoRun.status = 'paused'
   workflow.autoRun.pausedReason = reason
   workflow.autoRun.lastObservedAt = new Date().toISOString()
-  await appendEvent(workflow, {
-    kind: 'auto-run',
-    at: new Date().toISOString(),
-    round: workflow.autoRun.rounds,
-    step: workflow.autoRun.step,
-    note: `自动跑到底已暂停:${reason}`,
-  })
+  await appendEvent(
+    workflow,
+    {
+      kind: 'auto-run',
+      at: new Date().toISOString(),
+      round: workflow.autoRun.rounds,
+      step: workflow.autoRun.step,
+      note: `自动跑到底已暂停:${reason}`,
+    },
+    workflowRevision(workflow) ?? 0,
+  )
   clearDeadline(key)
   clearObservation(key)
 }
@@ -80,13 +97,17 @@ async function completeAutoRun(key: string): Promise<void> {
   if (!workflow?.autoRun || workflow.autoRun.status !== 'running') return
   workflow.autoRun.status = 'completed'
   workflow.autoRun.pausedReason = null
-  await appendEvent(workflow, {
-    kind: 'auto-run',
-    at: new Date().toISOString(),
-    round: workflow.autoRun.rounds,
-    step: workflow.autoRun.step,
-    note: '自动跑到底已收敛,等待人工合并',
-  })
+  await appendEvent(
+    workflow,
+    {
+      kind: 'auto-run',
+      at: new Date().toISOString(),
+      round: workflow.autoRun.rounds,
+      step: workflow.autoRun.step,
+      note: '自动跑到底已收敛,等待人工合并',
+    },
+    workflowRevision(workflow) ?? 0,
+  )
   clearDeadline(key)
   clearObservation(key)
 }
@@ -115,19 +136,22 @@ function clearDeadline(key: string): void {
   deadlineTimers.delete(key)
 }
 
-function armDeadline(key: string, deadline: string): void {
+function armDeadline(ctx: Context, key: string, deadline: string): void {
   clearDeadline(key)
   const delay = Math.max(0, Date.parse(deadline) - Date.now())
   const timer = setTimeout(
     () => {
       void (async () => {
         if (Date.now() < Date.parse(deadline)) {
-          armDeadline(key, deadline)
+          armDeadline(ctx, key, deadline)
           return
         }
         await pauseAutoRun(key, 'budget-exhausted')
         const workflow = await loadWorkflow(key)
-        liveTaskFor(workflow ?? { devTaskId: null, reviewTaskId: null })?.process?.kill()
+        if (workflow) {
+          const gate = taskLaunchDecision(observeWorkflowTask(ctx as unknown as TaskOwnershipContext, workflow))
+          if (!gate.allowed && gate.running) liveTaskFor(gate.task)?.process?.kill()
+        }
       })()
     },
     Math.min(delay, 2_147_483_647),
@@ -160,6 +184,7 @@ async function applyDecision(ctx: Context, key: string, decision: AutoRunDecisio
     merged?: boolean
     cleanupPending?: boolean
     gateFailures?: unknown[]
+    controllerError?: boolean
   }
   switch (decision.action) {
     case 'develop':
@@ -176,8 +201,6 @@ async function applyDecision(ctx: Context, key: string, decision: AutoRunDecisio
       result = await startReview(ctx, { url: workflow.url, agent: workflow.autoRun.reviewAgent })
       break
     case 'rework':
-      workflow.devAgent = workflow.autoRun.devAgent
-      await saveWorkflow(workflow)
       result = await resumeDevelop(ctx, { url: workflow.url })
       break
     case 'sync':
@@ -226,8 +249,15 @@ export function requestAutoRunReconcile(ctx: Context, key: string, outcome?: Aut
         await reconcileOnce(ctx, key, nextOutcome)
         nextOutcome = queued.get(key)
       } while (queued.has(key))
-    } catch {
-      await pauseAutoRun(key, 'session-interrupted')
+    } catch (error) {
+      logTaskDiagnostic('auto-run-reconcile-error', {
+        workflowKey: key,
+        outcome: nextOutcome ?? null,
+        errorName: error instanceof Error ? error.name : typeof error,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        errorStack: error instanceof Error ? error.stack : null,
+      })
+      await pauseAutoRun(key, 'controller-error')
     } finally {
       running.delete(key)
     }
@@ -263,8 +293,12 @@ export async function startAutoRun(
   const key = issueKey(`${parsed.owner}/${parsed.repo}`, parsed.number)
   const ensured = await ensureWorktree(ctx, parsed)
   if (!ensured.ok) return ensured
-  if (liveTaskFor(ensured.workflow)) {
+  const ownership = observeWorkflowTask(ctx as unknown as TaskOwnershipContext, ensured.workflow)
+  if (ownership.state === 'running') {
     return { ok: false, error: '该 issue 当前有任务运行,请等待或停止后再启动自动跑到底' }
+  }
+  if (ownership.state === 'unknown') {
+    return { ok: false, error: '当前控制器无法确认旧任务生死,为避免双开已禁止启动自动跑到底' }
   }
   const startedAt = new Date().toISOString()
   ensured.workflow.issueSnapshot = authorizedSnapshot
@@ -279,26 +313,39 @@ export async function startAutoRun(
     lastObservedAt: null,
     pausedReason: null,
   }
-  await appendEvent(ensured.workflow, { kind: 'auto-run', at: startedAt, round: 0, note: '自动跑到底已启动' })
-  armDeadline(key, ensured.workflow.autoRun.deadline)
+  await appendEvent(
+    ensured.workflow,
+    { kind: 'auto-run', at: startedAt, round: 0, note: '自动跑到底已启动' },
+    workflowRevision(ensured.workflow) ?? 0,
+  )
+  armDeadline(ctx, key, ensured.workflow.autoRun.deadline)
   requestAutoRunReconcile(ctx, key)
   return { ok: true, workflowKey: key }
 }
 
 export async function pauseOrphanedAutoRuns(
+  ctx: Context,
   workflows: readonly (IssueWorkflow & { autoRun?: AutoRunState })[],
 ): Promise<void> {
   for (const candidate of workflows) {
-    if (
-      running.has(candidate.key) ||
-      observationTimers.has(candidate.key) ||
-      !isOrphanedAutoRun(candidate, (taskId: string | null) => {
-        if (taskId === null) return false
-        const task = liveTasks.get(taskId)
-        return task !== undefined && !task.closed
-      })
-    )
+    if (candidate.autoRun?.status !== 'running' || running.has(candidate.key) || observationTimers.has(candidate.key)) {
       continue
-    await pauseAutoRun(candidate.key, 'session-interrupted')
+    }
+    const ownership = observeWorkflowTask(ctx as unknown as TaskOwnershipContext, candidate)
+    logTaskDiagnostic('auto-run-ownership-observed', {
+      workflowKey: candidate.key,
+      step: candidate.autoRun.step ?? 0,
+      updatedAt: candidate.updatedAt,
+      ownership,
+      devTaskId: candidate.devTaskId,
+      reviewTaskId: candidate.reviewTaskId,
+      liveTaskKeys: [...liveTasks.entries()].filter(([, task]) => !task.closed).map(([taskId]) => taskId),
+      trigger: 'state-refresh',
+    })
+    if (ownership.state === 'interrupted') {
+      await pauseAutoRun(candidate.key, 'session-interrupted')
+      continue
+    }
+    requestAutoRunReconcile(ctx, candidate.key)
   }
 }

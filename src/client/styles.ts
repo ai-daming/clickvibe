@@ -185,6 +185,7 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 .cv-stage-developing { background: var(--dsw-alias-state-business-tertiary); color: var(--dsw-alias-state-business-primary); }
 .cv-stage-review-ready { background: var(--dsw-alias-state-warn-tertiary); color: var(--dsw-alias-state-warn-label); }
 .cv-stage-reviewing { background: var(--cv-review-tertiary); color: var(--cv-review-primary); }
+.cv-stage-interrupted { background: var(--dsw-alias-state-warn-tertiary); color: var(--dsw-alias-state-warn-label); }
 .cv-stage-passed { background: var(--dsw-alias-state-success-tertiary); color: var(--dsw-alias-state-success-primary); }
 .cv-running-duration { color: var(--dsw-alias-label-secondary); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; white-space: nowrap; }
 .cv-dev-btn.cv-dev-warn { background: var(--dsw-alias-state-warn-secondary); color: var(--dsw-alias-label-primary-foreground); }

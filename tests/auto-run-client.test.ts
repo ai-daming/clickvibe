@@ -90,6 +90,12 @@ test('auto-run trigger: disabled while anything is still running, not only when 
   // 没有在跑的任务:可以启动自动跑到底(哪怕 autoRun 曾暂停)。
   const idle = { autoRun: { status: 'paused', pausedReason: 'session-interrupted', unresolved: [] } } as Workflow
   assert.deepEqual(autoRunTrigger(idle.autoRun!, idle), { label: '自动跑到底', disabled: false })
+  const unknown = {
+    autoRun: { status: 'paused', pausedReason: 'controller-error', unresolved: [] },
+    runStartedAt: null,
+    derived: { status: 'task-unknown' },
+  } as unknown as Workflow
+  assert.deepEqual(autoRunTrigger(unknown.autoRun!, unknown), { label: '等待任务确认', disabled: true })
   assert.deepEqual(autoRunTrigger(undefined, null), { label: '自动跑到底', disabled: false })
 })
 

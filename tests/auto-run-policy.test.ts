@@ -252,4 +252,7 @@ test('temporary observation gaps retry within the wall-clock budget', () => {
 test('cleanup failures remain distinct from merge gate rejection', () => {
   assert.equal(autoRunFailureReason('cleanup', { ok: false, merged: true, cleanupPending: true }), 'cleanup-failed')
   assert.equal(autoRunFailureReason('merge', { ok: false, gateFailures: [{}] }), 'merge-gate-rejected')
+  assert.equal(autoRunFailureReason('review', { ok: false, controllerError: true }), 'controller-error')
+  assert.equal(autoRunFailureReason('create-pr', { ok: false, error: 'GitHub network failed' }), 'controller-error')
+  assert.equal(autoRunFailureReason('sync', { ok: false, error: 'git authentication failed' }), 'controller-error')
 })

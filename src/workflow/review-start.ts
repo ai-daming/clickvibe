@@ -2,20 +2,15 @@ import { existsSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { fetchGithubPrFact, readConfiguredBranchFacts } from '../github/facts.ts'
-import { expandHome, liveTasks, loadConfig } from '../infra/runtime.ts'
-import { type IssueWorkflow, issueKey, saveWorkflow } from '../infra/state.ts'
+import { expandHome, loadConfig } from '../infra/runtime.ts'
+import { type IssueWorkflow, issueKey, commitWorkflowMetadata, workflowRevision } from '../infra/state.ts'
+import { observeWorkflowTask, taskLaunchDecision, type TaskOwnershipContext } from '../infra/task-ownership.ts'
 import { deriveWorkflowState } from './derive.ts'
 import { deriveReviewStartDecision, type ReviewStartDecision, type WorkflowFacts } from './state-view.ts'
 
 export type ReviewWorkflowResolution = { ok: true; workflow: IssueWorkflow } | { ok: false; error: string }
 
 type ParsedGithubUrl = { kind: 'issue' | 'pr'; owner: string; repo: string; number: string }
-
-function taskIsRunning(taskId: string | null): boolean {
-  if (!taskId) return false
-  const task = liveTasks.get(taskId)
-  return task !== undefined && !task.closed
-}
 
 function cachedReviewFacts(workflow: IssueWorkflow): WorkflowFacts {
   return {
@@ -24,7 +19,7 @@ function cachedReviewFacts(workflow: IssueWorkflow): WorkflowFacts {
     prNumber: workflow.prNumber,
     stage: workflow.stage,
     devInterrupted: workflow.devInterrupted,
-    taskRunning: taskIsRunning(workflow.devTaskId),
+    taskRunning: false,
     head: null,
     reviewedHash: null,
     reviewPassed: workflow.reviewResult?.passed ?? null,
@@ -41,6 +36,8 @@ export function reviewStartError(decision: Exclude<ReviewStartDecision, { allowe
   switch (decision.reason) {
     case 'task-running':
       return '有进行中任务,请等待当前开发任务完成后再 Review'
+    case 'task-unknown':
+      return '当前控制器无法确认旧任务生死,为避免双开已禁止启动 Review'
     case 'development-in-progress':
       return '开发仍在进行,尚无可 Review 的完成事实'
     case 'workflow-cache-missing':
@@ -85,14 +82,18 @@ export async function resolveReviewStartWorkflow(
   parsed: ParsedGithubUrl,
   existing: IssueWorkflow | null,
 ): Promise<ReviewWorkflowResolution> {
-  // A duplicate request for the same live review is handled by reviewTaskGate;
-  // it is not a new launch and must retain the existing task-id reuse contract.
-  if (existing && taskIsRunning(existing.reviewTaskId)) return { ok: true, workflow: existing }
+  // The caller consumes this same ownership answer after resolution and returns
+  // its exact task ref; this resolver must not guess a task from stage fields.
+  if (existing && !taskLaunchDecision(observeWorkflowTask(ctx as unknown as TaskOwnershipContext, existing)).allowed) {
+    return { ok: true, workflow: existing }
+  }
 
   if (existing) {
     const cachedDecision = deriveReviewStartDecision(cachedReviewFacts(existing))
     if (cachedDecision.allowed) return { ok: true, workflow: existing }
-    if (cachedDecision.reason === 'task-running') return { ok: false, error: reviewStartError(cachedDecision) }
+    if (cachedDecision.reason === 'task-running' || cachedDecision.reason === 'task-unknown') {
+      return { ok: false, error: reviewStartError(cachedDecision) }
+    }
   }
 
   if (parsed.kind !== 'issue') {
@@ -122,7 +123,17 @@ export async function resolveReviewStartWorkflow(
 
   workflow.prNumber = prLookup.pr?.number ?? workflow.prNumber
   if (!workflow.baseRef && prLookup.pr?.baseRefName) workflow.baseRef = `origin/${prLookup.pr.baseRefName}`
+  Object.assign(
+    workflow,
+    await commitWorkflowMetadata(workflow, workflowRevision(workflow), {
+      worktree: workflow.worktree,
+      branch: workflow.branch,
+      prNumber: workflow.prNumber,
+      issueState: workflow.issueState,
+      baseRef: workflow.baseRef,
+      events: workflow.events,
+    }),
+  )
   workflow.stage = 'review-ready'
-  await saveWorkflow(workflow)
   return { ok: true, workflow }
 }

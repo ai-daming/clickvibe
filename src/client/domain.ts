@@ -26,18 +26,20 @@ export interface Workflow {
   stage: 'idle' | 'developing' | 'review-ready' | 'reviewing' | 'passed'
   devAgent: 'codex' | 'claude' | null
   devTaskId: string | null
+  devHostJobId?: string | null
   devSessionId: string | null
   devSessionAgent: 'codex' | 'claude' | null
   devInterrupted: boolean
   reviewAgent: 'codex' | 'claude' | null
   reviewTaskId: string | null
+  reviewHostJobId?: string | null
   reviewSessionId: string | null
   reviewSessionAgent: 'codex' | 'claude' | null
   reviewResult: { passed: boolean; issues: string[]; commentUrl?: string } | null
   prNumber: string | null
   issueState?: 'OPEN' | 'CLOSED'
   baseRef: string | null
-  /** Present only while this host process still owns the active task. */
+  /** Present while the current host supervisor still owns the active task. */
   runStartedAt: number | null
   delivery?: {
     status: 'merged' | 'cleanup-pending' | 'archived'
@@ -63,6 +65,7 @@ export interface Workflow {
     lastObservedAt: string | null
     pausedReason:
       | 'session-interrupted'
+      | 'controller-error'
       | 'authorization-denied'
       | 'sync-conflict'
       | 'merge-gate-rejected'
@@ -75,6 +78,7 @@ export interface Workflow {
   updatedAt: number
   events?: WorkflowEvent[]
   derived?: {
+    taskRef: { kind: 'dev' | 'review'; taskId: string } | null
     head: string | null
     branch: string | null
     mainHead: string | null
@@ -101,11 +105,13 @@ export interface Workflow {
     hasNewCommits: boolean
     verdictCurrent: boolean
     nextAction: NextAction
-    status: 'idle' | 'developing' | 'review-ready' | 'reviewing' | 'passed'
+    status: WorkflowStatus
     baseBranch: string
     freshSession: { round: number; develop: boolean; review: boolean }
   }
 }
+
+export type WorkflowStatus = Workflow['stage'] | 'task-unknown' | 'interrupted'
 
 export type NextActionKind =
   | 'develop'
@@ -172,7 +178,7 @@ export function fmtTime(iso: string): string {
   }
 }
 
-export function stageLabel(stage: Workflow['stage'], workflow: Workflow | null): string {
+export function stageLabel(stage: WorkflowStatus, workflow: Workflow | null): string {
   return workflowStatusLabel(
     stage,
     workflow?.reviewResult?.passed ?? null,

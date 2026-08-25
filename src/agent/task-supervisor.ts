@@ -18,6 +18,7 @@
  *                      └── rework ────────┘
  */
 import type { Context } from '@deepseek-ai/cordis'
+import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
 import { type DevelopAgent, LineLog, shouldFallbackFromExactResume } from '../infra/develop-core.ts'
 import { LineBuffer } from '../infra/line-buffer.ts'
 import { encodeLiveLogEvent, type LiveLogEvent } from '../infra/live-output.ts'
@@ -35,6 +36,7 @@ import {
   TASK_TIMEOUT_MS,
 } from '../infra/runtime.ts'
 import { appendTaskLog, startTaskLog, type IssueWorkflow } from '../infra/state.ts'
+import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
 import {
   type AgentKind,
   lossyAgentOutputNotice,
@@ -42,6 +44,97 @@ import {
   recoverSpillLines,
   spillRecoveryNotice,
 } from './agent-stream.ts'
+
+declare module '@deepseek-ai/dsh-jobs' {
+  interface JobKindMap {
+    clickvibe: 'clickvibe'
+  }
+}
+
+interface HostTaskReservation {
+  hostJobId: string
+  settle(status: LiveTask['status']): void
+}
+
+const hostReservations = new WeakMap<LiveTask, HostTaskReservation>()
+const taskPersistence = new WeakMap<LiveTask, Promise<void>>()
+
+function persistTask(task: LiveTask, operation: () => Promise<void>): void {
+  const previous = taskPersistence.get(task) ?? Promise.resolve()
+  const current = previous.then(operation, operation)
+  taskPersistence.set(task, current)
+}
+
+/** Await all best-effort log writes scheduled for one live task before releasing its storage. */
+export async function waitForTaskPersistence(task: LiveTask): Promise<void> {
+  await taskPersistence.get(task)?.catch(() => undefined)
+}
+
+function hostJobOutcome(task: LiveTask, status: LiveTask['status']): JobOutcome {
+  if (status === 'done') return { status: 'completed', detail: `task ${task.taskId} completed` }
+  if (status === 'stopped' || status === 'timed_out') {
+    return { status: 'killed', detail: `task ${task.taskId} ${status}` }
+  }
+  return { status: 'failed', detail: `task ${task.taskId} ${status}` }
+}
+
+/** Atomically reserve one host-owned task before any prompt/snapshot await. */
+export function reserveHostTask(
+  ctx: Context,
+  task: LiveTask,
+): { created: true; hostJobId: string } | { created: false; taskId: string } {
+  if (!ctx.jobs) throw new Error('宿主任务 registry 不可用,拒绝启动无所有权任务')
+  const prefix = `clickvibe:${task.workflowKey}:`
+  const existing = ctx.jobs
+    .list()
+    .find(
+      (job) =>
+        job.kind === 'clickvibe' &&
+        (job.status === 'running' || job.status === 'stopping') &&
+        job.label.startsWith(prefix),
+    )
+  if (existing) return { created: false, taskId: existing.label.slice(existing.label.lastIndexOf(':') + 1) }
+
+  let resolveDone!: (outcome: JobOutcome) => void
+  let settled = false
+  const done = new Promise<JobOutcome>((resolve) => {
+    resolveDone = resolve
+  })
+  const settle = (status: LiveTask['status']): void => {
+    if (settled) return
+    settled = true
+    resolveDone(hostJobOutcome(task, status))
+  }
+  const hostJobId = ctx.jobs.start({
+    kind: 'clickvibe',
+    label: `${prefix}${task.kind}:${task.taskId}`,
+    run: () => ({
+      cancel: () => {
+        if (task.closed) return
+        task.status = 'stopped'
+        if (task.process) task.process.kill()
+        else {
+          finishTask(task, 'stopped', null)
+          settle('stopped')
+        }
+      },
+      done,
+    }),
+  })
+  if (hostJobId === null || hostJobId === undefined || String(hostJobId).trim() === '') {
+    settle('failed')
+    throw new Error('宿主任务 registry 返回空 hostJobId')
+  }
+  const reservation = { hostJobId: String(hostJobId), settle }
+  hostReservations.set(task, reservation)
+  logTaskDiagnostic('host-job-register', {
+    taskId: task.taskId,
+    workflowKey: task.workflowKey,
+    kind: task.kind,
+    hostJobId: reservation.hostJobId,
+  })
+  return { created: true, hostJobId: reservation.hostJobId }
+}
 
 /** Start (or restart) a dev task in the live map with status parsing. */
 export function createLiveTask(
@@ -57,6 +150,14 @@ export function createLiveTask(
       if (task.cleanup) clearTimeout(task.cleanup)
       liveTasks.delete(id)
       liveWaiters.delete(id)
+      logTaskDiagnostic('live-task-delete', {
+        taskId: id,
+        workflowKey: task.workflowKey,
+        kind: task.kind,
+        status: task.status,
+        closed: task.closed,
+        trigger: 'capacity-eviction',
+      })
     }
   }
   if (liveTasks.size >= MAX_TASKS) throw new Error('运行中任务过多,请先停止或等待现有任务完成')
@@ -73,9 +174,11 @@ export function createLiveTask(
     status: 'running',
     exitCode: null,
     sessionId,
+    workflowLease: null,
   }
   liveTasks.set(taskId, task)
-  void startTaskLog(workflow, kind, taskId)
+  logTaskDiagnostic('live-task-set', { taskId, workflowKey: workflow.key, kind, status: task.status, closed: false })
+  persistTask(task, () => startTaskLog(workflow, kind, taskId))
   pushTaskLine(task, '[clickvibe] 任务开始')
   return task
 }
@@ -93,7 +196,7 @@ export function pushTaskLine(
       : value
   const line = encodeLiveLogEvent(event)
   const sequence = task.log.appendLine(line)
-  void appendTaskLog(task.workflow, task.kind, task.taskId, sequence, line, completion)
+  persistTask(task, () => appendTaskLog(task.workflow, task.kind, task.taskId, sequence, line, completion))
   notifyTask(task.taskId)
 }
 
@@ -101,6 +204,14 @@ export function scheduleTaskCleanup(task: LiveTask): void {
   task.cleanup = setTimeout(() => {
     liveTasks.delete(task.taskId)
     liveWaiters.delete(task.taskId)
+    logTaskDiagnostic('live-task-delete', {
+      taskId: task.taskId,
+      workflowKey: task.workflowKey,
+      kind: task.kind,
+      status: task.status,
+      closed: task.closed,
+      trigger: 'retention-expired',
+    })
   }, TASK_RETENTION_MS)
   task.cleanup.unref?.()
 }
@@ -115,6 +226,15 @@ export function finishTask(
   task.exitCode = exitCode
   pushTaskLine(task, `[clickvibe] 任务结束:${status},退出码 ${exitCode ?? '未知'}`, { status, exitCode })
   task.closed = true
+  hostReservations.get(task)?.settle(status)
+  logTaskDiagnostic('live-task-close', {
+    taskId: task.taskId,
+    workflowKey: task.workflowKey,
+    kind: task.kind,
+    status,
+    closed: true,
+    exitCode,
+  })
   if (task.kind === 'review') reviewTaskGate.release(task.workflowKey, task)
   else resumeTaskGate.release(task.workflowKey, task)
   if (task.timeout) clearTimeout(task.timeout)
@@ -188,7 +308,16 @@ export function attachAgentProcess(
     staleSessionId: string
     prepare: () => Promise<{ command: string; prompt: string }>
   },
-): void {
+): string | null {
+  let reserved = hostReservations.get(task) ?? null
+  if (!reserved && ctx.jobs) {
+    const reservation = reserveHostTask(ctx, task)
+    if (!reservation.created) throw new Error(`该 workflow 已有宿主任务 ${reservation.taskId}`)
+    reserved = hostReservations.get(task) ?? null
+  }
+  const settleHostJob = (status: LiveTask['status']): void => {
+    reserved?.settle(status)
+  }
   task.timeout = setTimeout(() => {
     if (task.closed) return
     pushTaskLine(task, `[clickvibe] Agent 超过 ${TASK_TIMEOUT_MS / 3_600_000} 小时,已终止`)
@@ -215,7 +344,10 @@ export function attachAgentProcess(
       void Promise.resolve()
         .then(() => onExit(1, task.sessionId))
         .catch((exitError: unknown) => pushTaskLine(task, `[clickvibe] 启动失败收尾异常: ${String(exitError)}`))
-        .finally(() => finishTask(task, 'failed', 1))
+        .finally(() => {
+          finishTask(task, 'failed', 1)
+          settleHostJob('failed')
+        })
       return
     }
     task.process = process
@@ -314,6 +446,7 @@ export function attachAgentProcess(
         await onExit(process.exitCode, task.sessionId)
       } finally {
         finishTask(task, status, process.exitCode)
+        settleHostJob(status)
       }
     }
 
@@ -324,9 +457,15 @@ export function attachAgentProcess(
       )
       .catch((error: unknown) => {
         pushTaskLine(task, `[clickvibe] 任务收尾失败: ${String(error instanceof Error ? error.message : error)}`)
-        if (!task.closed) finishTask(task, task.status === 'running' ? 'failed' : task.status, task.exitCode)
+        if (!task.closed) {
+          const status = task.status === 'running' ? 'failed' : task.status
+          finishTask(task, status, task.exitCode)
+          settleHostJob(status)
+        }
       })
   }
 
+  if (task.closed) return reserved?.hostJobId ?? null
   launch(command, prompt, resumeFallback)
+  return reserved?.hostJobId ?? null
 }

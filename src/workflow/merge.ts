@@ -41,7 +41,15 @@ import {
   parseUrl,
   runCommand,
 } from '../infra/runtime.ts'
-import { appendEvent, archiveWorkflow, issueKey, loadWorkflow, saveWorkflowStrict } from '../infra/state.ts'
+import {
+  appendEvent,
+  archiveWorkflow,
+  type IssueWorkflow,
+  issueKey,
+  loadWorkflow,
+  commitWorkflowMetadata,
+  workflowRevision,
+} from '../infra/state.ts'
 import { collectMergeGateFailures, type MergeGateFailure, mergeGateRejection } from './merge-gates.ts'
 import { workflowBaseBranch } from './state-view.ts'
 
@@ -63,6 +71,18 @@ export type MergeAuthorizationPreview =
       mergeFlag: '--merge'
       cleanup: string[]
     }
+
+async function persistMergeMetadata(workflow: IssueWorkflow): Promise<void> {
+  Object.assign(
+    workflow,
+    await commitWorkflowMetadata(workflow, workflowRevision(workflow), {
+      delivery: workflow.delivery,
+      issueState: workflow.issueState,
+      autoRun: workflow.autoRun,
+      events: workflow.events,
+    }),
+  )
+}
 
 export async function mergeAuthorizationPreview(ctx: Context, url: string): Promise<MergeAuthorizationPreview> {
   const parsed = parseUrl(url)
@@ -266,14 +286,18 @@ export async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): P
       }
       // 放行审计先于合并写入时间线:即使随后合并失败,放行动作也可追溯,
       // 且与 review 结论事件分离——放行不冒充 review 通过。
-      await appendEvent(workflow, {
-        kind: 'merge-override',
-        at: new Date().toISOString(),
-        skipped: [...override.skipped],
-        skippedLabels: override.skipped.map(mergeGateLabel),
-        reason: override.reason,
-        operator: userInfo().username,
-      })
+      await appendEvent(
+        workflow,
+        {
+          kind: 'merge-override',
+          at: new Date().toISOString(),
+          skipped: [...override.skipped],
+          skippedLabels: override.skipped.map(mergeGateLabel),
+          reason: override.reason,
+          operator: userInfo().username,
+        },
+        workflowRevision(workflow) ?? 0,
+      )
     }
     if (pr.state !== 'MERGED') {
       const command = [
@@ -310,7 +334,7 @@ export async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): P
       cleanup: { worktree: false, localBranch: false, remoteBranch: false, issue: false },
     }
     try {
-      await saveWorkflowStrict(workflow)
+      await persistMergeMetadata(workflow)
     } catch (error) {
       return {
         ok: false,
@@ -329,13 +353,22 @@ export async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): P
   const persistStep = async (): Promise<void> => {
     delivery.status = 'cleanup-pending'
     delete delivery.lastError
-    await saveWorkflowStrict(workflow)
+    await persistMergeMetadata(workflow)
   }
   const failCleanup = async (label: string, error: unknown): Promise<MergeResult> => {
     const detail = String(error instanceof Error ? error.message : error)
     delivery.status = 'cleanup-pending'
     delivery.lastError = `${label}: ${detail}`
-    await saveWorkflowStrict(workflow).catch(() => {})
+    try {
+      await persistMergeMetadata(workflow)
+    } catch (persistError) {
+      return {
+        ok: false,
+        merged: true,
+        cleanupPending: true,
+        error: `PR 已合并;${label}失败:${detail};且持久化失败:${String(persistError)}`,
+      }
+    }
     return { ok: false, merged: true, cleanupPending: true, error: `PR 已合并;${label}失败,可重试: ${detail}` }
   }
 
@@ -431,7 +464,7 @@ export async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): P
   try {
     delivery.status = 'archived'
     delete delivery.lastError
-    await archiveWorkflow(workflow)
+    await archiveWorkflow(workflow, workflowRevision(workflow) ?? 0)
   } catch (error) {
     if (completingAutoRun && workflow.autoRun) {
       workflow.autoRun.status = 'running'

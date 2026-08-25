@@ -1,17 +1,11 @@
 import assert from 'node:assert/strict'
+import { commitWorkflowFixture } from './workflow-fixture.ts'
 import { appendFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { encodeLiveLogEvent } from '../src/infra/live-output.ts'
-import {
-  appendTaskLog,
-  loadWorkflow,
-  readTaskLog,
-  saveWorkflow,
-  startTaskLog,
-  type IssueWorkflow,
-} from '../src/infra/state.ts'
+import { appendTaskLog, loadWorkflow, readTaskLog, startTaskLog, type IssueWorkflow } from '../src/infra/state.ts'
 import { issueDirectory, issueKey, parseIssueDirectory, taskLogPath, workflowPath } from '../src/infra/state-layout.ts'
 
 function fixture(key = issueKey('a-b/c', '7')): IssueWorkflow {
@@ -61,7 +55,7 @@ test('task generations append valid structured JSONL independently and aggregate
   process.env.HOME = tempHome
   try {
     const workflow = fixture()
-    await saveWorkflow(workflow)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const first = workflow.devTaskId!
     const second = 'dev-1720000005000-second'
     await startTaskLog(workflow, 'dev', first)

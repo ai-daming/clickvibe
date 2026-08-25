@@ -21,7 +21,13 @@
 import { basename, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { buildDevelopPrompt, type ResolvedPromptSnapshot, sameSnapshot } from '../agent/prompts.ts'
-import { attachAgentProcess, createLiveTask, finishTask, pushTaskLine } from '../agent/task-supervisor.ts'
+import {
+  attachAgentProcess,
+  createLiveTask,
+  finishTask,
+  pushTaskLine,
+  reserveHostTask,
+} from '../agent/task-supervisor.ts'
 import { ensureWorktree } from '../agent/worktree.ts'
 import { fetchGithubPrFact, readConfiguredBranchFacts } from '../github/facts.ts'
 import { fetchIssue, issueSnapshot } from '../github/issue.ts'
@@ -35,21 +41,28 @@ import {
   automaticDependencyValidationClock,
   expandHome,
   type LiveTask,
-  liveTasks,
   loadConfig,
   parseUrl,
   readWorktreeHead,
   runCommand,
   taskId,
 } from '../infra/runtime.ts'
-import { type IssueWorkflow, issueKey, loadWorkflow, saveWorkflow } from '../infra/state.ts'
+import { type IssueWorkflow, issueKey, loadWorkflow } from '../infra/state.ts'
+import {
+  observeWorkflowTask,
+  taskLaunchDecision,
+  type TaskOwnershipContext,
+  workflowTaskExpectation,
+} from '../infra/task-ownership.ts'
 import { deriveAutoDevelopment } from './auto-development.ts'
 import { deriveDevelopmentEventKind } from './delivery-audit.ts'
 import { finalizeDevRun } from './dev-completion.ts'
 import { deriveWorkflowState } from './derive.ts'
 import { checkIssueContract } from './issue-contract.ts'
 import { firstDevelopmentFor } from './repository-state.ts'
-import { recordDevDelivery } from './review-flow.ts'
+import { recordDevDelivery } from './dev-delivery.ts'
+import { establishTaskClaim } from './task-claim.ts'
+import { mutateLiveTaskWorkflow } from './task-lease.ts'
 import { notifyAutoRunCompletion } from './auto-run-signal.ts'
 
 export async function resolveAutomaticFirstDevelopment(
@@ -105,7 +118,9 @@ export async function startDevelop(
   ctx: Context,
   payload: unknown,
   authorizedSnapshot: IssuePromptSnapshot | null,
-): Promise<{ ok: true; taskId: string; worktree: string; branch: string } | { ok: false; error: string }> {
+): Promise<
+  { ok: true; taskId: string; worktree: string; branch: string } | { ok: false; error: string; controllerError?: true }
+> {
   const body = (payload ?? {}) as { url?: unknown; agent?: unknown; context?: unknown; automatic?: unknown }
   const url = String(body.url ?? '').trim()
   let agent: DevelopAgent
@@ -234,10 +249,13 @@ export async function startDevelop(
   }
   if (!authorizedSnapshot || !launchSnapshot) return { ok: false, error: '服务端确认快照丢失,请重新确认' }
 
-  // 已有开发任务在跑:复用
-  if (workflow.devTaskId && liveTasks.has(workflow.devTaskId) && !liveTasks.get(workflow.devTaskId)!.closed) {
-    return { ok: true, taskId: workflow.devTaskId, worktree: workflow.worktree, branch: workflow.branch }
+  const ownershipGate = taskLaunchDecision(observeWorkflowTask(ctx as unknown as TaskOwnershipContext, workflow))
+  if (!ownershipGate.allowed) {
+    return ownershipGate.running
+      ? { ok: true, taskId: ownershipGate.task.taskId, worktree: workflow.worktree, branch: workflow.branch }
+      : { ok: false, error: ownershipGate.error, controllerError: true }
   }
+  const claimExpectation = workflowTaskExpectation(workflow)
 
   const taskIdValue = taskId('dev')
   let live: LiveTask
@@ -246,13 +264,49 @@ export async function startDevelop(
   } catch (error) {
     return { ok: false, error: String(error instanceof Error ? error.message : error) }
   }
+  let hostReservation: ReturnType<typeof reserveHostTask>
+  try {
+    hostReservation = reserveHostTask(ctx, live)
+  } catch (error) {
+    finishTask(live, 'failed', 1)
+    return {
+      ok: false,
+      error: `宿主任务占位失败:${String(error instanceof Error ? error.message : error)}`,
+      controllerError: true,
+    }
+  }
+  if (!hostReservation.created) {
+    finishTask(live, 'stopped', null)
+    return {
+      ok: true,
+      taskId: hostReservation.taskId,
+      worktree: workflow.worktree,
+      branch: workflow.branch,
+    }
+  }
   // LiveTask creation opened a new immutable JSONL generation. Previous task
   // files remain queryable and are never truncated.
-  workflow.devAgent = agent
-  workflow.devTaskId = taskIdValue
-  workflow.devInterrupted = false
-  workflow.stage = 'developing'
-  await saveWorkflow(workflow)
+  const claim = await establishTaskClaim(
+    workflow,
+    live,
+    {
+      kind: 'dev',
+      taskId: taskIdValue,
+      hostJobId: hostReservation.hostJobId,
+      agent,
+    },
+    claimExpectation,
+  )
+  if (!claim.ok) {
+    return {
+      ok: false,
+      error: `建立开发任务所有权失败:${claim.error}`,
+      controllerError: true,
+    }
+  }
+  if (!claim.claimed) {
+    return { ok: true, taskId: claim.taskId, worktree: workflow.worktree, branch: workflow.branch }
+  }
 
   void (async () => {
     try {
@@ -271,7 +325,7 @@ export async function startDevelop(
         const reloaded = await loadWorkflow(workflow.key)
         if (reloaded) {
           const fixedIssues = reloaded.reviewResult?.passed === false ? [...reloaded.reviewResult.issues] : []
-          await finalizeDevRun(reloaded, live.status, exitCode, sessionId, agent, async () => {
+          await finalizeDevRun(reloaded, live, live.status, exitCode, sessionId, agent, async () => {
             // 开发完成(含 rework):旧的 review 结论已归档到 events 历史,
             // 当前回到"待 review"——不能继续显示"Review 未通过"
             const head = await readWorktreeHead(ctx, workflow.worktree)
@@ -282,8 +336,8 @@ export async function startDevelop(
               head,
               fixedIssues,
               deriveDevelopmentEventKind(firstDevelopment, extraContext),
+              live,
               extraContext,
-              live.taskId,
               durationMs,
             )
           })
@@ -294,9 +348,10 @@ export async function startDevelop(
       pushTaskLine(live, `[clickvibe] 失败: ${String(error instanceof Error ? error.message : error)}`)
       const reloaded = await loadWorkflow(workflow.key)
       if (reloaded) {
-        reloaded.stage = 'developing'
-        reloaded.devInterrupted = true
-        await saveWorkflow(reloaded)
+        await mutateLiveTaskWorkflow(live, reloaded, (current) => {
+          current.stage = 'developing'
+          current.devInterrupted = true
+        })
       }
       notifyAutoRunCompletion(ctx, workflow.key, 'failed')
       finishTask(live, 'failed', 1)

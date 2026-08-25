@@ -40,7 +40,7 @@ import {
 import { LineBuffer } from './line-buffer.ts'
 import { type RepositoryFreshness, RepositoryFreshnessGate, RepositoryRefreshClock } from './repo-freshness.ts'
 import { ExclusiveTaskGate } from './task-gate.ts'
-import type { IssueWorkflow } from './state.ts'
+import type { IssueWorkflow, WorkflowTaskLease } from './state.ts'
 
 const MAX_BODY_BYTES = 64 * 1024
 
@@ -80,6 +80,8 @@ export interface LiveTask {
   timeout?: ReturnType<typeof setTimeout>
   cleanup?: ReturnType<typeof setTimeout>
   sessionId: string | null // 从事件流捕获的 agent 会话 id(续会话用)
+  /** Claim-signed lifecycle capability; never reconstructed from persisted workflow state. */
+  workflowLease: WorkflowTaskLease | null
 }
 
 export const liveTasks = new Map<string, LiveTask>()
