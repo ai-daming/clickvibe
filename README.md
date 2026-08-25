@@ -1,5 +1,7 @@
 # ClickVibe
 
+> **v0.1.0 状态:**这是一个基本可工作的实验性开发者预览版,不是生产稳定性承诺。能力边界、已知限制与升级预期见 [v0.1.0 Release Notes](https://github.com/ai-daming/clickvibe/blob/v0.1.0/docs/releases/v0.1.0.md)。
+
 > 在 DeepSeek Harness(DSH)Web 里开一个右侧面板,把你 GitHub 仓库的 open issue 变成一条看得见、点得动的开发流水线:选项目、看依赖、一键下单,Codex/Claude 在独立 worktree 里开发、review、返工自动跑——你只负责拆 issue 和拍板合并。
 
 ## 它是干什么的
