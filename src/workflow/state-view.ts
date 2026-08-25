@@ -50,7 +50,7 @@ export function githubCompareUrl(
 }
 
 export type WorkflowStageInput = 'idle' | 'developing' | 'review-ready' | 'reviewing' | 'passed'
-export type WorkflowStatus = WorkflowStageInput
+export type WorkflowStatus = WorkflowStageInput | 'task-unknown' | 'interrupted'
 export type IssueContractStatus = 'current' | 'changed' | 'unknown'
 export type IssueContractUnknownReason = 'missing-review-snapshot' | 'current-contract-unavailable' | null
 
@@ -72,6 +72,12 @@ export interface WorkflowFacts {
   devInterrupted: boolean
   /** A dev/review agent process is currently running for this workflow. */
   taskRunning: boolean
+  /** Kind reported by the supervisor; stage may already have advanced during task settlement. */
+  taskKind?: 'dev' | 'review' | null
+  /** Current controller cannot prove whether the in-flight task is alive. */
+  taskUnknown?: boolean
+  /** The host supervisor or an explicit task outcome proves termination. */
+  taskInterrupted?: boolean
   /** Worktree HEAD short hash; null when the worktree is missing. */
   head: string | null
   /** HEAD the latest review verdict was bound to. */
@@ -99,6 +105,62 @@ export interface WorkflowFacts {
   baseBranch?: string
   /** Whether the frozen origin/<base> branch still exists after fetch. */
   baseRefAvailable?: boolean
+  /** Whether these facts came with a durable workflow.json cache. */
+  workflowCachePresent?: boolean
+  /** Latest delivered dev/resume/rework HEAD, from local events or the live PR head. */
+  deliveryHash?: string | null
+}
+
+export type ReviewStartDecision =
+  | { allowed: true; reason: 'completed-facts' | 'workflow-ready' }
+  | {
+      allowed: false
+      reason:
+        | 'task-running'
+        | 'task-unknown'
+        | 'development-in-progress'
+        | 'workflow-cache-missing'
+        | 'no-completion-facts'
+    }
+
+function sameCommit(left: string | null | undefined, right: string | null | undefined): boolean {
+  if (!left || !right) return false
+  if (Math.min(left.length, right.length) < 7) return false
+  return left === right || left.startsWith(right) || right.startsWith(left)
+}
+
+/** Decide review launchability from the same cache and hard facts used by the next-action projection. */
+export function deriveReviewStartDecision(facts: WorkflowFacts): ReviewStartDecision {
+  if (facts.taskRunning) return { allowed: false, reason: 'task-running' }
+  if (facts.taskUnknown) return { allowed: false, reason: 'task-unknown' }
+  if (!facts.issueOpen || facts.prMerged) return { allowed: false, reason: 'no-completion-facts' }
+  // An explicitly interrupted development/rework must retain its resumable
+  // session even when HEAD still matches the previous delivered PR commit.
+  if (facts.stage === 'developing' && facts.devInterrupted) {
+    return { allowed: false, reason: 'development-in-progress' }
+  }
+
+  const completedByFacts =
+    facts.branchExists === true &&
+    facts.worktreeExists === true &&
+    facts.worktreeValid !== false &&
+    facts.hasUncommittedChanges !== true &&
+    facts.needsSync === false &&
+    facts.mergeConflict !== true &&
+    facts.hasCommits === true &&
+    facts.prNumber !== null &&
+    facts.prStatusKnown !== false &&
+    facts.prState === 'OPEN' &&
+    sameCommit(facts.head, facts.deliveryHash)
+  if (completedByFacts) return { allowed: true, reason: 'completed-facts' }
+
+  const cachePresent = facts.workflowCachePresent !== false
+  if (cachePresent && (facts.stage === 'review-ready' || facts.stage === 'reviewing' || facts.stage === 'passed')) {
+    return { allowed: true, reason: 'workflow-ready' }
+  }
+  if (!cachePresent) return { allowed: false, reason: 'workflow-cache-missing' }
+  if (facts.stage === 'developing') return { allowed: false, reason: 'development-in-progress' }
+  return { allowed: false, reason: 'no-completion-facts' }
 }
 
 function action(kind: NextActionKind, label: string, hint: string): NextAction {
@@ -116,7 +178,9 @@ export function deriveWorkflowStatus(facts: WorkflowFacts): WorkflowStatus {
 
   if (facts.prMerged) return 'passed'
   // A live task outranks the linked PR and any verdict bound to an older HEAD.
-  if (facts.taskRunning) return facts.stage === 'reviewing' ? 'reviewing' : 'developing'
+  if (facts.taskRunning) return facts.taskKind === 'review' || facts.stage === 'reviewing' ? 'reviewing' : 'developing'
+  if (facts.taskUnknown) return 'task-unknown'
+  if (facts.taskInterrupted || (facts.stage === 'developing' && facts.devInterrupted)) return 'interrupted'
   // When the worktree cannot be inspected, preserve a known passing verdict
   // unless there is positive evidence of a newer commit. This matches the
   // pre-derived-state behavior without treating a known changed HEAD as current.
@@ -155,6 +219,10 @@ export function workflowStatusLabel(
       return '待 review'
     case 'reviewing':
       return 'review 中'
+    case 'task-unknown':
+      return '任务状态未知'
+    case 'interrupted':
+      return '任务已中断'
     case 'passed':
       return '✅ 已通过'
   }
@@ -173,6 +241,7 @@ export function workflowStatusLabel(
  */
 export function deriveNextAction(facts: WorkflowFacts): NextAction {
   const remoteBase = `origin/${facts.baseBranch ?? 'main'}`
+  const reviewStart = deriveReviewStartDecision(facts)
   if (facts.cleanupPending) {
     return action('cleanup', '重试清理', 'PR 已合并,继续完成已确认的合并后清理')
   }
@@ -180,6 +249,9 @@ export function deriveNextAction(facts: WorkflowFacts): NextAction {
   if (!facts.issueOpen) return action('none', '无', 'issue 已关闭,无待办动作')
   if (facts.prMerged) return action('none', '无', 'PR 已合并,交付完成')
   if (facts.taskRunning) return action('none', '任务进行中', '开发/review 正在运行,等待完成')
+  if (facts.taskUnknown) {
+    return action('none', '等待任务确认', '当前控制器无法确认旧任务生死,为避免双开已禁止启动新任务')
+  }
   if (facts.prNumber && facts.prStatusKnown === false) {
     return action('none', '刷新 PR 状态', 'GitHub PR 实时状态查询失败,为避免误合并已暂停动作')
   }
@@ -221,6 +293,15 @@ export function deriveNextAction(facts: WorkflowFacts): NextAction {
     return action('develop', '查看原因 / 重新开发', 'PR 已关闭但未合并,检查原因后重新开发')
   }
 
+  // A slow workflow-cache update must not hide completed git/GitHub delivery facts.
+  if (
+    reviewStart.allowed &&
+    reviewStart.reason === 'completed-facts' &&
+    (facts.stage === 'idle' || facts.stage === 'developing')
+  ) {
+    return action('review', 'Review', '开发完成,审查代码改动')
+  }
+
   // 没有 workflow 缓存时,从 git 内容与 PR 硬事实恢复生命周期。
   if (!facts.prNumber && facts.hasUncommittedChanges) {
     return facts.hasResumeSession
@@ -238,18 +319,20 @@ export function deriveNextAction(facts: WorkflowFacts): NextAction {
     return action('create-pr', '创建 PR', '开发分支已有提交,推送并创建 PR 后 Review')
   }
 
-  // 中断恢复:开发中但没有存活任务(Host 重启 / 用户停止 / agent 失败)→ 恢复会话。
-  // taskRunning 已在上方排除,这里 stage==='developing' 即意味着任务已失联。
-  if (facts.stage === 'developing') {
+  // 只有明确停止、失败或宿主 supervisor 的终态才允许恢复。
+  if (facts.stage === 'developing' && (facts.taskInterrupted || facts.devInterrupted)) {
     return action(
       'resume',
       '恢复开发',
-      facts.devInterrupted ? '开发曾中断,续上次 agent 会话' : '开发任务已失联(Host 重启?),尝试恢复会话',
+      facts.devInterrupted
+        ? '确认旧宿主任务已停止后,续上次 agent 会话恢复开发'
+        : '确认旧宿主任务已停止后,尝试恢复失联的开发会话',
     )
   }
-  // review 中断:reviewing 但没有存活任务 → 重新 review。
-  if (facts.stage === 'reviewing') {
-    return action('review', '重新 Review', '上次 review 中断,重新审查当前代码')
+  if (facts.stage === 'reviewing' && facts.taskInterrupted) {
+    return reviewStart.allowed
+      ? action('review', '重新 Review', '确认旧宿主任务已停止后,重新审查当前代码')
+      : action('none', '无', '当前事实不足以重新启动 Review')
   }
 
   // worktree 缺失(非 idle,且分支也无法确认):无法继续,需要人工检查。
@@ -257,17 +340,25 @@ export function deriveNextAction(facts: WorkflowFacts): NextAction {
     return action('none', '无', 'worktree 缺失,请检查本地配置')
   }
 
-  // developing / reviewing 已被上面的早退处理(中断恢复/重新 review)
+  // Remaining in-flight stages lack enough evidence and stay fail closed.
+  if (facts.stage === 'developing' || facts.stage === 'reviewing') {
+    return action('none', '等待任务确认', '当前控制器无法确认旧任务生死,为避免双开已禁止启动新任务')
+  }
+
   switch (facts.stage) {
     case 'idle':
       return action('develop', '开始开发', '创建 worktree 并启动 agent 开发')
     case 'review-ready': {
       if (facts.reviewPassed === null) {
-        return action('review', 'Review', '开发完成,审查代码改动')
+        return reviewStart.allowed
+          ? action('review', 'Review', '开发完成,审查代码改动')
+          : action('none', '无', '当前事实不足以启动 Review')
       }
       // 契约证据优先于旧 verdict 的通过/失败语义。
       if (facts.issueContractStatus === 'changed') {
-        return action('review', '重新 Review', '验收已变更,需按当前 Issue 正文重新审查')
+        return reviewStart.allowed
+          ? action('review', '重新 Review', '验收已变更,需按当前 Issue 正文重新审查')
+          : action('none', '无', '当前事实不足以重新启动 Review')
       }
       if (facts.issueContractStatus === 'unknown') {
         return facts.issueContractUnknownReason === 'missing-review-snapshot'
@@ -281,7 +372,9 @@ export function deriveNextAction(facts: WorkflowFacts): NextAction {
       // 通过:结论必须仍针对当前 HEAD 和验收契约,任一变化都重新 review。
       const verdictCurrent = facts.head !== null && facts.head === facts.reviewedHash
       if (!verdictCurrent) {
-        return action('review', '重新 Review', '上次通过的结论针对旧提交,当前 HEAD 已变化,需重新审查')
+        return reviewStart.allowed
+          ? action('review', '重新 Review', '上次通过的结论针对旧提交,当前 HEAD 已变化,需重新审查')
+          : action('none', '无', '当前事实不足以重新启动 Review')
       }
       return facts.prNumber
         ? action('merge', '合并 PR', 'Review 通过,打开 PR 完成合并')
@@ -289,10 +382,14 @@ export function deriveNextAction(facts: WorkflowFacts): NextAction {
     }
     case 'passed':
       if (facts.head === null || facts.head !== facts.reviewedHash) {
-        return action('review', '重新 Review', '上次通过的结论针对旧提交,当前 HEAD 已变化,需重新审查')
+        return reviewStart.allowed
+          ? action('review', '重新 Review', '上次通过的结论针对旧提交,当前 HEAD 已变化,需重新审查')
+          : action('none', '无', '当前事实不足以重新启动 Review')
       }
       if (facts.issueContractStatus === 'changed') {
-        return action('review', '重新 Review', '验收已变更,需按当前 Issue 正文重新审查')
+        return reviewStart.allowed
+          ? action('review', '重新 Review', '验收已变更,需按当前 Issue 正文重新审查')
+          : action('none', '无', '当前事实不足以重新启动 Review')
       }
       if (facts.issueContractStatus === 'unknown') {
         return facts.issueContractUnknownReason === 'missing-review-snapshot'

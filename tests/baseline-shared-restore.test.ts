@@ -3,9 +3,11 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { issueKey, loadWorkflow, saveWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
-import { mutateWorkflowStrict } from '../src/infra/workflow-mutation.ts'
+import { commitWorkflowMetadata, issueKey, loadWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
 import { restoreBaseBranch } from '../src/workflow/baseline-restore.ts'
+import { commitWorkflowFixture } from './workflow-fixture.ts'
+
+const saveWorkflow = (workflow: IssueWorkflow) => commitWorkflowFixture(workflow, workflow.revision ?? null)
 
 function sharedWorkflow(root: string, number: string, hash: string, updatedAt: number): IssueWorkflow {
   return {
@@ -169,9 +171,7 @@ test('restore holds every workflow sharing the baseline until the exact push fin
       restoreTarget: { branch: 'release/shared', hash: 'bbb2222' },
     })
     await fetchStarted
-    const mutation = mutateWorkflowStrict(fixture.latest.key, (workflow) => {
-      workflow.stage = 'reviewing'
-    })
+    const mutation = commitWorkflowMetadata(fixture.latest, fixture.latest.revision ?? null, { issueState: 'CLOSED' })
     const race = await Promise.race([
       mutation.then(() => 'completed'),
       new Promise((resolve) => setTimeout(() => resolve('waiting'), 20)),
@@ -180,7 +180,7 @@ test('restore holds every workflow sharing the baseline until the exact push fin
     releaseFetch()
     assert.equal((await restoring).ok, true)
     await mutation
-    assert.equal((await loadWorkflow(fixture.latest.key))?.stage, 'reviewing')
+    assert.equal((await loadWorkflow(fixture.latest.key))?.issueState, 'CLOSED')
   } finally {
     releaseFetch()
     await fixture.cleanup()

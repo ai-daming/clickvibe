@@ -11,7 +11,35 @@
 3. **comment meta = 增强器**。允许缺失;缺失时走降级链(GitHub 原生 review → 人工确认),**永不因缺 meta 而卡死,也永不因缺判据而瞎猜**。
 4. **入口从 GitHub issue 出发**:枚举 repo 的 open issue,用约定(config 的 repo 路径 + worktreeRoot + issue 号)算出候选 worktree/分支,再用 git 查真相;workflow 文件存在时只叠加缓存信息。
 
-`workflow.autoRun` 同样只是可选的自动推进配置与审计缓存,不替代 git/GitHub 事实。字段缺失或结构无效时直接退回手动模式;`running` 只消费实时 `deriveNextAction`。Host 重启后若没有对应 live task,降级为 `paused / session-interrupted`,绝不从本地游标猜测下一步。
+`workflow.autoRun` 同样只是可选的自动推进配置与审计缓存,不替代 git/GitHub 事实。字段缺失或结构无效时直接退回手动模式;`running` 只消费实时 `deriveNextAction`。当前控制器看不到 local live task 时先查询宿主 `ctx.jobs`;仍无法证明生死时进入 `task-unknown` 并禁止新任务,不得写成 `session-interrupted`。轮(round)与步(step)两个计数的定义、推进规则与展示位置见 [docs/round-and-step.md](round-and-step.md)。
+
+### 宿主重启与任务恢复
+
+**操作要求:**重启 `dsh web`、更新宿主或卸载 ClickVibe 前,必须先在面板停止所有开发/Review 任务并等待状态不再显示「任务进行中」。DSH 的 `ctx.jobs` 是同一宿主进程内的稳定 supervisor,可跨 ClickVibe 插件重载/模块实例查询和停止任务;它不是跨进程持久化服务。真正的宿主重启会销毁 registry,但不能据此断言旧 agent 子进程已终止。
+
+workflow 每次提交都携带持久化 revision;所有普通写要求 expected revision,任务回调额外要求 task capability。跨进程文件锁把重读当前文件、revision/凭证复核、revision 递增和 temp/rename 提交包成一个不可分割的临界区。任务启动先取得宿主 reservation,再用一次条件提交同时建立 `taskId + hostJobId + stage + agent`;竞争失败的 reservation 在 Agent 启动前即被结算。旧宿主进程即使迟到收尾,也不能越过新宿主已提交的任务代次。锁宿主进程死亡只用于回收写锁,不得用来推断 agent 子进程死亡。
+
+恢复时严格区分三种证据状态:
+
+- `running`:当前 local task 或 `ctx.jobs` 确认任务仍在运行;状态保持开发中/Review 中,所有启动入口继续禁用。
+- `task-unknown`:只有“当前控制器看不到”的证据、registry 查询异常、旧 job ID 在新 registry 中不存在,或无 host job ID 的旧任务;状态显示「任务状态未知」,禁止恢复开发、重新 Review和自动跑到底。宿主重启不等于旧 agent 子进程已退出,不得从进程启动时间、PID、日志时间戳或本地 step 推断任务死亡。
+- `interrupted`:用户明确停止、人工在宿主任务视图或系统进程中确认停止、进程失败/超时,或 supervisor 返回 host job 终态;此时才提供恢复动作。
+
+确认中断后的操作(未知任务先点击「确认旧任务已停止」;该按钮只解除门禁,不能代替实际停止进程):
+
+- 开发/返工中断:使用「恢复开发」,只在原 agent 归属匹配时续接已记录的 session;session 缺失、归属不匹配或被 agent 拒绝时按既有规则降级为同一 worktree 的全新会话。
+- Review 中断:确认旧宿主任务已经停止后使用「重新 Review」,重新审查当前 HEAD;不得沿用未物化结论的旧 Review。
+- 自动跑到底:只有任务失败/停止/超时或上述宿主终止证据才使用 `session-interrupted`;GitHub、git、宿主 registry/controller/占位等非 Agent 故障使用 `controller-error`,由人处理后重新挂起。系统不得根据本地 step 或日志时间戳自动双开任务。
+
+方案评估与选型:
+
+| 方案 | 可行性 | 结论 |
+|---|---|---|
+| 任务亲和重入(agent session + 原 worktree) | 当前已有 session ID、agent 归属校验与失效回退;宿主确认任务终止后可安全启动一个新进程继续 | **选用作真正宿主重启后的恢复动作** |
+| 宿主重启时插件接管旧任务 | `ctx.jobs` 是进程内 host registry,注册不随插件 producer/controller fiber 消失;可覆盖热重载和多模块实例,但不能跨宿主进程 | **选用作同宿主重载的任务所有权事实源**;启动前同步占位,持久化 host job ID 并校验 workflow/task label |
+| 运行探活(PID/进程扫描/agent 日志游标) | shell 契约不暴露稳定 PID;扫描命令行或看日志新鲜度既不能证明所有权,也不能安全停止/接管 | 拒绝单信号探活;仅使用 supervisor 的 job 生命周期事实 |
+
+实现同时输出 `runtimeInstanceId`、PID、模块加载时间和任务 `set/close/delete`、host job 注册、auto-run 判断/异常的结构化诊断。`requestAutoRunReconcile()` 的未知异常记录为 `controller-error`,不再冒充 agent 会话中断。
 
 ## 二、事实分级
 
@@ -29,7 +57,7 @@
 | **软** | review 结论(通过 + 问题列表) | 本地事件 / comment meta | 见降级链 |
 | **软** | 结论绑定的 HEAD | 本地事件 / comment meta | 同上 |
 | **软** | 会话 id + agent 归属(续会话用) | 本地(进程/文件) | 缺失/归属未知/跨 agent → 降级为全新会话 |
-| **软** | 任务是否在跑 | 进程本地 | 唯一非 git/GitHub 事实,天然临时;可推导出"中断"结论 |
+| **软** | 任务运行/归属 | 宿主 `ctx.jobs` + 当前进程 live handle | supervisor 活跃态可证明 `running`;仅 local miss 或 registry 缺失只能得到 `task-unknown`,不得推导中断 |
 | **软** | comment meta(事件流水) | GitHub 评论 | 只影响时间线展示,不影响判断 |
 
 ## 三、按钮决策表(按优先级)

@@ -129,7 +129,7 @@ export async function handleApiPost(
   if (method === 'stop') {
     const securityError = privilegedRequestError(req)
     if (securityError) return { status: 403, body: { ok: false, error: securityError } }
-    const result = stopTask(payload)
+    const result = await stopTask(ctx, payload)
     return { status: result.ok ? 200 : 400, body: result }
   }
   if (method === 'sync') {

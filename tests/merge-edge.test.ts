@@ -4,13 +4,19 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { mergingWorkflows } from '../src/infra/runtime.ts'
-import { issueKey, saveWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
+import { issueKey, loadWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
 import {
   authorizeAgent,
   mergeAndCleanup,
   mergeAndCleanupUnlocked,
   mergeAuthorizationPreview,
 } from '../src/workflow/merge.ts'
+import { commitWorkflowFixture } from './workflow-fixture.ts'
+
+const saveWorkflow = async (workflow: IssueWorkflow) => {
+  const current = await loadWorkflow(workflow.key)
+  await commitWorkflowFixture(workflow, current?.revision ?? null)
+}
 
 function workflow(number: string, overrides: Partial<IssueWorkflow> = {}): IssueWorkflow {
   return {

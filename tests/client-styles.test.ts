@@ -94,3 +94,11 @@ test('terminal keeps an explicit fixed dark palette outside theme overrides', ()
   assert.doesNotMatch(terminal, /var\(--dsw-/)
   assert.doesNotMatch(PANEL_CSS, /body\[data-ds-dark-theme\][^{]*\.cv-terminal/)
 })
+
+test('expanded detail sections contain their own scroll chain and keep the toggle reachable', () => {
+  assert.match(declarations('.cv-section-head'), /position:\s*sticky;/)
+  assert.match(declarations('.cv-section-head'), /top:\s*0;/)
+  assert.match(declarations('.cv-section-content'), /max-height:\s*min\(360px, 55vh\);/)
+  assert.match(declarations('.cv-section-content'), /overflow:\s*auto;/)
+  assert.match(declarations('.cv-section-content'), /overscroll-behavior:\s*contain;/)
+})

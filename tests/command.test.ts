@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { commitWorkflowFixture } from './workflow-fixture.ts'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer, request, type RequestListener } from 'node:http'
 import { tmpdir } from 'node:os'
@@ -6,8 +7,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { apply } from '../src/index.ts'
 import { parseCommand } from '../src/workflow/command.ts'
-import { issueBodyHash, saveWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
-
+import { issueBodyHash, type IssueWorkflow } from '../src/infra/state.ts'
 function included(body: unknown, status = 200): string {
   return [`HTTP/2.0 ${status} ${status === 200 ? 'OK' : 'Error'}`, '', JSON.stringify(body)].join('\n')
 }
@@ -176,7 +176,7 @@ test('status command returns readable workflow state derived from the same /stat
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
     await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), `repos:\n  o/r: ${join(tempHome, 'missing-repo')}\n`)
     const workflow = workflowFixture('o-r-23', 'https://github.com/o/r/issues/23', join(tempHome, 'missing-worktree'))
-    await saveWorkflow(workflow)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const item = {
       url: workflow.url,
       number: 23,
@@ -414,7 +414,7 @@ test('merge command surfaces every gate failure and supports the manual override
         issueContract: { bodyHash: issueBodyHash('## 验收标准\n- old'), updatedAt: '2026-08-22T00:00:00Z' },
       },
     ]
-    await saveWorkflow(workflow)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const handler = createHandler(
       async ({ command }) => {
         const api = githubApi(command, {

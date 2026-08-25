@@ -44,6 +44,7 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.0-rc.8",
+    "@deepseek-ai/dsh-jobs": "^0.1.0-rc.8",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   },
@@ -54,6 +55,8 @@
   "devDependencies": {
     "@biomejs/biome": "2.5.10",
     "@deepseek-ai/cordis": "^4.0.0-rc.8",
+    "@deepseek-ai/dsh-jobs": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-jobs-local": "0.1.0-rc.8",
     "@deepseek-ai/dsh-client-runtime": "0.1.0-rc.8",
     "@deepseek-ai/dsh-client-ui-conversation": "0.1.0-rc.8",
     "@deepseek-ai/dsh-client-ui-layout": "0.1.0-rc.8",
@@ -81,6 +84,7 @@
     "fmt": "biome format --write src tests scripts",
     "check:size": "node scripts/check-file-size.mjs",
     "check:layers": "node scripts/check-import-layers.mjs",
-    "check": "pnpm run typecheck && pnpm run lint && pnpm run format:check && pnpm run check:size && pnpm run check:layers"
+    "check:state-writes": "node scripts/check-state-writes.mjs",
+    "check": "pnpm run typecheck && pnpm run lint && pnpm run format:check && pnpm run check:size && pnpm run check:layers && pnpm run check:state-writes"
   }
 }

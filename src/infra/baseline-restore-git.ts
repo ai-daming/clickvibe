@@ -1,6 +1,16 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { shellQuote } from './develop-core.ts'
 import { runCommand } from './runtime.ts'
+import type { WorkflowStorageIdentity } from './state-layout.ts'
+import { withBaselineRestoreWorkflowLocksCommand } from './workflow-persistence.ts'
+
+/** Serialize restore validation/push with every durable write to the related workflows. */
+export function withBaselineWorkflowLocks<T>(
+  workflows: WorkflowStorageIdentity[],
+  operation: () => Promise<T>,
+): Promise<T> {
+  return withBaselineRestoreWorkflowLocksCommand(workflows, operation)
+}
 
 /** Select the one known tip that contains every other durable tip; divergence fails closed. */
 export async function latestKnownBaseHash(ctx: Context, repoPath: string, hashes: string[]): Promise<string> {

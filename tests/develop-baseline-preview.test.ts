@@ -4,8 +4,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { GithubRateLimitError } from '../src/github/rest.ts'
-import { saveWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
+import type { IssueWorkflow } from '../src/infra/state.ts'
 import { developBaselinePreview } from '../src/workflow/develop-baseline-preview.ts'
+import { commitWorkflowFixture } from './workflow-fixture.ts'
+
+const saveWorkflow = (workflow: IssueWorkflow) => commitWorkflowFixture(workflow, workflow.revision ?? null)
 
 function workflow(number: string, baseRef: string): IssueWorkflow {
   return {

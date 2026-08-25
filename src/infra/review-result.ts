@@ -27,9 +27,12 @@ function validateReviewResult(value: unknown): ParsedReviewResult {
   if (!Array.isArray(record.issues) || !record.issues.every((issue) => typeof issue === 'string')) {
     return { result: null, error: 'issues 不是 string[]' }
   }
-  if (record.passed && record.issues.length > 0) return { result: null, error: '通过结论不能包含问题' }
-  if (!record.passed && record.issues.length === 0) return { result: null, error: '未通过结论必须包含至少一个问题' }
-  return { result: { passed: record.passed, issues: record.issues } }
+  // passed 是结论,issues 是随行备注:信任通过,不为"通过但带备注"卡死。
+  // agent 常把 [人工]/[无法验证] 等非缺陷说明放进 issues,收紧只会让
+  // 自动流水线无限返工;真问题应由 passed:false 表达。备注随行保留,可追溯。
+  if (record.passed) return { result: { passed: true, issues: record.issues } }
+  if (record.issues.length === 0) return { result: null, error: '未通过结论必须包含至少一个问题' }
+  return { result: { passed: false, issues: record.issues } }
 }
 
 function parseMaterializedResult(raw: string): ParsedReviewResult {

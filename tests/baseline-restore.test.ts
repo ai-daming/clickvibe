@@ -5,13 +5,17 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
-import { issueKey, loadWorkflow, saveWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
-import { mutateWorkflowStrict } from '../src/infra/workflow-mutation.ts'
+import { createLiveTask, finishTask } from '../src/agent/task-supervisor.ts'
+import { commitWorkflowMetadata, issueKey, loadWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
+import { workflowTaskExpectation } from '../src/infra/task-ownership.ts'
 import { restoreBaseBranch } from '../src/workflow/baseline-restore.ts'
-import { recordDevDelivery } from '../src/workflow/review-flow.ts'
+import { recordDevDelivery } from '../src/workflow/dev-delivery.ts'
 import { syncWorktree } from '../src/workflow/sync.ts'
+import { establishTaskClaim } from '../src/workflow/task-claim.ts'
+import { commitWorkflowFixture } from './workflow-fixture.ts'
 
 const execFileAsync = promisify(execFile)
+const saveWorkflow = (workflow: IssueWorkflow) => commitWorkflowFixture(workflow, workflow.revision ?? null)
 
 function realShellCtx() {
   return {
@@ -169,15 +173,13 @@ test('restore rejects an authorization made stale by a queued baseline-tip mutat
     )
     await saveWorkflow(workflow)
 
-    const advancing = mutateWorkflowStrict(workflow.key, async (current) => {
-      await Promise.race([fetchStarted, new Promise((resolve) => setTimeout(resolve, 100))])
-      current.baseRef = 'origin/release/deleted @ bbb2222'
+    await commitWorkflowMetadata(workflow, workflow.revision ?? null, {
+      baseRef: 'origin/release/deleted @ bbb2222',
     })
     const restoring = restoreBaseBranch(ctx as never, {
       url: workflow.url,
       restoreTarget: { branch: 'release/deleted', hash: 'aaa1111' },
     })
-    await advancing
     releaseFetch()
 
     const restored = await restoring
@@ -262,9 +264,7 @@ test('restore holds the workflow lock through the remote push', async () => {
       restoreTarget: { branch: 'release/deleted', hash: 'aaa1111' },
     })
     await fetchStarted
-    const mutation = mutateWorkflowStrict(workflow.key, (current) => {
-      current.stage = 'reviewing'
-    })
+    const mutation = commitWorkflowMetadata(workflow, workflow.revision ?? null, { issueState: 'CLOSED' })
     const race = await Promise.race([
       mutation.then(() => 'completed'),
       new Promise((resolve) => setTimeout(() => resolve('waiting'), 20)),
@@ -274,7 +274,7 @@ test('restore holds the workflow lock through the remote push', async () => {
 
     assert.equal((await restoring).ok, true)
     await mutation
-    assert.equal((await loadWorkflow(workflow.key))?.stage, 'reviewing')
+    assert.equal((await loadWorkflow(workflow.key))?.issueState, 'CLOSED')
   } finally {
     releaseFetch()
     if (previousHome === undefined) delete process.env.HOME
@@ -435,7 +435,16 @@ test('a resolved baseline merge conflict advances the durable tip before restore
     const head = (await wt('rev-parse', 'HEAD')).stdout.trim()
     const reloaded = await loadWorkflow(item.key)
     assert.ok(reloaded)
-    await recordDevDelivery(realShellCtx() as never, reloaded, 'codex', head, [], 'resume')
+    const live = createLiveTask('dev-62-resolve', reloaded, 'dev', 'codex', null)
+    const claim = await establishTaskClaim(
+      reloaded,
+      live,
+      { kind: 'dev', taskId: live.taskId, agent: 'codex', hostJobId: 'job-62-resolve' },
+      workflowTaskExpectation(reloaded),
+    )
+    assert.equal(claim.ok && claim.claimed, true)
+    await recordDevDelivery(realShellCtx() as never, reloaded, 'codex', head, [], 'resume', live)
+    finishTask(live, 'done', 0)
     assert.equal((await loadWorkflow(item.key))?.baseRef, `origin/release/conflict @ ${latest}`)
 
     await git('push', 'origin', '--delete', 'release/conflict')

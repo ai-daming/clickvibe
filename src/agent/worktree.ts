@@ -25,11 +25,12 @@ import { buildWorktreeAddCommand, decideWorktreeRecovery, shellQuote } from '../
 import { expandHome, loadConfig, runCommand } from '../infra/runtime.ts'
 import {
   appendLog,
+  commitWorkflowMetadata,
   type IssueWorkflow,
   issueKey,
   loadWorkflow,
-  saveWorkflow,
-  saveWorkflowStrict,
+  WorkflowConflictError,
+  workflowRevision,
 } from '../infra/state.ts'
 import { resolveSelectedRemoteBase } from './baseline.ts'
 
@@ -288,14 +289,22 @@ export async function ensureWorktree(
     )
   }
 
-  if (firstBaseSelection) {
-    // startDevelop holds the workflow lock across worktree preparation and
-    // task reservation. Freeze the baseline only after preparation succeeds,
-    // so a rejected first attempt remains eligible to select another base.
-    workflow.baseRef = `${remoteBase} @ ${remoteBaseHash}`
-    try {
-      await saveWorkflowStrict(workflow)
-    } catch (error) {
+  // startDevelop holds the workflow lock across worktree preparation and task
+  // reservation. Freeze the baseline only after preparation succeeds. The
+  // revision-bound metadata commit is the sole persistence point, so another
+  // controller cannot silently replace the selected base or lifecycle facts.
+  if (firstBaseSelection) workflow.baseRef = `${remoteBase} @ ${remoteBaseHash}`
+  try {
+    Object.assign(
+      workflow,
+      await commitWorkflowMetadata(workflow, workflowRevision(workflow), {
+        worktree: workflow.worktree,
+        branch: workflow.branch,
+        baseRef: workflow.baseRef,
+      }),
+    )
+  } catch (error) {
+    if (firstBaseSelection) {
       const rollbackErrors: string[] = []
       const rollback = async (command: string, workdir: string) => {
         try {
@@ -320,8 +329,13 @@ export async function ensureWorktree(
       const rollbackDetail = rollbackErrors.length > 0 ? `; worktree 回滚失败: ${rollbackErrors.join('; ')}` : ''
       return { ok: false, error: `无法定格开发基线: ${detail}${rollbackDetail}` }
     }
-  } else {
-    await saveWorkflow(workflow)
+    return {
+      ok: false,
+      error:
+        error instanceof WorkflowConflictError
+          ? 'Workflow 已由另一控制器推进,请刷新后重试'
+          : `Workflow 持久化失败:${String(error instanceof Error ? error.message : error)}`,
+    }
   }
   return { ok: true, workflow, worktree, branch }
 }

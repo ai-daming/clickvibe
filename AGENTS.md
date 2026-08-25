@@ -54,6 +54,15 @@ ClickVibe 是一个 DSH Web 插件:右侧面板把 GitHub issue 变成「开发 
 - 拆分以现状功能簇为准**搬移与分层**,不为"整齐"重写或凭空引入新层;抽象只在出现第二个真实使用方时才提取。
 - 与雷区呼应:框架 / 校验库等依赖,直到重复达到门槛(如校验逻辑 ≥3 处)才统一引入。
 
+**2.5 修复纪律(状态/并发/持久化类改动强制;出处 `docs/fix-discipline.md`,含 #111 十轮案例)。**
+- **不变量先行**:动手修状态/并发 bug 前先写下不变量(谁拥有事实、什么是原子单元、哪一代次持写权限);答不出禁止写修复。
+- **构造优于纪律**:在多个调用点插"先检查再操作"= 登记债务,必须给出收敛到机制层(类型/存储原语/串行化点)的期限。
+- **单一应答源**:"当前 X 是哪个"全系统只允许一个应答源;任何消费方自行推导 = 缺陷。
+- **写权限即凭证**:变更共享持久状态的 API 必须在签名上要求所有权凭证,校验在串行化临界区内部完成,禁止临界区前 check-then-write。
+- **缺失 ≠ 死亡**:查无记录只能推出 unknown(禁止新动作),禁止推成已终止;终态结论必须来自明确证据。
+- **对抗性验证与静态枚举审计**:先对每条不变量 grep 枚举全部可违反路径并逐条打勾(存在性缺口必须一次找全),再做交错压测/构造窗口;CRITICAL finding 必须复现验证。
+- **循环元规则**:同类 CRITICAL 连续 ≥2 轮、或修复轮 diff 持续发散 → 停止逐条修复,先出不变量文档与机制级方案(见 `skills/root-cause-review/SKILL.md`)。
+
 ## 3. 契约红线(违反即返工)
 
 1. **测试全绿**:`pnpm run typecheck && pnpm run build && pnpm test` 必须全绿;拆分 PR 中测试只允许改 import 路径,断言 / fixture / 行为一律不动。
@@ -72,7 +81,7 @@ ClickVibe 是一个 DSH Web 插件:右侧面板把 GitHub issue 变成「开发 
 
 ## 5. 工程流程与门禁
 
-- 本地交付链:`pnpm install && pnpm run typecheck && pnpm run build && pnpm test`,再跑覆盖率(≥85%)、`pnpm run lint`(biome)、`pnpm run check:size`(行数门禁);四者全绿才算完成。
+- 本地交付链:`pnpm install && pnpm run typecheck && pnpm run build && pnpm test`,再跑覆盖率(≥85%)、`pnpm run lint`(biome)、`pnpm run check:size`(行数门禁)、`pnpm run check:state-writes`(状态写入边界门禁,见 §2.5);全部全绿才算完成。
 - 覆盖率命令(以仓库实际 node 版本为准,门禁 PR 固化):
   - node ≥22:`node --experimental-test-coverage --test tests/*.test.ts`(报告);
   - node 23+/24 LTS 阈值硬门禁:`node --test --test-coverage --test-coverage-statements=85 --test-coverage-branches=85 --test-coverage-functions=85 --test-coverage-lines=85 tests/*.test.ts`。
@@ -83,4 +92,5 @@ ClickVibe 是一个 DSH Web 插件:右侧面板把 GitHub issue 变成「开发 
 ## 6. 关联文档
 
 - 领域拆分完整设计:`docs/plans/2026-08-23-domain-split-architecture-design.md`(§3 三规则、§4/§5 目标结构、§7 门禁、§8 PR 序列)
+- 修复纪律与并发不变量:`docs/fix-discipline.md`;根因 review 流程:`skills/root-cause-review/SKILL.md`;循环外协议审计:`skills/observer/SKILL.md`
 - 状态模型与按钮决策:`docs/state-model.md`;命令参考:`docs/command-reference.md`;产品蓝图:`docs/product-blueprint.md`

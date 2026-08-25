@@ -3,8 +3,12 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import type { IssueWorkflow } from '../src/infra/state.ts'
-import { recordDevDelivery } from '../src/workflow/review-flow.ts'
+import { createLiveTask, finishTask } from '../src/agent/task-supervisor.ts'
+import { workflowTaskExpectation } from '../src/infra/task-ownership.ts'
+import { loadWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
+import { recordDevDelivery } from '../src/workflow/dev-delivery.ts'
+import { establishTaskClaim } from '../src/workflow/task-claim.ts'
+import { commitWorkflowFixture } from './workflow-fixture.ts'
 
 function workflow(number: string): IssueWorkflow {
   return {
@@ -64,9 +68,22 @@ test('successful dev delivery advances the durable tip only to a remote base com
         },
       }
 
-      await recordDevDelivery(ctx as never, item, 'codex', 'head2222', [], 'resume')
-      assert.equal(item.baseRef, integrated ? 'origin/release/2.0 @ bbb1111' : 'origin/release/2.0 @ aaa0000')
+      await commitWorkflowFixture(item, null)
+      const live = createLiveTask(`dev-${number}-delivery`, item, 'dev', 'codex', null)
+      const claim = await establishTaskClaim(
+        item,
+        live,
+        { kind: 'dev', taskId: live.taskId, agent: 'codex', hostJobId: `job-${number}-delivery` },
+        workflowTaskExpectation(item),
+      )
+      assert.equal(claim.ok && claim.claimed, true)
+      await recordDevDelivery(ctx as never, item, 'codex', 'head2222', [], 'resume', live)
+      assert.equal(
+        (await loadWorkflow(item.key))?.baseRef,
+        integrated ? 'origin/release/2.0 @ bbb1111' : 'origin/release/2.0 @ aaa0000',
+      )
       assert.ok(commands.some((command) => command.includes('refs/remotes/origin/release/2.0^{commit}')))
+      finishTask(live, 'done', 0)
     }
   } finally {
     if (previousHome === undefined) delete process.env.HOME

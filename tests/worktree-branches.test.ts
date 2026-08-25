@@ -4,7 +4,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { ensureWorktree } from '../src/agent/worktree.ts'
-import { issueKey, loadWorkflow, saveWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
+import { issueKey, loadWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
+import { commitWorkflowFixture } from './workflow-fixture.ts'
+
+const saveWorkflow = (workflow: IssueWorkflow) => commitWorkflowFixture(workflow, workflow.revision ?? null)
 
 interface Scenario {
   records?: string | ((target: string, branch: string) => string)

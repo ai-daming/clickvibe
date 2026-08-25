@@ -270,7 +270,7 @@ export const COMMAND_HELP_TEXT = [
   '  auto <目标> [dev=… review=… rounds=20 budget=24 merge=off]  自动跑到底',
   '  sync <目标>                         同步 worktree 到远端基线',
   '  restore-base <目标>                 按最后已知 tip 恢复已删除的远端基线(需二次确认)',
-  '  stop <目标>                         停止运行中的任务',
+  '  stop <目标>                         停止任务;未知态需确认旧 agent 已停止后重发',
   '  merge <目标>                        合并 PR 并清理(需二次确认)',
   '  merge <目标> override=<放行原因>    门禁拒绝后的人工放行(跳过项与原因写入审计)',
   '',

@@ -23,8 +23,16 @@ import type { Context } from '@deepseek-ai/cordis'
 import { updateBaseTip } from '../agent/baseline.ts'
 import { shellQuote } from '../infra/develop-core.ts'
 import { conflictFileSuffix, hasMergeConflict, listConflictFiles } from '../infra/git.ts'
-import { liveTasks, parseUrl, readWorktreeHead, runCommand } from '../infra/runtime.ts'
-import { appendEvent, appendLog, issueKey, loadWorkflow, saveWorkflowStrict } from '../infra/state.ts'
+import { parseUrl, readWorktreeHead, runCommand } from '../infra/runtime.ts'
+import {
+  appendEvent,
+  appendLog,
+  commitWorkflowMetadata,
+  issueKey,
+  loadWorkflow,
+  workflowRevision,
+} from '../infra/state.ts'
+import { observeWorkflowTask, type TaskOwnershipContext } from '../infra/task-ownership.ts'
 import { withWorkflowLock } from '../infra/workflow-lock.ts'
 import { workflowBaseBranch } from './state-view.ts'
 
@@ -52,11 +60,10 @@ async function syncWorktreeLocked(ctx: Context, key: string): Promise<SyncResult
   if (!workflow || !existsSync(workflow.worktree)) {
     return { ok: false, error: '该 issue 尚无 worktree,无法同步' }
   }
-  const activeTask = [workflow.devTaskId, workflow.reviewTaskId].some((id) => {
-    const task = id ? liveTasks.get(id) : undefined
-    return task !== undefined && !task.closed
-  })
-  if (activeTask) return { ok: false, error: 'Agent 任务运行中,拒绝并发修改 worktree;请等待任务结束后同步' }
+  const ownership = observeWorkflowTask(ctx as unknown as TaskOwnershipContext, workflow)
+  if (ownership.state === 'running' || ownership.state === 'unknown') {
+    return { ok: false, error: 'Agent 任务仍运行或状态未知,拒绝并发修改 worktree;请先确认任务终态' }
+  }
   const policy = { mode: 'danger-full-access' as const, workspaceRoot: workflow.worktree }
   const remoteBase = `origin/${workflowBaseBranch(workflow.baseRef)}`
   try {
@@ -110,11 +117,15 @@ async function syncWorktreeLocked(ctx: Context, key: string): Promise<SyncResult
         await appendLog(workflow.key, 'dev', `[clickvibe] ${note}`)
         const reloaded = await loadWorkflow(workflow.key)
         if (reloaded) {
-          await appendEvent(reloaded, {
-            kind: 'note',
-            at: new Date().toISOString(),
-            note,
-          })
+          await appendEvent(
+            reloaded,
+            {
+              kind: 'note',
+              at: new Date().toISOString(),
+              note,
+            },
+            workflowRevision(reloaded) ?? 0,
+          )
         }
         return {
           ok: false,
@@ -128,8 +139,12 @@ async function syncWorktreeLocked(ctx: Context, key: string): Promise<SyncResult
     try {
       const current = await loadWorkflow(workflow.key)
       if (!current) throw new Error('同步期间 workflow 已不存在')
-      current.baseRef = updateBaseTip(current.baseRef, remoteBase, baseTip)
-      await saveWorkflowStrict(current)
+      Object.assign(
+        current,
+        await commitWorkflowMetadata(current, workflowRevision(current), {
+          baseRef: updateBaseTip(current.baseRef, remoteBase, baseTip),
+        }),
+      )
     } catch (persistError) {
       try {
         await runCommand(ctx, `git reset --hard ${shellQuote(beforeMerge)}`, {
@@ -161,12 +176,16 @@ async function syncWorktreeLocked(ctx: Context, key: string): Promise<SyncResult
     // 记录同步事件到权威时间线(不改变开发/审查语义)
     const reloaded = await loadWorkflow(workflow.key)
     if (reloaded) {
-      await appendEvent(reloaded, {
-        kind: 'note',
-        at: new Date().toISOString(),
-        hash: head ?? undefined,
-        note: `worktree 已同步到 ${remoteBase}`,
-      })
+      await appendEvent(
+        reloaded,
+        {
+          kind: 'note',
+          at: new Date().toISOString(),
+          hash: head ?? undefined,
+          note: `worktree 已同步到 ${remoteBase}`,
+        },
+        workflowRevision(reloaded) ?? 0,
+      )
     }
     return { ok: true, worktree: workflow.worktree, branch: workflow.branch, head }
   } catch (error) {

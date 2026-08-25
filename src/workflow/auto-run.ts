@@ -3,7 +3,21 @@ import { ensureWorktree } from '../agent/worktree.ts'
 import { fetchIssue, issueSnapshot } from '../github/issue.ts'
 import { type IssuePromptSnapshot } from '../infra/develop-core.ts'
 import { liveTasks, parseUrl } from '../infra/runtime.ts'
-import { appendEvent, type AutoRunPausedReason, issueKey, loadWorkflow, saveWorkflow } from '../infra/state.ts'
+import {
+  appendEvent,
+  type AutoRunPausedReason,
+  issueKey,
+  loadWorkflow,
+  commitWorkflowMetadata,
+  workflowRevision,
+} from '../infra/state.ts'
+import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
+import {
+  observeWorkflowTask,
+  taskLaunchDecision,
+  type TaskOwnershipContext,
+  type WorkflowTaskRef,
+} from '../infra/task-ownership.ts'
 import { createPullRequest } from './create-pr.ts'
 import { startDevelop } from './develop-start.ts'
 import { mergeAndCleanup } from './merge.ts'
@@ -16,6 +30,8 @@ import {
   decideAutoRun,
   validateAutoRunConfig,
 } from './auto-run-policy.ts'
+import type { AutoRunState, IssueWorkflow } from '../infra/state.ts'
+import type { LiveTask } from '../infra/runtime.ts'
 import { registerAutoRunReconciler } from './auto-run-signal.ts'
 import { enrichWorkflowStates } from './repository-state.ts'
 import { resumeDevelop } from './resume.ts'
@@ -27,8 +43,10 @@ const queued = new Map<string, AutoRunTaskOutcome | undefined>()
 const deadlineTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const observationTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
-function liveTaskFor(key: string) {
-  return [...liveTasks.values()].find((task) => task.workflowKey === key && !task.closed) ?? null
+function liveTaskFor(taskRef: WorkflowTaskRef | null): LiveTask | null {
+  if (!taskRef) return null
+  const task = liveTasks.get(taskRef.taskId)
+  return task && !task.closed ? task : null
 }
 
 async function persistDecision(key: string, decision: Exclude<AutoRunDecision, { kind: 'manual' }>): Promise<void> {
@@ -36,22 +54,40 @@ async function persistDecision(key: string, decision: Exclude<AutoRunDecision, {
   if (!workflow?.autoRun || workflow.autoRun.status !== 'running') return
   workflow.autoRun.rounds = decision.rounds
   workflow.autoRun.unresolved = decision.unresolved
+  if (decision.kind === 'trigger') workflow.autoRun.step = decision.step
   workflow.autoRun.lastObservedAt = new Date().toISOString()
-  await saveWorkflow(workflow)
+  Object.assign(
+    workflow,
+    await commitWorkflowMetadata(workflow, workflowRevision(workflow), { autoRun: workflow.autoRun }),
+  )
 }
 
 async function pauseAutoRun(key: string, reason: AutoRunPausedReason): Promise<void> {
   const workflow = await loadWorkflow(key)
   if (!workflow?.autoRun || workflow.autoRun.status !== 'running') return
+  logTaskDiagnostic('auto-run-pause', {
+    reason,
+    workflowKey: key,
+    step: workflow.autoRun.step ?? 0,
+    updatedAt: workflow.updatedAt,
+    devTaskId: workflow.devTaskId,
+    reviewTaskId: workflow.reviewTaskId,
+    liveTaskKeys: [...liveTasks.entries()].filter(([, task]) => !task.closed).map(([taskId]) => taskId),
+  })
   workflow.autoRun.status = 'paused'
   workflow.autoRun.pausedReason = reason
   workflow.autoRun.lastObservedAt = new Date().toISOString()
-  await appendEvent(workflow, {
-    kind: 'auto-run',
-    at: new Date().toISOString(),
-    round: workflow.autoRun.rounds,
-    note: `自动跑到底已暂停:${reason}`,
-  })
+  await appendEvent(
+    workflow,
+    {
+      kind: 'auto-run',
+      at: new Date().toISOString(),
+      round: workflow.autoRun.rounds,
+      step: workflow.autoRun.step,
+      note: `自动跑到底已暂停:${reason}`,
+    },
+    workflowRevision(workflow) ?? 0,
+  )
   clearDeadline(key)
   clearObservation(key)
 }
@@ -61,12 +97,17 @@ async function completeAutoRun(key: string): Promise<void> {
   if (!workflow?.autoRun || workflow.autoRun.status !== 'running') return
   workflow.autoRun.status = 'completed'
   workflow.autoRun.pausedReason = null
-  await appendEvent(workflow, {
-    kind: 'auto-run',
-    at: new Date().toISOString(),
-    round: workflow.autoRun.rounds,
-    note: '自动跑到底已收敛,等待人工合并',
-  })
+  await appendEvent(
+    workflow,
+    {
+      kind: 'auto-run',
+      at: new Date().toISOString(),
+      round: workflow.autoRun.rounds,
+      step: workflow.autoRun.step,
+      note: '自动跑到底已收敛,等待人工合并',
+    },
+    workflowRevision(workflow) ?? 0,
+  )
   clearDeadline(key)
   clearObservation(key)
 }
@@ -95,18 +136,22 @@ function clearDeadline(key: string): void {
   deadlineTimers.delete(key)
 }
 
-function armDeadline(key: string, deadline: string): void {
+function armDeadline(ctx: Context, key: string, deadline: string): void {
   clearDeadline(key)
   const delay = Math.max(0, Date.parse(deadline) - Date.now())
   const timer = setTimeout(
     () => {
       void (async () => {
         if (Date.now() < Date.parse(deadline)) {
-          armDeadline(key, deadline)
+          armDeadline(ctx, key, deadline)
           return
         }
         await pauseAutoRun(key, 'budget-exhausted')
-        liveTaskFor(key)?.process?.kill()
+        const workflow = await loadWorkflow(key)
+        if (workflow) {
+          const gate = taskLaunchDecision(observeWorkflowTask(ctx as unknown as TaskOwnershipContext, workflow))
+          if (!gate.allowed && gate.running) liveTaskFor(gate.task)?.process?.kill()
+        }
       })()
     },
     Math.min(delay, 2_147_483_647),
@@ -139,6 +184,7 @@ async function applyDecision(ctx: Context, key: string, decision: AutoRunDecisio
     merged?: boolean
     cleanupPending?: boolean
     gateFailures?: unknown[]
+    controllerError?: boolean
   }
   switch (decision.action) {
     case 'develop':
@@ -155,8 +201,6 @@ async function applyDecision(ctx: Context, key: string, decision: AutoRunDecisio
       result = await startReview(ctx, { url: workflow.url, agent: workflow.autoRun.reviewAgent })
       break
     case 'rework':
-      workflow.devAgent = workflow.autoRun.devAgent
-      await saveWorkflow(workflow)
       result = await resumeDevelop(ctx, { url: workflow.url })
       break
     case 'sync':
@@ -205,8 +249,15 @@ export function requestAutoRunReconcile(ctx: Context, key: string, outcome?: Aut
         await reconcileOnce(ctx, key, nextOutcome)
         nextOutcome = queued.get(key)
       } while (queued.has(key))
-    } catch {
-      await pauseAutoRun(key, 'session-interrupted')
+    } catch (error) {
+      logTaskDiagnostic('auto-run-reconcile-error', {
+        workflowKey: key,
+        outcome: nextOutcome ?? null,
+        errorName: error instanceof Error ? error.name : typeof error,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        errorStack: error instanceof Error ? error.stack : null,
+      })
+      await pauseAutoRun(key, 'controller-error')
     } finally {
       running.delete(key)
     }
@@ -240,9 +291,15 @@ export async function startAutoRun(
     return { ok: false, error: 'Issue 快照已变化,拒绝使用旧授权启动自动跑到底' }
   }
   const key = issueKey(`${parsed.owner}/${parsed.repo}`, parsed.number)
-  if (liveTaskFor(key)) return { ok: false, error: '该 issue 当前有任务运行,请等待或停止后再启动自动跑到底' }
   const ensured = await ensureWorktree(ctx, parsed)
   if (!ensured.ok) return ensured
+  const ownership = observeWorkflowTask(ctx as unknown as TaskOwnershipContext, ensured.workflow)
+  if (ownership.state === 'running') {
+    return { ok: false, error: '该 issue 当前有任务运行,请等待或停止后再启动自动跑到底' }
+  }
+  if (ownership.state === 'unknown') {
+    return { ok: false, error: '当前控制器无法确认旧任务生死,为避免双开已禁止启动自动跑到底' }
+  }
   const startedAt = new Date().toISOString()
   ensured.workflow.issueSnapshot = authorizedSnapshot
   ensured.workflow.autoRun = {
@@ -250,28 +307,45 @@ export async function startAutoRun(
     ...config,
     startedAt,
     deadline: new Date(Date.parse(startedAt) + config.budgetHours * 3_600_000).toISOString(),
+    step: 0,
     rounds: 0,
     unresolved: [],
     lastObservedAt: null,
     pausedReason: null,
   }
-  await appendEvent(ensured.workflow, { kind: 'auto-run', at: startedAt, round: 0, note: '自动跑到底已启动' })
-  armDeadline(key, ensured.workflow.autoRun.deadline)
+  await appendEvent(
+    ensured.workflow,
+    { kind: 'auto-run', at: startedAt, round: 0, note: '自动跑到底已启动' },
+    workflowRevision(ensured.workflow) ?? 0,
+  )
+  armDeadline(ctx, key, ensured.workflow.autoRun.deadline)
   requestAutoRunReconcile(ctx, key)
   return { ok: true, workflowKey: key }
 }
 
 export async function pauseOrphanedAutoRuns(
-  workflows: readonly { key: string; autoRun?: { status: string } }[],
+  ctx: Context,
+  workflows: readonly (IssueWorkflow & { autoRun?: AutoRunState })[],
 ): Promise<void> {
   for (const candidate of workflows) {
-    if (
-      candidate.autoRun?.status !== 'running' ||
-      running.has(candidate.key) ||
-      observationTimers.has(candidate.key) ||
-      liveTaskFor(candidate.key)
-    )
+    if (candidate.autoRun?.status !== 'running' || running.has(candidate.key) || observationTimers.has(candidate.key)) {
       continue
-    await pauseAutoRun(candidate.key, 'session-interrupted')
+    }
+    const ownership = observeWorkflowTask(ctx as unknown as TaskOwnershipContext, candidate)
+    logTaskDiagnostic('auto-run-ownership-observed', {
+      workflowKey: candidate.key,
+      step: candidate.autoRun.step ?? 0,
+      updatedAt: candidate.updatedAt,
+      ownership,
+      devTaskId: candidate.devTaskId,
+      reviewTaskId: candidate.reviewTaskId,
+      liveTaskKeys: [...liveTasks.entries()].filter(([, task]) => !task.closed).map(([taskId]) => taskId),
+      trigger: 'state-refresh',
+    })
+    if (ownership.state === 'interrupted') {
+      await pauseAutoRun(candidate.key, 'session-interrupted')
+      continue
+    }
+    requestAutoRunReconcile(ctx, candidate.key)
   }
 }

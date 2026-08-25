@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict'
 import { chmod, mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import test from 'node:test'
 import { liveTasks } from '../src/infra/runtime.ts'
-import { loadWorkflow, saveWorkflow, statePath, type IssueWorkflow } from '../src/infra/state.ts'
+import { loadWorkflow, statePath, type IssueWorkflow } from '../src/infra/state.ts'
 import { syncWorktree } from '../src/workflow/sync.ts'
+import { commitWorkflowFixture } from './workflow-fixture.ts'
+
+const saveWorkflow = (workflow: IssueWorkflow) => commitWorkflowFixture(workflow, workflow.revision ?? null)
 
 test('sync rejects malformed targets and issues without a worktree before git access', async () => {
   const invalid = await syncWorktree({} as never, undefined)
@@ -269,7 +272,7 @@ test('sync rejects a concurrent live agent before touching git', async () => {
       { url: workflow.url },
     )
     assert.equal(result.ok, false)
-    if (!result.ok) assert.match(result.error, /Agent 任务运行中/)
+    if (!result.ok) assert.match(result.error, /Agent 任务仍运行或状态未知/)
     assert.equal(gitCalls, 0)
   } finally {
     liveTasks.delete('dev-live-11')
@@ -329,11 +332,9 @@ test('sync rolls git back when baseline-tip persistence fails after merge', asyn
           if (spec.command === 'git rev-parse --verify HEAD') {
             return { exitCode: 0, stdout: { text: 'before222' }, stderr: { text: '' } }
           }
-          if (spec.command.startsWith('git merge --no-edit')) {
-            await chmod(workflowFile, 0o400)
-          }
+          if (spec.command.startsWith('git merge --no-edit')) await chmod(dirname(workflowFile), 0o500)
           if (spec.command.startsWith('git reset --hard')) {
-            await chmod(workflowFile, 0o600)
+            await chmod(dirname(workflowFile), 0o700)
           }
           return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
         },
@@ -346,7 +347,7 @@ test('sync rolls git back when baseline-tip persistence fails after merge', asyn
     assert.equal(commands.includes("git reset --hard 'before222'"), true)
     assert.equal((await loadWorkflow(workflow.key))?.baseRef, 'origin/main @ aaa0000')
   } finally {
-    if (workflowFile) await chmod(workflowFile, 0o600).catch(() => undefined)
+    if (workflowFile) await chmod(dirname(workflowFile), 0o700).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(root, { recursive: true, force: true })

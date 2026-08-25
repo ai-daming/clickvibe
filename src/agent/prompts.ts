@@ -23,8 +23,13 @@ import { fetchPrRestDetail, type GithubCommentRest } from '../github/reads.ts'
 import { githubRest, isGithubRateLimitError } from '../github/rest.ts'
 import { REVIEW_RESULT_RELATIVE_PATH } from '../infra/review-result.ts'
 import { readWorktreeHead, runCommand } from '../infra/runtime.ts'
-import { type IssueWorkflow, issueBodyHash } from '../infra/state.ts'
-import { mutateWorkflowStrict } from '../infra/workflow-mutation.ts'
+import {
+  commitWorkflowMetadata,
+  type IssueWorkflow,
+  issueBodyHash,
+  WorkflowConflictError,
+  workflowRevision,
+} from '../infra/state.ts'
 import { frozenBaseHash, frozenRemoteBase } from './baseline.ts'
 import { shellQuote } from './develop.ts'
 import {
@@ -76,10 +81,8 @@ export async function resolvePromptSnapshot(
     if (prComments) snapshot.comments.push(...prComments)
     workflow.issueSnapshot = snapshot
     if (snapshot.state === 'OPEN' || snapshot.state === 'CLOSED') workflow.issueState = snapshot.state
-    await mutateWorkflowStrict(workflow.key, (current) => {
-      current.issueSnapshot = snapshot
-      if (snapshot.state === 'OPEN' || snapshot.state === 'CLOSED') current.issueState = snapshot.state
-    }).catch(() => undefined)
+    const persistenceError = await persistPromptWorkflow(workflow)
+    if (persistenceError) return { error: persistenceError }
     return { snapshot, freshness: 'current' }
   }
   const snapshot = workflow.issueSnapshot
@@ -87,10 +90,26 @@ export async function resolvePromptSnapshot(
     return { error: `无法刷新 Issue,且没有可回退的持久化需求快照: ${fetched.error}` }
   }
   workflow.issueSnapshot = snapshot
-  await mutateWorkflowStrict(workflow.key, (current) => {
-    current.issueSnapshot = snapshot
-  }).catch(() => undefined)
+  const persistenceError = await persistPromptWorkflow(workflow)
+  if (persistenceError) return { error: persistenceError }
   return { snapshot, freshness: 'persisted', fetchError: fetched.error.slice(0, 500) }
+}
+
+async function persistPromptWorkflow(workflow: IssueWorkflow): Promise<string | null> {
+  try {
+    Object.assign(
+      workflow,
+      await commitWorkflowMetadata(workflow, workflowRevision(workflow), {
+        issueSnapshot: workflow.issueSnapshot,
+        issueState: workflow.issueState,
+      }),
+    )
+    return null
+  } catch (error) {
+    return error instanceof WorkflowConflictError
+      ? 'Workflow 已由另一控制器推进,本次启动已取消;请刷新后重试'
+      : `需求快照持久化失败:${String(error instanceof Error ? error.message : error)}`
+  }
 }
 
 export function sameSnapshot(left: PromptSnapshot, right: PromptSnapshot): boolean {

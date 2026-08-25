@@ -24,20 +24,25 @@ import { frozenBaseHash } from '../agent/baseline.ts'
 import { type DeriveOptions, hasMergeConflict, readBranch, readRefShort, readRevCount } from '../infra/git.ts'
 import { liveTasks, readWorktreeHead, runCommand } from '../infra/runtime.ts'
 import { type IssueContractSnapshot, type IssueWorkflow } from '../infra/state.ts'
+import { observeTaskOwnership, type TaskOwnershipContext } from '../infra/task-ownership.ts'
 import { latestDevelopmentHash } from './delivery-audit.ts'
 import { deriveFreshSessionAvailability, type FreshSessionAvailability } from './fresh-session.ts'
 import {
   deriveNextAction,
+  deriveReviewStartDecision,
   deriveWorkflowStatus,
   type IssueContractStatus,
   type IssueContractUnknownReason,
   type NextAction,
+  type ReviewStartDecision,
   type WorkflowFacts,
+  type WorkflowStatus,
   workflowBaseBranch,
 } from './state-view.ts'
 
 /** Worktree facts derived from git, GitHub and durable workflow events. */
 export interface WorkflowDerived {
+  taskRef: { kind: 'dev' | 'review'; taskId: string } | null
   head: string | null
   branch: string | null
   mainHead: string | null
@@ -69,7 +74,8 @@ export interface WorkflowDerived {
   hasNewCommits: boolean
   verdictCurrent: boolean
   nextAction: NextAction
-  status: 'idle' | 'developing' | 'review-ready' | 'reviewing' | 'passed'
+  reviewStart: ReviewStartDecision
+  status: WorkflowStatus
   baseBranch: string
   /** False when the frozen origin/<base> ref no longer exists after fetch. */
   baseRefAvailable: boolean
@@ -198,15 +204,20 @@ export async function deriveWorkflowState(
       !options.pr?.baseRefOid ||
       (lastReviewBase?.ref === options.pr.baseRefName && lastReviewBase.sha === options.pr.baseRefOid))
 
-  const devLive = workflow.devTaskId ? liveTasks.get(workflow.devTaskId) : undefined
-  const reviewLive = workflow.reviewTaskId ? liveTasks.get(workflow.reviewTaskId) : undefined
-  const runningTask =
-    reviewLive !== undefined && !reviewLive.closed
-      ? reviewLive
-      : devLive !== undefined && !devLive.closed
-        ? devLive
-        : null
-  const taskRunning = runningTask !== null
+  const ownership = observeTaskOwnership(
+    ctx as unknown as TaskOwnershipContext,
+    workflow,
+    (taskId) => {
+      const task = liveTasks.get(taskId)
+      return task !== undefined && !task.closed
+    },
+    (taskId) => liveTasks.get(taskId)?.startedAt ?? null,
+  )
+  const taskRunning = ownership.state === 'running'
+  const taskKind = ownership.state === 'running' ? ownership.kind : null
+  const taskInterrupted =
+    ownership.state === 'interrupted' || (workflow.stage === 'developing' && workflow.devInterrupted)
+  const taskUnknown = !taskInterrupted && ownership.state === 'unknown'
 
   const branchExists = options.branchExists ?? branch !== null
   const worktreeValid = !exists || branch === workflow.branch
@@ -224,6 +235,9 @@ export async function deriveWorkflowState(
     stage: workflow.stage,
     devInterrupted: workflow.devInterrupted,
     taskRunning,
+    taskKind,
+    taskUnknown,
+    taskInterrupted,
     head,
     reviewedHash,
     reviewPassed,
@@ -240,7 +254,12 @@ export async function deriveWorkflowState(
     hasResumeSession: workflow.devSessionId !== null,
     baseBranch,
     baseRefAvailable: originMainHead !== null,
+    workflowCachePresent: options.workflowCachePresent,
+    // The live PR head is the newest GitHub delivery fact. During completion
+    // persistence it can legitimately advance before the local event cache.
+    deliveryHash: options.pr?.headRefOid ?? lastDevHash,
   }
+  const reviewStart = deriveReviewStartDecision(facts)
   const nextAction = deriveNextAction(facts)
   const status = deriveWorkflowStatus(facts)
   const freshSession = deriveFreshSessionAvailability(
@@ -252,8 +271,9 @@ export async function deriveWorkflowState(
   return {
     ...workflow,
     prNumber: options.pr?.number ?? workflowPrNumber,
-    runStartedAt: runningTask?.startedAt ?? null,
+    runStartedAt: ownership.state === 'running' ? ownership.startedAt : null,
     derived: {
+      taskRef: ownership.state === 'none' ? null : { kind: ownership.kind, taskId: ownership.taskId },
       head,
       branch,
       mainHead,
@@ -284,6 +304,7 @@ export async function deriveWorkflowState(
       issueContractUnknownReason,
       hasNewCommits,
       verdictCurrent,
+      reviewStart,
       nextAction,
       status,
       baseBranch,

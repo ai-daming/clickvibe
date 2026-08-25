@@ -5,6 +5,7 @@ import {
   deliveryPublicationLabel,
   githubCompareUrl,
   selectHistoryTask,
+  selectUnknownTaskId,
   workflowStatusLabel,
 } from '../src/client/runtime.ts'
 
@@ -32,5 +33,32 @@ test('client runtime derives stable task, status, publication and compare labels
   assert.equal(
     githubCompareUrl('owner/repo', 'feature/x', 'origin/release/deleted @ abc123', 'main', false),
     'https://github.com/owner/repo/compare/release%2Fdeleted...feature%2Fx?expand=1',
+  )
+})
+
+test('unknown-task recovery uses the server-selected ownership task instead of persisted stage', () => {
+  assert.equal(
+    selectUnknownTaskId({
+      stage: 'passed',
+      devTaskId: 'dev-1000-old',
+      reviewTaskId: 'review-2000-current',
+      derived: {
+        status: 'task-unknown',
+        taskRef: { kind: 'review', taskId: 'review-2000-current' },
+      },
+    }),
+    'review-2000-current',
+  )
+  assert.equal(
+    selectUnknownTaskId({
+      stage: 'review-ready',
+      devTaskId: 'dev-3000-current',
+      reviewTaskId: 'review-2000-old',
+      derived: {
+        status: 'task-unknown',
+        taskRef: { kind: 'dev', taskId: 'dev-3000-current' },
+      },
+    }),
+    'dev-3000-current',
   )
 })

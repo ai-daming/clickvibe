@@ -9,6 +9,7 @@ import { type Dependencies, type GhIssue, IssueView, type TimelineEvent, repoOf 
 import { ProjectSelector } from './project-selector.tsx'
 import { RepositoryAdvanceBanner } from './repository-advance-banner.tsx'
 import { AutoRunForm } from './auto-run-form.tsx'
+import { IssueRowMeta } from './issue-row-meta.ts'
 
 export function PanelContent() {
   const {
@@ -435,7 +436,11 @@ export function PanelContent() {
                             />
                             <span className={`cv-stage cv-stage-${status}`}>{stageLabel(status, issue.workflow)}</span>
                             <div className="cv-issue-row-main">
-                              <span className="cv-issue-row-title" onClick={() => void openIssue(issue)}>
+                              <span
+                                className="cv-issue-row-title"
+                                title={`#${issue.number} ${issue.title}`}
+                                onClick={() => void openIssue(issue)}
+                              >
                                 #{issue.number} {issue.title}
                               </span>
                               {(status === 'developing' || status === 'reviewing') &&
@@ -443,40 +448,15 @@ export function PanelContent() {
                               issue.workflow.runStartedAt !== undefined ? (
                                 <RunningDuration startedAt={issue.workflow.runStartedAt} />
                               ) : null}
-                              <div className="cv-issue-row-meta">
-                                <span>分支: {issue.workflow.branch}</span>
-                                {(derived?.behindBase ?? 0) > 0 ? (
-                                  <span className="cv-row-lag">⚠ 落后 {derived?.behindBase}</span>
-                                ) : null}
-                                <span>里程碑: {issue.milestone?.title ?? '无'}</span>
-                                <span>
-                                  blockedBy:{' '}
-                                  {issue.blockedBy.length
-                                    ? issue.blockedBy
-                                        .map(
-                                          (dependency) =>
-                                            `#${dependency.number}${dependency.state.toUpperCase() === 'OPEN' ? '⏳' : '✓'}`,
-                                        )
-                                        .join(' ')
-                                    : '无'}
-                                </span>
-                                {contract && !contract.ok ? (
-                                  <span className="cv-row-contract">
-                                    ⚠ 不满足契约(缺:{contract.missing.join('、')})
-                                  </span>
-                                ) : null}
-                                {issue.autoDevelopment?.ready ? (
-                                  <span className="cv-row-ready">ready · 可自动下单</span>
-                                ) : null}
-                                {issue.dependencyLedger?.updated ? (
-                                  <span className="cv-row-ready">依赖账本已自动更新</span>
-                                ) : null}
-                                {issue.dependencyLedger?.error ? (
-                                  <span className="cv-row-contract" title={issue.dependencyLedger.error}>
-                                    ⚠ 依赖账本更新失败
-                                  </span>
-                                ) : null}
-                              </div>
+                              <IssueRowMeta
+                                branch={issue.workflow.branch}
+                                milestone={issue.milestone?.title ?? null}
+                                blockedBy={issue.blockedBy}
+                                behindBase={derived?.behindBase ?? 0}
+                                contract={contract}
+                                autoDevelopmentReady={issue.autoDevelopment?.ready === true}
+                                dependencyLedger={issue.dependencyLedger}
+                              />
                             </div>
                             <div className="cv-row-actions">
                               <AutoRunForm

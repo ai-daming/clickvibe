@@ -122,6 +122,55 @@ test('state exposes only the current in-memory task start time', async () => {
   assert.equal((await deriveWorkflowState(ctx, wf)).runStartedAt, null)
 })
 
+test('state keeps actions closed while completion persistence leads task settlement', async () => {
+  const wf = workflow({ stage: 'review-ready', devTaskId: 'dev-live-after-stage' })
+  liveTasks.set('dev-live-after-stage', {
+    taskId: 'dev-live-after-stage',
+    workflowKey: wf.key,
+    workflow: wf,
+    kind: 'dev',
+    agent: 'codex',
+    startedAt: 1_720_000_000_111,
+    log: new LineLog(10),
+    rawLog: new LineBuffer(),
+    closed: false,
+    status: 'running',
+    exitCode: null,
+    sessionId: null,
+  })
+  try {
+    const observed = await deriveWorkflowState(ctx, wf)
+    assert.equal(observed.runStartedAt, 1_720_000_000_111)
+    assert.equal(observed.derived.status, 'developing')
+    assert.equal(observed.derived.nextAction.kind, 'none')
+  } finally {
+    liveTasks.delete('dev-live-after-stage')
+  }
+
+  const review = workflow({ stage: 'passed', reviewTaskId: 'review-live-after-verdict' })
+  liveTasks.set('review-live-after-verdict', {
+    taskId: 'review-live-after-verdict',
+    workflowKey: review.key,
+    workflow: review,
+    kind: 'review',
+    agent: 'codex',
+    startedAt: 1_720_000_000_222,
+    log: new LineLog(10),
+    rawLog: new LineBuffer(),
+    closed: false,
+    status: 'running',
+    exitCode: null,
+    sessionId: null,
+  })
+  try {
+    const observed = await deriveWorkflowState(ctx, review)
+    assert.equal(observed.derived.status, 'reviewing')
+    assert.equal(observed.derived.nextAction.kind, 'none')
+  } finally {
+    liveTasks.delete('review-live-after-verdict')
+  }
+})
+
 test('state exposes round and only owned continuation sessions as fresh-session capabilities', async () => {
   const events = Array.from({ length: 5 }, (_, index) => ({
     kind: 'review' as const,

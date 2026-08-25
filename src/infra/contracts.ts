@@ -45,6 +45,7 @@ export interface IssueContractCheck {
 
 export type AutoRunPausedReason =
   | 'session-interrupted'
+  | 'controller-error'
   | 'authorization-denied'
   | 'sync-conflict'
   | 'merge-gate-rejected'
@@ -69,6 +70,9 @@ export interface AutoRunState {
   budgetHours: number
   startedAt: string
   deadline: string
+  /** 本次自动跑已触发的自动动作数(每次推进一步:启动开发/恢复/Review/合并等)。旧状态缺失时按 0 起算。 */
+  step: number
+  /** 本次自动跑已完成的 Review 判定数:轮次上限(maxRounds)基于此计数。 */
   rounds: number
   unresolved: AutoRunUnresolvedRound[]
   lastObservedAt: string | null

@@ -8,8 +8,11 @@ import test from 'node:test'
 import { pushTaskLine } from '../src/agent/task-supervisor.ts'
 import { LineLog } from '../src/infra/develop-core.ts'
 import { type LiveTask, liveTasks, liveWaiters } from '../src/infra/runtime.ts'
-import { loadWorkflow, saveWorkflow, startTaskLog, type IssueWorkflow } from '../src/infra/state.ts'
+import { loadWorkflow, startTaskLog, type IssueWorkflow } from '../src/infra/state.ts'
 import { getTaskHistory, handleStream, pollDevelop, resolveHistoryTarget, stopTask } from '../src/workflow/task-api.ts'
+import { commitWorkflowFixture } from './workflow-fixture.ts'
+
+const saveWorkflow = (workflow: IssueWorkflow) => commitWorkflowFixture(workflow, workflow.revision ?? null)
 
 function liveTask(overrides: Partial<LiveTask> = {}): LiveTask {
   return {
