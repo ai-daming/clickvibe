@@ -153,7 +153,10 @@ export function decideAutoRun(input: {
     case 'sync':
       return trigger(input.nextAction.kind)
     case 'resume':
-      return paused('session-interrupted', reviews)
+      // 并行开发的合并冲突由 agent 自动解决(#26 转交设计 + #90 现场):安全性来自
+      // 恢复网(git 历史/review 绑定新 HEAD/门禁/人工合并),不来自拒跑;会话失配
+      // 由 resumeDevelop 的精确会话回退与 ownership 门禁兜底。
+      return trigger('rework')
     case 'merge':
       return input.autoRun.autoMerge ? trigger('merge') : { kind: 'complete', ...reviews }
     case 'cleanup':
