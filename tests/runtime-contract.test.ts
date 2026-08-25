@@ -52,8 +52,9 @@ test('host and client preserve the same task-history selection', () => {
 
 test('host and client preserve the same pure presentation helpers', () => {
   for (const args of [
-    ['owner/repo', 'feature/x', 'origin/release', 'main'],
-    ['owner/repo', 'feature/x', 'HEAD', 'trunk'],
+    ['owner/repo', 'feature/x', 'origin/release', 'main', true],
+    ['owner/repo', 'feature/x', 'HEAD', 'trunk', true],
+    ['owner/repo', 'feature/x', 'origin/release @ abc123', 'main', false],
   ] as const) {
     assert.equal(clientCompareUrl(...args), hostCompareUrl(...args))
   }

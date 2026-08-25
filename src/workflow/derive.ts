@@ -20,6 +20,7 @@
 
 import { existsSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
+import { frozenBaseHash } from '../agent/baseline.ts'
 import { type DeriveOptions, readWorkflowGitFacts } from '../infra/git.ts'
 import { liveTasks } from '../infra/runtime.ts'
 import { type IssueContractSnapshot, type IssueWorkflow } from '../infra/state.ts'
@@ -76,6 +77,8 @@ export interface WorkflowDerived {
   reviewStart: ReviewStartDecision
   status: WorkflowStatus
   baseBranch: string
+  /** False when the frozen origin/<base> ref no longer exists after fetch. */
+  baseRefAvailable: boolean
   freshSession: FreshSessionAvailability
 }
 
@@ -94,20 +97,34 @@ export async function deriveWorkflowState(
   options: DeriveOptions = {},
 ): Promise<IssueWorkflow & { runStartedAt: number | null; derived: WorkflowDerived }> {
   const workflowPrNumber = workflow.prNumber == null ? null : String(workflow.prNumber)
+  const requestedBaseBranch = workflow.baseRef
+    ? workflowBaseBranch(workflow.baseRef, options.defaultBranch ?? 'main')
+    : options.defaultBranch
   const worktree = workflow.worktree
   const exists = existsSync(worktree)
   const events = workflow.events ?? []
   const lastDevHash = latestDevelopmentHash(events) ?? null
   let lastReviewHash: string | null = null
   let lastReviewContract: IssueContractSnapshot | null = null
+  let lastReviewBase: { ref: string; sha: string } | null = null
   for (const ev of events) {
     if (ev.kind === 'review') {
       lastReviewHash = ev.hash ?? lastReviewHash
       lastReviewContract = ev.issueContract ?? null
+      lastReviewBase = ev.reviewBase ?? null
     }
   }
 
-  const git = exists ? await readWorkflowGitFacts(ctx, worktree, workflow.branch).catch(() => null) : null
+  const git = exists
+    ? await readWorkflowGitFacts(
+        ctx,
+        worktree,
+        workflow.branch,
+        requestedBaseBranch,
+        frozenBaseHash(workflow.baseRef),
+      ).catch(() => null)
+    : null
+  const baseBranch = workflowBaseBranch(workflow.baseRef, options.defaultBranch ?? git?.defaultBranch ?? 'main')
   const head = git?.head ?? null
   const branch = git?.branch ?? null
   const hasUncommittedChanges = git?.hasUncommittedChanges ?? false
@@ -136,7 +153,7 @@ export async function deriveWorkflowState(
 
   // 有新提交 = worktree HEAD 不等于最近一次 dev/rework/resume 交付哈希
   const hasNewCommits = head !== null && lastDevHash !== null && head !== lastDevHash
-  // worktree 落后远端基线(origin/main 或远端同名分支)→ 需要同步
+  // worktree 落后其冻结的远端基线或远端同名分支 → 需要同步。
   const needsSync = behindBase > 0 || (behindUpstream ?? 0) > 0
   // 未完成的冲突合并(MERGE_HEAD 存在):sync 只会再次失败,必须由 agent 收拾(issue #26)
   const mergeConflict = git?.mergeConflict ?? false
@@ -163,7 +180,14 @@ export async function deriveWorkflowState(
   const issueContractCurrent = issueContractStatus === 'current'
   // 结论同时绑定当前 HEAD 与验收契约；旧事件缺契约快照时 fail closed。
   const verdictCurrent =
-    reviewPassed !== null && head !== null && reviewedHash !== null && head === reviewedHash && issueContractCurrent
+    reviewPassed !== null &&
+    head !== null &&
+    reviewedHash !== null &&
+    head === reviewedHash &&
+    issueContractCurrent &&
+    (!options.pr?.baseRefName ||
+      !options.pr?.baseRefOid ||
+      (lastReviewBase?.ref === options.pr.baseRefName && lastReviewBase.sha === options.pr.baseRefOid))
 
   const ownership = observeTaskOwnership(
     ctx as unknown as TaskOwnershipContext,
@@ -213,6 +237,8 @@ export async function deriveWorkflowState(
     hasUncommittedChanges,
     hasCommits,
     hasResumeSession: workflow.devSessionId !== null,
+    baseBranch,
+    baseRefAvailable: git?.baseRefAvailable ?? false,
     workflowCachePresent: options.workflowCachePresent,
     // The live PR head is the newest GitHub delivery fact. During completion
     // persistence it can legitimately advance before the local event cache.
@@ -220,7 +246,6 @@ export async function deriveWorkflowState(
   }
   const reviewStart = deriveReviewStartDecision(facts)
   const nextAction = deriveNextAction(facts)
-  const baseBranch = workflowBaseBranch(workflow.baseRef, options.defaultBranch ?? git?.defaultBranch ?? 'main')
   const status = deriveWorkflowStatus(facts)
   const freshSession = deriveFreshSessionAvailability(
     events,
@@ -268,6 +293,7 @@ export async function deriveWorkflowState(
       nextAction,
       status,
       baseBranch,
+      baseRefAvailable: git?.baseRefAvailable ?? false,
       freshSession,
     },
   }

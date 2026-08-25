@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
+import { fetchGithubPrFact } from '../src/github/facts.ts'
 import { GithubRateLimitError, GithubRestReader, deriveReviewDecision, githubRest } from '../src/github/rest.ts'
 
 function shellWith(responses: Array<{ exitCode: number; stdout: string; stderr?: string }>) {
@@ -51,6 +52,200 @@ test('REST reader only invokes gh api and reuses a resource while its known vers
   assert.match(fake.commands[0], /^gh api /)
 })
 
+test('a known resource version never bypasses TTL expiry', async () => {
+  const reader = new GithubRestReader({} as never)
+  let loads = 0
+  const first = await reader.cachedResource(
+    'o/r/pulls/1',
+    'v1',
+    async () => ({ updated_at: 'v1', base: 'release/a', load: ++loads }),
+    { ttlMs: 1, versionOf: (value) => value.updated_at },
+  )
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  const second = await reader.cachedResource(
+    'o/r/pulls/1',
+    'v1',
+    async () => ({ updated_at: 'v2', base: 'release/b', load: ++loads }),
+    { ttlMs: 1, versionOf: (value) => value.updated_at },
+  )
+
+  assert.equal(first.base, 'release/a')
+  assert.equal(second.base, 'release/b')
+  assert.equal(loads, 2)
+})
+
+test('critical PR fact reads force a fresh base identity', async () => {
+  const fake = shellWith([
+    {
+      exitCode: 0,
+      stdout: included({
+        number: 1,
+        state: 'open',
+        updated_at: 'v1',
+        head: { ref: 'feature', sha: 'fff1111' },
+        base: { ref: 'release/a', sha: 'aaa1111' },
+      }),
+    },
+    {
+      exitCode: 0,
+      stdout: included({
+        number: 1,
+        state: 'open',
+        updated_at: 'v2',
+        head: { ref: 'feature', sha: 'fff1111' },
+        base: { ref: 'release/b', sha: 'bbb2222' },
+      }),
+    },
+  ])
+
+  const first = await fetchGithubPrFact(fake as never, 'o/r', 'feature', '1', false, true)
+  const second = await fetchGithubPrFact(fake as never, 'o/r', 'feature', '1', false, true)
+
+  assert.equal(first.pr?.baseRefName, 'release/a')
+  assert.equal(second.pr?.baseRefName, 'release/b')
+  assert.equal(second.pr?.baseRefOid, 'bbb2222')
+  assert.equal(fake.commands.length, 2)
+})
+
+test('a forced resource read never joins or gets overwritten by an older ordinary read', async () => {
+  const reader = new GithubRestReader({} as never)
+  let releaseOrdinary: (() => void) | undefined
+  let ordinaryStarted: (() => void) | undefined
+  const started = new Promise<void>((resolve) => {
+    ordinaryStarted = resolve
+  })
+  const held = new Promise<void>((resolve) => {
+    releaseOrdinary = resolve
+  })
+  let loads = 0
+
+  const ordinary = reader.cachedResource(
+    'o/r/pulls/2',
+    null,
+    async () => {
+      loads += 1
+      ordinaryStarted?.()
+      await held
+      return { updated_at: 'v1', base: 'release/a' }
+    },
+    { versionOf: (value) => value.updated_at },
+  )
+  await started
+  const forcedRead = reader.cachedResource(
+    'o/r/pulls/2',
+    null,
+    async () => {
+      loads += 1
+      return { updated_at: 'v2', base: 'release/b' }
+    },
+    { force: true, versionOf: (value) => value.updated_at },
+  )
+  await new Promise((resolve) => setImmediate(resolve))
+  releaseOrdinary?.()
+  await ordinary
+  const forced = await forcedRead
+  const cached = await reader.cachedResource(
+    'o/r/pulls/2',
+    'v2',
+    async () => {
+      throw new Error('newer forced value must remain cached')
+    },
+    { versionOf: (value) => value.updated_at },
+  )
+
+  assert.equal(loads, 2)
+  assert.equal(forced.base, 'release/b')
+  assert.equal(cached.base, 'release/b')
+})
+
+test('an ordinary resource read started during a force refresh shares the authoritative refresh', async () => {
+  const reader = new GithubRestReader({} as never)
+  let releaseForce: (() => void) | undefined
+  let forceStarted: (() => void) | undefined
+  const started = new Promise<void>((resolve) => {
+    forceStarted = resolve
+  })
+  const held = new Promise<void>((resolve) => {
+    releaseForce = resolve
+  })
+  let ordinaryLoads = 0
+  const forced = reader.cachedResource(
+    'o/r/pulls/3',
+    null,
+    async () => {
+      forceStarted?.()
+      await held
+      return { updated_at: 'v2', base: 'release/b' }
+    },
+    { force: true, versionOf: (value) => value.updated_at },
+  )
+  await started
+  const ordinary = reader.cachedResource(
+    'o/r/pulls/3',
+    null,
+    async () => {
+      ordinaryLoads += 1
+      return { updated_at: 'v1', base: 'release/a' }
+    },
+    { versionOf: (value) => value.updated_at },
+  )
+  releaseForce?.()
+
+  assert.equal((await forced).base, 'release/b')
+  assert.equal((await ordinary).base, 'release/b')
+  assert.equal(ordinaryLoads, 0)
+})
+
+test('overlapping forced resource reads each reload and only the later call may populate the cache', async () => {
+  const reader = new GithubRestReader({} as never)
+  let releaseFirst: (() => void) | undefined
+  let firstStarted: (() => void) | undefined
+  const started = new Promise<void>((resolve) => {
+    firstStarted = resolve
+  })
+  const held = new Promise<void>((resolve) => {
+    releaseFirst = resolve
+  })
+  let loads = 0
+  const first = reader.cachedResource(
+    'o/r/pulls/4',
+    null,
+    async () => {
+      loads += 1
+      firstStarted?.()
+      await held
+      return { updated_at: 'v1', base: 'release/a' }
+    },
+    { force: true, versionOf: (value) => value.updated_at },
+  )
+  await started
+  const second = reader.cachedResource(
+    'o/r/pulls/4',
+    null,
+    async () => {
+      loads += 1
+      return { updated_at: 'v2', base: 'release/b' }
+    },
+    { force: true, versionOf: (value) => value.updated_at },
+  )
+  await new Promise((resolve) => setImmediate(resolve))
+  const overlappingLoads = loads
+  releaseFirst?.()
+
+  assert.equal((await first).base, 'release/a')
+  assert.equal((await second).base, 'release/b')
+  assert.equal(overlappingLoads, 2)
+  const cached = await reader.cachedResource(
+    'o/r/pulls/4',
+    'v2',
+    async () => {
+      throw new Error('the later force result must remain cached')
+    },
+    { versionOf: (value) => value.updated_at },
+  )
+  assert.equal(cached.base, 'release/b')
+})
+
 test('REST reader opens a circuit after rate limiting and reports the reset time without another request', async () => {
   const resetAt = 1_800_000_000
   const fake = shellWith([
@@ -78,6 +273,62 @@ test('REST reader opens a circuit after rate limiting and reports the reset time
     },
   )
   assert.equal(fake.commands.length, 1)
+})
+
+test('an open secondary-rate circuit preserves retry-after classification on queued reads', async () => {
+  const fake = shellWith([
+    {
+      exitCode: 1,
+      stdout: [
+        'HTTP/2.0 403 Forbidden',
+        'retry-after: 60',
+        'x-ratelimit-remaining: 5000',
+        '',
+        JSON.stringify({ message: 'You have exceeded a secondary rate limit' }),
+      ].join('\n'),
+    },
+  ])
+  const reader = new GithubRestReader(fake as never)
+  await assert.rejects(() => reader.json('repos/o/r/issues/1'), GithubRateLimitError)
+  await assert.rejects(
+    () => reader.json('repos/o/r/issues/2'),
+    (error: unknown) => error instanceof GithubRateLimitError && error.kind === 'secondary',
+  )
+  assert.equal(fake.commands.length, 1)
+})
+
+test('host REST requests are serialized across resources and respect a minimum start interval', async () => {
+  const starts: number[] = []
+  let releaseFirst: (() => void) | null = null
+  const firstBlocked = new Promise<void>((resolve) => {
+    releaseFirst = resolve
+  })
+  const fake = {
+    shell: {
+      resolve(spec: unknown) {
+        return spec
+      },
+      async run() {
+        starts.push(Date.now())
+        if (starts.length === 1) await firstBlocked
+        return { exitCode: 0, stdout: { text: included({ ok: true }) }, stderr: { text: '' } }
+      },
+    },
+  }
+  const reader = new GithubRestReader(fake as never, { minimumIntervalMs: 20 })
+  const first = reader.json('repos/o/r/issues/1')
+  const second = reader.json('repos/o/r/issues/2')
+  try {
+    for (let attempt = 0; attempt < 100 && starts.length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+    assert.equal(starts.length, 1, 'the second resource must wait for the first request to settle')
+  } finally {
+    releaseFirst?.()
+  }
+  await Promise.all([first, second])
+  assert.equal(starts.length, 2)
+  assert.ok(starts[1] - starts[0] >= 20, `requests started only ${starts[1] - starts[0]}ms apart`)
 })
 
 test('review decision uses each reviewer latest decisive review', () => {

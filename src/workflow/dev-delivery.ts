@@ -1,7 +1,8 @@
 import type { Context } from '@deepseek-ai/cordis'
+import { updateBaseTip } from '../agent/baseline.ts'
 import { detectLinkedPr } from '../github/pr.ts'
 import { shellQuote } from '../infra/develop-core.ts'
-import { readDeliveryStats } from '../infra/git.ts'
+import { readDeliveryStats, readIntegratedRemoteTip } from '../infra/git.ts'
 import { parseUrl, runCommand } from '../infra/runtime.ts'
 import type { LiveTask } from '../infra/runtime.ts'
 import { appendLog, type IssueWorkflow, loadWorkflow, type WorkflowEvent } from '../infra/state.ts'
@@ -27,6 +28,9 @@ export async function recordDevDelivery(
   const current = await loadWorkflow(workflow.key)
   if (!current) return
   const detectedPr = current.prNumber ?? (await detectLinkedPr(ctx, current.repoKey, current.branch))
+  const remoteBase = current.baseRef ? `origin/${workflowBaseBranch(current.baseRef)}` : null
+  const integratedTip =
+    head && remoteBase ? await readIntegratedRemoteTip(ctx, current.worktree, remoteBase, head) : null
   const stats = head
     ? await readDeliveryStats(ctx, current.worktree, workflowBaseBranch(current.baseRef), head)
     : undefined
@@ -46,6 +50,7 @@ export async function recordDevDelivery(
       note: `${agent} 完成开发${kind === 'rework' ? '(按 review 意见返工)' : ''}`,
       ...(userContext !== '' ? { userContext } : {}),
     }
+    if (integratedTip && remoteBase) latest.baseRef = updateBaseTip(latest.baseRef, remoteBase, integratedTip)
     if (!latest.prNumber) latest.prNumber = detectedPr
     latest.events = [...(latest.events ?? []), event]
   })

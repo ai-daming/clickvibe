@@ -44,13 +44,14 @@ export async function fetchGithubPrFact(
   branch: string,
   prNumber: string | number | null,
   includeReviews = true,
+  force = false,
 ): Promise<GithubPrLookup> {
   const hasPrNumber = prNumber !== null && prNumber !== undefined
   try {
     const rest = githubRest(ctx)
     let raw: GithubPrDetailRest | undefined
     if (hasPrNumber) {
-      raw = await fetchPrRestDetail(ctx, repoKey, String(prNumber), false, 5_000)
+      raw = await fetchPrRestDetail(ctx, repoKey, String(prNumber), force, 5_000)
     } else {
       const owner = repoKey.split('/')[0]
       raw = await rest.cachedResource(
@@ -64,6 +65,7 @@ export async function fetchGithubPrFact(
               5_000,
             )
           )[0],
+        { force },
       )
     }
     if (!raw) return { known: true, pr: null }
@@ -82,6 +84,7 @@ export async function fetchGithubPrFact(
         reviewDecision: deriveReviewDecision(reviews),
         headRefOid: raw.head?.sha ? String(raw.head.sha) : undefined,
         baseRefName: raw.base?.ref ? String(raw.base.ref) : undefined,
+        baseRefOid: raw.base?.sha ? String(raw.base.sha) : undefined,
       },
     }
   } catch (error) {
@@ -106,6 +109,7 @@ export async function readConfiguredBranchFacts(
   ctx: Context,
   config: ClickVibeConfig,
   workflow: IssueWorkflow,
+  baseBranch?: string,
 ): Promise<{ branchExists?: boolean; hasCommits?: boolean; defaultBranch?: string }> {
   if (existsSync(workflow.worktree)) return {}
   const configuredPath = config.repos[workflow.repoKey]
@@ -126,7 +130,7 @@ export async function readConfiguredBranchFacts(
     sandboxPolicy: policy,
   }).catch(() => '')
   if (!branchRef) return { branchExists: false, defaultBranch: defaultRef.replace(/^origin\//, '') || undefined }
-  const baseRef = defaultRef || 'origin/main'
+  const baseRef = baseBranch ? `origin/${baseBranch}` : defaultRef || 'origin/main'
   const hasCommits = await runCommand(ctx, `git rev-list --count ${shellQuote(baseRef)}..${shellQuote(branchRef)}`, {
     workdir: repoPath,
     timeoutMs: 3000,

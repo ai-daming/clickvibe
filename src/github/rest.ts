@@ -31,6 +31,46 @@ interface IncludedResponse {
   body: string
 }
 
+interface HostGithubRequestLane {
+  tail: Promise<void>
+  nextStartAt: number
+}
+
+const HOST_GITHUB_MINIMUM_INTERVAL_MS = 250
+const hostGithubLaneSymbol = Symbol.for('clickvibe.github-request-lane')
+
+function hostGithubLane(): HostGithubRequestLane {
+  const root = globalThis as unknown as Record<PropertyKey, unknown>
+  const existing = root[hostGithubLaneSymbol] as HostGithubRequestLane | undefined
+  if (existing) return existing
+  const created = { tail: Promise.resolve(), nextStartAt: 0 }
+  root[hostGithubLaneSymbol] = created
+  return created
+}
+
+async function serializeGithubRequest<T>(minimumIntervalMs: number, request: () => Promise<T>): Promise<T> {
+  const lane = hostGithubLane()
+  const previous = lane.tail
+  let release = () => {}
+  lane.tail = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await previous
+  try {
+    // Timers may wake just before their requested deadline. Re-check the
+    // monotonic wall-clock condition so the configured start interval is a
+    // guarantee rather than a best-effort delay.
+    while (Date.now() < lane.nextStartAt) {
+      await new Promise((resolve) => setTimeout(resolve, lane.nextStartAt - Date.now()))
+    }
+    const pending = request()
+    lane.nextStartAt = Date.now() + minimumIntervalMs
+    return await pending
+  } finally {
+    release()
+  }
+}
+
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`
 }
@@ -122,18 +162,23 @@ export function deriveReviewDecision(reviews: GithubReviewRest[]): 'APPROVED' | 
 /** One ctx-scoped REST reader: rate-limit circuit, request parsing and read caches. */
 export class GithubRestReader {
   private readonly ctx: ShellContext
+  private readonly minimumIntervalMs: number
   private readonly resources = new Map<string, CachedValue<unknown>>()
   private readonly aggregates = new Map<string, CachedValue<unknown>>()
   private readonly inFlight = new Map<string, Promise<unknown>>()
+  private readonly forcedResources = new Map<string, Promise<unknown>>()
   private readonly versions = new Map<string, string>()
+  private readonly resourceLoadSequence = new Map<string, number>()
   private circuitUntil = 0
+  private circuitKind: GithubRateLimitKind = 'unknown'
 
-  constructor(ctx: ShellContext) {
+  constructor(ctx: ShellContext, options: { minimumIntervalMs?: number } = {}) {
     this.ctx = ctx
+    this.minimumIntervalMs = Math.max(0, options.minimumIntervalMs ?? HOST_GITHUB_MINIMUM_INTERVAL_MS)
   }
 
   rateLimitError(now = Date.now()): GithubRateLimitError | null {
-    return this.circuitUntil > now ? new GithubRateLimitError(this.circuitUntil) : null
+    return this.circuitUntil > now ? new GithubRateLimitError(this.circuitUntil, this.circuitKind) : null
   }
 
   rememberVersion(key: string, version: string | null | undefined): void {
@@ -152,6 +197,14 @@ export class GithubRestReader {
       if (key === prefix || key.startsWith(`${prefix}/`)) this.aggregates.delete(key)
     }
     this.versions.delete(prefix)
+    for (const key of this.forcedResources.keys()) {
+      if (key === prefix || key.startsWith(`${prefix}/`)) this.forcedResources.delete(key)
+    }
+    for (const key of this.resourceLoadSequence.keys()) {
+      if (key === prefix || key.startsWith(`${prefix}/`)) {
+        this.resourceLoadSequence.set(key, (this.resourceLoadSequence.get(key) ?? 0) + 1)
+      }
+    }
   }
 
   private assertCircuitOpen(): void {
@@ -174,65 +227,71 @@ export class GithubRestReader {
     timeoutMs = 30_000,
     mutation?: { method: 'POST' | 'PATCH'; body: unknown },
   ): Promise<IncludedResponse> {
-    this.assertCircuitOpen()
-    const command = [
-      'gh api --include',
-      shellQuote(path),
-      mutation ? `--method ${mutation.method} --input -` : '',
-      accept ? `-H ${shellQuote(`Accept: ${accept}`)}` : '',
-    ]
-      .filter(Boolean)
-      .join(' ')
-    const spec = this.ctx.shell.resolve({
-      command,
-      timeoutMs,
-      ...(mutation ? { stdin: JSON.stringify(mutation.body) } : {}),
-    })
-    const result = await this.ctx.shell.run(spec)
-    const stdout = await this.output(result)
-    let response: IncludedResponse
-    try {
-      response = parseIncludedResponse(stdout)
-    } catch (parseError) {
-      const detail = [result.stderr?.text, stdout].filter(Boolean).join('\n').trim()
-      if (result.exitCode !== 0 && /(?:rate limit|secondary rate)/i.test(detail)) {
-        this.circuitUntil = Date.now() + 60 * 60_000
-        logTaskDiagnostic('github-rate-circuit-trip', {
-          kind: 'unknown' as const,
-          path,
-          until: this.circuitUntil,
-          note: 'gh CLI 失败且无响应头,按 60 分钟保守熔断',
-        })
-        throw new GithubRateLimitError(this.circuitUntil, 'unknown')
-      }
-      if (result.exitCode !== 0) throw new Error(detail || `gh api 执行失败(exit ${result.exitCode})`)
-      throw parseError
-    }
-    const detail = [result.stderr?.text, response.body].filter(Boolean).join('\n')
-    if (isRateLimited(response, detail)) {
-      this.circuitUntil = resetFrom(response.headers, Date.now())
-      const kind: GithubRateLimitKind = response.headers.get('x-ratelimit-remaining') === '0' ? 'primary' : 'secondary'
-      logTaskDiagnostic('github-rate-circuit-trip', {
-        kind,
-        path,
-        remaining: response.headers.get('x-ratelimit-remaining'),
-        reset: response.headers.get('x-ratelimit-reset'),
-        retryAfter: response.headers.get('retry-after'),
-        until: this.circuitUntil,
+    return serializeGithubRequest(this.minimumIntervalMs, async () => {
+      // A request queued before another resource trips the circuit must not hit GitHub afterwards.
+      this.assertCircuitOpen()
+      const command = [
+        'gh api --include',
+        shellQuote(path),
+        mutation ? `--method ${mutation.method} --input -` : '',
+        accept ? `-H ${shellQuote(`Accept: ${accept}`)}` : '',
+      ]
+        .filter(Boolean)
+        .join(' ')
+      const spec = this.ctx.shell.resolve({
+        command,
+        timeoutMs,
+        ...(mutation ? { stdin: JSON.stringify(mutation.body) } : {}),
       })
-      throw new GithubRateLimitError(this.circuitUntil, kind)
-    }
-    if (result.exitCode !== 0 || response.status < 200 || response.status >= 300) {
-      let message = response.body.trim()
+      const result = await this.ctx.shell.run(spec)
+      const stdout = await this.output(result)
+      let response: IncludedResponse
       try {
-        const parsed = JSON.parse(response.body) as { message?: unknown }
-        message = String(parsed.message ?? message)
-      } catch {
-        /* retain raw response body */
+        response = parseIncludedResponse(stdout)
+      } catch (parseError) {
+        const detail = [result.stderr?.text, stdout].filter(Boolean).join('\n').trim()
+        if (result.exitCode !== 0 && /(?:rate limit|secondary rate)/i.test(detail)) {
+          this.circuitUntil = Date.now() + 60 * 60_000
+          this.circuitKind = 'unknown'
+          logTaskDiagnostic('github-rate-circuit-trip', {
+            kind: 'unknown' as const,
+            path,
+            until: this.circuitUntil,
+            note: 'gh CLI 失败且无响应头,按 60 分钟保守熔断',
+          })
+          throw new GithubRateLimitError(this.circuitUntil, 'unknown')
+        }
+        if (result.exitCode !== 0) throw new Error(detail || `gh api 执行失败(exit ${result.exitCode})`)
+        throw parseError
       }
-      throw new Error(`GitHub REST ${response.status}: ${message || result.stderr?.text || '请求失败'}`)
-    }
-    return response
+      const detail = [result.stderr?.text, response.body].filter(Boolean).join('\n')
+      if (isRateLimited(response, detail)) {
+        this.circuitUntil = resetFrom(response.headers, Date.now())
+        const kind: GithubRateLimitKind =
+          response.headers.get('x-ratelimit-remaining') === '0' ? 'primary' : 'secondary'
+        this.circuitKind = kind
+        logTaskDiagnostic('github-rate-circuit-trip', {
+          kind,
+          path,
+          remaining: response.headers.get('x-ratelimit-remaining'),
+          reset: response.headers.get('x-ratelimit-reset'),
+          retryAfter: response.headers.get('retry-after'),
+          until: this.circuitUntil,
+        })
+        throw new GithubRateLimitError(this.circuitUntil, kind)
+      }
+      if (result.exitCode !== 0 || response.status < 200 || response.status >= 300) {
+        let message = response.body.trim()
+        try {
+          const parsed = JSON.parse(response.body) as { message?: unknown }
+          message = String(parsed.message ?? message)
+        } catch {
+          /* retain raw response body */
+        }
+        throw new Error(`GitHub REST ${response.status}: ${message || result.stderr?.text || '请求失败'}`)
+      }
+      return response
+    })
   }
 
   async json<T = unknown>(path: string, accept?: string, timeoutMs?: number): Promise<T> {
@@ -271,26 +330,46 @@ export class GithubRestReader {
     options: { ttlMs?: number; force?: boolean; versionOf?: (value: T) => string | null | undefined } = {},
   ): Promise<T> {
     this.assertCircuitOpen()
+    const forcedPending = this.forcedResources.get(key) as Promise<T> | undefined
+    if (!options.force && forcedPending) return forcedPending
     const knownVersion = version || null
     const cached = this.resources.get(key) as CachedValue<T> | undefined
     const now = Date.now()
     if (
       !options.force &&
       cached &&
-      ((knownVersion !== null && cached.version === knownVersion) || (knownVersion === null && cached.expiresAt > now))
+      cached.expiresAt > now &&
+      (knownVersion === null || cached.version === knownVersion)
     )
       return cached.value
-    return this.deduplicate(`resource:${key}`, async () => {
+    const load = async () => {
+      const sequence = (this.resourceLoadSequence.get(key) ?? 0) + 1
+      this.resourceLoadSequence.set(key, sequence)
       const value = await loader()
       const loadedVersion = options.versionOf?.(value) || knownVersion
-      this.resources.set(key, {
-        value,
-        version: loadedVersion,
-        expiresAt: Date.now() + (options.ttlMs ?? 30_000),
-      })
-      if (loadedVersion) this.versions.set(key, loadedVersion)
+      // A later-started force read is authoritative. An older ordinary request
+      // may still resolve for its caller, but must never overwrite that result.
+      if (this.resourceLoadSequence.get(key) === sequence) {
+        this.resources.set(key, {
+          value,
+          version: loadedVersion,
+          expiresAt: Date.now() + (options.ttlMs ?? 30_000),
+        })
+        if (loadedVersion) this.versions.set(key, loadedVersion)
+      }
       return value
-    })
+    }
+    if (!options.force) return this.deduplicate(`resource:ordinary:${key}`, load)
+
+    // `force` means fresh from this invocation point. It must not coalesce
+    // with an earlier force call whose GitHub fact may already be obsolete.
+    const forced = load()
+    this.forcedResources.set(key, forced)
+    const clear = () => {
+      if (this.forcedResources.get(key) === forced) this.forcedResources.delete(key)
+    }
+    void forced.then(clear, clear)
+    return forced
   }
 
   async cachedAggregate<T>(key: string, ttlMs: number, force: boolean, loader: () => Promise<T>): Promise<T> {

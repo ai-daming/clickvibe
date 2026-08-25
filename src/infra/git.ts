@@ -41,6 +41,7 @@ export interface WorkflowGitFacts {
   branchExists: boolean
   hasCommits: boolean
   defaultBranch: string
+  baseRefAvailable: boolean
   mergeConflict: boolean
 }
 
@@ -69,19 +70,20 @@ export function parseWorkflowGitFacts(output: string): WorkflowGitFacts {
   const branchLine = status.find((line) => line.startsWith('# branch.head '))
   const branchValue = branchLine?.slice('# branch.head '.length).trim() ?? ''
   const branch = branchValue === '' || branchValue === '(detached)' ? null : branchValue
-  const refs = new Map<string, { head: string; compare: GitCompare | null; defaultCompare: string | undefined }>()
+  const refs = new Map<string, { head: string; compare: GitCompare | null }>()
   for (const line of sections.get('REFS') ?? []) {
-    const [ref, head, _symref, compare, defaultCompare] = line.split('\t')
-    if (ref && head) refs.set(ref, { head, compare: parseCompare(compare), defaultCompare })
+    const [ref, head, _symref, compare] = line.split('\t')
+    if (ref && head) refs.set(ref, { head, compare: parseCompare(compare) })
   }
   const main = refs.get('refs/heads/main')
-  const originMain = refs.get('refs/remotes/origin/main')
   const upstream = branch ? refs.get(`refs/remotes/origin/${branch}`) : undefined
   const originHeadLine = (sections.get('REFS') ?? []).find((line) => line.startsWith('refs/remotes/origin/HEAD\t'))
   const defaultBranch = originHeadLine?.split('\t')[2]?.replace(/^origin\//, '') || 'main'
   const expectedBranch = sections.get('EXPECTED_BRANCH')?.find(Boolean)?.trim() ?? ''
   const expected = refs.get(`refs/heads/${expectedBranch}`) ?? refs.get(`refs/remotes/origin/${expectedBranch}`)
-  const expectedDefaultCompare = parseCompare(expected?.defaultCompare)
+  const baseBranch = sections.get('BASE_BRANCH')?.find(Boolean)?.trim() || defaultBranch
+  const base = refs.get(`refs/remotes/origin/${baseBranch}`)
+  const fallbackBase = parseCompare(sections.get('FALLBACK_BASE')?.find(Boolean))
 
   return {
     head: sections.get('HEAD')?.find(Boolean)?.trim() || null,
@@ -89,13 +91,14 @@ export function parseWorkflowGitFacts(output: string): WorkflowGitFacts {
     hasUncommittedChanges: status.some((line) => line !== '' && !line.startsWith('# ')),
     mainHead: main?.head ?? null,
     main: main?.compare ?? null,
-    originMainHead: originMain?.head ?? null,
-    originMain: originMain?.compare ?? null,
+    originMainHead: base?.head ?? null,
+    originMain: base?.compare ?? fallbackBase,
     upstreamHead: upstream?.head ?? null,
     upstream: upstream?.compare ?? null,
     branchExists: expected !== undefined,
-    hasCommits: (expectedDefaultCompare?.behind ?? 0) > 0,
+    hasCommits: Number(sections.get('HAS_COMMITS')?.find(Boolean) ?? 0) > 0,
     defaultBranch,
+    baseRefAvailable: base !== undefined,
     mergeConflict: Boolean(sections.get('MERGE_HEAD')?.find(Boolean)?.trim()),
   }
 }
@@ -105,9 +108,12 @@ export async function readWorkflowGitFacts(
   ctx: Context,
   workdir: string,
   expectedBranch: string,
+  baseBranch?: string,
+  fallbackBaseHash?: string | null,
 ): Promise<WorkflowGitFacts> {
   const expectedLocalRef = `refs/heads/${expectedBranch}`
   const expectedRemoteRef = `refs/remotes/origin/${expectedBranch}`
+  const requestedBaseRef = baseBranch ? `origin/${baseBranch}` : ''
   const command = [
     'status_output=$(git status --porcelain=v2 --branch 2>/dev/null || true)',
     "branch=''",
@@ -122,11 +128,27 @@ export async function readWorkflowGitFacts(
     `printf '%s\\n' '${WORKFLOW_GIT_SECTION}HEAD'`,
     'git rev-parse --short HEAD 2>/dev/null || true',
     `printf '%s\\n' '${WORKFLOW_GIT_SECTION}EXPECTED_BRANCH' ${shellQuote(expectedBranch)}`,
-    `printf '%s\\n' '${WORKFLOW_GIT_SECTION}REFS'`,
-    `set -- 'refs/heads/main' 'refs/remotes/origin/main' 'refs/remotes/origin/HEAD' ${shellQuote(expectedLocalRef)} ${shellQuote(expectedRemoteRef)}`,
-    'case "$branch" in \'\'|\'(detached)\') ;; *) set -- "$@" "refs/heads/$branch" "refs/remotes/origin/$branch" ;; esac',
     "default_ref=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || printf '%s' 'origin/main')",
-    'git for-each-ref --format="%(refname)%09%(objectname:short)%09%(symref:short)%09%(ahead-behind:HEAD)%09%(ahead-behind:$default_ref)" "$@" 2>/dev/null || true',
+    `base_ref=${shellQuote(requestedBaseRef)}`,
+    '[ -n "$base_ref" ] || base_ref="$default_ref"',
+    `base_branch=\${base_ref#origin/}`,
+    'base_ref_path="refs/remotes/$base_ref"',
+    `printf '%s\\n' '${WORKFLOW_GIT_SECTION}BASE_BRANCH' "$base_branch"`,
+    `printf '%s\\n' '${WORKFLOW_GIT_SECTION}REFS'`,
+    `set -- 'refs/heads/main' 'refs/remotes/origin/main' 'refs/remotes/origin/HEAD' ${shellQuote(expectedLocalRef)} ${shellQuote(expectedRemoteRef)} "$base_ref_path"`,
+    'case "$branch" in \'\'|\'(detached)\') ;; *) set -- "$@" "refs/heads/$branch" "refs/remotes/origin/$branch" ;; esac',
+    'git for-each-ref --format="%(refname)%09%(objectname:short)%09%(symref:short)%09%(ahead-behind:HEAD)" "$@" 2>/dev/null || true',
+    `printf '%s\\n' '${WORKFLOW_GIT_SECTION}FALLBACK_BASE'`,
+    fallbackBaseHash
+      ? `git rev-list --left-right --count ${shellQuote(`${fallbackBaseHash}...HEAD`)} 2>/dev/null || true`
+      : ':',
+    `printf '%s\\n' '${WORKFLOW_GIT_SECTION}HAS_COMMITS'`,
+    "expected_ref=''",
+    `if git show-ref --verify --quiet ${shellQuote(expectedLocalRef)}; then expected_ref=${shellQuote(expectedBranch)}; elif git show-ref --verify --quiet ${shellQuote(expectedRemoteRef)}; then expected_ref=${shellQuote(`origin/${expectedBranch}`)}; fi`,
+    "base_compare_ref=''",
+    'if git show-ref --verify --quiet "$base_ref_path"; then base_compare_ref="$base_ref"; fi',
+    fallbackBaseHash ? `[ -n "$base_compare_ref" ] || base_compare_ref=${shellQuote(fallbackBaseHash)}` : ':',
+    'if [ -n "$base_compare_ref" ] && [ -n "$expected_ref" ]; then git rev-list --count "$base_compare_ref..$expected_ref" 2>/dev/null || true; fi',
     `printf '%s\\n' '${WORKFLOW_GIT_SECTION}MERGE_HEAD'`,
     'git rev-parse --verify --short MERGE_HEAD 2>/dev/null || true',
     `printf '%s\\n' '${WORKFLOW_GIT_SECTION}END'`,
@@ -202,6 +224,7 @@ interface PrFactForDerivation {
   reviewDecision: string | null
   headRefOid?: string
   baseRefName?: string
+  baseRefOid?: string
 }
 
 export interface DeriveOptions {
@@ -300,6 +323,66 @@ export async function listConflictFiles(ctx: Context, workdir: string): Promise<
 /** Format a conflict-file list as a readable suffix (";冲突文件:a、b"), '' when none. */
 export function conflictFileSuffix(files: string[]): string {
   return files.length > 0 ? `;冲突文件:${files.join('、')}` : ''
+}
+
+/** Fetch and enumerate origin remote branches for a first-development preview. */
+export async function fetchOriginBranches(
+  ctx: Context,
+  repoPath: string,
+): Promise<{ defaultRemoteBase: string; refs: string[] }> {
+  const policy = { mode: 'danger-full-access' as const, workspaceRoot: repoPath }
+  await runCommand(ctx, 'git fetch origin --prune', { workdir: repoPath, timeoutMs: 60_000, sandboxPolicy: policy })
+  let defaultRemoteBase = await runCommand(ctx, 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD', {
+    workdir: repoPath,
+    timeoutMs: 10_000,
+    sandboxPolicy: { mode: 'read-only', workspaceRoot: repoPath },
+  }).catch(() => '')
+  if (!defaultRemoteBase) {
+    const main = await runCommand(ctx, "git show-ref --verify --quiet 'refs/remotes/origin/main'; echo $?", {
+      workdir: repoPath,
+      timeoutMs: 10_000,
+      sandboxPolicy: { mode: 'read-only', workspaceRoot: repoPath },
+    })
+    if (main.trim() !== '0') throw new Error('无法确定 origin 默认分支,请设置 origin/HEAD')
+    defaultRemoteBase = 'origin/main'
+  }
+  const output = await runCommand(ctx, "git for-each-ref --format='%(refname:short)' refs/remotes/origin", {
+    workdir: repoPath,
+    timeoutMs: 10_000,
+    sandboxPolicy: { mode: 'read-only', workspaceRoot: repoPath },
+  })
+  return {
+    defaultRemoteBase,
+    refs: output
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean),
+  }
+}
+
+/** Return the current remote-tracking tip only when a completed HEAD actually contains it. */
+export async function readIntegratedRemoteTip(
+  ctx: Context,
+  worktree: string,
+  remoteBase: string,
+  head: string,
+): Promise<string | null> {
+  const policy = { mode: 'read-only' as const, workspaceRoot: worktree }
+  try {
+    const tip = await runCommand(ctx, `git rev-parse --verify ${shellQuote(`refs/remotes/${remoteBase}^{commit}`)}`, {
+      workdir: worktree,
+      timeoutMs: 10_000,
+      sandboxPolicy: policy,
+    })
+    await runCommand(ctx, `git merge-base --is-ancestor ${shellQuote(tip)} ${shellQuote(head)}`, {
+      workdir: worktree,
+      timeoutMs: 10_000,
+      sandboxPolicy: policy,
+    })
+    return tip
+  } catch {
+    return null
+  }
 }
 
 /** Preface instruction for resume/rework agents when the worktree is not on the

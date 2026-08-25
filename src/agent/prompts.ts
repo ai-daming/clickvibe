@@ -22,14 +22,16 @@ import { fetchIssue, issueSnapshot } from '../github/issue.ts'
 import { fetchPrRestDetail, type GithubCommentRest } from '../github/reads.ts'
 import { githubRest, isGithubRateLimitError } from '../github/rest.ts'
 import { REVIEW_RESULT_RELATIVE_PATH } from '../infra/review-result.ts'
-import { readWorktreeHead } from '../infra/runtime.ts'
+import { readWorktreeHead, runCommand } from '../infra/runtime.ts'
 import {
+  commitWorkflowMetadata,
   type IssueWorkflow,
   issueBodyHash,
-  commitWorkflowMetadata,
   WorkflowConflictError,
   workflowRevision,
 } from '../infra/state.ts'
+import { frozenBaseHash, frozenRemoteBase } from './baseline.ts'
+import { shellQuote } from './develop.ts'
 import {
   buildStagePrompt,
   type PromptSnapshot,
@@ -115,14 +117,26 @@ export function sameSnapshot(left: PromptSnapshot, right: PromptSnapshot): boole
   return JSON.stringify(left) === JSON.stringify(right)
 }
 
-export const DEVELOPMENT_REQUIREMENTS = [
-  '先执行 git fetch origin 同步远端,并检查 base(默认 origin/main)是否有更新;若已有更新,先合并或变基到最新再继续。',
+export const GITHUB_USAGE_REQUIREMENT =
+  '查询 PR/Issue 上下文优先使用 `gh api` REST，不使用 `gh pr view` / `gh issue view` 的 GraphQL 聚合；同一资源在单任务内只查询一次，除非写动作后必须回读验证或已有事实明确失效。'
+
+const COMMON_DEVELOPMENT_REQUIREMENTS = [
+  GITHUB_USAGE_REQUIREMENT,
   '先理解当前需求快照;如有歧义可自行判断或提问。',
   '实现代码改动,并保留现有 worktree 中尚未提交的有效工作。',
   '运行相关测试。',
   '完成后 git commit 并推送当前分支。',
-  '用 gh 创建或更新 PR(若适用)。',
 ]
+
+function developmentRequirements(baseRef: string | null): string[] {
+  const remoteBase = frozenRemoteBase(baseRef) ?? 'origin/main'
+  const baseBranch = remoteBase.replace(/^origin\//, '')
+  return [
+    `先执行 git fetch origin 同步远端,并检查开发基线(${remoteBase})是否有更新;若已有更新,先合并或变基到最新再继续。`,
+    ...COMMON_DEVELOPMENT_REQUIREMENTS,
+    `用 gh 创建或更新 PR(若适用);首次创建必须显式执行 gh pr create --base ${baseBranch},不得依赖仓库默认分支。`,
+  ]
+}
 
 export function buildDevelopPrompt(
   workflow: IssueWorkflow,
@@ -141,12 +155,44 @@ export function buildDevelopPrompt(
       `开发基线: ${workflow.baseRef ?? '未知'}`,
       ...(extraContext ? ['附加上下文:', extraContext] : []),
     ],
-    requirements: DEVELOPMENT_REQUIREMENTS,
+    requirements: developmentRequirements(workflow.baseRef),
   })
 }
 
-/** Build the review prompt: review `git diff base...HEAD` against the issue.
- *  base 取远端主干(origin/main 或 PR base),让 agent 用真实 diff 审查。 */
+export interface ReviewBaseTarget {
+  ref: string
+  sha: string
+}
+
+function exactCommitHash(value: string): string {
+  const hash = value.trim()
+  return /^[0-9a-f]{4,64}$/i.test(hash) ? hash : ''
+}
+
+export async function resolveReviewBaseTarget(ctx: Context, workflow: IssueWorkflow): Promise<ReviewBaseTarget> {
+  let ref = (frozenRemoteBase(workflow.baseRef) ?? 'origin/main').replace(/^origin\//, '')
+  let sha = frozenBaseHash(workflow.baseRef) ?? ''
+  let prSha = ''
+  if (workflow.prNumber) {
+    const target = await fetchPrBaseTarget(ctx, workflow.repoKey, workflow.prNumber)
+    if (!target) throw new Error(`无法读取 PR #${workflow.prNumber} 的基线身份,拒绝启动可能审错范围的 review`)
+    ref = target.ref
+    prSha = exactCommitHash(target.sha ?? '')
+    if (target.sha && !prSha) throw new Error(`PR #${workflow.prNumber} 返回了无效的基线 commit,拒绝启动 review`)
+  }
+  const remote = `origin/${ref}`
+  if (prSha) return { ref, sha: prSha }
+  if (!workflow.baseRef && !workflow.prNumber) return { ref, sha: '' }
+  const localSha = await runCommand(ctx, `git rev-parse --verify ${shellQuote(`${remote}^{commit}`)}`, {
+    workdir: workflow.worktree,
+    timeoutMs: 10_000,
+    sandboxPolicy: { mode: 'read-only', workspaceRoot: workflow.worktree },
+  }).catch(() => '')
+  sha = exactCommitHash(localSha) || exactCommitHash(sha)
+  return { ref, sha }
+}
+
+/** Build the review prompt against one exact base SHA; the ref is display identity only. */
 export async function buildReviewPrompt(
   ctx: Context,
   workflow: IssueWorkflow,
@@ -154,14 +200,13 @@ export async function buildReviewPrompt(
   reviewedHead: string,
   sessionId: string | null = null,
   extraContext = '',
+  frozenReviewBase?: ReviewBaseTarget,
   freshSession = false,
 ): Promise<string> {
-  // 解析 base:PR 有 baseRefName(若记录过),否则尝试 origin/HEAD 主干
-  let base = 'origin/main'
-  if (workflow.prNumber) {
-    const baseRef = await fetchPrBase(ctx, workflow.repoKey, workflow.prNumber)
-    if (baseRef) base = `origin/${baseRef}`
-  }
+  const reviewBase = frozenReviewBase ?? (await resolveReviewBaseTarget(ctx, workflow))
+  // The persisted review identity and the executed diff share this exact SHA.
+  // Keeping a second caller-provided diff field would permit recording B while reviewing A.
+  const base = reviewBase.sha || `origin/${reviewBase.ref}`
   const prUrl = workflow.prNumber ? `https://github.com/${workflow.repoKey}/pull/${workflow.prNumber}` : '未关联'
   const contractHash = issueBodyHash(resolved.snapshot.body)
   const promptSnapshot = freshSession ? snapshotWithoutReviewFeedback(resolved.snapshot) : resolved.snapshot
@@ -175,6 +220,7 @@ export async function buildReviewPrompt(
       `PR: ${prUrl}`,
       `被审 commit: ${reviewedHead}`,
       `对比 base: ${base}`,
+      `PR 基线身份: ${reviewBase.ref} @ ${reviewBase.sha || '未知'}`,
       `契约正文 SHA-256: ${contractHash}`,
       `会话模式: ${sessionId ? `续接 review 会话 ${sessionId};保留既有审查记忆` : '全新 review 会话'}`,
       ...(extraContext ? ['附加上下文:', extraContext] : []),
@@ -182,6 +228,7 @@ export async function buildReviewPrompt(
     requirements: [
       '本轮 review 采用根因 review 协议:先读取 PR/issue 上全部历史 review 轮次做母题分类(同类复发必须点名轮次),对每个 finding 给出代码根因(什么构造让这类问题不可能)与过程根因(为什么活到本轮);先做静态枚举审计(枚举全部可违反路径,非构造保护即为 finding,不需要复现),再做动态对抗验证(CRITICAL 必须复现,含失败率);判定修复高度时对比改造前后的公开 API/导出面,排除改名式修复;结论按 verdict 输出(pass/fix-these/stop-and-redesign),同类连续复发或 diff 持续发散时输出 stop-and-redesign 而非问题清单。若仓库存在 skills/root-cause-review/SKILL.md 或 docs/fix-discipline.md,以其全文为准。',
       '先执行 git fetch origin 同步远端最新状态(并行开发时 base 可能已变化)。',
+      GITHUB_USAGE_REQUIREMENT,
       `执行 git diff ${base}...HEAD 查看完整改动。`,
       ...(sessionId ? ['先复核之前发现的问题是否已解决,再审查全部新改动。'] : []),
       '严格按当前需求快照中的验收标准逐条审查,同时检查 bug、安全隐患和测试覆盖。',
@@ -238,17 +285,26 @@ export async function buildResumePrompt(
         ? ['优先利用当前会话记忆继续工作,但记忆与当前需求快照冲突时以快照为准。']
         : ['先读取 git diff 和未提交改动,再按当前需求快照继续;不要依赖已失效会话的旧记忆。']),
       ...(rework ? ['逐条处理“当前状态”中的 Review 意见,完成后重新验证。'] : []),
-      ...DEVELOPMENT_REQUIREMENTS,
+      ...developmentRequirements(workflow.baseRef),
     ],
   })
 }
 
 /** Fetch a PR's base ref name via gh. */
 export async function fetchPrBase(ctx: Context, repoKey: string, prNumber: string): Promise<string | null> {
+  return (await fetchPrBaseTarget(ctx, repoKey, prNumber))?.ref ?? null
+}
+
+async function fetchPrBaseTarget(
+  ctx: Context,
+  repoKey: string,
+  prNumber: string,
+): Promise<{ ref: string; sha: string | null } | null> {
   try {
-    const pr = await fetchPrRestDetail(ctx, repoKey, prNumber)
-    const name = String(pr.base?.ref ?? '').trim()
-    return name === '' ? null : name
+    const pr = await fetchPrRestDetail(ctx, repoKey, prNumber, true)
+    const ref = String(pr.base?.ref ?? '').trim()
+    const sha = String(pr.base?.sha ?? '').trim()
+    return ref === '' ? null : { ref, sha: sha === '' ? null : sha }
   } catch (error) {
     if (isGithubRateLimitError(error)) throw error
     return null

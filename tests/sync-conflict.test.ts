@@ -19,6 +19,7 @@ import { applyDevRunOutcome, loadWorkflow, readLogTail } from '../src/infra/stat
 import { createFakeJobs } from './fake-jobs.ts'
 
 const execFileAsync = promisify(execFile)
+const saveWorkflow = (workflow: IssueWorkflow) => commitWorkflowFixture(workflow, workflow.revision ?? null)
 
 /** A minimal real-shell ctx: resolve passes the spec through, run executes it. */
 function realShellCtx() {
@@ -88,7 +89,7 @@ async function setupConflictedRepo() {
 }
 
 /** Set up an existing remote PR branch that can merge the advanced main cleanly. */
-async function setupSyncableRepo() {
+async function setupSyncableRepo(baseBranch = 'main') {
   const root = await mkdtemp(join(tmpdir(), 'clickvibe-sync-push-'))
   const remote = join(root, 'remote.git')
   const repo = join(root, 'repo')
@@ -107,18 +108,22 @@ async function setupSyncableRepo() {
   await git('branch', '-M', 'main')
   await git('push', '-u', 'origin', 'main')
   await remoteGit('symbolic-ref', 'HEAD', 'refs/heads/main')
+  if (baseBranch !== 'main') {
+    await git('switch', '-c', baseBranch)
+    await git('push', '-u', 'origin', baseBranch)
+  }
   await git('fetch', 'origin', '--prune')
-  await git('worktree', 'add', '-b', branch, worktree, 'origin/main')
+  await git('worktree', 'add', '-b', branch, worktree, `origin/${baseBranch}`)
   await writeFile(join(worktree, 'feature.md'), 'development\n')
   await wt('add', '.')
   await wt('commit', '-m', 'dev work')
   await wt('push', '-u', 'origin', branch)
   const remoteHeadBeforeSync = (await remoteGit('rev-parse', `refs/heads/${branch}`)).stdout.trim()
-  await git('switch', 'main')
+  await git('switch', baseBranch)
   await writeFile(join(repo, 'base.md'), 'base B\n')
   await git('add', '.')
   await git('commit', '-m', 'parallel base B')
-  await git('push', 'origin', 'main')
+  await git('push', 'origin', baseBranch)
   return { root, remote, worktree, branch, wt, remoteGit, remoteHeadBeforeSync }
 }
 
@@ -204,6 +209,28 @@ test('sync pushes the clean merge commit to the existing PR branch (issue #45)',
       assert.notEqual(localHead, remoteHeadBeforeSync)
       assert.equal(remoteHead, localHead)
       assert.equal(result.head, localShortHead)
+    })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('sync merges and records the frozen custom baseline', async () => {
+  const { root, worktree, branch, wt } = await setupSyncableRepo('release/2.0')
+  try {
+    await withTempHome(root, async () => {
+      const item = syncableWorkflow(worktree, branch)
+      item.baseRef = 'origin/release/2.0 @ frozen'
+      await saveWorkflow(item)
+
+      const result = await syncWorktree(ctx, { url: item.url })
+      assert.equal(result.ok, true)
+      const parents = (await wt('show', '-s', '--format=%P', 'HEAD')).stdout.trim().split(/\s+/)
+      const releaseHead = (await wt('rev-parse', 'origin/release/2.0')).stdout.trim()
+      assert.equal(parents.includes(releaseHead), true)
+      const saved = await loadWorkflow(item.key)
+      assert.equal(saved?.baseRef, `origin/release/2.0 @ ${releaseHead}`)
+      assert.match(saved?.events.at(-1)?.note ?? '', /origin\/release\/2\.0/)
     })
   } finally {
     await rm(root, { recursive: true, force: true })
@@ -447,4 +474,28 @@ test('merge preface guides the resume/rework agent through conflict then stalene
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+// ---- #127 现场:merge/cleanup 持久化冲突的良性重放 ----
+
+test('replayMergeMetadata keeps concurrent disk events and memory cleanup state', async () => {
+  const { replayMergeMetadata } = await import('../src/workflow/merge.ts')
+  const disk = {
+    events: [{ kind: 'auto-run', note: '磁盘上的并发事件(defer)' }],
+    delivery: { status: 'archived' },
+    issueState: 'CLOSED',
+  } as never
+  const memory = {
+    events: [{ kind: 'merge', note: '内存旧快照的事件' }],
+    delivery: { status: 'cleanup-pending', cleanup: { worktree: true } },
+    issueState: 'OPEN',
+  } as never
+  // 重放规则:清理进度三件套(delivery/issueState/autoRun)以内存为准;
+  // events 以磁盘为准——整对象快照不得覆盖并发事件。
+  replayMergeMetadata(disk, memory)
+  const replayed = disk as { events: unknown[]; delivery: { status: string }; issueState: string }
+  assert.equal(replayed.delivery.status, 'cleanup-pending')
+  assert.equal(replayed.issueState, 'OPEN')
+  assert.equal(replayed.events.length, 1)
+  assert.match(JSON.stringify(replayed.events[0]), /defer/)
 })
