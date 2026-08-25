@@ -107,6 +107,7 @@ export async function readConfiguredBranchFacts(
   config: ClickVibeConfig,
   workflow: IssueWorkflow,
 ): Promise<{ branchExists?: boolean; hasCommits?: boolean; defaultBranch?: string }> {
+  if (existsSync(workflow.worktree)) return {}
   const configuredPath = config.repos[workflow.repoKey]
   if (!configuredPath) return {}
   const repoPath = expandHome(configuredPath)

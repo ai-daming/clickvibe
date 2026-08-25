@@ -67,6 +67,30 @@ test('review start recovers a missing workflow from matching branch, commit, and
           if (spec.command.startsWith('git rev-list --count')) {
             return { exitCode: 0, stdout: { text: '1' }, stderr: { text: '' } }
           }
+          if (spec.command.includes('CLICKVIBE_WORKFLOW_GIT_STATUS')) {
+            return {
+              exitCode: 0,
+              stdout: {
+                text: [
+                  'CLICKVIBE_WORKFLOW_GIT_STATUS',
+                  '# branch.oid abc1234567890abcdef',
+                  '# branch.head r-issue-106',
+                  'CLICKVIBE_WORKFLOW_GIT_HEAD',
+                  'abc1234',
+                  'CLICKVIBE_WORKFLOW_GIT_EXPECTED_BRANCH',
+                  'r-issue-106',
+                  'CLICKVIBE_WORKFLOW_GIT_REFS',
+                  'refs/heads/main\tabc1234\t\t0 1\t0 1',
+                  'refs/remotes/origin/main\tabc1234\t\t0 1\t0 1',
+                  'refs/remotes/origin/HEAD\tabc1234\torigin/main\t0 1\t0 1',
+                  'refs/heads/r-issue-106\tabc1234\t\t0 0\t1 0',
+                  'CLICKVIBE_WORKFLOW_GIT_MERGE_HEAD',
+                  'CLICKVIBE_WORKFLOW_GIT_END',
+                ].join('\n'),
+              },
+              stderr: { text: '' },
+            }
+          }
           if (spec.command === 'git rev-parse --short HEAD') {
             return { exitCode: 0, stdout: { text: 'abc1234' }, stderr: { text: '' } }
           }

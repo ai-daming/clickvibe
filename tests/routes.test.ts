@@ -2838,7 +2838,10 @@ test('/fetch maps PR REST fields and latest reviews without any GraphQL read com
 test('rate-limit response opens a circuit and returns the friendly recovery time on later routes', async () => {
   const reset = Math.floor((Date.now() + 10 * 60_000) / 1000)
   let requests = 0
-  const handler = createHandler(async () => {
+  const handler = createHandler(async (spec) => {
+    if (!spec.command.startsWith('gh api ')) {
+      return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+    }
     requests++
     return {
       exitCode: 1,

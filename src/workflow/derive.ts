@@ -20,8 +20,8 @@
 
 import { existsSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
-import { type DeriveOptions, hasMergeConflict, readBranch, readRefShort, readRevCount } from '../infra/git.ts'
-import { liveTasks, readWorktreeHead, runCommand } from '../infra/runtime.ts'
+import { type DeriveOptions, readWorkflowGitFacts } from '../infra/git.ts'
+import { liveTasks } from '../infra/runtime.ts'
 import { type IssueContractSnapshot, type IssueWorkflow } from '../infra/state.ts'
 import { observeTaskOwnership, type TaskOwnershipContext } from '../infra/task-ownership.ts'
 import { latestDevelopmentHash } from './delivery-audit.ts'
@@ -107,17 +107,10 @@ export async function deriveWorkflowState(
     }
   }
 
-  const head = exists ? await readWorktreeHead(ctx, worktree) : null
-  const branch = exists ? await readBranch(ctx, worktree) : null
-  const hasUncommittedChanges = exists
-    ? await runCommand(ctx, 'git status --porcelain', {
-        workdir: worktree,
-        timeoutMs: 10000,
-        sandboxPolicy: { mode: 'read-only', workspaceRoot: worktree },
-      })
-        .then((output) => output !== '')
-        .catch(() => false)
-    : false
+  const git = exists ? await readWorkflowGitFacts(ctx, worktree, workflow.branch).catch(() => null) : null
+  const head = git?.head ?? null
+  const branch = git?.branch ?? null
+  const hasUncommittedChanges = git?.hasUncommittedChanges ?? false
 
   let mainHead: string | null = null
   let aheadOfMain = 0
@@ -129,33 +122,16 @@ export async function deriveWorkflowState(
   let aheadOfUpstream: number | null = null
   let behindUpstream: number | null = null
 
-  if (exists && head !== null) {
-    mainHead = await readRefShort(ctx, worktree, 'main')
-    if (mainHead) {
-      const compare = await readRevCount(ctx, worktree, 'main', 'HEAD')
-      if (compare) {
-        behindMain = compare.behind
-        aheadOfMain = compare.ahead
-      }
-    }
-    originMainHead = await readRefShort(ctx, worktree, 'origin/main')
-    if (originMainHead) {
-      const compare = await readRevCount(ctx, worktree, 'origin/main', 'HEAD')
-      if (compare) {
-        behindBase = compare.behind
-        aheadOfBase = compare.ahead
-      }
-    }
-    if (branch) {
-      upstreamHead = await readRefShort(ctx, worktree, `origin/${branch}`)
-      if (upstreamHead) {
-        const compare = await readRevCount(ctx, worktree, `origin/${branch}`, 'HEAD')
-        if (compare) {
-          behindUpstream = compare.behind
-          aheadOfUpstream = compare.ahead
-        }
-      }
-    }
+  if (git && head !== null) {
+    mainHead = git.mainHead
+    behindMain = git.main?.behind ?? 0
+    aheadOfMain = git.main?.ahead ?? 0
+    originMainHead = git.originMainHead
+    behindBase = git.originMain?.behind ?? 0
+    aheadOfBase = git.originMain?.ahead ?? 0
+    upstreamHead = git.upstreamHead
+    behindUpstream = git.upstream?.behind ?? null
+    aheadOfUpstream = git.upstream?.ahead ?? null
   }
 
   // 有新提交 = worktree HEAD 不等于最近一次 dev/rework/resume 交付哈希
@@ -163,7 +139,7 @@ export async function deriveWorkflowState(
   // worktree 落后远端基线(origin/main 或远端同名分支)→ 需要同步
   const needsSync = behindBase > 0 || (behindUpstream ?? 0) > 0
   // 未完成的冲突合并(MERGE_HEAD 存在):sync 只会再次失败,必须由 agent 收拾(issue #26)
-  const mergeConflict = exists && (await hasMergeConflict(ctx, worktree))
+  const mergeConflict = git?.mergeConflict ?? false
   const githubReviewPassed =
     options.pr?.reviewDecision === 'APPROVED' ? true : options.pr?.reviewDecision === 'CHANGES_REQUESTED' ? false : null
   const reviewPassed = workflow.reviewResult?.passed ?? githubReviewPassed
@@ -204,9 +180,9 @@ export async function deriveWorkflowState(
     ownership.state === 'interrupted' || (workflow.stage === 'developing' && workflow.devInterrupted)
   const taskUnknown = !taskInterrupted && ownership.state === 'unknown'
 
-  const branchExists = options.branchExists ?? branch !== null
+  const branchExists = options.branchExists ?? git?.branchExists ?? branch !== null
   const worktreeValid = !exists || branch === workflow.branch
-  const hasCommits = options.hasCommits ?? aheadOfBase > 0
+  const hasCommits = options.hasCommits ?? git?.hasCommits ?? aheadOfBase > 0
   const facts: WorkflowFacts = {
     issueOpen: (workflow.issueState ?? 'OPEN') !== 'CLOSED',
     prMerged:
@@ -244,7 +220,7 @@ export async function deriveWorkflowState(
   }
   const reviewStart = deriveReviewStartDecision(facts)
   const nextAction = deriveNextAction(facts)
-  const baseBranch = workflowBaseBranch(workflow.baseRef, options.defaultBranch ?? 'main')
+  const baseBranch = workflowBaseBranch(workflow.baseRef, options.defaultBranch ?? git?.defaultBranch ?? 'main')
   const status = deriveWorkflowStatus(facts)
   const freshSession = deriveFreshSessionAvailability(
     events,
