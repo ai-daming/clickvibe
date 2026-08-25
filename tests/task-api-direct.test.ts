@@ -165,17 +165,27 @@ test('stop handles closed, process-backed and process-less tasks and persists st
   const home = await mkdtemp(join(tmpdir(), 'clickvibe-stop-task-'))
   process.env.HOME = home
   try {
-    assert.match((stopTask(undefined) as { error: string }).error, /未知任务/)
+    const missing = await stopTask({} as never, undefined)
+    assert.equal(missing.ok, false)
+    if (!missing.ok) assert.match(missing.error, /未知任务/)
     const closed = liveTask({ taskId: 'already-closed', closed: true, status: 'done' })
     liveTasks.set(closed.taskId, closed)
-    assert.deepEqual(stopTask({ taskId: closed.taskId }), { ok: true, taskId: closed.taskId, stopped: false })
+    assert.deepEqual(await stopTask({} as never, { taskId: closed.taskId }), {
+      ok: true,
+      taskId: closed.taskId,
+      stopped: false,
+    })
 
     const devWorkflow = workflow('o-r-3')
+    devWorkflow.stage = 'developing'
+    devWorkflow.devTaskId = 'running-process'
+    devWorkflow.reviewTaskId = null
     await saveWorkflow(devWorkflow)
     let killed = 0
     const running = liveTask({
       taskId: 'running-process',
       workflowKey: devWorkflow.key,
+      workflow: devWorkflow,
       process: {
         kill: () => {
           killed += 1
@@ -184,19 +194,29 @@ test('stop handles closed, process-backed and process-less tasks and persists st
       } as LiveTask['process'],
     })
     liveTasks.set(running.taskId, running)
-    assert.deepEqual(stopTask({ taskId: running.taskId }), { ok: true, taskId: running.taskId, stopped: true })
+    assert.deepEqual(await stopTask({} as never, { taskId: running.taskId }), {
+      ok: true,
+      taskId: running.taskId,
+      stopped: true,
+    })
     assert.equal(killed, 1)
 
     const reviewWorkflow = workflow('o-r-4')
+    reviewWorkflow.devTaskId = null
+    reviewWorkflow.reviewTaskId = 'processless-review'
     await saveWorkflow(reviewWorkflow)
-    const processless = liveTask({ taskId: 'processless-review', workflowKey: reviewWorkflow.key, kind: 'review' })
+    const processless = liveTask({
+      taskId: 'processless-review',
+      workflowKey: reviewWorkflow.key,
+      workflow: reviewWorkflow,
+      kind: 'review',
+    })
     liveTasks.set(processless.taskId, processless)
-    assert.deepEqual(stopTask({ taskId: processless.taskId }), {
+    assert.deepEqual(await stopTask({} as never, { taskId: processless.taskId }), {
       ok: true,
       taskId: processless.taskId,
       stopped: false,
     })
-    await new Promise((resolve) => setTimeout(resolve, 20))
     assert.equal((await loadWorkflow(devWorkflow.key))?.devInterrupted, true)
     assert.equal((await loadWorkflow(reviewWorkflow.key))?.stage, 'review-ready')
 

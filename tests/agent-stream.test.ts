@@ -254,7 +254,7 @@ test('codex parser covers lifecycle, tool families and defensive event shapes', 
   assert.deepEqual(parseCodexEvent(JSON.stringify({ type: 'item.completed', item: { type: 'reasoning' } })), [])
   assert.deepEqual(parseCodexEvent(JSON.stringify({ type: 'item.completed', item: { type: 'token_count' } })), [])
   assert.deepEqual(parseCodexEvent(JSON.stringify({ type: 'item.completed', item: { type: 'error' } })), [
-    { kind: 'text', text: '⚠️ error' },
+    { kind: 'text', text: '⚠️ Codex 报告错误，但未提供错误详情' },
   ])
 })
 
