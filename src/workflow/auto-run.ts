@@ -280,6 +280,14 @@ async function applyDecision(ctx: Context, key: string, decision: AutoRunDecisio
       await scheduleRateRetry(ctx, key, circuit.resetAt, `动作 ${decision.action}`)
       return
     }
+    if (result.conflict) {
+      // 原则 10(可恢复性优于预防):sync 冲突现场已由 syncWorktree 保留并记录,
+      // 属可恢复工作——不暂停,直接排队下一轮 reconcile,由 derive 推导出 resume
+      // 并自动转交 agent 解决(#107 现场:并行落后 61 提交,首步 sync 必撞冲突,
+      // 旧路径每次都要人工重挂一次)。
+      requestAutoRunReconcile(ctx, key)
+      return
+    }
     await pauseAutoRun(key, autoRunFailureReason(decision.action, result), {
       action: decision.action,
       error: result.error,
