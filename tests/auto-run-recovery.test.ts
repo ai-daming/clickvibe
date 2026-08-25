@@ -78,3 +78,91 @@ test('a reconcile exception is preserved as controller-error, never session-inte
     await rm(tempHome, { recursive: true, force: true })
   }
 })
+
+// ---- #120 切片②:限流按 reset 自动重试,不再暂停(GitHub 二级限流 +10min 签名) ----
+
+test('a rate-limit reconcile failure defers to the reset time instead of pausing', async () => {
+  const { GithubRateLimitError } = await import('../src/github/rest.ts')
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-ratelimit-'))
+  const previousHome = process.env.HOME
+  process.env.HOME = tempHome
+  let failure: Error = new GithubRateLimitError(Date.now() + 300)
+  try {
+    const key = issueKey('owner/repo', '120')
+    const workflow: IssueWorkflow = {
+      key,
+      url: 'https://github.com/owner/repo/issues/120',
+      repoKey: 'owner/repo',
+      worktree: tempHome,
+      branch: 'clickvibe-issue-120',
+      stage: 'developing',
+      devAgent: null,
+      devTaskId: 'dev-task-120',
+      devHostJobId: 'clickvibe-120',
+      devSessionId: null,
+      devSessionAgent: null,
+      devInterrupted: false,
+      reviewAgent: null,
+      reviewTaskId: null,
+      reviewSessionId: null,
+      reviewSessionAgent: null,
+      reviewResult: null,
+      prNumber: null,
+      issueState: 'OPEN',
+      baseRef: 'origin/main @ 82e55b2',
+      autoRun: {
+        status: 'running',
+        autoMerge: false,
+        devAgent: 'codex',
+        reviewAgent: 'codex',
+        maxRounds: 20,
+        budgetHours: 24,
+        startedAt: '2026-08-25T00:00:00Z',
+        deadline: '2026-08-26T00:00:00Z',
+        step: 1,
+        rounds: 0,
+        unresolved: [],
+        lastObservedAt: null,
+        pausedReason: null,
+      },
+      updatedAt: Date.now(),
+      events: [],
+    }
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
+    const ctx = Object.defineProperty({}, 'jobs', {
+      get() {
+        throw failure
+      },
+    })
+    requestAutoRunReconcile(ctx as never, key)
+
+    let observed: IssueWorkflow | null = null
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      observed = await loadWorkflow(key)
+      if (observed?.events.some((event) => (event.note ?? '').includes('限流'))) break
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    // 限流不暂停:autoRun 保持 running,事件流写明等待与自动重试
+    assert.equal(observed?.autoRun?.status, 'running', 'rate-limit must not pause the auto-run')
+    assert.match(
+      observed?.events.at(-1)?.note ?? '',
+      /限流.*自动(等待|重试)/,
+      'the durable event must explain the deferral',
+    )
+
+    // reset 过后的重试若遇到普通故障,仍按 controller-error 暂停(证据保留)
+    failure = new Error('post-reset real failure')
+    await new Promise((resolve) => setTimeout(resolve, 3_000))
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      observed = await loadWorkflow(key)
+      if (observed?.autoRun?.status === 'paused') break
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    assert.equal(observed?.autoRun?.pausedReason, 'controller-error')
+    assert.match(observed?.events.at(-1)?.note ?? '', /post-reset real failure/)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})

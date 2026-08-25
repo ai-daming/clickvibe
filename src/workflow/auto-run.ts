@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { ensureWorktree } from '../agent/worktree.ts'
 import { fetchIssue, issueSnapshot, sameIssueContract } from '../github/issue.ts'
+import { githubRest, isGithubRateLimitError, recoveryLabel } from '../github/rest.ts'
 import { type IssuePromptSnapshot } from '../infra/develop-core.ts'
 import { liveTasks, parseUrl } from '../infra/runtime.ts'
 import {
@@ -42,6 +43,52 @@ const running = new Set<string>()
 const queued = new Map<string, AutoRunTaskOutcome | undefined>()
 const deadlineTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const observationTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const rateRetryTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+/** #120 切片②:限流按 reset 自动重试的缓冲,避免压着恢复时刻立即再撞。 */
+const RATE_RETRY_BUFFER_MS = 2_000
+
+function clearRateRetry(key: string): void {
+  const timer = rateRetryTimers.get(key)
+  if (timer) clearTimeout(timer)
+  rateRetryTimers.delete(key)
+}
+
+/** Defer instead of pausing when the only failure is a GitHub rate limit. */
+async function scheduleRateRetry(ctx: Context, key: string, resetAt: number, source: string): Promise<void> {
+  clearRateRetry(key)
+  const delay = Math.max(0, resetAt + RATE_RETRY_BUFFER_MS - Date.now())
+  logTaskDiagnostic('auto-run-rate-deferred', {
+    workflowKey: key,
+    retryAt: new Date(resetAt + RATE_RETRY_BUFFER_MS).toISOString(),
+    resetAt: new Date(resetAt).toISOString(),
+    source,
+    delayMs: delay,
+  })
+  const workflow = await loadWorkflow(key)
+  if (workflow?.autoRun?.status === 'running') {
+    await appendEvent(
+      workflow,
+      {
+        kind: 'auto-run',
+        at: new Date().toISOString(),
+        round: workflow.autoRun.rounds,
+        step: workflow.autoRun.step,
+        note: `自动跑到底遇 GitHub 限流(${source}),自动等待至 ${recoveryLabel(resetAt + RATE_RETRY_BUFFER_MS)} 重试(不暂停)`,
+      },
+      workflowRevision(workflow) ?? 0,
+    )
+  }
+  const timer = setTimeout(
+    () => {
+      rateRetryTimers.delete(key)
+      requestAutoRunReconcile(ctx, key)
+    },
+    Math.min(delay, 2_147_483_647),
+  )
+  timer.unref?.()
+  rateRetryTimers.set(key, timer)
+}
 
 function liveTaskFor(taskRef: WorkflowTaskRef | null): LiveTask | null {
   if (!taskRef) return null
@@ -104,6 +151,7 @@ async function pauseAutoRun(key: string, reason: AutoRunPausedReason, evidence?:
   )
   clearDeadline(key)
   clearObservation(key)
+  clearRateRetry(key)
 }
 
 async function completeAutoRun(key: string): Promise<void> {
@@ -124,6 +172,7 @@ async function completeAutoRun(key: string): Promise<void> {
   )
   clearDeadline(key)
   clearObservation(key)
+  clearRateRetry(key)
 }
 
 function clearObservation(key: string): void {
@@ -226,6 +275,11 @@ async function applyDecision(ctx: Context, key: string, decision: AutoRunDecisio
       break
   }
   if (!result.ok) {
+    const circuit = githubRest(ctx as never).rateLimitError()
+    if (circuit) {
+      await scheduleRateRetry(ctx, key, circuit.resetAt, `动作 ${decision.action}`)
+      return
+    }
     await pauseAutoRun(key, autoRunFailureReason(decision.action, result), {
       action: decision.action,
       error: result.error,
@@ -274,9 +328,13 @@ export function requestAutoRunReconcile(ctx: Context, key: string, outcome?: Aut
         errorMessage: error instanceof Error ? error.message : String(error),
         errorStack: error instanceof Error ? error.stack : null,
       })
-      await pauseAutoRun(key, 'controller-error', {
-        error: `${error instanceof Error ? error.message : String(error)}`,
-      })
+      if (isGithubRateLimitError(error)) {
+        await scheduleRateRetry(ctx, key, error.resetAt, 'reconcile')
+      } else {
+        await pauseAutoRun(key, 'controller-error', {
+          error: `${error instanceof Error ? error.message : String(error)}`,
+        })
+      }
     } finally {
       running.delete(key)
     }
