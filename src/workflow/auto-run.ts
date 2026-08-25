@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { ensureWorktree } from '../agent/worktree.ts'
-import { fetchIssue, issueSnapshot } from '../github/issue.ts'
+import { fetchIssue, issueSnapshot, sameIssueContract } from '../github/issue.ts'
 import { type IssuePromptSnapshot } from '../infra/develop-core.ts'
 import { liveTasks, parseUrl } from '../infra/runtime.ts'
 import {
@@ -306,8 +306,8 @@ export async function startAutoRun(
   const refreshed = await fetchIssue(ctx, { url, forceRefresh: true })
   if (!refreshed.ok) return { ok: false, error: `执行前无法刷新 Issue 快照: ${refreshed.error}` }
   const currentSnapshot = issueSnapshot(refreshed.data.item as Record<string, unknown>)
-  if (JSON.stringify(currentSnapshot) !== JSON.stringify(authorizedSnapshot)) {
-    return { ok: false, error: 'Issue 快照已变化,拒绝使用旧授权启动自动跑到底' }
+  if (!sameIssueContract(currentSnapshot, authorizedSnapshot)) {
+    return { ok: false, error: 'Issue 契约已变化(正文/标题/状态),拒绝使用旧授权启动自动跑到底' }
   }
   const key = issueKey(`${parsed.owner}/${parsed.repo}`, parsed.number)
   const ensured = await ensureWorktree(ctx, parsed)
