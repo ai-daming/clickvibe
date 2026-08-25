@@ -13,10 +13,5 @@
     "path": "tests/prompt.test.ts",
     "reason": "Issue #60 baseline prompt regressions and the current shared prompt contract remain in one suite; test-only splitting is deferred from merge recovery.",
     "issueRef": "#60"
-  },
-  {
-    "path": "tests/sync-conflict.test.ts",
-    "reason": "Issue #127 adds merge-metadata replay coverage to the existing real-git sync-conflict suite; splitting the integration fixture is deferred from the release gate repair.",
-    "issueRef": "#127"
   }
 ]
