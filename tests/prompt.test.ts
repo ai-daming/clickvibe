@@ -6,7 +6,7 @@ import {
   snapshotWithoutReviewFeedback,
   type PromptSnapshot,
 } from '../src/agent/prompt.ts'
-import { DEVELOPMENT_REQUIREMENTS, GITHUB_USAGE_REQUIREMENT } from '../src/agent/prompts.ts'
+import { buildDevelopPrompt, buildResumePrompt, buildReviewPrompt, GITHUB_USAGE_REQUIREMENT } from '../src/agent/prompts.ts'
 
 const snapshot: PromptSnapshot = {
   url: 'https://github.com/o/r/issues/20',
@@ -16,6 +16,53 @@ const snapshot: PromptSnapshot = {
   updatedAt: '2026-08-22T06:13:11Z',
   comments: [{ author: 'owner', body: '相关评论正文' }],
 }
+
+test('develop prompt derives sync and PR target instructions from the frozen baseline', () => {
+  const prompt = buildDevelopPrompt(
+    {
+      repoKey: 'o/r',
+      branch: 'clickvibe-issue-60',
+      worktree: '/tmp/worktree',
+      baseRef: 'origin/release/2.0 @ abc1234',
+    } as never,
+    { snapshot, freshness: 'current' },
+    '',
+    true,
+  )
+  assert.match(prompt, /检查开发基线\(origin\/release\/2\.0\)/)
+  assert.match(prompt, /gh pr create --base release\/2\.0/)
+  assert.doesNotMatch(prompt, /默认 origin\/main/)
+})
+
+test('resume and rework prompts derive sync and PR target instructions from the frozen baseline', async () => {
+  const prompt = await buildResumePrompt(
+    {
+      shell: {
+        resolve(spec: unknown) {
+          return spec
+        },
+        async run() {
+          return { exitCode: 0, stdout: { text: 'feature-head' }, stderr: { text: '' } }
+        },
+      },
+    } as never,
+    {
+      repoKey: 'o/r',
+      branch: 'clickvibe-issue-60',
+      worktree: '/tmp/worktree',
+      baseRef: 'origin/release/2.0 @ abc1234',
+      reviewResult: { passed: false, issues: ['fix it'] },
+      events: [],
+    } as never,
+    { snapshot, freshness: 'current' },
+    '',
+    '',
+    'session-1',
+  )
+  assert.match(prompt, /检查开发基线\(origin\/release\/2\.0\)/)
+  assert.match(prompt, /gh pr create --base release\/2\.0/)
+  assert.doesNotMatch(prompt, /默认 origin\/main/)
+})
 
 test('all agent stages share the snapshot/status/requirements/trust envelope', () => {
   for (const stage of ['develop', 'review', 'resume', 'rework'] as const) {
@@ -58,7 +105,6 @@ test('persisted fallback is explicit about possible staleness', () => {
 })
 
 test('development and review requirements avoid repeated GraphQL-heavy gh context reads', () => {
-  assert.ok(DEVELOPMENT_REQUIREMENTS.includes(GITHUB_USAGE_REQUIREMENT))
   assert.match(GITHUB_USAGE_REQUIREMENT, /gh api/)
   assert.match(GITHUB_USAGE_REQUIREMENT, /gh pr view/)
   assert.match(GITHUB_USAGE_REQUIREMENT, /gh issue view/)
@@ -130,6 +176,267 @@ test('a current passed review never turns resume into rework from old feedback',
     localIssues: [],
   })
   assert.equal(feedback, null)
+})
+
+test('review without a PR falls back to the frozen workflow baseline', async () => {
+  const ctx = {
+    shell: {
+      resolve(spec: unknown) {
+        return spec
+      },
+      async run() {
+        return { exitCode: 0, stdout: { text: 'fed7890' }, stderr: { text: '' } }
+      },
+    },
+  }
+  const prompt = await buildReviewPrompt(
+    ctx as never,
+    {
+      repoKey: 'o/r',
+      branch: 'clickvibe-issue-60',
+      worktree: '/tmp/worktree',
+      prNumber: null,
+      baseRef: 'origin/release/2.0 @ abc123',
+    } as never,
+    { snapshot, freshness: 'current' },
+    'def456',
+  )
+  assert.match(prompt, /对比 base: fed7890/)
+  assert.match(prompt, /PR 基线身份: release\/2\.0 @ fed7890/)
+  assert.match(prompt, /git diff fed7890\.\.\.HEAD/)
+})
+
+test('review without a PR falls back to the frozen commit when its remote baseline was deleted', async () => {
+  const commands: string[] = []
+  const ctx = {
+    shell: {
+      resolve(spec: unknown) {
+        return spec
+      },
+      async run(spec: { command: string }) {
+        commands.push(spec.command)
+        return { exitCode: 1, stdout: { text: '' }, stderr: { text: '' } }
+      },
+    },
+  }
+  const prompt = await buildReviewPrompt(
+    ctx as never,
+    {
+      repoKey: 'o/r',
+      branch: 'clickvibe-issue-60',
+      worktree: '/tmp/worktree',
+      prNumber: null,
+      baseRef: 'origin/release/deleted @ abc123',
+    } as never,
+    { snapshot, freshness: 'current' },
+    'def456',
+  )
+  assert.deepEqual(commands, ["git rev-parse --verify 'origin/release/deleted^{commit}'"])
+  assert.match(prompt, /对比 base: abc123/)
+  assert.match(prompt, /git diff abc123\.\.\.HEAD/)
+  assert.doesNotMatch(prompt, /git diff origin\/release\/deleted/)
+})
+
+test('review keeps the live PR base ahead of the frozen workflow baseline', async () => {
+  const ctx = {
+    shell: {
+      resolve(spec: unknown) {
+        return spec
+      },
+      async run(spec: { command: string }) {
+        if (!spec.command.includes('/pulls/77')) {
+          return { exitCode: 0, stdout: { text: 'def8888' }, stderr: { text: '' } }
+        }
+        return {
+          exitCode: 0,
+          stdout: { text: ['HTTP/2.0 200 OK', '', JSON.stringify({ base: { ref: 'integration' } })].join('\n') },
+          stderr: { text: '' },
+        }
+      },
+    },
+  }
+  const prompt = await buildReviewPrompt(
+    ctx as never,
+    {
+      repoKey: 'o/r',
+      branch: 'clickvibe-issue-60',
+      worktree: '/tmp/worktree',
+      prNumber: '77',
+      baseRef: 'origin/release/2.0 @ abc123',
+    } as never,
+    { snapshot, freshness: 'current' },
+    'def456',
+  )
+  assert.match(prompt, /对比 base: def8888/)
+  assert.match(prompt, /PR 基线身份: integration @ def8888/)
+})
+
+test('review diff uses the exact PR base SHA even when the same-name local ref points elsewhere', async () => {
+  const commands: string[] = []
+  const ctx = {
+    shell: {
+      resolve(spec: unknown) {
+        return spec
+      },
+      async run(spec: { command: string }) {
+        commands.push(spec.command)
+        if (spec.command.includes('/pulls/77')) {
+          return {
+            exitCode: 0,
+            stdout: {
+              text: ['HTTP/2.0 200 OK', '', JSON.stringify({ base: { ref: 'integration', sha: 'def9999' } })].join(
+                '\n',
+              ),
+            },
+            stderr: { text: '' },
+          }
+        }
+        return { exitCode: 0, stdout: { text: 'aaa1111' }, stderr: { text: '' } }
+      },
+    },
+  }
+  const prompt = await buildReviewPrompt(
+    ctx as never,
+    {
+      repoKey: 'o/r',
+      branch: 'clickvibe-issue-60',
+      worktree: '/tmp/worktree',
+      prNumber: '77',
+      baseRef: 'origin/release/2.0 @ abc1234',
+    } as never,
+    { snapshot, freshness: 'current' },
+    'feature-head',
+  )
+  assert.match(prompt, /PR 基线身份: integration @ def9999/)
+  assert.match(prompt, /对比 base: def9999/)
+  assert.match(prompt, /git diff def9999\.\.\.HEAD/)
+  assert.doesNotMatch(prompt, /git diff origin\/integration/)
+  assert.equal(commands.filter((command) => command.includes('refs/remotes/origin/integration')).length, 0)
+})
+
+test('review with a deleted PR base still uses the exact PR base SHA', async () => {
+  const commands: string[] = []
+  const ctx = {
+    shell: {
+      resolve(spec: unknown) {
+        return spec
+      },
+      async run(spec: { command: string }) {
+        commands.push(spec.command)
+        if (spec.command.includes('/pulls/77')) {
+          return {
+            exitCode: 0,
+            stdout: {
+              text: ['HTTP/2.0 200 OK', '', JSON.stringify({ base: { ref: 'integration', sha: 'def9999' } })].join(
+                '\n',
+              ),
+            },
+            stderr: { text: '' },
+          }
+        }
+        return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'missing ref' } }
+      },
+    },
+  }
+  const prompt = await buildReviewPrompt(
+    ctx as never,
+    {
+      repoKey: 'o/r',
+      branch: 'clickvibe-issue-60',
+      worktree: '/tmp/worktree',
+      prNumber: '77',
+      baseRef: 'origin/release/2.0 @ abc1234',
+    } as never,
+    { snapshot, freshness: 'current' },
+    'def456',
+  )
+  assert.equal(
+    commands.some((command) => command.includes('rev-parse')),
+    false,
+  )
+  assert.match(prompt, /对比 base: def9999/)
+  assert.match(prompt, /git diff def9999\.\.\.HEAD/)
+  assert.doesNotMatch(prompt, /git diff abc1234/)
+})
+
+test('review fails closed when a linked PR base identity cannot be read', async () => {
+  const ctx = {
+    shell: {
+      resolve(spec: unknown) {
+        return spec
+      },
+      async run() {
+        return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'unavailable' } }
+      },
+    },
+  }
+  await assert.rejects(
+    buildReviewPrompt(
+      ctx as never,
+      {
+        repoKey: 'o/r',
+        branch: 'clickvibe-issue-60',
+        worktree: '/tmp/worktree',
+        prNumber: '77',
+        baseRef: 'origin/release/2.0 @ abc1234',
+      } as never,
+      { snapshot, freshness: 'current' },
+      'feature-head',
+    ),
+    /无法读取 PR #77 的基线身份/,
+  )
+})
+
+test('review fails closed when GitHub returns a malformed PR base SHA', async () => {
+  const ctx = {
+    shell: {
+      resolve(spec: unknown) {
+        return spec
+      },
+      async run() {
+        return {
+          exitCode: 0,
+          stdout: {
+            text: ['HTTP/2.0 200 OK', '', JSON.stringify({ base: { ref: 'integration', sha: 'not-a-sha' } })].join(
+              '\n',
+            ),
+          },
+          stderr: { text: '' },
+        }
+      },
+    },
+  }
+  await assert.rejects(
+    buildReviewPrompt(
+      ctx as never,
+      {
+        repoKey: 'o/r',
+        branch: 'clickvibe-issue-60',
+        worktree: '/tmp/worktree',
+        prNumber: '77',
+        baseRef: 'origin/release/2.0 @ abc1234',
+      } as never,
+      { snapshot, freshness: 'current' },
+      'feature-head',
+    ),
+    /PR #77 返回了无效的基线 commit/,
+  )
+})
+
+test('legacy review without a persisted baseline retains origin/main without probing a ref', async () => {
+  const prompt = await buildReviewPrompt(
+    {} as never,
+    {
+      repoKey: 'o/r',
+      branch: 'clickvibe-issue-1',
+      worktree: '/tmp/worktree',
+      prNumber: null,
+      baseRef: null,
+    } as never,
+    { snapshot, freshness: 'current' },
+    'abc123',
+  )
+  assert.match(prompt, /git diff origin\/main\.\.\.HEAD/)
 })
 
 test('fresh review removes ClickVibe review lists but preserves ordinary requirement comments', () => {

@@ -165,7 +165,9 @@ export class GithubRestReader {
   private readonly resources = new Map<string, CachedValue<unknown>>()
   private readonly aggregates = new Map<string, CachedValue<unknown>>()
   private readonly inFlight = new Map<string, Promise<unknown>>()
+  private readonly forcedResources = new Map<string, Promise<unknown>>()
   private readonly versions = new Map<string, string>()
+  private readonly resourceLoadSequence = new Map<string, number>()
   private circuitUntil = 0
   private circuitKind: GithubRateLimitKind = 'unknown'
 
@@ -194,6 +196,14 @@ export class GithubRestReader {
       if (key === prefix || key.startsWith(`${prefix}/`)) this.aggregates.delete(key)
     }
     this.versions.delete(prefix)
+    for (const key of this.forcedResources.keys()) {
+      if (key === prefix || key.startsWith(`${prefix}/`)) this.forcedResources.delete(key)
+    }
+    for (const key of this.resourceLoadSequence.keys()) {
+      if (key === prefix || key.startsWith(`${prefix}/`)) {
+        this.resourceLoadSequence.set(key, (this.resourceLoadSequence.get(key) ?? 0) + 1)
+      }
+    }
   }
 
   private assertCircuitOpen(): void {
@@ -319,26 +329,46 @@ export class GithubRestReader {
     options: { ttlMs?: number; force?: boolean; versionOf?: (value: T) => string | null | undefined } = {},
   ): Promise<T> {
     this.assertCircuitOpen()
+    const forcedPending = this.forcedResources.get(key) as Promise<T> | undefined
+    if (!options.force && forcedPending) return forcedPending
     const knownVersion = version || null
     const cached = this.resources.get(key) as CachedValue<T> | undefined
     const now = Date.now()
     if (
       !options.force &&
       cached &&
-      ((knownVersion !== null && cached.version === knownVersion) || (knownVersion === null && cached.expiresAt > now))
+      cached.expiresAt > now &&
+      (knownVersion === null || cached.version === knownVersion)
     )
       return cached.value
-    return this.deduplicate(`resource:${key}`, async () => {
+    const load = async () => {
+      const sequence = (this.resourceLoadSequence.get(key) ?? 0) + 1
+      this.resourceLoadSequence.set(key, sequence)
       const value = await loader()
       const loadedVersion = options.versionOf?.(value) || knownVersion
-      this.resources.set(key, {
-        value,
-        version: loadedVersion,
-        expiresAt: Date.now() + (options.ttlMs ?? 30_000),
-      })
-      if (loadedVersion) this.versions.set(key, loadedVersion)
+      // A later-started force read is authoritative. An older ordinary request
+      // may still resolve for its caller, but must never overwrite that result.
+      if (this.resourceLoadSequence.get(key) === sequence) {
+        this.resources.set(key, {
+          value,
+          version: loadedVersion,
+          expiresAt: Date.now() + (options.ttlMs ?? 30_000),
+        })
+        if (loadedVersion) this.versions.set(key, loadedVersion)
+      }
       return value
-    })
+    }
+    if (!options.force) return this.deduplicate(`resource:ordinary:${key}`, load)
+
+    // `force` means fresh from this invocation point. It must not coalesce
+    // with an earlier force call whose GitHub fact may already be obsolete.
+    const forced = load()
+    this.forcedResources.set(key, forced)
+    const clear = () => {
+      if (this.forcedResources.get(key) === forced) this.forcedResources.delete(key)
+    }
+    void forced.then(clear, clear)
+    return forced
   }
 
   async cachedAggregate<T>(key: string, ttlMs: number, force: boolean, loader: () => Promise<T>): Promise<T> {

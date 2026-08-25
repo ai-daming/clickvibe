@@ -54,6 +54,7 @@ import {
   type TaskOwnershipContext,
   workflowTaskExpectation,
 } from '../infra/task-ownership.ts'
+import { withWorkflowLock } from '../infra/workflow-lock.ts'
 import { deriveAutoDevelopment } from './auto-development.ts'
 import { deriveDevelopmentEventKind } from './delivery-audit.ts'
 import { finalizeDevRun } from './dev-completion.ts'
@@ -63,6 +64,7 @@ import { firstDevelopmentFor } from './repository-state.ts'
 import { recordDevDelivery } from './dev-delivery.ts'
 import { establishTaskClaim } from './task-claim.ts'
 import { mutateLiveTaskWorkflow } from './task-lease.ts'
+import { workflowBaseBranch } from './state-view.ts'
 import { notifyAutoRunCompletion } from './auto-run-signal.ts'
 
 export async function resolveAutomaticFirstDevelopment(
@@ -101,7 +103,12 @@ export async function resolveAutomaticFirstDevelopment(
     events: [],
   }
   const [branchFacts, prLookup] = await Promise.all([
-    readConfiguredBranchFacts(ctx, config, workflow),
+    readConfiguredBranchFacts(
+      ctx,
+      config,
+      workflow,
+      workflow.baseRef ? workflowBaseBranch(workflow.baseRef) : undefined,
+    ),
     fetchGithubPrFact(ctx, repoKey, branch, existing?.prNumber ?? null),
   ])
   if (!prLookup.known) return { ok: false, error: '无法确认开发分支是否已有 PR，自动开发已关门' }
@@ -121,7 +128,13 @@ export async function startDevelop(
 ): Promise<
   { ok: true; taskId: string; worktree: string; branch: string } | { ok: false; error: string; controllerError?: true }
 > {
-  const body = (payload ?? {}) as { url?: unknown; agent?: unknown; context?: unknown; automatic?: unknown }
+  const body = (payload ?? {}) as {
+    url?: unknown
+    agent?: unknown
+    context?: unknown
+    automatic?: unknown
+    baseline?: unknown
+  }
   const url = String(body.url ?? '').trim()
   let agent: DevelopAgent
   try {
@@ -204,7 +217,10 @@ export async function startDevelop(
     if (!decision.ready) return { ok: false, error: `自动开发跳过: ${decision.reason}` }
   }
 
-  const ensured = await ensureWorktree(ctx, parsed)
+  // Automatic selection and dryrun are deliberately pinned to the default sentinel.
+  const requestedBaseline = automatic || agent === 'dryrun' ? undefined : body.baseline
+  const workflowKey = issueKey(`${parsed.owner}/${parsed.repo}`, parsed.number)
+  const ensured = await withWorkflowLock(workflowKey, () => ensureWorktree(ctx, parsed, requestedBaseline))
   if (!ensured.ok) return ensured
   const { workflow } = ensured
   // issue 已校验为 OPEN(真实 agent 走授权快照,dryrun 走抓取校验)

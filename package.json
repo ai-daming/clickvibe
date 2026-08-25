@@ -77,7 +77,7 @@
     "test": "node --test tests/*.test.ts",
     "watch": "tsdown --watch",
     "typecheck": "tsc --noEmit",
-    "coverage": "node --test --experimental-test-coverage --test-coverage-lines=85 --test-coverage-functions=85 tests/*.test.ts",
+    "coverage": "node --test --experimental-test-coverage --test-coverage-branches=85 --test-coverage-functions=85 --test-coverage-lines=85 tests/*.test.ts",
     "lint": "biome lint src tests scripts",
     "lint:fix": "biome lint --write src tests scripts",
     "format:check": "biome format src tests scripts",

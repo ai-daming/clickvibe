@@ -144,6 +144,7 @@ export const WRITE_METHOD: Partial<
   auto: 'auto',
   stop: 'stop',
   sync: 'sync',
+  'restore-base': 'sync',
   merge: 'merge',
 }
 
@@ -181,9 +182,11 @@ export function formatWriteOutcome(
             ? `已恢复开发会话:任务 ${String(body.taskId ?? '')}。${followUp}`
             : action === 'merge'
               ? `PR #${String(body.prNumber ?? '')} 已合并,worktree/分支/Issue 清理与归档完成。`
-              : action === 'sync'
-                ? `已同步 ${String(body.branch ?? '')} 到远端基线,HEAD ${String(body.head ?? '未知')}。`
-                : `已请求停止任务 ${String(body.taskId ?? '')}${body.stopped === false ? '(任务此前已结束)' : ''}。`
+              : action === 'restore-base'
+                ? `已恢复远端基线 origin/${String(body.baseBranch ?? '')} @ ${String(body.baseHash ?? '')},可继续创建 PR。`
+                : action === 'sync'
+                  ? `已同步 ${String(body.branch ?? '')} 到远端基线,HEAD ${String(body.head ?? '未知')}。`
+                  : `已请求停止任务 ${String(body.taskId ?? '')}${body.stopped === false ? '(任务此前已结束)' : ''}。`
   return { status: result.status, body: { ok: true, action, text, ...body } }
 }
 
@@ -209,6 +212,7 @@ export async function handleCommand(
     authorizationId?: unknown
     authorizationDigest?: unknown
     target?: unknown
+    restoreTarget?: unknown
     override?: unknown
     confirmedStopped?: unknown
   }
@@ -217,6 +221,7 @@ export async function handleCommand(
     ...(confirm.authorizationId !== undefined ? { authorizationId: String(confirm.authorizationId) } : {}),
     ...(confirm.authorizationDigest !== undefined ? { authorizationDigest: String(confirm.authorizationDigest) } : {}),
     ...(confirm.target !== undefined ? { target: confirm.target } : {}),
+    ...(confirm.restoreTarget !== undefined ? { restoreTarget: confirm.restoreTarget } : {}),
     ...(confirm.override !== undefined ? { override: confirm.override } : {}),
   }
   const execute = (method: string, body: Record<string, unknown>) =>
@@ -349,6 +354,7 @@ export async function handleCommand(
         ...(command.action === 'auto' && autoRun ? { autoRun } : {}),
         ...(agent && agent !== 'dryrun' ? { agent } : {}),
         ...(command.context !== '' ? { context: command.context } : {}),
+        ...(command.action === 'restore-base' ? { restoreBase: true } : {}),
       }),
     )
   }
@@ -411,6 +417,7 @@ export async function handleCommand(
         authorizationDigest: authorized.authorizationDigest,
         expiresAt: authorized.expiresAt,
         ...(authorized.target ? { target: authorized.target } : {}),
+        ...(authorized.restoreTarget ? { restoreTarget: authorized.restoreTarget } : {}),
         ...(authorized.override ? { override: authorized.override } : {}),
       },
     },

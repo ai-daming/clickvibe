@@ -1,16 +1,7 @@
 /**
  * clickvibe host half — routes:
- * - `/clickvibe/api/fetch`          — fetch GitHub issue/PR data via gh
- * - `/clickvibe/api/command`        — text-command entry (issue #13): conversation
- *                                      triggers reuse the same action handlers below
- * - `/clickvibe/api/state`          — restore panel context (all workflows)
- * - `/clickvibe/api/develop`        — start dev: worktree+branch+agent
- * - `/clickvibe/api/develop/poll`   — incremental dev log/status (JSON)
- * - `/clickvibe/api/history`        — complete disk-backed task history
- * - `/clickvibe/api/stream`         — SSE live status stream for a task
- * - `/clickvibe/api/review`         — review the dev branch with codex/claude
- * - `/clickvibe/api/resume`         — resume an interrupted dev session
- * - `/clickvibe/api/sync`           — sync the worktree with the remote base (issue #5)
+ * Routes cover state, development, review, resume, sync, task logs and streams.
+ * Text commands reuse these same action handlers.
  *
  * Workflow per issue (persisted under ~/.clickvibe/state/):
  *   developing → review-ready → reviewing → passed
@@ -21,7 +12,12 @@
 import { existsSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import { type AgentKind } from '../agent/agent-stream.ts'
-import { buildReviewPrompt, fetchPrHeadBranch, resolvePromptSnapshot } from '../agent/prompts.ts'
+import {
+  buildReviewPrompt,
+  fetchPrHeadBranch,
+  resolvePromptSnapshot,
+  resolveReviewBaseTarget,
+} from '../agent/prompts.ts'
 import {
   attachAgentProcess,
   createLiveTask,
@@ -112,6 +108,7 @@ export async function startReview(
   if (!existsSync(workflow.worktree)) {
     return { ok: false, error: `worktree 不存在: ${workflow.worktree}` }
   }
+  const workflowKey = workflow.key
   const availability = deriveFreshSessionAvailability(
     workflow.events,
     workflow.devSessionId !== null && workflow.devSessionAgent === workflow.devAgent,
@@ -131,7 +128,7 @@ export async function startReview(
   // 复用 taskId,不会重复支付 GitHub 刷新超时,也不会交错清理结论文件并双开 review。
   let reservation: { task: LiveTask; created: boolean }
   try {
-    reservation = reviewTaskGate.reserve(workflow.key, () => {
+    reservation = reviewTaskGate.reserve(workflowKey, () => {
       const id = taskId('review')
       return createLiveTask(id, workflow, 'review', agent, sessionId)
     })
@@ -145,7 +142,6 @@ export async function startReview(
     finishTask(live, 'failed', 1)
     return { ok: false, error: resolvedSnapshot.error }
   }
-  // Prompt 与 review 事件必须绑定同一份快照，避免两次 GitHub 读取之间的契约漂移。
   const reviewIssue: ReviewIssueContract = {
     title: resolvedSnapshot.snapshot.title,
     body: resolvedSnapshot.snapshot.body,
@@ -155,8 +151,6 @@ export async function startReview(
       updatedAt: resolvedSnapshot.snapshot.updatedAt,
     },
   }
-  // Review must inspect the branch against current remote refs. Keep review
-  // available during an outage, but make the degraded input explicit in its log.
   try {
     await runCommand(ctx, 'git fetch origin --prune', {
       workdir: workflow.worktree,
@@ -170,7 +164,6 @@ export async function startReview(
       `[clickvibe] review 前 git fetch 失败(继续): ${String(error instanceof Error ? error.message : error)}`,
     )
   }
-
   if (reviewIssue.state !== 'OPEN') {
     finishTask(live, 'failed', 1)
     return { ok: false, error: '只有 OPEN Issue 可以启动 review' }
@@ -179,6 +172,15 @@ export async function startReview(
   if (!reviewedHead) {
     finishTask(live, 'failed', 1)
     return { ok: false, error: '无法冻结被审 HEAD,请检查 worktree 后重试' }
+  }
+  let reviewBase: Awaited<ReturnType<typeof resolveReviewBaseTarget>>
+  try {
+    reviewBase = await resolveReviewBaseTarget(ctx, workflow)
+  } catch (error) {
+    const message = String(error instanceof Error ? error.message : error)
+    pushTaskLine(live, `[clickvibe] 无法冻结 Review 基线: ${message}`)
+    finishTask(live, 'failed', 1)
+    return { ok: false, error: `无法冻结 Review 基线: ${message}` }
   }
 
   if (ownedReviewSession.invalid) {
@@ -198,6 +200,7 @@ export async function startReview(
       reviewedHead,
       sessionId,
       extraContext,
+      reviewBase,
       freshSession,
     )
   } catch (error) {
@@ -295,7 +298,7 @@ export async function startReview(
         notifyAutoRunCompletion(ctx, workflow.key, live.status === 'running' ? 'failed' : live.status)
         return
       }
-      const lines = (await readLogTail(workflow.key, 'review', 200)).map((line) => decodeLiveLogLine(line).text)
+      const lines = (await readLogTail(workflowKey, 'review', 200)).map((line) => decodeLiveLogLine(line).text)
       const resolved = await loadReviewResult(workflow.worktree, lines)
       if (!resolved.result) {
         pushTaskLine(live, `[clickvibe] review 结论解析异常:${resolved.parseError ?? '原因未知'},需要重新 Review`)
@@ -339,6 +342,7 @@ export async function startReview(
           taskId: live.taskId,
           verdict: { passed, issues },
           issueContract: reviewIssue.contract,
+          ...(reviewBase.sha ? { reviewBase: { ref: reviewBase.ref, sha: reviewBase.sha } } : {}),
           note: `${agent} review${passed ? ' 通过' : ` 发现 ${issues.length} 个问题`}`,
           // 用户附加说明只进本地事件时间线,不进 GitHub 评论(issue #54)。
           ...(extraContext !== '' ? { userContext: extraContext } : {}),
@@ -408,6 +412,7 @@ export async function startReview(
               reviewedHead,
               null,
               extraContext,
+              reviewBase,
             )
             return {
               command: buildFreshAgentCommand(agent),

@@ -4,7 +4,14 @@ import { fetchIssue, issueSnapshot, sameIssueContract } from '../github/issue.ts
 import { githubRest } from '../github/rest.ts'
 import { type IssuePromptSnapshot } from '../infra/develop-core.ts'
 import { liveTasks, parseUrl } from '../infra/runtime.ts'
-import { appendEvent, issueKey, loadWorkflow, commitWorkflowMetadata, workflowRevision } from '../infra/state.ts'
+import {
+  appendEvent,
+  WorkflowConflictError,
+  issueKey,
+  loadWorkflow,
+  commitWorkflowMetadata,
+  workflowRevision,
+} from '../infra/state.ts'
 import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
 import { observeWorkflowTask, type TaskOwnershipContext } from '../infra/task-ownership.ts'
 import { createPullRequest } from './create-pr.ts'
@@ -57,10 +64,23 @@ async function persistDecision(key: string, decision: Exclude<AutoRunDecision, {
   workflow.autoRun.unresolved = decision.unresolved
   if (decision.kind === 'trigger') workflow.autoRun.step = decision.step
   workflow.autoRun.lastObservedAt = new Date().toISOString()
-  Object.assign(
-    workflow,
-    await commitWorkflowMetadata(workflow, workflowRevision(workflow), { autoRun: workflow.autoRun }),
-  )
+  try {
+    Object.assign(
+      workflow,
+      await commitWorkflowMetadata(workflow, workflowRevision(workflow), { autoRun: workflow.autoRun }),
+    )
+  } catch (error) {
+    if (!(error instanceof WorkflowConflictError)) throw error
+    // 记账数据(rounds/step/lastObservedAt)每轮 reconcile 重算重写;条件提交拦住
+    // 旧写是它正确工作。对"有人更新"的正确反应是放手让路(#122 现场:与 defer
+    // 事件/完成收尾并发写撞车曾把控制器打停)。丢一次记账,下一轮自愈。
+    logTaskDiagnostic('auto-run-persist-skipped', {
+      workflowKey: key,
+      reason: 'revision-conflict',
+      rounds: decision.rounds,
+      step: decision.kind === 'trigger' ? decision.step : null,
+    })
+  }
 }
 
 async function applyDecision(ctx: Context, key: string, decision: AutoRunDecision): Promise<void> {

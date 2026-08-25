@@ -269,6 +269,20 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 .cv-context-input { width: 100%; box-sizing: border-box; border: 1px solid var(--dsw-alias-border-l2); border-radius: 6px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); padding: 6px 8px; font-size: var(--dsw-font-xxs-12-font-size); font-family: inherit; line-height: 1.5; resize: vertical; }
 .cv-context-input::placeholder { color: var(--dsw-alias-label-caption); }
 .cv-tl-user-context { color: var(--dsw-alias-label-secondary); word-break: break-all; }
+.cv-auth-overlay { position: fixed; z-index: 90; inset: 0; display: grid; place-items: center; padding: 18px; background: var(--dsw-alias-bg-mask-2); }
+.cv-auth-dialog { width: min(460px, 100%); max-height: calc(100vh - 36px); overflow: auto; box-sizing: border-box; padding: 16px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; background: var(--dsw-alias-bg-base); box-shadow: var(--dsw-shadow-lv3); }
+.cv-auth-title { margin-bottom: 10px; color: var(--dsw-alias-label-primary); font-size: 15px; font-weight: 700; }
+.cv-auth-snapshot { display: grid; gap: 3px; color: var(--dsw-alias-label-secondary); font-size: 12px; }
+.cv-auth-snapshot strong { color: var(--dsw-alias-label-primary); font-size: 13px; }
+.cv-auth-advanced { margin-top: 12px; padding: 9px 10px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 7px; background: var(--dsw-alias-interactive-bg-hover-solid); }
+.cv-auth-advanced summary { cursor: pointer; color: var(--dsw-alias-label-primary); font-weight: 600; }
+.cv-auth-baseline { display: grid; gap: 5px; margin-top: 9px; color: var(--dsw-alias-label-secondary); font-size: 12px; }
+.cv-auth-baseline select { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 6px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); }
+.cv-auth-frozen, .cv-auth-note, .cv-auth-warning { margin-top: 7px; font-size: 11.5px; line-height: 1.45; }
+.cv-auth-frozen { color: var(--dsw-alias-label-secondary); }
+.cv-auth-note { color: var(--dsw-alias-state-business-primary); }
+.cv-auth-warning { color: var(--dsw-alias-state-warn-label); }
+.cv-auth-actions { display: flex; justify-content: flex-end; align-items: center; gap: 10px; margin-top: 14px; }
 `
 
 /** Inject the plugin stylesheet once; returns the disposer. */

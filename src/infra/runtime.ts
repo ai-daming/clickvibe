@@ -166,7 +166,9 @@ export function authorizationInputFromPayload(
     url?: unknown
     agent?: unknown
     context?: unknown
+    baseline?: unknown
     target?: unknown
+    restoreTarget?: unknown
     override?: unknown
     autoRun?: unknown
     freshSession?: unknown

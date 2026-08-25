@@ -62,6 +62,7 @@ const EXPECTED_PERSISTENCE_EXPORTS = [
   'currentWorkflowTaskRef',
   'mutateWorkflowTaskCommand',
   'stopWorkflowTaskCommand',
+  'withBaselineRestoreWorkflowLocksCommand',
   'workflowRevision',
   'workflowStatePath',
 ]

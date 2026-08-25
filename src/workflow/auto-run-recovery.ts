@@ -37,6 +37,8 @@ const failureAttempts =
   (failureAttemptsRoot[failureAttemptsSymbol] as Map<string, ControllerFailureAttempt> | undefined) ?? new Map()
 failureAttemptsRoot[failureAttemptsSymbol] = failureAttempts
 const RATE_RETRY_BUFFER_MS = 2_000
+const RATE_RETRY_MAX_WAIT_MS = 3 * 60_000
+const RATE_RETRY_JITTER_MS = 15_000
 
 export { armAutoRunDeadline, autoRunWakePending }
 export type { AutoRunWake }
@@ -286,7 +288,19 @@ export async function handleAutoRunControllerFailure(
     return
   }
   if (isGithubRateLimitError(error)) {
-    const retryAt = error.resetAt + RATE_RETRY_BUFFER_MS
+    const effectiveResetAt = Math.min(error.resetAt, now + RATE_RETRY_MAX_WAIT_MS)
+    const baseRetryAt = effectiveResetAt + RATE_RETRY_BUFFER_MS
+    const baseDelay = Math.max(0, baseRetryAt - now)
+    const retryAt = baseRetryAt + (baseDelay > 30_000 ? Math.floor(Math.random() * RATE_RETRY_JITTER_MS) : 0)
+    const pendingRetryAt = Date.parse(workflow.autoRun.controllerRecovery?.retryAt ?? '')
+    if (
+      workflow.autoRun.controllerRecovery?.kind === 'rate-limit' &&
+      autoRunWakePending(key) &&
+      Number.isFinite(pendingRetryAt) &&
+      pendingRetryAt <= retryAt
+    ) {
+      return
+    }
     const evidence = controllerFailureEvidence(error)
     const previous = failureAttempts.get(key) ?? persistedAttempt(workflow, evidence)
     const attempt = nextControllerFailure(previous, evidence, now, Math.random())

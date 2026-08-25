@@ -159,6 +159,8 @@ export function decideAutoRun(input: {
       // 恢复网(git 历史/review 绑定新 HEAD/门禁/人工合并),不来自拒跑;会话失配
       // 由 resumeDevelop 的精确会话回退与 ownership 门禁兜底。
       return trigger('rework')
+    case 'restore-base':
+      return paused('authorization-denied', reviews)
     case 'merge':
       return input.autoRun.autoMerge ? trigger('merge') : { kind: 'complete', ...reviews }
     case 'cleanup':

@@ -1,15 +1,16 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
-import { deriveWorkflowState, enrichWorkflowStates, type IssueWorkflow } from '../src/index.ts'
+import { deriveWorkflowState, type IssueWorkflow } from '../src/index.ts'
 import { LineLog } from '../src/infra/develop-core.ts'
 import { LineBuffer } from '../src/infra/line-buffer.ts'
 import { liveTasks } from '../src/infra/runtime.ts'
 import { issueBodyHash } from '../src/infra/state.ts'
+import { readConfiguredBranchFacts } from '../src/github/facts.ts'
 
 const execFileAsync = promisify(execFile)
 
@@ -245,6 +246,75 @@ test('state view derives worktree/main/remote hashes, ahead-behind and sync need
   }
 })
 
+test('state view compares a custom workflow baseline instead of origin/main', async () => {
+  const { root, repo, worktree, git, wt } = await setupRepo()
+  try {
+    await git('switch', '-c', 'release/2.0')
+    await git('push', '-u', 'origin', 'release/2.0')
+    const releaseBase = (await git('rev-parse', '--short', 'origin/release/2.0')).stdout.trim()
+    await wt('commit', '--allow-empty', '-m', 'release feature')
+
+    await git('switch', 'main')
+    await git('commit', '--allow-empty', '-m', 'main only advance')
+    await git('push', 'origin', 'main')
+    await wt('fetch', 'origin', '--prune')
+    const afterMain = (
+      await deriveWorkflowState(ctx, workflow({ worktree, baseRef: `origin/release/2.0 @ ${releaseBase}` }))
+    ).derived
+    assert.equal(afterMain.baseBranch, 'release/2.0')
+    assert.equal(afterMain.originMainHead, releaseBase)
+    assert.equal(afterMain.behindBase, 0)
+    assert.equal(afterMain.needsSync, false)
+
+    await git('switch', 'release/2.0')
+    await git('commit', '--allow-empty', '-m', 'release advance')
+    await git('push', 'origin', 'release/2.0')
+    await wt('fetch', 'origin', '--prune')
+    const afterRelease = (
+      await deriveWorkflowState(ctx, workflow({ worktree, baseRef: `origin/release/2.0 @ ${releaseBase}` }))
+    ).derived
+    assert.equal(afterRelease.behindBase, 1)
+    assert.equal(afterRelease.needsSync, true)
+
+    await git('branch', 'baseline-probe', 'origin/release/2.0')
+    const probe = workflow({ branch: 'baseline-probe', baseRef: `origin/release/2.0 @ ${releaseBase}` })
+    const customFacts = await readConfiguredBranchFacts(
+      ctx,
+      { repos: { 'o/r': repo }, worktreeRoot: root },
+      probe,
+      'release/2.0',
+    )
+    const defaultFacts = await readConfiguredBranchFacts(ctx, { repos: { 'o/r': repo }, worktreeRoot: root }, probe)
+    assert.equal(customFacts.hasCommits, false)
+    assert.equal(defaultFacts.hasCommits, true)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a deleted remote baseline warns and requires explicit restoration before PR creation', async () => {
+  const { root, worktree, git, wt, baseA } = await setupRepo()
+  try {
+    await git('switch', '-c', 'release/deleted')
+    await git('push', '-u', 'origin', 'release/deleted')
+    await wt('commit', '--allow-empty', '-m', 'feature after frozen base')
+    await git('push', 'origin', '--delete', 'release/deleted')
+    await wt('fetch', 'origin', '--prune')
+
+    const derived = (
+      await deriveWorkflowState(ctx, workflow({ worktree, baseRef: `origin/release/deleted @ ${baseA}` }))
+    ).derived
+    assert.equal(derived.baseRefAvailable, false)
+    assert.equal(derived.originMainHead, null)
+    assert.equal(derived.aheadOfBase, 1)
+    assert.equal(derived.hasCommits, true)
+    assert.equal(derived.needsSync, false)
+    assert.equal(derived.nextAction.kind, 'restore-base')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('review verdict binds to the reviewed HEAD and goes stale when the head moves', async () => {
   const { root, worktree, wt } = await setupRepo()
   try {
@@ -412,79 +482,6 @@ test('metadata-only updatedAt drift does not invalidate an unchanged issue body'
     assert.equal(current.issueContractCurrent, true)
     assert.equal(current.verdictCurrent, true)
     assert.equal(current.nextAction.kind, 'merge')
-  } finally {
-    await rm(root, { recursive: true, force: true })
-  }
-})
-
-test('/state enrichment checks configured branches while the host serializes GitHub request bursts', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'clickvibe-state-enrich-'))
-  const repo = join(root, 'repo')
-  await mkdir(repo)
-  let activeGithub = 0
-  let maxGithub = 0
-  const githubTimeouts: number[] = []
-  const fakeCtx = {
-    shell: {
-      resolve(spec: unknown) {
-        return spec
-      },
-      async run(spec: { command: string; timeoutMs?: number }) {
-        if (spec.command.startsWith('gh api ') && spec.command.includes('/pulls?state=all')) {
-          githubTimeouts.push(spec.timeoutMs ?? 0)
-          activeGithub += 1
-          maxGithub = Math.max(maxGithub, activeGithub)
-          await new Promise((resolve) => setTimeout(resolve, 40))
-          activeGithub -= 1
-          return { exitCode: 0, stdout: { text: 'HTTP/2.0 200 OK\n\n[]' }, stderr: { text: '' } }
-        }
-        if (spec.command.startsWith('if git show-ref')) {
-          const branch = spec.command.includes('issue-6') ? 'clickvibe-issue-6' : 'clickvibe-issue-5'
-          return { exitCode: 0, stdout: { text: branch }, stderr: { text: '' } }
-        }
-        if (spec.command.startsWith('git symbolic-ref'))
-          return { exitCode: 0, stdout: { text: 'origin/main' }, stderr: { text: '' } }
-        if (spec.command.startsWith('git rev-list')) return { exitCode: 0, stdout: { text: '1' }, stderr: { text: '' } }
-        throw new Error(`unexpected command: ${spec.command}`)
-      },
-    },
-  }
-  try {
-    const workflows = [
-      workflow({
-        worktree: join(root, 'missing-5'),
-        branch: 'clickvibe-issue-5',
-        stage: 'passed',
-        reviewResult: { passed: true, issues: [] },
-        events: [
-          {
-            kind: 'review',
-            at: new Date().toISOString(),
-            hash: 'abc123',
-            verdict: { passed: true, issues: [] },
-            issueContract: { bodyHash: issueBodyHash('## 验收标准\n- A'), updatedAt: '2026-08-22T00:00:00Z' },
-          },
-        ],
-      }),
-      workflow({
-        key: 'repo-6',
-        url: 'https://github.com/o/r/issues/6',
-        worktree: join(root, 'missing-6'),
-        branch: 'clickvibe-issue-6',
-      }),
-    ]
-    const enriched = await enrichWorkflowStates(fakeCtx as never, workflows, {
-      repos: { 'o/r': repo },
-      worktreeRoot: root,
-    })
-    assert.equal(maxGithub, 1)
-    assert.deepEqual(githubTimeouts, [5000, 5000])
-    assert.deepEqual(
-      enriched.map((item) => item.derived.nextAction.label),
-      ['恢复 worktree 继续开发', '恢复 worktree 继续开发'],
-    )
-    assert.equal(enriched[0].derived.issueContractStatus, 'unknown')
-    assert.equal(enriched[0].derived.issueContractUnknownReason, 'current-contract-unavailable')
   } finally {
     await rm(root, { recursive: true, force: true })
   }

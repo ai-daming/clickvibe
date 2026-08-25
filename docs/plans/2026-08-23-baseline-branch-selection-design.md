@@ -6,14 +6,14 @@
 
 ## 目标与边界
 
-**现状**：`ensureWorktree`（src/index.ts:2279-2299）写死从 fetch 后的 `origin/HEAD`（兜底 `origin/main`）创建分支，并把 `workflow.baseRef = "origin/main @ hash"` 定格为开发基线。基线在状态模型里**已经是一等事实**（state.ts:63-64、state-model §七「📍 基线」常驻、§二 fork 点/应同步基线）。
+**现状**：`ensureWorktree`（src/index.ts:2279-2299）写死从 fetch 后的 `origin/HEAD`（兜底 `origin/main`）创建分支，并把 `workflow.baseRef = "origin/main @ hash"` 记录为开发基线。基线在状态模型里**已经是一等事实**（state.ts:63-64、state-model §七「📍 基线」常驻、§二开发基线身份/应同步基线）。
 
 **结论**：把 baseRef 的取值来源从"写死"开放为"首次开发时显式指定"，默认路径零变化。设计上让**全链路行为（落后对比、同步对象、review base、PR compare URL）统一从 baseRef 推导**，而不是新增第二套"基线"概念——这是本设计能保持低成本的根因。
 
 **边界**（对齐现有硬原则）：
 
 1. **默认零摩擦**：默认值永远是 origin/HEAD；选择器收在「高级」折叠里。auto-pick 与 dryrun 永远走默认，不弹选择。
-2. **仅首次开发可选**：baseRef 已定格（非 null）→ 拒绝改基线请求。想换基线 = 删除分支/worktree 重建，属另一功能，本设计不提供（"基线永远不变"）。
+2. **仅首次开发可选**：baseRef 的远端分支身份已定格（非 null）→ 拒绝改基线请求。想换分支 = 删除分支/worktree 重建，属另一功能，本设计不提供；`@ hash` 是该分支最近一次成功同步持久化的 tip，可随显式同步前进。
 3. **只接受远端事实**：基线必须是 fetch 后的 `origin/*` 分支（校验 ref 存在），不接受本地任意 HEAD/自由文本——延续"新分支只从 fetch 后的远端创建"的安全边界。
 4. **与依赖契约联动**：基线命中已知 issue 开发分支时建议补 `Blocked by #N`，保持自动选取判定诚实。
 
@@ -45,10 +45,10 @@
 
 ## 边界与降级
 
-- **基线远端分支被删除**：📍 基线仍显示定格 hash；落后/同步显示 ⚠「基线分支已不存在」，不做同步（不阻塞 review/merge；merge 门禁照旧）。
+- **基线远端分支被删除**：📍 基线仍显示最后一次成功同步持久化的 tip；落后/同步显示 ⚠「基线分支已不存在」，review 使用精确 SHA；建 PR 前通过显式一次性授权恢复同名分支。
 - **baseline == 默认分支**：等价于现状，多余字段无害。
 - **旧数据 baseRef 缺失**：`workflowBaseBranch` 退化 defaultBranch，行为不变。
-- **跨机器（#11）**：baseRef 是本地 git 事实且含定格 hash；任意执行机 fetch 后 `origin/<base>` 可解析，可审计性不变。
+- **跨机器（#11）**：baseRef 是本地 git 事实，包含不可变分支身份和最后已知 tip；任意执行机 fetch 后 `origin/<base>` 可解析，可审计性不变。
 
 ## 合并顺序与 retarget（stacked 场景）
 

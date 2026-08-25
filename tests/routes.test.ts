@@ -30,6 +30,8 @@ after(async () => {
   await rm(routesTestHome, { recursive: true, force: true })
 })
 
+const saveWorkflow = (workflow: IssueWorkflow) => commitWorkflowFixture(workflow, workflow.revision ?? null)
+
 function included(body: unknown, status = 200, headers: Record<string, string> = {}): string {
   return [
     `HTTP/2.0 ${status} ${status === 200 ? 'OK' : 'Error'}`,
@@ -461,6 +463,248 @@ test('authorization route freezes the displayed snapshot and consumes tampered c
   assert.equal(replay.status, 403)
 })
 
+test('develop authorization previews fetched baselines and binds a custom selection', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-baseline-preview-'))
+  process.env.HOME = tempHome
+  try {
+    const repo = join(tempHome, 'repo')
+    await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
+    await mkdir(repo, { recursive: true })
+    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), ['repos:', `  o/r: ${repo}`, ''].join('\n'))
+    const item = {
+      url: 'https://github.com/o/r/issues/60',
+      title: 'baseline selection',
+      body: '## 验收标准\n- select release',
+      state: 'OPEN',
+      updatedAt: '2026-08-23T00:00:00Z',
+      comments: [],
+    }
+    const commands: string[] = []
+    const handler = createHandler(async (spec) => {
+      commands.push(spec.command)
+      const api = githubApi(spec.command, { item })
+      if (api) return api
+      if (spec.command === 'git fetch origin --prune')
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      if (spec.command === 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD')
+        return { exitCode: 0, stdout: { text: 'origin/main' }, stderr: { text: '' } }
+      if (spec.command.startsWith('git for-each-ref'))
+        return {
+          exitCode: 0,
+          stdout: { text: 'origin/HEAD\norigin/main\norigin/release/2.0\norigin/clickvibe-issue-17\n' },
+          stderr: { text: '' },
+        }
+      throw new Error(`unexpected command: ${spec.command}`)
+    })
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+    const expectedSnapshot = { ...item }
+    const authorized = await post(
+      handler,
+      '/clickvibe/api/authorize',
+      { action: 'develop', url: item.url, agent: 'codex', baseline: 'origin/release/2.0', expectedSnapshot },
+      headers,
+    )
+    assert.equal(authorized.status, 200, JSON.stringify(authorized.body))
+    assert.deepEqual((authorized.body.preview as { baselineOptions: string[] }).baselineOptions, [
+      'origin/HEAD',
+      'origin/clickvibe-issue-17',
+      'origin/main',
+      'origin/release/2.0',
+    ])
+    assert.equal((authorized.body.preview as { baseline: string }).baseline, 'origin/release/2.0')
+    assert.equal((authorized.body.preview as { baselineFrozen: boolean }).baselineFrozen, false)
+    assert.equal(commands.includes('git fetch origin --prune'), true)
+
+    const dependencyPreview = await post(
+      handler,
+      '/clickvibe/api/authorize',
+      { action: 'develop', url: item.url, agent: 'codex', baseline: 'origin/clickvibe-issue-17', expectedSnapshot },
+      headers,
+    )
+    assert.equal(dependencyPreview.status, 200, JSON.stringify(dependencyPreview.body))
+    assert.equal((dependencyPreview.body.preview as { baselineDependencyIssue: number }).baselineDependencyIssue, 17)
+
+    const missingPreview = await post(
+      handler,
+      '/clickvibe/api/authorize',
+      { action: 'develop', url: item.url, agent: 'codex', baseline: 'origin/not-fetched', expectedSnapshot },
+      headers,
+    )
+    assert.equal(missingPreview.status, 400)
+    assert.match(String(missingPreview.body.error), /不存在或未 fetch/)
+
+    const tampered = await post(
+      handler,
+      '/clickvibe/api/develop',
+      {
+        url: item.url,
+        agent: 'codex',
+        baseline: 'origin/main',
+        authorizationId: authorized.body.authorizationId,
+        authorizationDigest: authorized.body.authorizationDigest,
+      },
+      headers,
+    )
+    assert.equal(tampered.status, 403)
+
+    const frozen = interruptedWorkflow('o-r-60', item.url, join(tempHome, 'worktree'))
+    frozen.baseRef = 'origin/release/2.0 @ abc123'
+    await saveWorkflow(frozen)
+    const frozenPreview = await post(
+      handler,
+      '/clickvibe/api/authorize',
+      { action: 'develop', url: item.url, agent: 'codex', expectedSnapshot },
+      headers,
+    )
+    assert.equal(frozenPreview.status, 200, JSON.stringify(frozenPreview.body))
+    assert.equal((frozenPreview.body.preview as { baselineFrozen: boolean }).baselineFrozen, true)
+    assert.equal((frozenPreview.body.preview as { baselineRef: string }).baselineRef, frozen.baseRef)
+    assert.deepEqual((frozenPreview.body.preview as { baselineOptions: string[] }).baselineOptions, [
+      'origin/release/2.0',
+    ])
+    const replaceFrozen = await post(
+      handler,
+      '/clickvibe/api/authorize',
+      { action: 'develop', url: item.url, agent: 'codex', baseline: 'origin/main', expectedSnapshot },
+      headers,
+    )
+    assert.equal(replaceFrozen.status, 400)
+    assert.match(String(replaceFrozen.body.error), /基线已定格/)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('concurrent first-development authorizations freeze exactly one baseline and start one task', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-baseline-race-'))
+  process.env.HOME = tempHome
+  try {
+    const repo = join(tempHome, 'repo')
+    await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
+    await mkdir(repo, { recursive: true })
+    await writeFile(
+      join(tempHome, '.clickvibe', 'config.yaml'),
+      ['repos:', `  o/r: ${repo}`, `worktreeRoot: ${join(tempHome, 'worktrees')}`, ''].join('\n'),
+    )
+    const item = {
+      url: 'https://github.com/o/r/issues/601',
+      title: 'baseline race',
+      body: '## 验收标准\n- freeze once',
+      state: 'OPEN',
+      updatedAt: '2026-08-23T00:00:00Z',
+      comments: [],
+    }
+    let developmentPhase = false
+    let fetchArrivals = 0
+    let releaseFetches: (() => void) | null = null
+    const bothFetchesArrived = new Promise<void>((resolve) => {
+      releaseFetches = resolve
+    })
+    let starts = 0
+    const handler = createHandler(
+      async (spec) => {
+        const api = githubApi(spec.command, { item })
+        if (api) return api
+        if (spec.command === 'git fetch origin --prune') {
+          if (developmentPhase) {
+            fetchArrivals += 1
+            if (fetchArrivals === 2) releaseFetches?.()
+            await Promise.race([bothFetchesArrived, new Promise((resolve) => setTimeout(resolve, 50))])
+          }
+          return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+        }
+        if (spec.command === 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD')
+          return { exitCode: 0, stdout: { text: 'origin/main' }, stderr: { text: '' } }
+        if (spec.command.startsWith('git for-each-ref'))
+          return {
+            exitCode: 0,
+            stdout: { text: 'origin/HEAD\norigin/main\norigin/release/2.0\n' },
+            stderr: { text: '' },
+          }
+        if (spec.command.startsWith('git show-ref --verify --quiet') && spec.command.includes('refs/remotes/'))
+          return { exitCode: 0, stdout: { text: '0' }, stderr: { text: '' } }
+        if (spec.command.startsWith('git rev-parse --short')) {
+          const hash = spec.command.includes('release/2.0')
+            ? '2222222'
+            : spec.command.includes('HEAD')
+              ? '3333333'
+              : '1111111'
+          return { exitCode: 0, stdout: { text: hash }, stderr: { text: '' } }
+        }
+        if (spec.command === 'git worktree list --porcelain')
+          return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+        if (spec.command.startsWith('git show-ref --verify --quiet') && spec.command.includes('refs/heads/'))
+          return { exitCode: 0, stdout: { text: '1' }, stderr: { text: '' } }
+        if (spec.command.startsWith('git worktree add'))
+          return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+        if (spec.command.startsWith('gh issue comment'))
+          return {
+            exitCode: 0,
+            stdout: { text: 'https://github.com/o/r/issues/601#issuecomment-1' },
+            stderr: { text: '' },
+          }
+        throw new Error(`unexpected command: ${spec.command}`)
+      },
+      () => {
+        starts += 1
+        return {
+          status: 'running',
+          exitCode: 0,
+          done: new Promise<void>((resolve) => setTimeout(resolve, 100)),
+          readOutput() {
+            return { delta: '', lossy: false }
+          },
+          kill() {
+            return true
+          },
+        }
+      },
+    )
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+    const authorize = async (baseline: string) =>
+      (await post(
+        handler,
+        '/clickvibe/api/authorize',
+        { action: 'develop', url: item.url, agent: 'codex', baseline, expectedSnapshot: item },
+        headers,
+      )) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
+    const main = await authorize('origin/main')
+    const release = await authorize('origin/release/2.0')
+    assert.equal(main.status, 200)
+    assert.equal(release.status, 200)
+    developmentPhase = true
+
+    const develop = (baseline: string, authorization: typeof main) =>
+      post(
+        handler,
+        '/clickvibe/api/develop',
+        {
+          url: item.url,
+          agent: 'codex',
+          baseline,
+          authorizationId: authorization.body.authorizationId,
+          authorizationDigest: authorization.body.authorizationDigest,
+        },
+        headers,
+      )
+    const results = await Promise.all([develop('origin/main', main), develop('origin/release/2.0', release)])
+    assert.deepEqual(results.map((result) => result.status).sort(), [200, 400])
+    assert.equal(starts, 1)
+    assert.match(results.find((result) => result.status === 400)?.body.error ?? '', /基线已定格/)
+    const frozen = await loadWorkflow('o-r-601')
+    assert.match(frozen?.baseRef ?? '', /^origin\/(?:main|release\/2\.0) @ (?:1111111|2222222)$/)
+    await new Promise((resolve) => setTimeout(resolve, 120))
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
 test('development rejects a confirmed snapshot when the issue changes before stage start', async () => {
   const url = 'https://github.com/ai-daming/clickvibe/issues/20'
   const oldItem = {
@@ -526,6 +770,145 @@ test('/sync rejects worktree mutation without the same-origin privileged headers
   assert.match(result.body.error ?? '', /授权请求头/)
 })
 
+test('missing baseline restoration requires and consumes an exact one-use authorization', async () => {
+  const previousHome = process.env.HOME
+  const home = await mkdtemp(join(tmpdir(), 'clickvibe-restore-route-'))
+  process.env.HOME = home
+  try {
+    const repo = join(home, 'repo')
+    await mkdir(join(home, '.clickvibe'), { recursive: true })
+    await mkdir(repo, { recursive: true })
+    await writeFile(
+      join(home, '.clickvibe', 'config.yaml'),
+      ['repos:', `  o/r: ${repo}`, `worktreeRoot: ${join(home, 'worktrees')}`, ''].join('\n'),
+    )
+    const workflow = {
+      key: 'o-r-60',
+      url: 'https://github.com/o/r/issues/60',
+      repoKey: 'o/r',
+      worktree: join(home, 'worktrees', 'repo', 'repo-issue-60'),
+      branch: 'repo-issue-60',
+      stage: 'review-ready',
+      devAgent: 'codex',
+      devTaskId: null,
+      devSessionId: null,
+      devSessionAgent: null,
+      devInterrupted: false,
+      reviewAgent: null,
+      reviewTaskId: null,
+      reviewSessionId: null,
+      reviewSessionAgent: null,
+      reviewResult: null,
+      prNumber: null,
+      issueState: 'OPEN',
+      baseRef: 'origin/release/deleted @ abc1234',
+      updatedAt: 0,
+      events: [],
+    } satisfies IssueWorkflow
+    await saveWorkflow(workflow)
+    const commands: string[] = []
+    const handler = createHandler(async (spec) => {
+      commands.push(spec.command)
+      if (spec.command.includes('refs/remotes/origin/release/deleted')) {
+        return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'missing' } }
+      }
+      return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+    })
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+    const unauthorized = await post(handler, '/clickvibe/api/sync', { url: workflow.url, restoreBase: true }, headers)
+    assert.equal(unauthorized.status, 403)
+    assert.equal(commands.length, 0)
+
+    const authorized = (await post(
+      handler,
+      '/clickvibe/api/authorize',
+      { action: 'restore-base', url: workflow.url },
+      headers,
+    )) as {
+      status: number
+      body: {
+        authorizationId: string
+        authorizationDigest: string
+        restoreTarget: { branch: string; hash: string }
+        preview: { baseline: string; baselineRef: string }
+      }
+    }
+    assert.equal(authorized.status, 200)
+    assert.equal(authorized.body.preview.baseline, 'origin/release/deleted')
+    assert.equal(authorized.body.preview.baselineRef, 'abc1234')
+    assert.deepEqual(authorized.body.restoreTarget, { branch: 'release/deleted', hash: 'abc1234' })
+    workflow.baseRef = 'origin/release/deleted @ def5678'
+    await saveWorkflow(workflow)
+    const stale = await post(
+      handler,
+      '/clickvibe/api/sync',
+      {
+        url: workflow.url,
+        restoreBase: true,
+        authorizationId: authorized.body.authorizationId,
+        authorizationDigest: authorized.body.authorizationDigest,
+        restoreTarget: authorized.body.restoreTarget,
+      },
+      headers,
+    )
+    assert.equal(stale.status, 400)
+    assert.equal(
+      commands.some((command) => command.startsWith('git push --force-with-lease=')),
+      false,
+    )
+
+    const refreshed = (await post(
+      handler,
+      '/clickvibe/api/authorize',
+      { action: 'restore-base', url: workflow.url },
+      headers,
+    )) as typeof authorized
+    assert.deepEqual(refreshed.body.restoreTarget, { branch: 'release/deleted', hash: 'def5678' })
+    const restored = await post(
+      handler,
+      '/clickvibe/api/sync',
+      {
+        url: workflow.url,
+        restoreBase: true,
+        authorizationId: refreshed.body.authorizationId,
+        authorizationDigest: refreshed.body.authorizationDigest,
+        restoreTarget: refreshed.body.restoreTarget,
+      },
+      headers,
+    )
+    assert.equal(restored.status, 200, JSON.stringify(restored.body))
+    assert.ok(commands.some((command) => command.startsWith('git push --force-with-lease=')))
+    const replay = await post(
+      handler,
+      '/clickvibe/api/sync',
+      {
+        url: workflow.url,
+        restoreBase: true,
+        authorizationId: refreshed.body.authorizationId,
+        authorizationDigest: refreshed.body.authorizationDigest,
+        restoreTarget: refreshed.body.restoreTarget,
+      },
+      headers,
+    )
+    assert.equal(replay.status, 403)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('all privileged workflow routes reject missing request provenance before action dispatch', async () => {
+  for (const method of ['review', 'resume', 'stop', 'sync', 'merge']) {
+    const result = await post(createHandler(), `/clickvibe/api/${method}`, {
+      url: 'https://github.com/o/r/issues/1',
+      agent: 'codex',
+    })
+    assert.equal(result.status, 403, method)
+    assert.match(result.body.error ?? '', /授权请求头/, method)
+  }
+})
+
 test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, cleanup and archive', async () => {
   const previousHome = process.env.HOME
   const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-merge-'))
@@ -565,6 +948,7 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
         at: '2026-08-22T00:00:00Z',
         hash: 'abcdef1',
         verdict: { passed: true, issues: [] },
+        reviewBase: { ref: 'main', sha: '1111111111111111' },
         issueContract: { bodyHash: issueBodyHash(reviewedBody), updatedAt: '2026-08-22T00:00:00Z' },
       },
     ]
@@ -589,7 +973,7 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
           state: merged ? 'closed' : 'open',
           merged_at: merged ? '2026-08-22T01:00:00Z' : null,
           head: { ref: workflow.branch, sha: 'abcdef1234567890' },
-          base: { ref: 'main' },
+          base: { ref: 'main', sha: '1111111111111111' },
           html_url: 'https://github.com/o/r/pull/29',
         },
         reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
@@ -634,6 +1018,8 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
       prNumber: '29',
       branch: workflow.branch,
       head: 'abcdef1234567890',
+      baseRef: 'main',
+      baseSha: '1111111111111111',
       mergeFlag: '--merge',
       cleanup: ['worktree', '本地分支', '远端分支', 'Issue #23', 'workflow 归档'],
     })
@@ -735,7 +1121,15 @@ test('/merge rejects a stale review hash before invoking gh pr merge', async () 
     workflow.branch = 'r-issue-23'
     workflow.stage = 'passed'
     workflow.reviewResult = { passed: true, issues: [] }
-    workflow.events = [{ kind: 'review', at: 'now', hash: '1111111', verdict: { passed: true, issues: [] } }]
+    workflow.events = [
+      {
+        kind: 'review',
+        at: 'now',
+        hash: '1111111',
+        verdict: { passed: true, issues: [] },
+        reviewBase: { ref: 'main', sha: '1111111111111111' },
+      },
+    ]
     await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const commands: string[] = []
     const handler = createHandler(async (spec) => {
@@ -746,7 +1140,7 @@ test('/merge rejects a stale review hash before invoking gh pr merge', async () 
           state: 'open',
           merged_at: null,
           head: { ref: workflow.branch, sha: '2222222222222222' },
-          base: { ref: 'main' },
+          base: { ref: 'main', sha: '1111111111111111' },
           html_url: 'https://github.com/o/r/pull/29',
         },
         reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
@@ -785,6 +1179,7 @@ test('/merge authorization rejects a changed acceptance contract with the same P
         at: 'now',
         hash: 'abcdef1',
         verdict: { passed: true, issues: [] },
+        reviewBase: { ref: 'main', sha: '1111111111111111' },
         issueContract: {
           bodyHash: issueBodyHash('## 验收标准\n- reviewed contract'),
           updatedAt: '2026-08-22T00:00:00Z',
@@ -809,7 +1204,7 @@ test('/merge authorization rejects a changed acceptance contract with the same P
           state: 'open',
           merged_at: null,
           head: { ref: workflow.branch, sha: 'abcdef1234567890' },
-          base: { ref: 'main' },
+          base: { ref: 'main', sha: '1111111111111111' },
           html_url: 'https://github.com/o/r/pull/29',
         },
         reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
@@ -864,6 +1259,7 @@ test('/merge gate rejection offers manual override that merges once and audits t
         at: '2026-08-22T00:00:00Z',
         hash: '1111111',
         verdict: { passed: true, issues: [] },
+        reviewBase: { ref: 'main', sha: '1111111111111111' },
         issueContract: { bodyHash: issueBodyHash(reviewedBody), updatedAt: '2026-08-22T00:00:00Z' },
       },
     ]
@@ -888,7 +1284,7 @@ test('/merge gate rejection offers manual override that merges once and audits t
           state: merged ? 'closed' : 'open',
           merged_at: merged ? '2026-08-22T01:00:00Z' : null,
           head: { ref: workflow.branch, sha: '2222222222222222' },
-          base: { ref: 'main' },
+          base: { ref: 'main', sha: '1111111111111111' },
           html_url: 'https://github.com/o/r/pull/29',
         },
         reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
@@ -1034,6 +1430,7 @@ test('/merge manual override refuses gate failures not covered by the confirmati
         at: 'now',
         hash: 'abcdef1',
         verdict: { passed: true, issues: [] },
+        reviewBase: { ref: 'main', sha: '1111111111111111' },
         issueContract: {
           bodyHash: issueBodyHash('## 验收标准\n- reviewed contract'),
           updatedAt: '2026-08-22T00:00:00Z',
@@ -1065,7 +1462,7 @@ test('/merge manual override refuses gate failures not covered by the confirmati
           state: 'open',
           merged_at: null,
           head: { ref: workflow.branch, sha: 'abcdef1234567890' },
-          base: { ref: 'main' },
+          base: { ref: 'main', sha: '1111111111111111' },
           html_url: 'https://github.com/o/r/pull/29',
         },
         reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
@@ -1150,6 +1547,7 @@ test('cleanup failure keeps merged terminal state and retries without merging ag
         at: 'now',
         hash: 'abcdef1',
         verdict: { passed: true, issues: [] },
+        reviewBase: { ref: 'main', sha: '1111111111111111' },
         issueContract: { bodyHash: issueBodyHash(reviewedBody), updatedAt: '2026-08-22T00:00:00Z' },
       },
     ]
@@ -1174,7 +1572,7 @@ test('cleanup failure keeps merged terminal state and retries without merging ag
           state: merged ? 'closed' : 'open',
           merged_at: merged ? '2026-08-22T01:00:00Z' : null,
           head: { ref: workflow.branch, sha: 'abcdef1234567890' },
-          base: { ref: 'main' },
+          base: { ref: 'main', sha: '1111111111111111' },
           html_url: 'https://github.com/o/r/pull/29',
         },
         reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
@@ -1270,7 +1668,7 @@ test('/state uses the live GitHub issue state instead of the stored issueState',
           state: 'open',
           merged_at: null,
           head: { ref: workflow.branch, sha: 'abcdef1234567890' },
-          base: { ref: 'main' },
+          base: { ref: 'main', sha: '1111111111111111' },
           html_url: 'https://github.com/o/r/pull/29',
         },
       })
@@ -1457,6 +1855,8 @@ test('a rejected dry-run worktree attempt preserves the previous durable dev his
         return { exitCode: 0, stdout: { text: 'origin/main' }, stderr: { text: '' } }
       if (command === "git rev-parse --short 'origin/main'")
         return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
+      if (command === "git show-ref --verify --quiet 'refs/remotes/origin/main'; echo $?")
+        return { exitCode: 0, stdout: { text: '0' }, stderr: { text: '' } }
       if (command === 'git worktree list --porcelain')
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       if (command.includes("git show-ref --verify --quiet 'refs/heads/repo-issue-905'"))
@@ -1464,12 +1864,97 @@ test('a rejected dry-run worktree attempt preserves the previous durable dev his
       throw new Error(`unexpected command: ${command}`)
     })
 
-    const result = await post(handler, '/clickvibe/api/develop', { url: issue.url, agent: 'dryrun' })
+    const result = await post(handler, '/clickvibe/api/develop', {
+      url: issue.url,
+      agent: 'dryrun',
+      baseline: 'origin/release/must-be-ignored',
+    })
     assert.equal(result.status, 400)
     assert.match(result.body.error ?? '', /worktree 冲突/)
     const history = await readLogHistory('o-r-905', 'dev')
     assert.equal(history[0], 'previous completed task history')
     assert.ok(history.some((line) => line.includes('worktree 冲突')))
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('dryrun uses the default baseline, reports command output and closes success or failure tasks', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-dryrun-execution-'))
+  process.env.HOME = tempHome
+  try {
+    const repo = join(tempHome, 'repo')
+    const worktreeRoot = join(tempHome, 'worktrees')
+    await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
+    await mkdir(repo, { recursive: true })
+    await writeFile(
+      join(tempHome, '.clickvibe', 'config.yaml'),
+      ['repos:', `  o/r: ${repo}`, `worktreeRoot: ${worktreeRoot}`, ''].join('\n'),
+    )
+    const runOne = async (number: number, failPwd: boolean) => {
+      const issue = {
+        url: `https://github.com/o/r/issues/${number}`,
+        title: 'dryrun execution',
+        body: '',
+        state: 'OPEN',
+        updatedAt: 'now',
+        comments: [],
+      }
+      const commands: string[] = []
+      const handler = createHandler(async ({ command }) => {
+        commands.push(command)
+        const api = githubApi(command, { item: issue })
+        if (api) return api
+        if (command === 'git fetch origin --prune') return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+        if (command === 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD')
+          return { exitCode: 0, stdout: { text: 'origin/main' }, stderr: { text: '' } }
+        if (command === "git show-ref --verify --quiet 'refs/remotes/origin/main'; echo $?")
+          return { exitCode: 0, stdout: { text: '0' }, stderr: { text: '' } }
+        if (command === "git rev-parse --short 'origin/main'")
+          return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
+        if (command === 'git worktree list --porcelain')
+          return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+        if (command.includes(`refs/heads/repo-issue-${number}`))
+          return { exitCode: 0, stdout: { text: '1' }, stderr: { text: '' } }
+        if (command.startsWith('git worktree add')) return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+        if (command === 'pwd')
+          return failPwd
+            ? { exitCode: 1, stdout: { text: '' }, stderr: { text: 'pwd failed' } }
+            : { exitCode: 0, stdout: { text: '/fake/worktree\n' }, stderr: { text: '' } }
+        if (command === 'git branch --show-current')
+          return { exitCode: 0, stdout: { text: `repo-issue-${number}\n` }, stderr: { text: '' } }
+        if (command === 'git status --short --branch')
+          return { exitCode: 0, stdout: { text: `## repo-issue-${number}\n` }, stderr: { text: '' } }
+        throw new Error(`unexpected command: ${command}`)
+      })
+      const started = (await post(handler, '/clickvibe/api/develop', {
+        url: issue.url,
+        agent: 'dryrun',
+        baseline: 'origin/release/must-be-ignored',
+      })) as { status: number; body: { taskId?: string } }
+      assert.equal(started.status, 200)
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      const polled = (await post(handler, '/clickvibe/api/develop/poll', {
+        taskId: started.body.taskId,
+        cursor: 0,
+      })) as { body: { status?: string; delta?: string[] } }
+      return { commands, polled: polled.body }
+    }
+
+    const success = await runOne(906, false)
+    assert.equal(success.polled.status, 'done')
+    assert.match(success.polled.delta?.join('\n') ?? '', /fake\/worktree.*repo-issue-906/s)
+    assert.equal(
+      success.commands.some((command) => command.includes('release/must-be-ignored')),
+      false,
+    )
+
+    const failure = await runOne(907, true)
+    assert.equal(failure.polled.status, 'failed')
+    assert.match(failure.polled.delta?.join('\n') ?? '', /dry-run 失败/)
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
@@ -3602,6 +4087,10 @@ test('develop with user context stays a first development and records the note i
         if (api) return api
         if (spec.command === 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD')
           return { exitCode: 0, stdout: { text: 'origin/main' }, stderr: { text: '' } }
+        if (spec.command === "git show-ref --verify --quiet 'refs/remotes/origin/main'; echo $?")
+          return { exitCode: 0, stdout: { text: '0' }, stderr: { text: '' } }
+        if (spec.command === "git rev-parse --short 'origin/main'")
+          return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
         if (spec.command === 'git rev-parse --short HEAD')
           return { exitCode: 0, stdout: { text: 'f00d123' }, stderr: { text: '' } }
         if (spec.command.startsWith('gh issue comment')) {

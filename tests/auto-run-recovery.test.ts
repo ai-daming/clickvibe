@@ -12,6 +12,7 @@ import {
   handleAutoRunControllerFailure,
   maintainPausedAutoRun,
 } from '../src/workflow/auto-run-recovery.ts'
+import { requestAutoRunReconcile } from '../src/workflow/auto-run.ts'
 import { commitWorkflowFixture } from './workflow-fixture.ts'
 
 function workflow(tempHome: string, number: string, overrides: Partial<IssueWorkflow> = {}): IssueWorkflow {
@@ -356,6 +357,41 @@ test('temporarily unavailable workflow storage keeps a wake armed instead of aba
     assert.ok(records.some((record) => record.event === 'auto-run-state-unavailable'))
   } finally {
     clearAutoRunTimers(key)
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('rapid rate-limit reconciles during one circuit window defer only once', async () => {
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-defer-dedupe-'))
+  const previousHome = process.env.HOME
+  process.env.HOME = tempHome
+  try {
+    const current = workflow(tempHome, '122', {
+      stage: 'developing',
+      devTaskId: 'dev-task-122',
+      devHostJobId: 'clickvibe-122',
+    })
+    await commitWorkflowFixture(current, current.revision ?? null)
+    const resetAt = Date.now() + 120_000 // 远离触发,只验证去抖
+    const ctx = Object.defineProperty({}, 'jobs', {
+      get() {
+        throw new GithubRateLimitError(resetAt)
+      },
+    })
+    // 模拟面板轮询:熔断窗口内连续 3 次 reconcile
+    requestAutoRunReconcile(ctx as never, current.key)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    requestAutoRunReconcile(ctx as never, current.key)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    requestAutoRunReconcile(ctx as never, current.key)
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    const observed = await loadWorkflow(current.key)
+    const defers = (observed?.events ?? []).filter((event) => (event.note ?? '').includes('限流'))
+    assert.equal(defers.length, 1, `同一熔断窗口只应记录一次等待,实际 ${defers.length} 次`)
+    assert.equal(observed?.autoRun?.status, 'running')
+  } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })

@@ -84,6 +84,15 @@ test('controller triggers only actions derived by the authoritative state view',
     }),
     { kind: 'trigger', action: 'rework', step: 1, rounds: 0, unresolved: [] },
   )
+  assert.deepEqual(
+    decideAutoRun({
+      autoRun: running(),
+      nextAction: { kind: 'restore-base', label: '恢复基线', hint: '' },
+      now: Date.parse('2026-08-23T01:00:00Z'),
+      reviewEvents: [],
+    }),
+    { kind: 'pause', reason: 'authorization-denied', rounds: 0, unresolved: [] },
+  )
 })
 
 test('orphan detection never pauses a fresh or task-owned auto-run (issue #111 止血)', () => {

@@ -14,6 +14,7 @@ import { syncConfiguredRepository } from './repository-sync.ts'
 import { resumeDevelop } from './resume.ts'
 import { startReview } from './review-flow.ts'
 import { syncWorktree } from './sync.ts'
+import { restoreBaseBranch } from './baseline-restore.ts'
 import { pollDevelop, stopTask } from './task-api.ts'
 
 /** Body size bound of one JSON request. */
@@ -134,6 +135,17 @@ export async function handleApiPost(
   if (method === 'sync') {
     const securityError = privilegedRequestError(req)
     if (securityError) return { status: 403, body: { ok: false, error: securityError } }
+    if ((payload as { restoreBase?: unknown } | undefined)?.restoreBase === true) {
+      try {
+        if (!consumeAuthorization('restore-base', payload)) {
+          return { status: 403, body: { ok: false, error: '恢复基线授权无效、已使用或已过期,请重新确认' } }
+        }
+      } catch (error) {
+        return { status: 400, body: { ok: false, error: String(error instanceof Error ? error.message : error) } }
+      }
+      const result = await restoreBaseBranch(ctx, payload)
+      return { status: result.ok ? 200 : 400, body: result }
+    }
     const repoKey = String((payload as { repoKey?: unknown } | undefined)?.repoKey ?? '').trim()
     const result = repoKey ? await syncConfiguredRepository(ctx, payload) : await syncWorktree(ctx, payload)
     return { status: result.ok ? 200 : 400, body: result }
