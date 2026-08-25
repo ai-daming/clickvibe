@@ -36,6 +36,7 @@ import {
   buildStagePrompt,
   type PromptSnapshot,
   type SnapshotFreshness,
+  reworkRoundDirective,
   selectReviewFeedback,
   snapshotWithoutReviewFeedback,
 } from './prompt.ts'
@@ -221,6 +222,7 @@ export async function buildReviewPrompt(
       ...(extraContext ? ['附加上下文:', extraContext] : []),
     ],
     requirements: [
+      '本轮 review 采用根因 review 协议:先读取 PR/issue 上全部历史 review 轮次做母题分类(同类复发必须点名轮次),对每个 finding 给出代码根因(什么构造让这类问题不可能)与过程根因(为什么活到本轮);先做静态枚举审计(枚举全部可违反路径,非构造保护即为 finding,不需要复现),再做动态对抗验证(CRITICAL 必须复现,含失败率);判定修复高度时对比改造前后的公开 API/导出面,排除改名式修复;结论按 verdict 输出(pass/fix-these/stop-and-redesign),同类连续复发或 diff 持续发散时输出 stop-and-redesign 而非问题清单。若仓库存在 skills/root-cause-review/SKILL.md 或 docs/fix-discipline.md,以其全文为准。',
       '先执行 git fetch origin 同步远端最新状态(并行开发时 base 可能已变化)。',
       `执行 git diff ${base}...HEAD 查看完整改动。`,
       ...(sessionId ? ['先复核之前发现的问题是否已解决,再审查全部新改动。'] : []),
@@ -270,6 +272,9 @@ export async function buildResumePrompt(
     ],
     reviewFeedback,
     requirements: [
+      ...(rework ? [reworkRoundDirective(reviewFeedback?.text ?? null)] : []).filter(
+        (directive): directive is string => directive !== null,
+      ),
       ...(mergePreface ? [mergePreface] : []),
       ...(sessionId
         ? ['优先利用当前会话记忆继续工作,但记忆与当前需求快照冲突时以快照为准。']

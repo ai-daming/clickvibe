@@ -35,3 +35,18 @@ test('terminal keeps short system, stage, command and message events directly vi
   assert.doesNotMatch(html, /hidden usage/)
   assert.doesNotMatch(html, />展开/)
 })
+
+test('terminal numbers logical lines continuously while collapsed blocks reserve hidden locations', () => {
+  const longOutput = Array.from({ length: 21 }, (_, index) => `output ${index + 1}`).join('\n')
+  const html = render([
+    { source: 'agent', kind: 'message', text: 'first\nsecond' },
+    { source: 'agent', kind: 'command_output', text: longOutput },
+    { source: 'agent', kind: 'message', text: 'after collapsed output' },
+  ])
+
+  assert.match(html, /cv-terminal-line-number[^>]*>1</)
+  assert.match(html, /cv-terminal-line-number[^>]*>2</)
+  assert.match(html, /cv-terminal-line-number[^>]*>3</)
+  assert.match(html, /cv-terminal-line-number[^>]*>24</)
+  assert.doesNotMatch(html, /cv-terminal-line-number[^>]*>11</)
+})

@@ -21,6 +21,11 @@ export interface CollapsedLogBlock {
   lineCount: number
 }
 
+export interface NumberedLogLine {
+  number: number
+  text: string
+}
+
 function appendCommandOutput(current: string, next: string): string {
   if (current === '' || next === '' || current.endsWith('\n') || next.startsWith('\n')) return current + next
   return `${current}\n${next}`
@@ -54,6 +59,13 @@ function logicalLines(text: string): string[] {
   const lines = text.split('\n')
   if (text.endsWith('\n')) lines.pop()
   return lines
+}
+
+/** Split display text into addressable lines without treating a trailing newline as new content. */
+export function numberLogLines(text: string, startNumber: number): NumberedLogLine[] {
+  const lines = logicalLines(text)
+  if (lines.length === 0) return [{ number: startNumber, text: '' }]
+  return lines.map((line, index) => ({ number: startNumber + index, text: line }))
 }
 
 function previewLines(lines: readonly string[]): string {
