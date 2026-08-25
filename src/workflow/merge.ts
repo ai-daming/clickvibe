@@ -31,6 +31,7 @@ import {
   loadWorkflow,
   commitWorkflowMetadata,
   workflowRevision,
+  WorkflowConflictError,
 } from '../infra/state.ts'
 import { collectMergeGateFailures, type MergeGateFailure, mergeGateRejection } from './merge-gates.ts'
 import { workflowBaseBranch } from './state-view.ts'
@@ -61,16 +62,37 @@ export type MergeAuthorizationPreview =
       cleanup: string[]
     }
 
+/**
+ * 重放规则(#127 现场):清理进度三件套(delivery/issueState/autoRun)以内存最新为准;
+ * events 以磁盘为准——merge 是长操作,期间并发写(defer 事件、完成收尾)会推进 revision,
+ * 整对象快照不得覆盖它们的 events。
+ */
+export function replayMergeMetadata(disk: IssueWorkflow, memory: IssueWorkflow): void {
+  disk.delivery = memory.delivery
+  disk.issueState = memory.issueState
+  disk.autoRun = memory.autoRun
+}
+
 async function persistMergeMetadata(workflow: IssueWorkflow): Promise<void> {
-  Object.assign(
-    workflow,
-    await commitWorkflowMetadata(workflow, workflowRevision(workflow), {
-      delivery: workflow.delivery,
-      issueState: workflow.issueState,
-      autoRun: workflow.autoRun,
-      events: workflow.events,
-    }),
-  )
+  for (let attempt = 0; ; attempt += 1) {
+    const current = (await loadWorkflow(workflow.key)) ?? workflow
+    replayMergeMetadata(current, workflow)
+    try {
+      Object.assign(
+        workflow,
+        await commitWorkflowMetadata(current, workflowRevision(current), {
+          delivery: current.delivery,
+          issueState: current.issueState,
+          autoRun: current.autoRun,
+        }),
+      )
+      return
+    } catch (error) {
+      // revision 冲突:重载-重放-重试(3 次)。冲突不再逃逸到清理步骤的 catch,
+      // 否则会被贴上"删除远端分支失败"之类的错误标签(#127 的归因事故)。
+      if (!(error instanceof WorkflowConflictError) || attempt >= 2) throw error
+    }
+  }
 }
 
 export async function mergeAuthorizationPreview(ctx: Context, url: string): Promise<MergeAuthorizationPreview> {

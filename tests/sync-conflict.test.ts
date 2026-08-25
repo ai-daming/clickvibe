@@ -475,3 +475,27 @@ test('merge preface guides the resume/rework agent through conflict then stalene
     await rm(root, { recursive: true, force: true })
   }
 })
+
+// ---- #127 现场:merge/cleanup 持久化冲突的良性重放 ----
+
+test('replayMergeMetadata keeps concurrent disk events and memory cleanup state', async () => {
+  const { replayMergeMetadata } = await import('../src/workflow/merge.ts')
+  const disk = {
+    events: [{ kind: 'auto-run', note: '磁盘上的并发事件(defer)' }],
+    delivery: { status: 'archived' },
+    issueState: 'CLOSED',
+  } as never
+  const memory = {
+    events: [{ kind: 'merge', note: '内存旧快照的事件' }],
+    delivery: { status: 'cleanup-pending', cleanup: { worktree: true } },
+    issueState: 'OPEN',
+  } as never
+  // 重放规则:清理进度三件套(delivery/issueState/autoRun)以内存为准;
+  // events 以磁盘为准——整对象快照不得覆盖并发事件。
+  replayMergeMetadata(disk, memory)
+  const replayed = disk as { events: unknown[]; delivery: { status: string }; issueState: string }
+  assert.equal(replayed.delivery.status, 'cleanup-pending')
+  assert.equal(replayed.issueState, 'OPEN')
+  assert.equal(replayed.events.length, 1)
+  assert.match(JSON.stringify(replayed.events[0]), /defer/)
+})
