@@ -91,6 +91,7 @@ interface PrFactForDerivation {
   reviewDecision: string | null
   headRefOid?: string
   baseRefName?: string
+  baseRefOid?: string
 }
 
 export interface DeriveOptions {
@@ -189,6 +190,66 @@ export async function listConflictFiles(ctx: Context, workdir: string): Promise<
 /** Format a conflict-file list as a readable suffix (";冲突文件:a、b"), '' when none. */
 export function conflictFileSuffix(files: string[]): string {
   return files.length > 0 ? `;冲突文件:${files.join('、')}` : ''
+}
+
+/** Fetch and enumerate origin remote branches for a first-development preview. */
+export async function fetchOriginBranches(
+  ctx: Context,
+  repoPath: string,
+): Promise<{ defaultRemoteBase: string; refs: string[] }> {
+  const policy = { mode: 'danger-full-access' as const, workspaceRoot: repoPath }
+  await runCommand(ctx, 'git fetch origin --prune', { workdir: repoPath, timeoutMs: 60_000, sandboxPolicy: policy })
+  let defaultRemoteBase = await runCommand(ctx, 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD', {
+    workdir: repoPath,
+    timeoutMs: 10_000,
+    sandboxPolicy: { mode: 'read-only', workspaceRoot: repoPath },
+  }).catch(() => '')
+  if (!defaultRemoteBase) {
+    const main = await runCommand(ctx, "git show-ref --verify --quiet 'refs/remotes/origin/main'; echo $?", {
+      workdir: repoPath,
+      timeoutMs: 10_000,
+      sandboxPolicy: { mode: 'read-only', workspaceRoot: repoPath },
+    })
+    if (main.trim() !== '0') throw new Error('无法确定 origin 默认分支,请设置 origin/HEAD')
+    defaultRemoteBase = 'origin/main'
+  }
+  const output = await runCommand(ctx, "git for-each-ref --format='%(refname:short)' refs/remotes/origin", {
+    workdir: repoPath,
+    timeoutMs: 10_000,
+    sandboxPolicy: { mode: 'read-only', workspaceRoot: repoPath },
+  })
+  return {
+    defaultRemoteBase,
+    refs: output
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean),
+  }
+}
+
+/** Return the current remote-tracking tip only when a completed HEAD actually contains it. */
+export async function readIntegratedRemoteTip(
+  ctx: Context,
+  worktree: string,
+  remoteBase: string,
+  head: string,
+): Promise<string | null> {
+  const policy = { mode: 'read-only' as const, workspaceRoot: worktree }
+  try {
+    const tip = await runCommand(ctx, `git rev-parse --verify ${shellQuote(`refs/remotes/${remoteBase}^{commit}`)}`, {
+      workdir: worktree,
+      timeoutMs: 10_000,
+      sandboxPolicy: policy,
+    })
+    await runCommand(ctx, `git merge-base --is-ancestor ${shellQuote(tip)} ${shellQuote(head)}`, {
+      workdir: worktree,
+      timeoutMs: 10_000,
+      sandboxPolicy: policy,
+    })
+    return tip
+  } catch {
+    return null
+  }
 }
 
 /** Preface instruction for resume/rework agents when the worktree is not on the

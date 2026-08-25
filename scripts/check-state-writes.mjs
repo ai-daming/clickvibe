@@ -30,6 +30,7 @@ const PERSISTENCE_IMPORTS = new Map([
   ['src/workflow/task-claim.ts', new Set(['claimWorkflowTaskCommand'])],
   ['src/workflow/task-lease.ts', new Set(['mutateWorkflowTaskCommand', 'WorkflowTaskCommitResult'])],
   ['src/workflow/task-api.ts', new Set(['stopWorkflowTaskCommand'])],
+  ['src/infra/baseline-restore-git.ts', new Set(['withBaselineRestoreWorkflowLocksCommand'])],
 ])
 
 async function collect(directory) {

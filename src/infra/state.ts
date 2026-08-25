@@ -73,7 +73,7 @@ export interface IssueWorkflow {
   prNumber: string | null
   /** 最近一次从 GitHub 看到的 issue 状态(推导『已关闭→无动作』,issue #5)。 */
   issueState: 'OPEN' | 'CLOSED'
-  /** 开发基线:开 worktree 时基于的分支与提交(如 origin/main @ a8a7b5f)。 */
+  /** 开发基线:不可变远端分支 + 最近一次成功合入 worktree 并持久化的 tip。 */
   baseRef: string | null
   /** GitHub merge 已确认后的不可逆事实与幂等清理进度。 */
   delivery?: WorkflowDelivery
@@ -102,6 +102,7 @@ export interface WorkflowEvent {
   verdict?: { passed: boolean; issues: string[] } // review 结论(仅 review 事件)
   /** review 启动时冻结的 Issue 验收契约。旧事件缺失时按过期处理。 */
   issueContract?: IssueContractSnapshot
+  reviewBase?: { ref: string; sha: string } // PR retargeting invalidates the verdict
   /** 本次开发完成前仍待修复的上一轮 review 问题数。 */
   fixed?: number
   /** 用户在动作触发时填写的附加说明(issue #54);只进 prompt 与本地时间线,不发布到 GitHub。 */
@@ -181,7 +182,6 @@ export async function appendEvent(
   )
 }
 
-/** Derive the per-issue state directory. */
 export function stateDir(): string {
   return join(homedir(), '.clickvibe', 'state')
 }
@@ -235,20 +235,23 @@ async function storedWorkflowFiles(): Promise<string[]> {
 
 async function migrateWorkflowLogs(workflow: IssueWorkflow): Promise<void> {
   for (const kind of ['dev', 'review'] as const) {
-    const legacy = join(stateDir(), workflow.key, `${kind}.log`)
     const taskId = kind === 'dev' ? workflow.devTaskId : workflow.reviewTaskId
     if (!taskId) continue
-    try {
-      await migrateLegacyLog(
-        stateDir(),
-        workflow,
-        kind,
-        taskId,
-        legacy,
-        new Date(workflow.updatedAt || 0).toISOString(),
-      )
-    } catch {
-      // Best effort: leave the source untouched so a later startup can retry.
+    const storageKeys = [workflow.key, legacyIssueKey(workflow.key)].filter((key): key is string => key !== null)
+    for (const storageKey of storageKeys) {
+      try {
+        await migrateLegacyLog(
+          stateDir(),
+          workflow,
+          kind,
+          taskId,
+          join(stateDir(), storageKey, `${kind}.log`),
+          new Date(workflow.updatedAt || 0).toISOString(),
+        )
+        break
+      } catch {
+        // Best effort: try the legacy alias or leave the source for a later retry.
+      }
     }
   }
 }
@@ -317,14 +320,14 @@ export async function loadWorkflow(key: string): Promise<IssueWorkflow | null> {
   return null
 }
 
-export async function loadAllWorkflows(): Promise<IssueWorkflow[]> {
+export async function loadAllWorkflows(includeArchived = false): Promise<IssueWorkflow[]> {
   await migrateLegacyState()
   const workflows: IssueWorkflow[] = []
   for (const path of await storedWorkflowFiles()) {
     const workflow = await readWorkflowFile(path)
     if (workflow) {
       await migrateWorkflowLogs(workflow)
-      if (workflow.delivery?.status !== 'archived') workflows.push(workflow)
+      if (includeArchived || workflow.delivery?.status !== 'archived') workflows.push(workflow)
     }
   }
   return workflows.sort((a, b) => b.updatedAt - a.updatedAt)

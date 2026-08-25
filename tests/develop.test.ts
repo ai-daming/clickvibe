@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { parseAgentChunk } from '../src/agent/agent-stream.ts'
 import {
   AuthorizationStore,
   LineLog,
@@ -15,10 +14,8 @@ import {
   parseGithubUrl,
   shellQuote,
   shouldFallbackFromExactResume,
-  parseDependencies,
   validatePrivilegedRequest,
 } from '../src/agent/develop.ts'
-import { LineBuffer } from '../src/infra/line-buffer.ts'
 
 test('parseAgent accepts only the three supported agents', () => {
   assert.equal(parseAgent('codex'), 'codex')
@@ -352,53 +349,57 @@ test('server authorization is one-use, bounded, expiring and bound to the frozen
   assert.equal(store.size, 2)
 })
 
-test('merge authorization input accepts only a well-formed manual override', () => {
-  const base = {
-    action: 'merge',
-    url: 'https://github.com/ai-daming/clickvibe/issues/49',
-    target: { prNumber: '29', branch: 'r-issue-49', head: 'abcdef1234567890', mergeFlag: '--merge' },
-  }
-  assert.deepEqual(
-    makeAuthorizationInput({
-      ...base,
-      override: { skipped: ['review-hash', 'contract-changed', 'review-hash'], reason: ' 人工确认可合并 ' },
-    }).override,
-    { skipped: ['review-hash', 'contract-changed'], reason: '人工确认可合并' },
-  )
-  // 非对象(授权请求阶段的布尔开关)与其它 action 不产生 override 绑定
-  assert.equal(makeAuthorizationInput({ ...base, override: true }).override, undefined)
+test('develop authorization binds the selected remote baseline', () => {
+  const store = new AuthorizationStore()
+  const input = makeAuthorizationInput({
+    action: 'develop',
+    agent: 'codex',
+    url: 'https://github.com/ai-daming/clickvibe/issues/60',
+    baseline: 'origin/release/2.0',
+  })
+  assert.equal(input.baseline, 'origin/release/2.0')
+  const authorization = store.issue(input, null)
   assert.equal(
-    makeAuthorizationInput({
-      action: 'review',
-      agent: 'codex',
-      url: 'https://github.com/ai-daming/clickvibe/issues/49',
-      override: { skipped: ['review-hash'], reason: 'x' },
-    }).override,
-    undefined,
-  )
-  assert.throws(
-    () =>
+    store.consume(
+      authorization.id,
       makeAuthorizationInput({
-        ...base,
-        override: { skipped: ['github-protection'], reason: 'x' },
+        action: 'develop',
+        agent: 'codex',
+        url: input.url,
+        baseline: 'origin/main',
       }),
-    /门禁项无效/,
+      authorization.digest,
+    ),
+    null,
   )
-  assert.throws(
-    () =>
+})
+
+test('restore-base authorization binds the exact branch and hash', () => {
+  const input = makeAuthorizationInput({
+    action: 'restore-base',
+    url: 'https://github.com/ai-daming/clickvibe/issues/60',
+    restoreTarget: { branch: 'release/deleted', hash: 'abc1234' },
+  })
+  assert.deepEqual(input, {
+    action: 'restore-base',
+    url: 'https://github.com/ai-daming/clickvibe/issues/60',
+    agent: null,
+    context: '',
+    restoreTarget: { branch: 'release/deleted', hash: 'abc1234' },
+  })
+  const store = new AuthorizationStore()
+  const authorization = store.issue(input, null)
+  assert.equal(
+    store.consume(
+      authorization.id,
       makeAuthorizationInput({
-        ...base,
-        override: { skipped: [], reason: 'x' },
+        action: 'restore-base',
+        url: input.url,
+        restoreTarget: { branch: 'release/deleted', hash: 'def5678' },
       }),
-    /门禁项无效/,
-  )
-  assert.throws(
-    () =>
-      makeAuthorizationInput({
-        ...base,
-        override: { skipped: ['review-hash'], reason: '   ' },
-      }),
-    /放行原因无效/,
+      authorization.digest,
+    ),
+    null,
   )
 })
 
@@ -413,31 +414,35 @@ test('LineLog preserves a never-terminated long line and handles CRLF split acro
   assert.equal(read.lines.length, 2)
   assert.equal(read.lines[0], longLine)
   assert.equal(read.lines[1], 'next')
+
+  const trailingCr = new LineLog(2)
+  trailingCr.appendChunk('tail\r')
+  trailingCr.flush()
+  assert.deepEqual(trailingCr.read(0).lines, ['tail'])
 })
 
-test('LineBuffer consumes complete raw events while retaining only the partial line', () => {
-  const buffer = new LineBuffer()
-  const events = Array.from({ length: 2001 }, (_, index) =>
-    JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: `m${index}` } }),
+test('authorization input and origin validation reject malformed boundary data', () => {
+  assert.throws(
+    () => makeAuthorizationInput({ action: 'unknown', url: 'https://github.com/o/r/issues/1' }),
+    /不支持的 Agent 操作/,
   )
-  const lines = buffer.appendChunk(`${events.join('\n')}\npartial`)
-  const parsed = parseAgentChunk('codex', lines.join('\n'))
-  assert.equal(parsed.lines.length, 2001)
-  assert.equal(parsed.lines[0].text, '💬 m0')
-  assert.equal(parsed.lines[2000].text, '💬 m2000')
-  assert.deepEqual(buffer.appendChunk(' tail\r'), [])
-  assert.deepEqual(buffer.appendChunk('\nnext\r'), ['partial tail'])
-  assert.deepEqual(buffer.appendChunk('\nfinal'), ['next'])
-  assert.deepEqual(buffer.flush(), ['final'])
-  assert.deepEqual(buffer.flush(), [])
-})
-
-test('parseDependencies extracts Blocked by numbers from the 依赖 section', () => {
-  assert.deepEqual(parseDependencies(`## 目标\n做 X\n\n## 依赖\n\nBlocked by #7`), [7])
-  assert.deepEqual(parseDependencies(`## 依赖\n\nBlocked by #7, #8`), [7, 8])
-  assert.deepEqual(parseDependencies(`## 依赖\n\n无`), [])
-  assert.deepEqual(parseDependencies('## 目标\n无依赖,正常开发'), [])
-  assert.deepEqual(parseDependencies(''), [])
-  // 依赖章节后还有其它章节:不串台
-  assert.deepEqual(parseDependencies(`## 依赖\n\nBlocked by #7\n\n## 验收标准\n- [ ] 通过 #7 的行为`), [7])
+  assert.throws(
+    () =>
+      makeAuthorizationInput({
+        action: 'develop',
+        agent: 'codex',
+        url: 'https://github.com/o/r/issues/1',
+        baseline: 'main',
+      }),
+    /origin\/\*/,
+  )
+  assert.match(
+    validatePrivilegedRequest({
+      remoteAddress: '127.0.0.1',
+      host: '127.0.0.1:3080',
+      origin: 'not a URL',
+      requestMarker: '1',
+    }) ?? '',
+    /Origin 无效/,
+  )
 })

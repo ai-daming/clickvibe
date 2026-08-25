@@ -19,6 +19,7 @@ import { applyDevRunOutcome, loadWorkflow, readLogTail } from '../src/infra/stat
 import { createFakeJobs } from './fake-jobs.ts'
 
 const execFileAsync = promisify(execFile)
+const saveWorkflow = (workflow: IssueWorkflow) => commitWorkflowFixture(workflow, workflow.revision ?? null)
 
 /** A minimal real-shell ctx: resolve passes the spec through, run executes it. */
 function realShellCtx() {
@@ -88,7 +89,7 @@ async function setupConflictedRepo() {
 }
 
 /** Set up an existing remote PR branch that can merge the advanced main cleanly. */
-async function setupSyncableRepo() {
+async function setupSyncableRepo(baseBranch = 'main') {
   const root = await mkdtemp(join(tmpdir(), 'clickvibe-sync-push-'))
   const remote = join(root, 'remote.git')
   const repo = join(root, 'repo')
@@ -107,18 +108,22 @@ async function setupSyncableRepo() {
   await git('branch', '-M', 'main')
   await git('push', '-u', 'origin', 'main')
   await remoteGit('symbolic-ref', 'HEAD', 'refs/heads/main')
+  if (baseBranch !== 'main') {
+    await git('switch', '-c', baseBranch)
+    await git('push', '-u', 'origin', baseBranch)
+  }
   await git('fetch', 'origin', '--prune')
-  await git('worktree', 'add', '-b', branch, worktree, 'origin/main')
+  await git('worktree', 'add', '-b', branch, worktree, `origin/${baseBranch}`)
   await writeFile(join(worktree, 'feature.md'), 'development\n')
   await wt('add', '.')
   await wt('commit', '-m', 'dev work')
   await wt('push', '-u', 'origin', branch)
   const remoteHeadBeforeSync = (await remoteGit('rev-parse', `refs/heads/${branch}`)).stdout.trim()
-  await git('switch', 'main')
+  await git('switch', baseBranch)
   await writeFile(join(repo, 'base.md'), 'base B\n')
   await git('add', '.')
   await git('commit', '-m', 'parallel base B')
-  await git('push', 'origin', 'main')
+  await git('push', 'origin', baseBranch)
   return { root, remote, worktree, branch, wt, remoteGit, remoteHeadBeforeSync }
 }
 
@@ -204,6 +209,28 @@ test('sync pushes the clean merge commit to the existing PR branch (issue #45)',
       assert.notEqual(localHead, remoteHeadBeforeSync)
       assert.equal(remoteHead, localHead)
       assert.equal(result.head, localShortHead)
+    })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('sync merges and records the frozen custom baseline', async () => {
+  const { root, worktree, branch, wt } = await setupSyncableRepo('release/2.0')
+  try {
+    await withTempHome(root, async () => {
+      const item = syncableWorkflow(worktree, branch)
+      item.baseRef = 'origin/release/2.0 @ frozen'
+      await saveWorkflow(item)
+
+      const result = await syncWorktree(ctx, { url: item.url })
+      assert.equal(result.ok, true)
+      const parents = (await wt('show', '-s', '--format=%P', 'HEAD')).stdout.trim().split(/\s+/)
+      const releaseHead = (await wt('rev-parse', 'origin/release/2.0')).stdout.trim()
+      assert.equal(parents.includes(releaseHead), true)
+      const saved = await loadWorkflow(item.key)
+      assert.equal(saved?.baseRef, `origin/release/2.0 @ ${releaseHead}`)
+      assert.match(saved?.events.at(-1)?.note ?? '', /origin\/release\/2\.0/)
     })
   } finally {
     await rm(root, { recursive: true, force: true })

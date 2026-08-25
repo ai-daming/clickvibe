@@ -130,6 +130,7 @@ export function githubCompareUrl(
   branch: string,
   baseRef: string | null | undefined,
   defaultBranch = 'main',
+  _baseRefAvailable = true,
 ): string {
   const base = workflowBaseBranch(baseRef, defaultBranch)
   return `https://github.com/${repoKey}/compare/${encodeURIComponent(base)}...${encodeURIComponent(branch)}?expand=1`

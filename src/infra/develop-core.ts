@@ -1,15 +1,23 @@
 import { createHash, randomBytes } from 'node:crypto'
+import {
+  isValidGitBranchName,
+  type MergeAuthorizationTarget,
+  mergeAuthorizationTarget,
+  type RestoreAuthorizationTarget,
+  restoreAuthorizationTarget,
+} from './authorization-target.ts'
+import { type AutoRunAuthorizationConfig, parseAutoRunAuthorization } from './auto-run-authorization.ts'
 import type { PromptSnapshot } from './contracts.ts'
 
 export type DevelopAgent = 'codex' | 'claude' | 'dryrun'
-export type AgentAction = 'develop' | 'review' | 'resume' | 'create-pr' | 'merge' | 'auto'
+export type AgentAction = 'develop' | 'review' | 'resume' | 'create-pr' | 'merge' | 'auto' | 'restore-base'
 
 /**
- * ClickVibe 自身合并门禁项(issue #49)。门禁拒绝时可由用户人工放行逐项跳过;
- * GitHub 侧保护(protected branch / required reviews)不在其中,永远不可跳过。
+ * ClickVibe 自身合并门禁项(issue #49);GitHub 侧保护永远不可跳过。
  */
 export const MERGE_OVERRIDE_GATES = [
   'review-hash', // 实时 PR HEAD 与最近一次通过的 review 结论哈希不一致
+  'review-base', // 实时 PR base 与最近一次通过的 review 基线身份不一致
   'review-contract-missing', // 最近通过的 review 缺少验收契约快照
   'contract-unreadable', // 无法读取当前验收契约
   'contract-changed', // 验收契约已变更
@@ -23,6 +31,7 @@ export const MERGE_OVERRIDE_REASON_MAX = 500
 /** 门禁 key → 面板/审计展示文案的唯一来源;服务端下发,客户端不再自行维护映射。 */
 export const MERGE_GATE_LABELS: Record<MergeOverrideGate, string> = {
   'review-hash': 'PR HEAD 与 review 结论哈希不一致',
+  'review-base': 'PR base 与 review 结论基线不一致',
   'review-contract-missing': 'review 缺少验收契约快照',
   'contract-unreadable': '无法读取当前验收契约',
   'contract-changed': '验收契约已变更',
@@ -231,27 +240,17 @@ export class LineLog {
 }
 
 export type IssuePromptSnapshot = PromptSnapshot
-
 export interface AgentAuthorizationInput {
   action: AgentAction
   url: string
   agent: 'codex' | 'claude' | null
   context: string
-  autoRun?: {
-    autoMerge: boolean
-    devAgent: 'codex' | 'claude'
-    reviewAgent: 'codex' | 'claude'
-    maxRounds: number
-    budgetHours: number
-  }
+  baseline?: string
+  autoRun?: AutoRunAuthorizationConfig
   /** Manual choice to abandon the resumable session while preserving git artifacts. */
   freshSession?: true
-  target?: {
-    prNumber: string
-    branch: string
-    head: string
-    mergeFlag: '--merge'
-  }
+  target?: MergeAuthorizationTarget
+  restoreTarget?: RestoreAuthorizationTarget
   /** 人工放行(仅 merge):被用户二次确认跳过的门禁项与放行原因;计入授权摘要,不可篡改。 */
   override?: {
     skipped: MergeOverrideGate[]
@@ -366,33 +365,42 @@ export function makeAuthorizationInput(value: {
   url?: unknown
   agent?: unknown
   context?: unknown
+  baseline?: unknown
   freshSession?: unknown
   target?: unknown
+  restoreTarget?: unknown
   override?: unknown
   autoRun?: unknown
 }): AgentAuthorizationInput {
   const action = String(value.action ?? '') as AgentAction
-  if (!['develop', 'review', 'resume', 'create-pr', 'merge', 'auto'].includes(action)) {
+  if (!['develop', 'review', 'resume', 'create-pr', 'merge', 'auto', 'restore-base'].includes(action)) {
     throw new Error('不支持的 Agent 操作')
   }
-  const parsedAgent = action === 'merge' || action === 'create-pr' || action === 'auto' ? null : parseAgent(value.agent)
+  const parsedAgent =
+    action === 'merge' || action === 'create-pr' || action === 'auto' || action === 'restore-base'
+      ? null
+      : parseAgent(value.agent)
   if (parsedAgent === 'dryrun') throw new Error('dryrun 不需要高权限授权')
   const url = String(value.url ?? '').trim()
   if (!parseGithubUrl(url)) throw new Error('GitHub URL 无效')
+  let baseline: string | undefined
+  if (action === 'develop' && value.baseline !== undefined) {
+    baseline = String(value.baseline).trim()
+    if (!baseline.startsWith('origin/') || !isValidGitBranchName(baseline.slice('origin/'.length))) {
+      throw new Error('开发基线只接受 origin/* 远端分支')
+    }
+  }
   const freshSession = value.freshSession === true
   if (freshSession && action !== 'resume' && action !== 'review') {
     throw new Error('新开会话只支持 resume 或 review')
   }
   let target: AgentAuthorizationInput['target']
   if (action === 'merge' && value.target !== undefined) {
-    const raw = value.target as Record<string, unknown>
-    const prNumber = String(raw?.prNumber ?? '').trim()
-    const branch = String(raw?.branch ?? '').trim()
-    const head = String(raw?.head ?? '').trim()
-    if (!/^\d+$/.test(prNumber) || branch === '' || !/^[0-9a-f]{7,64}$/i.test(head) || raw?.mergeFlag !== '--merge') {
-      throw new Error('合并授权目标无效')
-    }
-    target = { prNumber, branch, head, mergeFlag: '--merge' }
+    target = mergeAuthorizationTarget(value.target)
+  }
+  let restoreTarget: AgentAuthorizationInput['restoreTarget']
+  if (action === 'restore-base' && value.restoreTarget !== undefined) {
+    restoreTarget = restoreAuthorizationTarget(value.restoreTarget)
   }
   let override: AgentAuthorizationInput['override']
   if (
@@ -413,27 +421,17 @@ export function makeAuthorizationInput(value: {
     }
     override = { skipped: skipped as MergeOverrideGate[], reason }
   }
-  let autoRun: AgentAuthorizationInput['autoRun']
-  if (action === 'auto') {
-    const raw = (value.autoRun ?? {}) as Record<string, unknown>
-    const devAgent = String(raw.devAgent ?? '')
-    const reviewAgent = String(raw.reviewAgent ?? '')
-    const maxRounds = Number(raw.maxRounds)
-    const budgetHours = Number(raw.budgetHours)
-    if (devAgent !== 'codex' && devAgent !== 'claude') throw new Error('开发 agent 无效')
-    if (reviewAgent !== 'codex' && reviewAgent !== 'claude') throw new Error('Review agent 无效')
-    if (!Number.isInteger(maxRounds) || maxRounds <= 0) throw new Error('轮次上限必须是正整数')
-    if (!Number.isFinite(budgetHours) || budgetHours <= 0) throw new Error('总预算必须是正数')
-    autoRun = { autoMerge: raw.autoMerge === true, devAgent, reviewAgent, maxRounds, budgetHours }
-  }
+  const autoRun = action === 'auto' ? parseAutoRunAuthorization(value.autoRun) : undefined
   return {
     action,
     url,
     agent: parsedAgent,
     context: typeof value.context === 'string' ? value.context.trim() : '',
+    ...(baseline ? { baseline } : {}),
     ...(autoRun ? { autoRun } : {}),
     ...(freshSession ? { freshSession: true } : {}),
     ...(target ? { target } : {}),
+    ...(restoreTarget ? { restoreTarget } : {}),
     ...(override ? { override } : {}),
   }
 }

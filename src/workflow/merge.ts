@@ -1,22 +1,4 @@
-/**
- * clickvibe host half — routes:
- * - `/clickvibe/api/fetch`          — fetch GitHub issue/PR data via gh
- * - `/clickvibe/api/command`        — text-command entry (issue #13): conversation
- *                                      triggers reuse the same action handlers below
- * - `/clickvibe/api/state`          — restore panel context (all workflows)
- * - `/clickvibe/api/develop`        — start dev: worktree+branch+agent
- * - `/clickvibe/api/develop/poll`   — incremental dev log/status (JSON)
- * - `/clickvibe/api/history`        — complete disk-backed task history
- * - `/clickvibe/api/stream`         — SSE live status stream for a task
- * - `/clickvibe/api/review`         — review the dev branch with codex/claude
- * - `/clickvibe/api/resume`         — resume an interrupted dev session
- * - `/clickvibe/api/sync`           — sync the worktree with the remote base (issue #5)
- *
- * Workflow per issue (persisted under ~/.clickvibe/state/):
- *   developing → review-ready → reviewing → passed
- *                      ↑                  │
- *                      └── rework ────────┘
- */
+/** Privileged merge authorization, gates, cleanup and archival workflow. */
 
 import { existsSync } from 'node:fs'
 import { userInfo } from 'node:os'
@@ -52,6 +34,9 @@ import {
 } from '../infra/state.ts'
 import { collectMergeGateFailures, type MergeGateFailure, mergeGateRejection } from './merge-gates.ts'
 import { workflowBaseBranch } from './state-view.ts'
+import { baselineRestorePreview } from './baseline-restore.ts'
+import { type DevelopBaselinePreview, developBaselinePreview } from './develop-baseline-preview.ts'
+import { withWorkflowLock } from '../infra/workflow-lock.ts'
 
 export type MergeAuthorizationPreview =
   | {
@@ -59,6 +44,8 @@ export type MergeAuthorizationPreview =
       prNumber: string
       branch: string
       head: string
+      baseRef: string
+      baseSha: string
       mergeFlag: '--merge'
       cleanup: string[]
     }
@@ -68,6 +55,8 @@ export type MergeAuthorizationPreview =
       prNumber: string
       branch: string
       head: string
+      baseRef: string
+      baseSha: string
       mergeFlag: '--merge'
       cleanup: string[]
     }
@@ -90,19 +79,29 @@ export async function mergeAuthorizationPreview(ctx: Context, url: string): Prom
   const repoKey = `${parsed.owner}/${parsed.repo}`
   const workflow = await loadWorkflow(issueKey(repoKey, parsed.number))
   if (!workflow || !workflow.prNumber) throw new Error('未找到可合并的 workflow 或关联 PR')
-  const lookup = await fetchGithubPrFact(ctx, repoKey, workflow.branch, workflow.prNumber)
+  const lookup = await fetchGithubPrFact(ctx, repoKey, workflow.branch, workflow.prNumber, true, true)
   if (!lookup.known || !lookup.pr) throw new Error('无法读取实时 PR 状态,请稍后重试')
   if (lookup.pr.state === 'CLOSED') throw new Error('PR 已关闭且未合并,不能执行合并')
   if (lookup.pr.headRefName !== workflow.branch) throw new Error('实时 PR 分支与 workflow 不一致,拒绝合并')
+  if (!lookup.pr.baseRefName || !lookup.pr.baseRefOid) throw new Error('实时 PR base 身份缺失,拒绝生成合并授权')
   const base = {
     prNumber: lookup.pr.number,
     branch: workflow.branch,
     head: lookup.pr.headRefOid ?? workflow.delivery?.prHead ?? '',
+    baseRef: lookup.pr.baseRefName,
+    baseSha: lookup.pr.baseRefOid,
     mergeFlag: '--merge' as const,
     cleanup: ['worktree', '本地分支', '远端分支', `Issue #${parsed.number}`, 'workflow 归档'],
   }
   if (!workflow.delivery) {
-    const gateFailures = await collectMergeGateFailures(ctx, workflow, lookup.pr.headRefOid ?? '')
+    const gateFailures = await collectMergeGateFailures(
+      ctx,
+      workflow,
+      lookup.pr.headRefOid ?? '',
+      lookup.pr.baseRefName && lookup.pr.baseRefOid
+        ? { ref: lookup.pr.baseRefName, sha: lookup.pr.baseRefOid }
+        : undefined,
+    )
     if (gateFailures.length > 0) return { ok: false, gateFailures, ...base }
   }
   return { ok: true, ...base }
@@ -119,6 +118,7 @@ export async function authorizeAgent(
       expiresAt: number
       preview: unknown
       target?: AgentAuthorizationInput['target']
+      restoreTarget?: AgentAuthorizationInput['restoreTarget']
       override?: AgentAuthorizationInput['override']
     }
   | { ok: false; error: string; gateFailures?: MergeGateFailure[] }
@@ -133,7 +133,9 @@ export async function authorizeAgent(
     const action = String(body.action ?? '') as AgentAuthorizationInput['action']
     const input = authorizationInputFromPayload(action, payload)
     let snapshot: IssuePromptSnapshot | null = null
+    let baselinePreview: DevelopBaselinePreview | null = null
     let mergePreview: Extract<Awaited<ReturnType<typeof mergeAuthorizationPreview>>, { ok: true }> | null = null
+    let restorePreview: Awaited<ReturnType<typeof baselineRestorePreview>> | null = null
     let mergeOverride: AgentAuthorizationInput['override']
     if (input.action === 'develop' || input.action === 'auto') {
       const fetched = await fetchIssue(ctx, { url: input.url })
@@ -143,6 +145,9 @@ export async function authorizeAgent(
       if (JSON.stringify(body.expectedSnapshot) !== JSON.stringify(snapshot)) {
         return { ok: false, error: 'Issue 内容已变化或未提供完整预览快照,请刷新面板并重新确认' }
       }
+      if (input.action === 'develop') baselinePreview = await developBaselinePreview(ctx, input.url, input.baseline)
+    } else if (input.action === 'restore-base') {
+      restorePreview = await baselineRestorePreview(ctx, input.url)
     } else if (input.action === 'merge') {
       const preview = await mergeAuthorizationPreview(ctx, input.url)
       if (preview.ok) {
@@ -164,6 +169,8 @@ export async function authorizeAgent(
           prNumber: preview.prNumber,
           branch: preview.branch,
           head: preview.head,
+          baseRef: preview.baseRef,
+          baseSha: preview.baseSha,
           mergeFlag: preview.mergeFlag,
           cleanup: preview.cleanup,
           // 预览同时给出被跳过门禁项的明细,供客户端逐项二次确认。
@@ -178,11 +185,18 @@ export async function authorizeAgent(
             prNumber: mergePreview.prNumber,
             branch: mergePreview.branch,
             head: mergePreview.head,
+            baseRef: mergePreview.baseRef,
+            baseSha: mergePreview.baseSha,
             mergeFlag: mergePreview.mergeFlag,
           },
           ...(mergeOverride ? { override: mergeOverride } : {}),
         }
-      : input
+      : restorePreview
+        ? {
+            ...input,
+            restoreTarget: { branch: restorePreview.baseBranch, hash: restorePreview.baseHash },
+          }
+        : input
     const authorization = authorizations.issue(authorizationInput, snapshot)
     // 预览沿用量剔除 ok 判别字段,保持既有合并预览结构不变。
     const mergePreviewBody = mergePreview ? (({ ok, ...fields }) => fields)(mergePreview) : null
@@ -193,6 +207,16 @@ export async function authorizeAgent(
       expiresAt: authorization.expiresAt,
       preview:
         mergePreviewBody ??
+        (restorePreview
+          ? {
+              action: input.action,
+              agent: null,
+              url: input.url,
+              digest: authorization.digest,
+              baseline: `origin/${restorePreview.baseBranch}`,
+              baselineRef: restorePreview.baseHash,
+            }
+          : null) ??
         (snapshot
           ? {
               action: input.action,
@@ -202,10 +226,12 @@ export async function authorizeAgent(
               updatedAt: snapshot.updatedAt,
               commentCount: snapshot.comments.length,
               digest: authorization.digest,
+              ...(baselinePreview ?? {}),
               ...(input.action === 'auto' ? { autoRun: input.autoRun } : {}),
             }
           : { action: input.action, agent: input.agent, url: input.url, digest: authorization.digest }),
       ...(mergePreview ? { target: authorizationInput.target } : {}),
+      ...(restorePreview ? { restoreTarget: authorizationInput.restoreTarget } : {}),
       ...(mergeOverride ? { override: mergeOverride } : {}),
     }
   } catch (error) {
@@ -226,7 +252,7 @@ export async function mergeAndCleanup(ctx: Context, payload: unknown): Promise<M
   if (mergingWorkflows.has(key)) return { ok: false, error: '该 PR 正在合并或清理,请等待当前请求完成' }
   mergingWorkflows.add(key)
   try {
-    return await mergeAndCleanupUnlocked(ctx, payload)
+    return await withWorkflowLock(key, async () => mergeAndCleanupUnlocked(ctx, payload))
   } finally {
     mergingWorkflows.delete(key)
   }
@@ -252,7 +278,7 @@ export async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): P
   }
   if (workflow.branch.trim() === '') return { ok: false, error: 'workflow 分支无效,拒绝清理' }
 
-  let lookup = await fetchGithubPrFact(ctx, repoKey, workflow.branch, workflow.prNumber)
+  let lookup = await fetchGithubPrFact(ctx, repoKey, workflow.branch, workflow.prNumber, true, true)
   if (!lookup.known || !lookup.pr) return { ok: false, error: '无法读取实时 PR 状态,状态未改变' }
   let pr = lookup.pr
   if (pr.state === 'CLOSED') return { ok: false, error: 'PR 已关闭且未合并,状态未改变' }
@@ -261,9 +287,26 @@ export async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): P
     return { ok: false, error: 'workflow 分支等于 PR 基线分支,拒绝清理' }
   }
   if (!pr.headRefOid) return { ok: false, error: '实时 PR HEAD 缺失,拒绝合并' }
+  let authorizedTarget: AgentAuthorizationInput['target']
+  try {
+    authorizedTarget = authorizationInputFromPayload('merge', payload).target
+  } catch {
+    authorizedTarget = undefined
+  }
+  if (
+    authorizedTarget &&
+    (authorizedTarget.baseRef !== pr.baseRefName || !pr.baseRefOid || authorizedTarget.baseSha !== pr.baseRefOid)
+  ) {
+    return { ok: false, error: '实时 PR base 相对授权预览已变化,请刷新并重新确认' }
+  }
 
   if (!workflow.delivery) {
-    const gateFailures = await collectMergeGateFailures(ctx, workflow, pr.headRefOid)
+    const gateFailures = await collectMergeGateFailures(
+      ctx,
+      workflow,
+      pr.headRefOid,
+      pr.baseRefName && pr.baseRefOid ? { ref: pr.baseRefName, sha: pr.baseRefOid } : undefined,
+    )
     if (gateFailures.length > 0) {
       // 门禁拒绝(issue #49):仅当用户已完成人工放行二次确认(授权绑定被跳过
       // 门禁项与原因)且当前失败项被完全覆盖时才放行;否则行为与文案保持不变。
@@ -318,7 +361,7 @@ export async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): P
       } catch (error) {
         return { ok: false, error: `PR 合并失败: ${String(error instanceof Error ? error.message : error)}` }
       }
-      lookup = await fetchGithubPrFact(ctx, repoKey, workflow.branch, workflow.prNumber)
+      lookup = await fetchGithubPrFact(ctx, repoKey, workflow.branch, workflow.prNumber, true, true)
       if (!lookup.known || !lookup.pr || lookup.pr.state !== 'MERGED') {
         return { ok: false, error: 'gh pr merge 已返回,但实时 PR 状态尚未确认 MERGED;未开始清理' }
       }

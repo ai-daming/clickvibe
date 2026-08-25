@@ -3,5 +3,15 @@
     "path": "tests/routes.test.ts",
     "reason": "Existing route-contract suite is intentionally unchanged during issue #61's production-code-only split.",
     "issueRef": "#61"
+  },
+  {
+    "path": "src/workflow/merge.ts",
+    "reason": "Issue #60 keeps exact PR-base authorization, merge gates, cleanup, and archive orchestration together; splitting is outside this feature rework.",
+    "issueRef": "#60"
+  },
+  {
+    "path": "tests/prompt.test.ts",
+    "reason": "Issue #60 baseline prompt regressions and the current shared prompt contract remain in one suite; test-only splitting is deferred from merge recovery.",
+    "issueRef": "#60"
   }
 ]
