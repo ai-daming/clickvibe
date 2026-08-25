@@ -95,6 +95,14 @@ test('terminal keeps an explicit fixed dark palette outside theme overrides', ()
   assert.doesNotMatch(PANEL_CSS, /body\[data-ds-dark-theme\][^{]*\.cv-terminal/)
 })
 
+test('terminal keeps long logical lines intact and exposes horizontal scrolling', () => {
+  assert.match(declarations('.cv-dev-log'), /overflow:\s*auto;/)
+  assert.match(declarations('.cv-dev-log'), /white-space:\s*pre;/)
+  assert.match(declarations('.cv-dev-log'), /word-break:\s*normal;/)
+  assert.match(declarations('.cv-dev-log'), /overflow-wrap:\s*normal;/)
+  assert.match(declarations('.cv-terminal-line-number'), /user-select:\s*none;/)
+})
+
 test('expanded detail sections contain their own scroll chain and keep the toggle reachable', () => {
   assert.match(declarations('.cv-section-head'), /position:\s*sticky;/)
   assert.match(declarations('.cv-section-head'), /top:\s*0;/)

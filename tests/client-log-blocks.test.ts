@@ -6,6 +6,7 @@ import {
   COLLAPSED_LOG_LINE_THRESHOLD,
   buildLogBlocks,
   collapseLogBlock,
+  numberLogLines,
   toggleExpandedLogBlock,
 } from '../src/client/log-blocks.ts'
 
@@ -91,6 +92,15 @@ test('short text and trailing newlines preserve their display and logical line c
     lineCount: 1,
   })
   assert.equal(collapseLogBlock('').lineCount, 0)
+})
+
+test('display lines receive stable one-based locations without inventing a trailing line', () => {
+  assert.deepEqual(numberLogLines('first\n\nthird\n', 7), [
+    { number: 7, text: 'first' },
+    { number: 8, text: '' },
+    { number: 9, text: 'third' },
+  ])
+  assert.deepEqual(numberLogLines('', 10), [{ number: 10, text: '' }])
 })
 
 test('expanded block state toggles open and closed without mutating the previous set', () => {
