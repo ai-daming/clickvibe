@@ -31,10 +31,12 @@ export function RunningDuration({
     return () => window.clearInterval(timer)
   }, [now, startedAt])
 
+  const elapsed = formatElapsed(current - startedAt)
   return React.createElement(
     'span',
-    { className: 'cv-running-duration', 'aria-label': compact ? '任务已运行时长' : undefined },
-    `${compact ? '' : '正在运行 · 已运行 '}${formatElapsed(current - startedAt)}`,
+    { className: 'cv-running-duration', 'aria-label': compact ? `正在运行，已运行 ${elapsed}` : undefined },
+    React.createElement('span', { className: 'cv-running-dot', 'aria-hidden': true }),
+    React.createElement('span', null, `${compact ? '' : '正在运行 · 已运行 '}${elapsed}`),
   )
 }
 

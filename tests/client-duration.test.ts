@@ -12,10 +12,9 @@ test('delivery durations use a compact unit format', () => {
 })
 
 test('running and delivery duration components render their display contracts', () => {
-  assert.match(
-    renderToStaticMarkup(React.createElement(RunningDuration, { startedAt: 1_000, now: 2_000 })),
-    /正在运行 · 已运行 00:00:01/,
-  )
+  const running = renderToStaticMarkup(React.createElement(RunningDuration, { startedAt: 1_000, now: 2_000 }))
+  assert.match(running, /class="cv-running-dot" aria-hidden="true"/)
+  assert.match(running, /正在运行 · 已运行 00:00:01/)
   assert.match(
     renderToStaticMarkup(React.createElement(DeliveryDuration, { kind: 'review', durationMs: 754_000 })),
     /耗时 12m34s/,
@@ -26,7 +25,7 @@ test('running and delivery duration components render their display contracts', 
 test('one running-duration component serves detail, list and terminal header', () => {
   assert.match(
     renderToStaticMarkup(React.createElement(RunningDuration, { startedAt: 1_000, now: 2_000, compact: true })),
-    /aria-label="任务已运行时长"[^>]*>00:00:01</,
+    /aria-label="正在运行，已运行 00:00:01"[^>]*>.*class="cv-running-dot" aria-hidden="true".*00:00:01</,
   )
 
   for (const path of [
@@ -38,4 +37,7 @@ test('one running-duration component serves detail, list and terminal header', (
     assert.match(source, /import \{ RunningDuration \} from '\.\.\/duration\.ts'/)
     assert.match(source, /<RunningDuration\b/)
   }
+
+  const terminal = readFileSync(new URL('../src/client/views/live-terminal.tsx', import.meta.url), 'utf8')
+  assert.doesNotMatch(terminal, /<span aria-hidden="true">●<\/span>/)
 })
