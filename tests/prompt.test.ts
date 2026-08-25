@@ -134,3 +134,59 @@ test('fresh review removes ClickVibe review lists but preserves ordinary require
   assert.deepEqual(sanitized.comments, [{ author: 'owner', body: '新增验收要求' }])
   assert.deepEqual(snapshot.comments, [{ author: 'owner', body: '相关评论正文' }])
 })
+
+// ---- verdict→模板选择(issue #111 协议接线:reviewer 判定驱动下一轮模板) ----
+
+const reviewMeta = (fields: string[]) => ['== Review Meta ==', '- event: review', ...fields].join('\n')
+
+test('parseReviewMetaVerdict extracts verdict, next and theme fields', async () => {
+  const { parseReviewMetaVerdict } = await import('../src/agent/prompt.ts')
+  const meta = parseReviewMetaVerdict(
+    reviewMeta([
+      '- passed: false',
+      '- next: stop-and-redesign',
+      '- round: 17',
+      '- theme: shared-state-generation-ordering',
+      '- verdict: stop-and-redesign',
+    ]),
+  )
+  assert.equal(meta?.verdict, 'stop-and-redesign')
+  assert.equal(meta?.next, 'stop-and-redesign')
+  assert.equal(meta?.theme, 'shared-state-generation-ordering')
+
+  const legacy = parseReviewMetaVerdict(reviewMeta(['- passed: false', '- next: rework', '- round: 3']))
+  assert.equal(legacy?.verdict, null)
+  assert.equal(legacy?.next, 'rework')
+  assert.equal(legacy?.theme, null)
+
+  assert.equal(parseReviewMetaVerdict('普通评论,不是 Review Meta'), null)
+})
+
+test('reworkRoundDirective prefers an explicit next-round directive block', async () => {
+  const { reworkRoundDirective } = await import('../src/agent/prompt.ts')
+  const withDirective =
+    reviewMeta(['- passed: false', '- verdict: fix-these']) +
+    '\n\n## 下一轮指令\n按 docs/fix-discipline.md〈修复轮〉模板执行…'
+  assert.match(String(reworkRoundDirective(withDirective)), /「下一轮指令」段:以该段为准执行/)
+})
+
+test('reworkRoundDirective maps stop-and-redesign verdicts to the redesign template', async () => {
+  const { reworkRoundDirective } = await import('../src/agent/prompt.ts')
+  const redesign = reworkRoundDirective(
+    reviewMeta(['- passed: false', '- next: stop-and-redesign', '- verdict: stop-and-redesign']),
+  )
+  assert.match(String(redesign), /重设计轮/)
+  assert.match(String(redesign), /fix-discipline/)
+
+  // verdict 缺失但 next 标注 stop-and-redesign 的旧格式同样触发
+  const byNextOnly = reworkRoundDirective(reviewMeta(['- passed: false', '- next: stop-and-redesign']))
+  assert.match(String(byNextOnly), /重设计轮/)
+})
+
+test('reworkRoundDirective maps ordinary failures to the rework template, legacy included', async () => {
+  const { reworkRoundDirective } = await import('../src/agent/prompt.ts')
+  assert.match(String(reworkRoundDirective(reviewMeta(['- passed: false', '- verdict: fix-these']))), /修复轮/)
+  assert.match(String(reworkRoundDirective(reviewMeta(['- passed: false', '- next: rework']))), /修复轮/)
+  assert.equal(reworkRoundDirective(null), null)
+  assert.equal(reworkRoundDirective('普通评论'), null)
+})

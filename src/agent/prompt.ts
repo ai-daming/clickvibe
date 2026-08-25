@@ -128,3 +128,43 @@ export function selectReviewFeedback(input: {
   }
   return null
 }
+
+export interface ReviewMetaVerdict {
+  verdict: 'pass' | 'fix-these' | 'stop-and-redesign' | null
+  next: 'rework' | 'stop-and-redesign' | null
+  theme: string | null
+}
+
+/** Extract the verdict/next/theme fields from a Review Meta comment (null elsewhere). */
+export function parseReviewMetaVerdict(text: string): ReviewMetaVerdict | null {
+  if (!text.includes('== Review Meta ==')) return null
+  const field = (name: string): string | null => {
+    const match = text.match(new RegExp(`^- ${name}: (.+)$`, 'm'))
+    return match ? match[1].trim() : null
+  }
+  const verdict = field('verdict')
+  const next = field('next')
+  return {
+    verdict: verdict === 'pass' || verdict === 'fix-these' || verdict === 'stop-and-redesign' ? verdict : null,
+    next: next === 'rework' || next === 'stop-and-redesign' ? next : null,
+    theme: field('theme'),
+  }
+}
+
+/**
+ * Derive the next-round template directive from the review feedback
+ * (docs/fix-discipline.md 循环驱动模板;the doc stays the single source of
+ * truth — this only selects which template applies and defers to the
+ * reviewer's explicit directive block when one exists).
+ */
+export function reworkRoundDirective(feedbackText: string | null): string | null {
+  if (!feedbackText || !feedbackText.includes('== Review Meta ==')) return null
+  if (feedbackText.includes('下一轮指令')) {
+    return 'Review 意见末尾附有「下一轮指令」段:以该段为准执行,修法按其唯一指定,不留选择空间。'
+  }
+  const meta = parseReviewMetaVerdict(feedbackText)
+  if (meta?.verdict === 'stop-and-redesign' || meta?.next === 'stop-and-redesign') {
+    return '本轮 review 判定为 stop-and-redesign:按 docs/fix-discipline.md〈重设计轮〉模板执行——先产出不变量文档,再实现机制级方案,交付静态枚举表;禁止在现有模型上继续调用点级补丁。'
+  }
+  return '本轮为修复轮:按 docs/fix-discipline.md〈修复轮〉模板执行——先对每个 finding 判母题,历史复发母题禁止逐条修(按原则 8 上报需要重设计轮);本轮 diff 应净减少或持平。'
+}

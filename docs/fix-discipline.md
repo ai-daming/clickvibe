@@ -136,11 +136,11 @@ R4-R8 是同一件事(重复推导不一致),R9-R10 是另一件事(写入无并
 
 > 重设计轮。先产出不变量文档,再按原则 2/4 实现条件提交:每条 workflow mutation 的签名要求 capability 或 expected revision,锁内重读-验证-变更-原子提交或拒绝;任务启动把 reservation + taskId + hostJobId + stage 建立为一次线性化迁移;移除所有无条件整对象写调用点。交付物必须包含静态枚举表:全部 mutation 路径逐条列出、逐条标注保护方式,表中不得有「调用点纪律」或「无保护」行。同步处理 review 指出的前瞻问题(如锁重入、错误语义混叠)。本轮 diff 允许净减少。
 
-### 长期目标(状态:未实现)
+### 循环驱动(状态:已接线)
 
-模板的消费方最终应是 ClickVibe 自身的 prompt 构建(`src/agent/prompt.ts` 按 review verdict 自动选模板),人工输入退化为零;本文档是模板的唯一事实源,代码侧引用而非复制。
+模板的消费方是 ClickVibe 自身的 prompt 构建;本文档是模板的唯一事实源,代码侧引用而非复制。
 
-> 实现状态:**仅目标,未实现**。当前 `prompt.ts` 对 Review Meta 只做原文盲透传,不解析 verdict、不选模板。前置条件:① review skill 已要求 verdict 附「下一轮指令」段(已生效);② 待 #111 落地后独立小 PR 实现 prompt.ts 侧解析与模板注入。在落地前,人工输入「按 docs/fix-discipline.md〈某轮〉模板执行」仍是必需品。
+> 实现状态:**已接线**(2026-08-25,直接合入 main)。`src/agent/prompt.ts` 的 `parseReviewMetaVerdict`/`reworkRoundDirective` 解析 Review Meta 的 verdict/next/theme 字段:reviewer 附「下一轮指令」段时以其为准;stop-and-redesign 判定注入〈重设计轮〉模板指针;普通失败注入〈修复轮〉模板指针(旧格式 Review Meta 兼容)。`buildReviewPrompt` 首条要求内联根因 review 协议精简版,并声明"仓库存在 skills/root-cause-review/SKILL.md 或本文档时以其全文为准"。人工输入「按 fix-discipline〈某轮〉模板执行」从必需品降级为可选强化。
 
 ## 关联
 
