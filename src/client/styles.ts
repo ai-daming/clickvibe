@@ -55,7 +55,7 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 @container (max-width: 240px) { .cv-row-meta-secondary { display: none; } }
 .cv-issue-row-main .cv-running-duration { display: block; margin-top: 3px; color: var(--dsw-alias-state-business-primary); font-weight: 600; }
 .cv-row-lag { color: var(--dsw-alias-state-warn-label); font-weight: 600; }
-.cv-row-contract { color: var(--dsw-alias-state-error-primary); font-weight: 600; }
+.cv-row-contract, .cv-tl-publish-fail { color: var(--dsw-alias-state-error-primary); font-weight: 600; }
 .cv-row-ready { color: var(--dsw-alias-state-success-primary); font-weight: 600; }
 :is(.cv-row-lag, .cv-row-contract, .cv-row-ready) .cv-row-meta-value { color: inherit; }
 .cv-row-action { border: none; border-radius: 6px; padding: 5px 8px; background: var(--dsw-alias-state-success-primary); color: var(--dsw-alias-label-primary-foreground); font-size: 11px; white-space: nowrap; cursor: pointer; }
@@ -203,8 +203,8 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 .cv-dep-block { display: flex; flex-direction: column; gap: 4px; }
 .cv-dep-label { font-size: 12px; font-weight: 600; color: var(--dsw-alias-label-secondary); }
 .cv-link-row { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dsw-alias-label-secondary); flex-wrap: wrap; }
-.cv-link { color: var(--dsw-alias-state-business-primary); font-weight: 600; text-decoration: none; }
-.cv-link:hover { text-decoration: underline; }
+.cv-link, .cv-tl-public { color: var(--dsw-alias-state-business-primary); font-weight: 600; text-decoration: none; }
+.cv-link:hover, .cv-tl-public:hover { text-decoration: underline; }
 .cv-link-state { display: inline-block; padding: 0 6px; border-radius: 8px; font-size: 10.5px; font-weight: 600; }
 .cv-link-kind { font-size: 10.5px; font-weight: 700; color: var(--dsw-alias-label-secondary); }
 .cv-pr-icon { flex-shrink: 0; display: inline-block; }
@@ -225,10 +225,7 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 .cv-tl-hash { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; background: var(--dsw-alias-markdown-inline-code); padding: 0 4px; border-radius: 4px; }
 .cv-tl-verdict { font-weight: 600; }
 .cv-tl-note { color: var(--dsw-alias-label-secondary); }
-.cv-tl-public { color: var(--dsw-alias-state-business-primary); font-weight: 600; text-decoration: none; }
-.cv-tl-public:hover { text-decoration: underline; }
 .cv-tl-local { color: var(--dsw-alias-label-caption); }
-.cv-tl-publish-fail { color: var(--dsw-alias-state-error-primary); font-weight: 600; }
 .cv-audit-backdrop { position: fixed; z-index: 10020; inset: 0; background: var(--dsw-alias-bg-mask-2); }
 .cv-audit-drawer { position: absolute; top: 0; right: 0; bottom: 0; width: min(480px, 92vw); overflow: auto; padding: 18px; background: var(--dsw-alias-bg-base); box-shadow: var(--dsw-shadow-lv3); color: var(--dsw-alias-label-primary); }
 .cv-audit-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--dsw-alias-border-l2); }

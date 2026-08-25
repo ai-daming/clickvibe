@@ -54,12 +54,23 @@ function declarations(selector: string): string {
   return match?.[1] ?? ''
 }
 
-function groupedSelectors(selector: string): string[] {
+const SEMANTIC_COLOR_SELECTOR =
+  /^\.cv-(?:badge-(?:open|closed|merged|kind)|stage-[\w-]+|link(?:$|:hover$)|link-state-[\w-]+|tl-kind-[\w-]+|tl-public(?:$|:hover$)|pr-(?:open|merged|closed)|issue-(?:open|closed)|row-(?:lag|contract|ready)|tl-(?:pass|fail|publish-fail))$/
+
+function duplicateSemanticRules(): string[][][] {
+  const rulesByDeclarations = new Map<string, string[][]>()
   for (const match of PANEL_CSS.matchAll(/^([^@\n][^{]+) \{[^{}]*\}/gm)) {
-    const selectors = (match[1] ?? '').split(',').map((entry) => entry.trim())
-    if (selectors.includes(selector)) return selectors
+    const selectors = (match[1] ?? '')
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter((selector) => SEMANTIC_COLOR_SELECTOR.test(selector))
+    if (selectors.length === 0) continue
+    const declarations = (match[0].slice(match[0].indexOf('{') + 1, -1) ?? '').trim().replace(/\s+/g, ' ')
+    const rules = rulesByDeclarations.get(declarations) ?? []
+    rules.push(selectors)
+    rulesByDeclarations.set(declarations, rules)
   }
-  assert.fail(`missing ${selector}`)
+  return [...rulesByDeclarations.values()].filter((rules) => rules.length > 1)
 }
 
 test('panel common materials use only real DSH theme tokens', () => {
@@ -87,32 +98,8 @@ test('only the minimal ClickVibe semantic palette follows the DSH body theme fla
   assert.doesNotMatch(PANEL_CSS, /prefers-color-scheme|MutationObserver|ui-theme\.preference/)
 })
 
-test('equivalent semantic status colors share one rule per palette pair', () => {
-  const semanticGroups = [
-    ['.cv-badge-open', '.cv-stage-passed', '.cv-link-state-open'],
-    ['.cv-badge-closed', '.cv-link-state-closed', '.cv-tl-kind-merge-override'],
-    [
-      '.cv-badge-merged',
-      '.cv-stage-reviewing',
-      '.cv-link-state-merged',
-      '.cv-link-state-issue-closed',
-      '.cv-tl-kind-review',
-    ],
-    ['.cv-badge-kind', '.cv-stage-idle', '.cv-tl-kind-resume', '.cv-tl-kind-note'],
-    ['.cv-stage-developing', '.cv-tl-kind-dev'],
-    ['.cv-stage-review-ready', '.cv-stage-interrupted', '.cv-stage-new', '.cv-tl-kind-rework'],
-    ['.cv-pr-open', '.cv-issue-open', '.cv-tl-pass'],
-    ['.cv-pr-merged', '.cv-issue-closed'],
-    ['.cv-pr-closed', '.cv-tl-fail'],
-  ]
-
-  for (const group of semanticGroups) {
-    for (const selector of group) {
-      const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-      assert.deepEqual(groupedSelectors(selector), group)
-      assert.equal([...PANEL_CSS.matchAll(new RegExp(`${escaped}(?=\\s*(?:,|\\{))`, 'g'))].length, 1)
-    }
-  }
+test('semantic color rules cannot repeat equivalent declarations independently', () => {
+  assert.deepEqual(duplicateSemanticRules(), [])
 })
 
 test('every text entry surface explicitly binds its background, text and placeholder to DSH', () => {
