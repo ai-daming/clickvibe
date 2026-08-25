@@ -62,11 +62,25 @@ async function persistDecision(key: string, decision: Exclude<AutoRunDecision, {
   )
 }
 
-async function pauseAutoRun(key: string, reason: AutoRunPausedReason): Promise<void> {
+interface PauseEvidence {
+  action?: string
+  error?: string
+}
+
+async function pauseAutoRun(key: string, reason: AutoRunPausedReason, evidence?: PauseEvidence): Promise<void> {
   const workflow = await loadWorkflow(key)
   if (!workflow?.autoRun || workflow.autoRun.status !== 'running') return
+  const evidenceNote = evidence
+    ? `(${[
+        evidence.action ? `动作 ${evidence.action}` : null,
+        evidence.error ? `错误: ${evidence.error.slice(0, 200)}` : null,
+      ]
+        .filter(Boolean)
+        .join(' · ')})`
+    : ''
   logTaskDiagnostic('auto-run-pause', {
     reason,
+    ...(evidence ? { action: evidence.action ?? null, error: evidence.error?.slice(0, 500) ?? null } : {}),
     workflowKey: key,
     step: workflow.autoRun.step ?? 0,
     updatedAt: workflow.updatedAt,
@@ -84,7 +98,7 @@ async function pauseAutoRun(key: string, reason: AutoRunPausedReason): Promise<v
       at: new Date().toISOString(),
       round: workflow.autoRun.rounds,
       step: workflow.autoRun.step,
-      note: `自动跑到底已暂停:${reason}`,
+      note: `自动跑到底已暂停:${reason}${evidenceNote}`,
     },
     workflowRevision(workflow) ?? 0,
   )
@@ -212,7 +226,10 @@ async function applyDecision(ctx: Context, key: string, decision: AutoRunDecisio
       break
   }
   if (!result.ok) {
-    await pauseAutoRun(key, autoRunFailureReason(decision.action, result))
+    await pauseAutoRun(key, autoRunFailureReason(decision.action, result), {
+      action: decision.action,
+      error: result.error,
+    })
     return
   }
   if (decision.action === 'create-pr' || decision.action === 'sync') requestAutoRunReconcile(ctx, key)
@@ -257,7 +274,9 @@ export function requestAutoRunReconcile(ctx: Context, key: string, outcome?: Aut
         errorMessage: error instanceof Error ? error.message : String(error),
         errorStack: error instanceof Error ? error.stack : null,
       })
-      await pauseAutoRun(key, 'controller-error')
+      await pauseAutoRun(key, 'controller-error', {
+        error: `${error instanceof Error ? error.message : String(error)}`,
+      })
     } finally {
       running.delete(key)
     }
