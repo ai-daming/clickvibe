@@ -1,4 +1,5 @@
 /** Project-list data loading, polling and detail-navigation state. */
+import { applyWorkflowSnapshot } from './workflow-snapshot.ts'
 import React from 'react'
 import {
   type ProjectOption,
@@ -54,15 +55,13 @@ export function useProjectPanel() {
     return merged
   }, [])
 
-  const mergeWorkflowStates = React.useCallback((workflows: Workflow[]) => {
-    const byUrl = new Map(workflows.map((item) => [item.url, item]))
-    setIssues((previous) =>
-      previous.map((issue) => {
-        const current = byUrl.get(String(issue.url ?? ''))
-        return current ? { ...issue, workflow: current } : issue
-      }),
-    )
-    setWorkflow((previous) => (previous ? (byUrl.get(previous.url) ?? previous) : previous))
+  const mergeWorkflowStates = React.useCallback((workflows: Workflow[], pruneMissing = false) => {
+    setIssues((previous) => applyWorkflowSnapshot(previous, workflows, pruneMissing) as typeof previous)
+    setWorkflow((previous) => {
+      if (!previous) return previous
+      const merged = applyWorkflowSnapshot([{ url: previous.url, workflow: previous }], workflows, pruneMissing)
+      return (merged[0]?.workflow as typeof previous | undefined) ?? previous
+    })
   }, [])
 
   const updateWorkflow = React.useCallback(
@@ -81,7 +80,8 @@ export function useProjectPanel() {
       const response = await apiCall<WorkflowStateResponse>('state', { repoKey }, 8_000)
       if (response.ok) {
         setStateRefreshError(null)
-        mergeWorkflowStates(response.workflows)
+        // prune=true:本轮成功响应中消失的 workflow 已归档,终结显示而非冻结僵尸动作
+        mergeWorkflowStates(response.workflows, true)
         setFreshness(response.freshness)
         setRepoAdvance(response.repoAdvance)
         if (response.dependenciesRefreshDue) {

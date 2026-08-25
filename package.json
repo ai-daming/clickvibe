@@ -84,7 +84,8 @@
     "fmt": "biome format --write src tests scripts",
     "check:size": "node scripts/check-file-size.mjs",
     "check:layers": "node scripts/check-import-layers.mjs",
+    "check:style-tokens": "node scripts/check-style-tokens.mjs",
     "check:state-writes": "node scripts/check-state-writes.mjs",
-    "check": "pnpm run typecheck && pnpm run lint && pnpm run format:check && pnpm run check:size && pnpm run check:layers && pnpm run check:state-writes"
+    "check": "pnpm run typecheck && pnpm run lint && pnpm run format:check && pnpm run check:size && pnpm run check:layers && pnpm run check:style-tokens && pnpm run check:state-writes"
   }
 }

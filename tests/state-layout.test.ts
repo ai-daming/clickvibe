@@ -1,12 +1,20 @@
 import assert from 'node:assert/strict'
-import { commitWorkflowFixture } from './workflow-fixture.ts'
-import { appendFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { encodeLiveLogEvent } from '../src/infra/live-output.ts'
-import { appendTaskLog, loadWorkflow, readTaskLog, startTaskLog, type IssueWorkflow } from '../src/infra/state.ts'
-import { issueDirectory, issueKey, parseIssueDirectory, taskLogPath, workflowPath } from '../src/infra/state-layout.ts'
+import { appendTaskLog, type IssueWorkflow, loadWorkflow, readTaskLog, startTaskLog } from '../src/infra/state.ts'
+import {
+  issueDirectory,
+  issueKey,
+  legacyIssueKey,
+  parseIssueDirectory,
+  parseIssueKey,
+  taskLogPath,
+  workflowPath,
+} from '../src/infra/state-layout.ts'
+import { commitWorkflowFixture } from './workflow-fixture.ts'
 
 function fixture(key = issueKey('a-b/c', '7')): IssueWorkflow {
   return {
@@ -47,6 +55,9 @@ test('project issue paths are reversible and do not depend on collision-prone ke
   assert.throws(() => issueDirectory(root, 'a-b', '..', '7'), /invalid issue coordinates/)
   assert.notEqual(issueKey('a-b/c', '7'), issueKey('a/b-c', '7'))
   assert.equal(workflowPath(root, fixture()), '/state/a-b/c/issue-7/workflow.json')
+  for (const invalid of [issueKey('foo', '7'), issueKey('a/b/c', '7')]) {
+    assert.deepEqual([parseIssueKey(invalid), legacyIssueKey(invalid)], [null, null])
+  }
 })
 
 test('task generations append valid structured JSONL independently and aggregate metrics', async () => {

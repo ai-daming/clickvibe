@@ -70,6 +70,7 @@ ClickVibe 是一个 DSH Web 插件:右侧面板把 GitHub issue 变成「开发 
 3. **构建入口固定**:`src/index.ts`、`src/invariant.ts`、`src/client/index.tsx`(`tsdown.config.ts`),搬移不得移动这三个文件本身。
 4. **对外契约不变**:17 个 `/clickvibe/api/*` method(fetch/projects/repo/issues/state/authorize/develop/develop/poll/history/stream/review/resume/stop/sync/merge/command)、响应形状、`~/.clickvibe/state/` 持久化格式、agent 两阶段授权命令(预览→一次性 2 分钟授权→执行)与文本命令语法。
 5. **状态推导纪律**:git/GitHub 原生事实是门槛,workflow 文件与 comment meta 只是缓存/增强器(见 `docs/state-model.md`);review 结论必须绑定其审查的 commit 与契约指纹,不得冒充。
+6. **错误不埋葬**:任何被捕获、降级或归类处理的错误,原始信息(动作/错误文本)必须同时落盘(本地事件持久)并可在面板展示;可以处理,不可抹去。归类标签(如 controller-error)是分类,不是替代证据(#90 两次暂停不可追溯的教训,2026-08-25)。
 
 ## 4. 雷区(不做)
 
