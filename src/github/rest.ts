@@ -63,8 +63,9 @@ async function serializeGithubRequest<T>(minimumIntervalMs: number, request: () 
     while (Date.now() < lane.nextStartAt) {
       await new Promise((resolve) => setTimeout(resolve, lane.nextStartAt - Date.now()))
     }
+    const pending = request()
     lane.nextStartAt = Date.now() + minimumIntervalMs
-    return await request()
+    return await pending
   } finally {
     release()
   }
