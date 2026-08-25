@@ -60,6 +60,15 @@ export interface AutoRunUnresolvedRound {
   issues: string[]
 }
 
+export interface AutoRunControllerRecovery {
+  kind: 'transient' | 'rate-limit' | 'fused'
+  attempt: number
+  consecutive: number
+  fingerprint: string
+  retryAt: string
+  lastFailureAt: string
+}
+
 /** Durable enhancement only; absence always means manual workflow mode. */
 export interface AutoRunState {
   status: 'running' | 'paused' | 'completed'
@@ -77,12 +86,27 @@ export interface AutoRunState {
   unresolved: AutoRunUnresolvedRound[]
   lastObservedAt: string | null
   pausedReason: AutoRunPausedReason | null
+  /** Durable scheduler checkpoint; git/GitHub facts remain the workflow truth. */
+  controllerRecovery?: AutoRunControllerRecovery
 }
 
 export function isAutoRunState(value: unknown): value is AutoRunState {
   if (value === undefined) return true
   if (!value || typeof value !== 'object') return false
   const state = value as Partial<AutoRunState>
+  const recovery = state.controllerRecovery
+  const validRecovery =
+    recovery === undefined ||
+    (typeof recovery === 'object' &&
+      recovery !== null &&
+      (recovery.kind === 'transient' || recovery.kind === 'rate-limit' || recovery.kind === 'fused') &&
+      Number.isInteger(recovery.attempt) &&
+      recovery.attempt > 0 &&
+      Number.isInteger(recovery.consecutive) &&
+      recovery.consecutive > 0 &&
+      typeof recovery.fingerprint === 'string' &&
+      typeof recovery.retryAt === 'string' &&
+      typeof recovery.lastFailureAt === 'string')
   return (
     (state.status === 'running' || state.status === 'paused' || state.status === 'completed') &&
     (state.devAgent === 'codex' || state.devAgent === 'claude') &&
@@ -93,6 +117,7 @@ export function isAutoRunState(value: unknown): value is AutoRunState {
     Number(state.budgetHours) > 0 &&
     typeof state.startedAt === 'string' &&
     typeof state.deadline === 'string' &&
-    Array.isArray(state.unresolved)
+    Array.isArray(state.unresolved) &&
+    validRecovery
   )
 }

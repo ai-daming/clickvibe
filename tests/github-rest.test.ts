@@ -80,6 +80,62 @@ test('REST reader opens a circuit after rate limiting and reports the reset time
   assert.equal(fake.commands.length, 1)
 })
 
+test('an open secondary-rate circuit preserves retry-after classification on queued reads', async () => {
+  const fake = shellWith([
+    {
+      exitCode: 1,
+      stdout: [
+        'HTTP/2.0 403 Forbidden',
+        'retry-after: 60',
+        'x-ratelimit-remaining: 5000',
+        '',
+        JSON.stringify({ message: 'You have exceeded a secondary rate limit' }),
+      ].join('\n'),
+    },
+  ])
+  const reader = new GithubRestReader(fake as never)
+  await assert.rejects(() => reader.json('repos/o/r/issues/1'), GithubRateLimitError)
+  await assert.rejects(
+    () => reader.json('repos/o/r/issues/2'),
+    (error: unknown) => error instanceof GithubRateLimitError && error.kind === 'secondary',
+  )
+  assert.equal(fake.commands.length, 1)
+})
+
+test('host REST requests are serialized across resources and respect a minimum start interval', async () => {
+  const starts: number[] = []
+  let releaseFirst: (() => void) | null = null
+  const firstBlocked = new Promise<void>((resolve) => {
+    releaseFirst = resolve
+  })
+  const fake = {
+    shell: {
+      resolve(spec: unknown) {
+        return spec
+      },
+      async run() {
+        starts.push(Date.now())
+        if (starts.length === 1) await firstBlocked
+        return { exitCode: 0, stdout: { text: included({ ok: true }) }, stderr: { text: '' } }
+      },
+    },
+  }
+  const reader = new GithubRestReader(fake as never, { minimumIntervalMs: 20 })
+  const first = reader.json('repos/o/r/issues/1')
+  const second = reader.json('repos/o/r/issues/2')
+  try {
+    for (let attempt = 0; attempt < 100 && starts.length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+    assert.equal(starts.length, 1, 'the second resource must wait for the first request to settle')
+  } finally {
+    releaseFirst?.()
+  }
+  await Promise.all([first, second])
+  assert.equal(starts.length, 2)
+  assert.ok(starts[1] - starts[0] >= 20, `requests started only ${starts[1] - starts[0]}ms apart`)
+})
+
 test('review decision uses each reviewer latest decisive review', () => {
   assert.equal(
     deriveReviewDecision([

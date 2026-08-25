@@ -245,6 +245,27 @@ test('deadline and task outcomes converge to explicit pause reasons', () => {
     decideAutoRun({ autoRun: running(), nextAction, now: 0, reviewEvents: [], taskOutcome: 'failed' }).reason,
     'session-interrupted',
   )
+  assert.equal(
+    decideAutoRun({
+      autoRun: running(),
+      nextAction,
+      now: Date.parse('2026-08-24T00:00:00Z'),
+      reviewEvents: [],
+      taskOutcome: 'failed',
+    }).reason,
+    'budget-exhausted',
+  )
+})
+
+test('a closed issue terminates auto-run after the budget gate without inventing more work', () => {
+  const decision = decideAutoRun({
+    autoRun: running(),
+    nextAction: { kind: 'none', label: '已关闭', hint: '' },
+    now: Date.parse('2026-08-23T01:00:00Z'),
+    reviewEvents: [],
+    issueOpen: false,
+  })
+  assert.deepEqual(decision, { kind: 'complete', reason: 'issue-closed', rounds: 0, unresolved: [] })
 })
 
 test('temporary observation gaps retry within the wall-clock budget', () => {

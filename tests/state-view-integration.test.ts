@@ -417,7 +417,7 @@ test('metadata-only updatedAt drift does not invalidate an unchanged issue body'
   }
 })
 
-test('/state enrichment checks configured branches and runs GitHub lookups concurrently', async () => {
+test('/state enrichment checks configured branches while the host serializes GitHub request bursts', async () => {
   const root = await mkdtemp(join(tmpdir(), 'clickvibe-state-enrich-'))
   const repo = join(root, 'repo')
   await mkdir(repo)
@@ -477,7 +477,7 @@ test('/state enrichment checks configured branches and runs GitHub lookups concu
       repos: { 'o/r': repo },
       worktreeRoot: root,
     })
-    assert.equal(maxGithub, 2)
+    assert.equal(maxGithub, 1)
     assert.deepEqual(githubTimeouts, [5000, 5000])
     assert.deepEqual(
       enriched.map((item) => item.derived.nextAction.label),

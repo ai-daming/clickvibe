@@ -6,6 +6,7 @@ import {
   snapshotWithoutReviewFeedback,
   type PromptSnapshot,
 } from '../src/agent/prompt.ts'
+import { DEVELOPMENT_REQUIREMENTS, GITHUB_USAGE_REQUIREMENT } from '../src/agent/prompts.ts'
 
 const snapshot: PromptSnapshot = {
   url: 'https://github.com/o/r/issues/20',
@@ -54,6 +55,14 @@ test('persisted fallback is explicit about possible staleness', () => {
   assert.match(prompt, /刷新失败: gh unavailable/)
   assert.match(prompt, /PR: #9/)
   assert.match(prompt, /commit: abc123/)
+})
+
+test('development and review requirements avoid repeated GraphQL-heavy gh context reads', () => {
+  assert.ok(DEVELOPMENT_REQUIREMENTS.includes(GITHUB_USAGE_REQUIREMENT))
+  assert.match(GITHUB_USAGE_REQUIREMENT, /gh api/)
+  assert.match(GITHUB_USAGE_REQUIREMENT, /gh pr view/)
+  assert.match(GITHUB_USAGE_REQUIREMENT, /gh issue view/)
+  assert.match(GITHUB_USAGE_REQUIREMENT, /同一资源.*一次/)
 })
 
 test('resume keeps session memory but explicitly makes the current snapshot authoritative', () => {
