@@ -54,6 +54,14 @@ function declarations(selector: string): string {
   return match?.[1] ?? ''
 }
 
+function groupedSelectors(selector: string): string[] {
+  for (const match of PANEL_CSS.matchAll(/^([^@\n][^{]+) \{[^{}]*\}/gm)) {
+    const selectors = (match[1] ?? '').split(',').map((entry) => entry.trim())
+    if (selectors.includes(selector)) return selectors
+  }
+  assert.fail(`missing ${selector}`)
+}
+
 test('panel common materials use only real DSH theme tokens', () => {
   const namedTokens = [...PANEL_CSS.matchAll(/var\((--dsw-[a-z0-9-]+)/g)].map((match) => match[1] ?? '')
   assert.ok(namedTokens.length > 20, 'the panel must materially consume the DSH theme')
@@ -77,6 +85,34 @@ test('only the minimal ClickVibe semantic palette follows the DSH body theme fla
     /body\[data-ds-dark-theme\]\s+\.cv-panel-slot\s*\{[^}]*--cv-review-primary:[^}]*--cv-review-tertiary:/s,
   )
   assert.doesNotMatch(PANEL_CSS, /prefers-color-scheme|MutationObserver|ui-theme\.preference/)
+})
+
+test('equivalent semantic status colors share one rule per palette pair', () => {
+  const semanticGroups = [
+    ['.cv-badge-open', '.cv-stage-passed', '.cv-link-state-open'],
+    ['.cv-badge-closed', '.cv-link-state-closed', '.cv-tl-kind-merge-override'],
+    [
+      '.cv-badge-merged',
+      '.cv-stage-reviewing',
+      '.cv-link-state-merged',
+      '.cv-link-state-issue-closed',
+      '.cv-tl-kind-review',
+    ],
+    ['.cv-badge-kind', '.cv-stage-idle', '.cv-tl-kind-resume', '.cv-tl-kind-note'],
+    ['.cv-stage-developing', '.cv-tl-kind-dev'],
+    ['.cv-stage-review-ready', '.cv-stage-interrupted', '.cv-stage-new', '.cv-tl-kind-rework'],
+    ['.cv-pr-open', '.cv-issue-open', '.cv-tl-pass'],
+    ['.cv-pr-merged', '.cv-issue-closed'],
+    ['.cv-pr-closed', '.cv-tl-fail'],
+  ]
+
+  for (const group of semanticGroups) {
+    for (const selector of group) {
+      const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      assert.deepEqual(groupedSelectors(selector), group)
+      assert.equal([...PANEL_CSS.matchAll(new RegExp(`${escaped}(?=\\s*(?:,|\\{))`, 'g'))].length, 1)
+    }
+  }
 })
 
 test('every text entry surface explicitly binds its background, text and placeholder to DSH', () => {
