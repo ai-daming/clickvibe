@@ -70,6 +70,11 @@ test('controller triggers only actions derived by the authoritative state view',
       { kind: 'trigger', action: kind, step: 1, rounds: 0, unresolved: [] },
     )
   }
+  // resume 自动执行(2026-08-25 #90 现场):并行开发必然产生大量合并冲突,#26 把
+  // 解冲突路由到 resume,agent 有完整 git 权限自行解决。安全性来自恢复网(git
+  // 历史 + review 绑定新 HEAD + 门禁 + 人工合并),不来自预防性拒跑;会话失配由
+  // resumeDevelop 内部的精确会话回退与 ownership 门禁兜底。旧策略在此处
+  // paused('session-interrupted') 是无证据的标签谎言,使每次重挂即死循环。
   assert.deepEqual(
     decideAutoRun({
       autoRun: running(),
@@ -77,7 +82,7 @@ test('controller triggers only actions derived by the authoritative state view',
       now: Date.parse('2026-08-23T01:00:00Z'),
       reviewEvents: [],
     }),
-    { kind: 'pause', reason: 'session-interrupted', rounds: 0, unresolved: [] },
+    { kind: 'trigger', action: 'rework', step: 1, rounds: 0, unresolved: [] },
   )
 })
 

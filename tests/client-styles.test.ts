@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { measureStyleTokenCoverage, MINIMUM_STYLE_TOKEN_COVERAGE } from '../scripts/check-style-tokens.mjs'
 import { PANEL_CSS } from '../src/client/styles.ts'
 
 const DSH_THEME_TOKENS = new Set([
@@ -37,6 +38,11 @@ const DSH_THEME_TOKENS = new Set([
   '--dsw-alias-state-warn-secondary',
   '--dsw-alias-state-warn-tertiary',
   '--dsw-shadow-lv3',
+  '--dsw-font-base-16-font-size',
+  '--dsw-font-s-14-font-size',
+  '--dsw-font-xs-13-font-size',
+  '--dsw-font-xxs-12-font-size',
+  '--dsw-font-xxxs-11-font-size',
 ])
 
 function between(start: string, end: string): string {
@@ -72,6 +78,14 @@ function duplicateSemanticRules(): string[][][] {
   }
   return [...rulesByDeclarations.values()].filter((rules) => rules.length > 1)
 }
+
+test('at least 80% of common color and font-size materials use theme tokens', () => {
+  const coverage = measureStyleTokenCoverage(PANEL_CSS)
+  assert.ok(
+    coverage.ratio >= MINIMUM_STYLE_TOKEN_COVERAGE,
+    `style token coverage ${(coverage.ratio * 100).toFixed(2)}% (${coverage.covered}/${coverage.total}) is below ${MINIMUM_STYLE_TOKEN_COVERAGE * 100}%`,
+  )
+})
 
 test('panel common materials use only real DSH theme tokens', () => {
   const namedTokens = [...PANEL_CSS.matchAll(/var\((--dsw-[a-z0-9-]+)/g)].map((match) => match[1] ?? '')
