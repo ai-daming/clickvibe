@@ -60,6 +60,25 @@ function declarations(selector: string): string {
   return match?.[1] ?? ''
 }
 
+const SEMANTIC_COLOR_SELECTOR =
+  /^\.cv-(?:badge-(?:open|closed|merged|kind)|stage-[\w-]+|link(?:$|:hover$)|link-state-[\w-]+|tl-kind-[\w-]+|tl-public(?:$|:hover$)|pr-(?:open|merged|closed)|issue-(?:open|closed)|row-(?:lag|contract|ready)|tl-(?:pass|fail|publish-fail))$/
+
+function duplicateSemanticRules(): string[][][] {
+  const rulesByDeclarations = new Map<string, string[][]>()
+  for (const match of PANEL_CSS.matchAll(/^([^@\n][^{]+) \{[^{}]*\}/gm)) {
+    const selectors = (match[1] ?? '')
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter((selector) => SEMANTIC_COLOR_SELECTOR.test(selector))
+    if (selectors.length === 0) continue
+    const declarations = (match[0].slice(match[0].indexOf('{') + 1, -1) ?? '').trim().replace(/\s+/g, ' ')
+    const rules = rulesByDeclarations.get(declarations) ?? []
+    rules.push(selectors)
+    rulesByDeclarations.set(declarations, rules)
+  }
+  return [...rulesByDeclarations.values()].filter((rules) => rules.length > 1)
+}
+
 test('at least 80% of common color and font-size materials use theme tokens', () => {
   const coverage = measureStyleTokenCoverage(PANEL_CSS)
   assert.ok(
@@ -91,6 +110,10 @@ test('only the minimal ClickVibe semantic palette follows the DSH body theme fla
     /body\[data-ds-dark-theme\]\s+\.cv-panel-slot\s*\{[^}]*--cv-review-primary:[^}]*--cv-review-tertiary:/s,
   )
   assert.doesNotMatch(PANEL_CSS, /prefers-color-scheme|MutationObserver|ui-theme\.preference/)
+})
+
+test('semantic color rules cannot repeat equivalent declarations independently', () => {
+  assert.deepEqual(duplicateSemanticRules(), [])
 })
 
 test('every text entry surface explicitly binds its background, text and placeholder to DSH', () => {
