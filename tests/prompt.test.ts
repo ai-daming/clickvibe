@@ -6,7 +6,12 @@ import {
   snapshotWithoutReviewFeedback,
   type PromptSnapshot,
 } from '../src/agent/prompt.ts'
-import { buildDevelopPrompt, buildResumePrompt, buildReviewPrompt, GITHUB_USAGE_REQUIREMENT } from '../src/agent/prompts.ts'
+import {
+  buildDevelopPrompt,
+  buildResumePrompt,
+  buildReviewPrompt,
+  GITHUB_USAGE_REQUIREMENT,
+} from '../src/agent/prompts.ts'
 
 const snapshot: PromptSnapshot = {
   url: 'https://github.com/o/r/issues/20',

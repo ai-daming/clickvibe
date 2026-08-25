@@ -110,6 +110,7 @@ async function applyDecision(ctx: Context, key: string, decision: AutoRunDecisio
     cleanupPending?: boolean
     gateFailures?: unknown[]
     controllerError?: boolean
+    semanticFailure?: 'authorization-denied'
   }
   switch (decision.action) {
     case 'develop':
@@ -219,6 +220,11 @@ export function requestAutoRunReconcile(ctx: Context, key: string, outcome?: Aut
       await handleAutoRunControllerFailure(ctx, key, error, source, requestAutoRunReconcile)
     } finally {
       running.delete(key)
+      if (queued.has(key)) {
+        const pending = queued.get(key)
+        queued.delete(key)
+        requestAutoRunReconcile(ctx, key, pending)
+      }
     }
   })()
 }

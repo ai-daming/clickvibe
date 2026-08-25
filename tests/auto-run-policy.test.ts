@@ -4,6 +4,7 @@ import {
   aggregateAutoRunReviews,
   autoRunFailureReason,
   autoRunRetryDelay,
+  classifiedAutoRunFailure,
   decideAutoRun,
   isOrphanedAutoRun,
   validateAutoRunConfig,
@@ -290,4 +291,19 @@ test('cleanup failures remain distinct from merge gate rejection', () => {
   assert.equal(autoRunFailureReason('review', { ok: false, controllerError: true }), 'controller-error')
   assert.equal(autoRunFailureReason('create-pr', { ok: false, error: 'GitHub network failed' }), 'controller-error')
   assert.equal(autoRunFailureReason('sync', { ok: false, error: 'git authentication failed' }), 'controller-error')
+  assert.equal(
+    autoRunFailureReason('develop', { ok: false, error: '无法读取授权快照文件: EACCES' }),
+    'controller-error',
+  )
+  assert.equal(
+    autoRunFailureReason('develop', {
+      error: 'Issue contract changed',
+      semanticFailure: 'authorization-denied',
+    }),
+    'authorization-denied',
+  )
+  assert.equal(
+    JSON.stringify(classifiedAutoRunFailure('Issue contract changed', 'authorization-denied')),
+    '{"ok":false,"error":"Issue contract changed"}',
+  )
 })

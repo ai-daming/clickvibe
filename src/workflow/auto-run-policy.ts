@@ -10,7 +10,23 @@ export interface AutoRunConfig {
 }
 
 export type AutoRunTaskOutcome = 'done' | 'failed' | 'stopped' | 'timed_out'
+export type AutoRunSemanticFailure = 'authorization-denied'
 export const AUTO_RUN_RETRY_MS = 5_000
+
+export interface AutoRunFailureClassification {
+  semanticFailure?: AutoRunSemanticFailure
+}
+
+/** Keep controller-only classification out of the JSON response contract. */
+export function classifiedAutoRunFailure(
+  error: string,
+  semanticFailure: AutoRunSemanticFailure,
+): { ok: false; error: string } & AutoRunFailureClassification {
+  return Object.defineProperty({ ok: false as const, error }, 'semanticFailure', {
+    value: semanticFailure,
+    enumerable: false,
+  }) as { ok: false; error: string } & AutoRunFailureClassification
+}
 
 export type AutoRunDecision =
   | { kind: 'manual' }
@@ -109,13 +125,14 @@ export function autoRunFailureReason(
     cleanupPending?: boolean
     gateFailures?: unknown[]
     controllerError?: boolean
+    semanticFailure?: AutoRunSemanticFailure
   },
 ): AutoRunPausedReason {
   if (result.controllerError) return 'controller-error'
   if (result.cleanupPending || (action === 'cleanup' && result.merged)) return 'cleanup-failed'
   if (result.conflict) return 'sync-conflict'
   if (action === 'merge' || action === 'cleanup' || result.gateFailures) return 'merge-gate-rejected'
-  if (/授权|快照/.test(result.error ?? '')) return 'authorization-denied'
+  if (result.semanticFailure) return result.semanticFailure
   return 'controller-error'
 }
 
