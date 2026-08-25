@@ -23,7 +23,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { shellQuote } from '../infra/develop-core.ts'
 import { conflictFileSuffix, hasMergeConflict, listConflictFiles } from '../infra/git.ts'
 import { parseUrl, readWorktreeHead, runCommand } from '../infra/runtime.ts'
-import { appendEvent, appendLog, issueKey, loadWorkflow } from '../infra/state.ts'
+import { appendEvent, appendLog, issueKey, loadWorkflow, workflowRevision } from '../infra/state.ts'
 
 /** Sync a workflow's worktree with the remote base, then push the PR branch.
  *  Keeps the worktree on the latest base so dev/review never target stale code
@@ -87,11 +87,15 @@ export async function syncWorktree(
         await appendLog(workflow.key, 'dev', `[clickvibe] ${note}`)
         const reloaded = await loadWorkflow(workflow.key)
         if (reloaded) {
-          await appendEvent(reloaded, {
-            kind: 'note',
-            at: new Date().toISOString(),
-            note,
-          })
+          await appendEvent(
+            reloaded,
+            {
+              kind: 'note',
+              at: new Date().toISOString(),
+              note,
+            },
+            workflowRevision(reloaded) ?? 0,
+          )
         }
         return {
           ok: false,
@@ -113,12 +117,16 @@ export async function syncWorktree(
     // 记录同步事件到权威时间线(不改变开发/审查语义)
     const reloaded = await loadWorkflow(workflow.key)
     if (reloaded) {
-      await appendEvent(reloaded, {
-        kind: 'note',
-        at: new Date().toISOString(),
-        hash: head ?? undefined,
-        note: 'worktree 已同步到 origin/main',
-      })
+      await appendEvent(
+        reloaded,
+        {
+          kind: 'note',
+          at: new Date().toISOString(),
+          hash: head ?? undefined,
+          note: 'worktree 已同步到 origin/main',
+        },
+        workflowRevision(reloaded) ?? 0,
+      )
     }
     return { ok: true, worktree: workflow.worktree, branch: workflow.branch, head }
   } catch (error) {

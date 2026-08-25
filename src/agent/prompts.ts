@@ -23,11 +23,18 @@ import { fetchPrRestDetail, type GithubCommentRest } from '../github/reads.ts'
 import { githubRest, isGithubRateLimitError } from '../github/rest.ts'
 import { REVIEW_RESULT_RELATIVE_PATH } from '../infra/review-result.ts'
 import { readWorktreeHead } from '../infra/runtime.ts'
-import { type IssueWorkflow, issueBodyHash, saveWorkflow } from '../infra/state.ts'
+import {
+  type IssueWorkflow,
+  issueBodyHash,
+  commitWorkflowMetadata,
+  WorkflowConflictError,
+  workflowRevision,
+} from '../infra/state.ts'
 import {
   buildStagePrompt,
   type PromptSnapshot,
   type SnapshotFreshness,
+  reworkRoundDirective,
   selectReviewFeedback,
   snapshotWithoutReviewFeedback,
 } from './prompt.ts'
@@ -73,7 +80,8 @@ export async function resolvePromptSnapshot(
     if (prComments) snapshot.comments.push(...prComments)
     workflow.issueSnapshot = snapshot
     if (snapshot.state === 'OPEN' || snapshot.state === 'CLOSED') workflow.issueState = snapshot.state
-    await saveWorkflow(workflow)
+    const persistenceError = await persistPromptWorkflow(workflow)
+    if (persistenceError) return { error: persistenceError }
     return { snapshot, freshness: 'current' }
   }
   const snapshot = workflow.issueSnapshot
@@ -81,8 +89,26 @@ export async function resolvePromptSnapshot(
     return { error: `无法刷新 Issue,且没有可回退的持久化需求快照: ${fetched.error}` }
   }
   workflow.issueSnapshot = snapshot
-  await saveWorkflow(workflow)
+  const persistenceError = await persistPromptWorkflow(workflow)
+  if (persistenceError) return { error: persistenceError }
   return { snapshot, freshness: 'persisted', fetchError: fetched.error.slice(0, 500) }
+}
+
+async function persistPromptWorkflow(workflow: IssueWorkflow): Promise<string | null> {
+  try {
+    Object.assign(
+      workflow,
+      await commitWorkflowMetadata(workflow, workflowRevision(workflow), {
+        issueSnapshot: workflow.issueSnapshot,
+        issueState: workflow.issueState,
+      }),
+    )
+    return null
+  } catch (error) {
+    return error instanceof WorkflowConflictError
+      ? 'Workflow 已由另一控制器推进,本次启动已取消;请刷新后重试'
+      : `需求快照持久化失败:${String(error instanceof Error ? error.message : error)}`
+  }
 }
 
 export function sameSnapshot(left: PromptSnapshot, right: PromptSnapshot): boolean {
@@ -154,6 +180,7 @@ export async function buildReviewPrompt(
       ...(extraContext ? ['附加上下文:', extraContext] : []),
     ],
     requirements: [
+      '本轮 review 采用根因 review 协议:先读取 PR/issue 上全部历史 review 轮次做母题分类(同类复发必须点名轮次),对每个 finding 给出代码根因(什么构造让这类问题不可能)与过程根因(为什么活到本轮);先做静态枚举审计(枚举全部可违反路径,非构造保护即为 finding,不需要复现),再做动态对抗验证(CRITICAL 必须复现,含失败率);判定修复高度时对比改造前后的公开 API/导出面,排除改名式修复;结论按 verdict 输出(pass/fix-these/stop-and-redesign),同类连续复发或 diff 持续发散时输出 stop-and-redesign 而非问题清单。若仓库存在 skills/root-cause-review/SKILL.md 或 docs/fix-discipline.md,以其全文为准。',
       '先执行 git fetch origin 同步远端最新状态(并行开发时 base 可能已变化)。',
       `执行 git diff ${base}...HEAD 查看完整改动。`,
       ...(sessionId ? ['先复核之前发现的问题是否已解决,再审查全部新改动。'] : []),
@@ -203,6 +230,9 @@ export async function buildResumePrompt(
     ],
     reviewFeedback,
     requirements: [
+      ...(rework ? [reworkRoundDirective(reviewFeedback?.text ?? null)] : []).filter(
+        (directive): directive is string => directive !== null,
+      ),
       ...(mergePreface ? [mergePreface] : []),
       ...(sessionId
         ? ['优先利用当前会话记忆继续工作,但记忆与当前需求快照冲突时以快照为准。']

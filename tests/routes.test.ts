@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
+import { commitWorkflowFixture } from './workflow-fixture.ts'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer, request, type RequestListener } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { apply, fetchRepositoryIssues } from '../src/index.ts'
-import { encodeLiveLogEvent } from '../src/infra/live-output.ts'
+import { decodeLiveLogLine, encodeLiveLogEvent } from '../src/infra/live-output.ts'
 import {
   appendLog,
   appendTaskLog,
@@ -13,10 +14,10 @@ import {
   loadAllArchivedWorkflows,
   loadWorkflow,
   readLogHistory,
-  saveWorkflow,
   startTaskLog,
   type IssueWorkflow,
 } from '../src/infra/state.ts'
+import { createFakeJobs } from './fake-jobs.ts'
 
 function included(body: unknown, status = 200, headers: Record<string, string> = {}): string {
   return [
@@ -111,6 +112,7 @@ function createHandler(
 ): RequestListener {
   let handler: RequestListener | null = null
   const ctx = {
+    jobs: createFakeJobs(),
     skills: { register: () => () => {} },
     webServer: {
       register(route: { handler: RequestListener }) {
@@ -555,7 +557,7 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
         issueContract: { bodyHash: issueBodyHash(reviewedBody), updatedAt: '2026-08-22T00:00:00Z' },
       },
     ]
-    await saveWorkflow(workflow)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
 
     let merged = false
     let issueClosed = false
@@ -723,7 +725,7 @@ test('/merge rejects a stale review hash before invoking gh pr merge', async () 
     workflow.stage = 'passed'
     workflow.reviewResult = { passed: true, issues: [] }
     workflow.events = [{ kind: 'review', at: 'now', hash: '1111111', verdict: { passed: true, issues: [] } }]
-    await saveWorkflow(workflow)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const commands: string[] = []
     const handler = createHandler(async (spec) => {
       commands.push(spec.command)
@@ -778,7 +780,7 @@ test('/merge authorization rejects a changed acceptance contract with the same P
         },
       },
     ]
-    await saveWorkflow(workflow)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const commands: string[] = []
     const handler = createHandler(async (spec) => {
       commands.push(spec.command)
@@ -854,7 +856,7 @@ test('/merge gate rejection offers manual override that merges once and audits t
         issueContract: { bodyHash: issueBodyHash(reviewedBody), updatedAt: '2026-08-22T00:00:00Z' },
       },
     ]
-    await saveWorkflow(workflow)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
 
     let merged = false
     let issueClosed = false
@@ -1027,7 +1029,7 @@ test('/merge manual override refuses gate failures not covered by the confirmati
         },
       },
     ]
-    await saveWorkflow(workflow)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     // 授权时:哈希一致、契约已变更 → 只放行 contract-changed;
     // 合并时:Issue 契约读取失败(合并路径强制刷新)→ 新增 contract-unreadable
     // 失败项,未被确认覆盖 → 拒绝,且不写放行审计。
@@ -1140,7 +1142,7 @@ test('cleanup failure keeps merged terminal state and retries without merging ag
         issueContract: { bodyHash: issueBodyHash(reviewedBody), updatedAt: '2026-08-22T00:00:00Z' },
       },
     ]
-    await saveWorkflow(workflow)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
 
     let merged = false
     let removeAttempts = 0
@@ -1248,7 +1250,7 @@ test('/state uses the live GitHub issue state instead of the stored issueState',
       join(tempHome, 'missing-worktree'),
     )
     workflow.issueState = 'OPEN'
-    await saveWorkflow(workflow)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const handler = createHandler(async (spec) => {
       const api = githubApi(spec.command, {
         item: { url: workflow.url, number: 23, state: 'CLOSED' },
@@ -1471,7 +1473,7 @@ test('/history restores the complete disk log by task id after Host restart', as
   try {
     const workflow = interruptedWorkflow('o-r-903', 'https://github.com/o/r/issues/903', join(tempHome, 'worktree'))
     workflow.devTaskId = 'dev-before-restart'
-    await saveWorkflow(workflow)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     await appendLog(workflow.key, 'dev', 'thinking one')
     await appendLog(workflow.key, 'dev', 'thinking two')
 
@@ -1497,7 +1499,7 @@ test('/history queries an older round by project and issue while binding the rou
     const older = 'dev-1720000000000-older'
     const current = 'dev-1720000005000-current'
     workflow.devTaskId = current
-    await saveWorkflow(workflow)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     await startTaskLog(workflow, 'dev', older)
     await appendTaskLog(workflow, 'dev', older, 1, 'older round')
     await startTaskLog(workflow, 'dev', current)
@@ -1527,7 +1529,7 @@ test('/history restores structured agent records and keeps legacy lines compatib
   try {
     const workflow = interruptedWorkflow('o-r-906', 'https://github.com/o/r/issues/906', join(tempHome, 'worktree'))
     workflow.devTaskId = 'dev-1720000000000-event'
-    await saveWorkflow(workflow)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     await appendLog(
       workflow.key,
       'dev',
@@ -1559,7 +1561,7 @@ test('/history accepts a safe workflow key and rejects unknown or traversal targ
   process.env.HOME = tempHome
   try {
     const workflow = interruptedWorkflow('o-r-904', 'https://github.com/o/r/issues/904', join(tempHome, 'worktree'))
-    await saveWorkflow(workflow)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     await appendLog(workflow.key, 'review', 'review history')
     const handler = createHandler()
 
@@ -1650,7 +1652,7 @@ test('invalid exact dev session falls back once to a fresh session on the same t
         url: 'https://github.com/o/r/pull/29#issuecomment-99',
       },
     })
-    await saveWorkflow(workflow)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     await appendLog(workflow.key, 'dev', 'prior run must be rotated')
     const starts: Array<{ command: string; workdir?: string; prompt: string }> = []
     const comments: Array<{ command: string; body: string }> = []
@@ -1795,6 +1797,139 @@ test('invalid exact dev session falls back once to a fresh session on the same t
   }
 })
 
+test('lossy agent output recovers the missing head from the host spill file into the panel and session id', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-spill-recovery-'))
+  process.env.HOME = tempHome
+  try {
+    const worktree = join(tempHome, 'worktree')
+    await mkdir(worktree, { recursive: true })
+    const workflow = interruptedWorkflow('o-r-931', 'https://github.com/o/r/issues/931', worktree)
+    workflow.devSessionId = null
+    workflow.devSessionAgent = null
+    await commitWorkflowFixture(workflow, null)
+    const currentIssue = {
+      url: workflow.url,
+      title: 'recover issue',
+      body: '## 验收标准\n- recover',
+      state: 'OPEN',
+      updatedAt: '2026-08-22T08:00:00Z',
+      comments: [],
+    }
+    const spillFile = join(tempHome, 'agent-stdout.log')
+    await writeFile(
+      spillFile,
+      [
+        '{"type":"thread.started","thread_id":"recovered-session"}',
+        '{"type":"item.completed","item":{"type":"agent_message","text":"lost in the host buffer"}}',
+        '',
+      ].join('\n'),
+    )
+    const starts: Array<{ command: string; prompt: string }> = []
+    const comments: Array<{ command: string; body: string }> = []
+    const handler = createHandler(
+      async (spec) => {
+        const api = githubApi(spec.command, { item: currentIssue })
+        if (api) return api
+        if (spec.command === 'git rev-parse --short HEAD')
+          return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
+        if (spec.command.startsWith('git merge-base '))
+          return { exitCode: 0, stdout: { text: 'base123\n' }, stderr: { text: '' } }
+        if (spec.command.startsWith('git log '))
+          return { exitCode: 0, stdout: { text: 'abc123\u001f完成实现\n' }, stderr: { text: '' } }
+        if (spec.command.startsWith('git diff --numstat '))
+          return { exitCode: 0, stdout: { text: '1\t1\tsrc/recovered.ts\n' }, stderr: { text: '' } }
+        if (spec.command.startsWith('gh issue comment')) {
+          comments.push({ command: spec.command, body: spec.stdin ?? '' })
+          return {
+            exitCode: 0,
+            stdout: { text: 'https://github.com/o/r/issues/931#issuecomment-1' },
+            stderr: { text: '' },
+          }
+        }
+        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      },
+      (spec) => {
+        starts.push({ command: spec.command, prompt: spec.stdin ?? '' })
+        let read = false
+        return {
+          status: 'running',
+          exitCode: 0,
+          done: new Promise<void>((resolve) => setTimeout(resolve, 30)),
+          readOutput() {
+            if (read) return { delta: '', lossy: false }
+            read = true
+            return {
+              delta: '{"type":"item.completed","item":{"type":"agent_message","text":"visible tail"}}\n',
+              lossy: true,
+              stdoutSpillPath: spillFile,
+            }
+          },
+          kill() {
+            return true
+          },
+        }
+      },
+    )
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+    const authorized = (await post(
+      handler,
+      '/clickvibe/api/authorize',
+      {
+        action: 'resume',
+        url: workflow.url,
+        agent: 'codex',
+        context: '',
+      },
+      headers,
+    )) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
+    const resumed = (await post(
+      handler,
+      '/clickvibe/api/resume',
+      {
+        url: workflow.url,
+        agent: 'codex',
+        context: '',
+        authorizationId: authorized.body.authorizationId,
+        authorizationDigest: authorized.body.authorizationDigest,
+      },
+      headers,
+    )) as { status: number; body: { ok: boolean; taskId?: string } }
+    assert.equal(resumed.status, 200, JSON.stringify(resumed.body))
+    assert.ok(resumed.body.taskId)
+    const completed = await waitForTask(handler, resumed.body.taskId)
+
+    assert.ok(
+      completed.delta.some((line) => line.includes('visible tail')),
+      'live tail rendered',
+    )
+    assert.ok(
+      completed.delta.some((line) => line.includes('lost in the host buffer')),
+      'recovered head rendered',
+    )
+    assert.ok(
+      completed.delta.some((line) => line.includes('已从宿主 spill 文件恢复 2 行缺失的 Agent 输出')),
+      'recovery notice rendered',
+    )
+    assert.ok(
+      completed.delta.some((line) => line.includes('宿主流式缓冲已丢失部分 Agent 输出')),
+      'lossy gap notice rendered',
+    )
+    assert.equal(starts.length, 1)
+    assert.equal(comments.length, 1)
+    const reloaded = await loadWorkflow(workflow.key)
+    assert.equal(reloaded?.devSessionId, 'recovered-session')
+    assert.equal(reloaded?.devSessionAgent, 'codex')
+    const historyEvents = (await readLogHistory(workflow.key, 'dev')).map(decodeLiveLogLine)
+    assert.ok(historyEvents.some((event) => event.text.includes('lost in the host buffer')))
+    assert.ok(historyEvents.some((event) => event.text.includes('已从宿主 spill 文件恢复 2 行')))
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
 test('completed development without a PR appends its Dev Meta comment to the issue', async () => {
   const previousHome = process.env.HOME
   const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-dev-comment-fallback-'))
@@ -1804,7 +1939,7 @@ test('completed development without a PR appends its Dev Meta comment to the iss
     await mkdir(worktree, { recursive: true })
     const workflow = interruptedWorkflow('o-r-920', 'https://github.com/o/r/issues/920', worktree)
     workflow.prNumber = null
-    await saveWorkflow(workflow)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const comments: Array<{ command: string; body: string }> = []
     const prompts: string[] = []
     const handler = createHandler(
@@ -1900,7 +2035,7 @@ test('concurrent resume requests reserve one workflow task before refreshing the
     const workflow = interruptedWorkflow('o-r-930', 'https://github.com/o/r/issues/930', worktree)
     workflow.prNumber = null
     workflow.devSessionId = null
-    await saveWorkflow(workflow)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     let issueReads = 0
     let starts = 0
     const currentIssue = {
@@ -1998,7 +2133,7 @@ test('comment publication failure keeps the delivery event and stores a bounded 
     await mkdir(worktree, { recursive: true })
     const workflow = interruptedWorkflow('o-r-921', 'https://github.com/o/r/issues/921', worktree)
     workflow.reviewResult = { passed: false, issues: ['must remain traceable'] }
-    await saveWorkflow(workflow)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const handler = createHandler(
       async (spec) => {
         if (spec.command === 'git rev-parse --short HEAD') {
@@ -2081,7 +2216,7 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     workflow.stage = 'review-ready'
     workflow.reviewSessionId = 'dead-review'
     workflow.reviewSessionAgent = 'codex'
-    await saveWorkflow(workflow)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const starts: Array<{ command: string; prompt: string }> = []
     const reviewedBody = '## 验收标准\n- frozen review contract'
     const reviewedUpdatedAt = '2026-08-22T01:02:03Z'
@@ -2255,7 +2390,7 @@ test('duplicate review requests reuse the reserved task before fetching the Issu
     await mkdir(worktree, { recursive: true })
     const workflow = interruptedWorkflow('o-r-920', 'https://github.com/o/r/issues/920', worktree)
     workflow.stage = 'review-ready'
-    await saveWorkflow(workflow)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
 
     let issueCalls = 0
     let notifyIssueEntered!: () => void
@@ -2376,7 +2511,7 @@ test('cross-agent review starts fresh and an empty failed verdict requires re-re
     workflow.reviewSessionId = 'codex-review'
     workflow.reviewSessionAgent = 'codex'
     workflow.reviewResult = { passed: false, issues: ['old issue'] }
-    await saveWorkflow(workflow)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const starts: string[] = []
     const reviewedBody = '## 验收标准\n- current contract'
     const handler = createHandler(
@@ -3569,7 +3704,7 @@ test('resume (rework) carries the user context next to the review feedback and a
     await mkdir(worktree, { recursive: true })
     const workflow = interruptedWorkflow('o-r-921', 'https://github.com/o/r/issues/921', worktree)
     workflow.reviewResult = { passed: false, issues: ['修复竞态', '补充失败测试'] }
-    await saveWorkflow(workflow)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const prompts: string[] = []
     const currentIssue = {
       url: workflow.url,
@@ -3664,7 +3799,7 @@ test('review with user context appends it to the prompt and audits it in the rev
     await mkdir(worktree, { recursive: true })
     const workflow = interruptedWorkflow('o-r-922', 'https://github.com/o/r/issues/922', worktree)
     workflow.stage = 'review-ready'
-    await saveWorkflow(workflow)
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const starts: Array<{ command: string; prompt: string }> = []
     const reviewedBody = '## 验收标准\n- review context'
     const currentIssue = {

@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { parseAgentChunk, parseClaudeEvent, parseCodexEvent } from '../src/agent/agent-stream.ts'
+import {
+  lossyAgentOutputNotice,
+  parseAgentChunk,
+  parseClaudeEvent,
+  parseCodexEvent,
+  recoverSpillLines,
+  spillRecoveryNotice,
+} from '../src/agent/agent-stream.ts'
 
 const longMessage = `/Users/example/project\n  ${'x'.repeat(5000)}\n/tmp/clickvibe-worktree`
 
@@ -48,6 +55,30 @@ test('codex preserves complete reasoning, commands, errors and tool arguments', 
     )[0].text,
     `🔧 执行命令: ${toolArguments}`,
   )
+})
+
+test('codex error items without useful text identify the reporting agent', () => {
+  for (const text of [undefined, '', '   ']) {
+    assert.deepEqual(parseCodexEvent(JSON.stringify({ type: 'item.completed', item: { type: 'error', text } })), [
+      { kind: 'text', text: '⚠️ Codex 报告错误，但未提供错误详情' },
+    ])
+  }
+})
+
+test('lossy agent output notice explains the host buffer gap and spill recovery paths', () => {
+  assert.equal(
+    lossyAgentOutputNotice({
+      lossy: true,
+      stdoutSpillPath: '/private/tmp/dsh/stdout.log',
+      stderrSpillPath: '/private/tmp/dsh/stderr.log',
+    }),
+    '[clickvibe] 宿主流式缓冲已丢失部分 Agent 输出；可从宿主 spill 文件恢复：stdout /private/tmp/dsh/stdout.log；stderr /private/tmp/dsh/stderr.log',
+  )
+  assert.equal(
+    lossyAgentOutputNotice({ lossy: true }),
+    '[clickvibe] 宿主流式缓冲已丢失部分 Agent 输出；宿主未提供 spill 文件，缺口无法从 ClickVibe 日志恢复',
+  )
+  assert.equal(lossyAgentOutputNotice({ lossy: false }), null)
 })
 
 test('codex preserves command output whitespace as one complete event', () => {
@@ -167,4 +198,43 @@ test('claude renders thinking, tool_use and usage with its own schema', () => {
     ['thinking', 'tool', 'usage'],
   )
   assert.equal(lines[2].usage?.totalTokens, 23)
+})
+
+test('recovers only the spill lines the live delta stream never delivered', () => {
+  const delivered = new Set([
+    '{"type":"turn.started"}',
+    '{"type":"item.completed","item":{"type":"agent_message","text":"tail message"}}',
+  ])
+  const spill = [
+    '{"type":"thread.started","thread_id":"t-1"}',
+    '{"type":"turn.started"}',
+    '{"type":"item.completed","item":{"type":"agent_message","text":"lost in the gap"}}',
+    '{"type":"item.completed","item":{"type":"agent_message","text":"tail message"}}',
+  ].join('\n')
+  assert.deepEqual(recoverSpillLines(spill, delivered), [
+    '{"type":"thread.started","thread_id":"t-1"}',
+    '{"type":"item.completed","item":{"type":"agent_message","text":"lost in the gap"}}',
+  ])
+})
+
+test('spill recovery is idempotent and normalizes line endings like the live stream', () => {
+  const delivered = new Set(['already delivered'])
+  const spill = 'already delivered\r\nfirst missing\r\nsecond missing\r\n'
+  const first = recoverSpillLines(spill, delivered)
+  assert.deepEqual(first, ['first missing', 'second missing'])
+  assert.deepEqual(recoverSpillLines(spill, new Set([...delivered, ...first])), [])
+  assert.deepEqual(recoverSpillLines('', new Set()), [])
+})
+
+test('spill recovery notice reports the recovered line count and paths', () => {
+  assert.equal(
+    spillRecoveryNotice(['stdout /private/tmp/dsh/stdout.log'], 3),
+    '[clickvibe] 已从宿主 spill 文件恢复 3 行缺失的 Agent 输出: stdout /private/tmp/dsh/stdout.log',
+  )
+  assert.equal(
+    spillRecoveryNotice(['stdout /private/tmp/dsh/stdout.log', 'stderr /private/tmp/dsh/stderr.log'], 12),
+    '[clickvibe] 已从宿主 spill 文件恢复 12 行缺失的 Agent 输出: stdout /private/tmp/dsh/stdout.log；stderr /private/tmp/dsh/stderr.log',
+  )
+  assert.equal(spillRecoveryNotice([], 0), null)
+  assert.equal(spillRecoveryNotice(['stdout /a'], 0), null)
 })

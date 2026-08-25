@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict'
+import { commitWorkflowFixture } from './workflow-fixture.ts'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { loadWorkflow, type IssueWorkflow, saveWorkflow } from '../src/infra/state.ts'
+import type { LiveTask } from '../src/infra/runtime.ts'
+import { loadWorkflow, type IssueWorkflow, type WorkflowTaskLease } from '../src/infra/state.ts'
 import { finalizeDevRun } from '../src/workflow/dev-completion.ts'
 
 function workflow(): IssueWorkflow {
@@ -38,18 +40,33 @@ test('successful dev completion is durable before slow delivery work begins', as
   process.env.HOME = tempHome
   try {
     const current = workflow()
-    await saveWorkflow(current)
+    await commitWorkflowFixture(current, null)
+    assert.equal(current.taskStateRevision, 0)
+    const staleTaskSnapshot = structuredClone(current)
+    current.issueSnapshot = { url: current.url, title: 'metadata advanced', body: '', state: 'OPEN', updatedAt: 'now' }
+    await commitWorkflowFixture(current, current.revision ?? 0)
+    assert.equal(current.taskStateRevision, 0)
     let deliveryStarted = false
-    const completed = await finalizeDevRun(current, 'done', 0, 'session-106', 'codex', async () => {
+    const live = {
+      taskId: current.devTaskId!,
+      workflowLease: {
+        kind: 'dev',
+        taskId: current.devTaskId!,
+        taskStateRevision: staleTaskSnapshot.taskStateRevision ?? 0,
+      } as WorkflowTaskLease,
+    } as LiveTask
+    const completed = await finalizeDevRun(staleTaskSnapshot, live, 'done', 0, 'session-106', 'codex', async () => {
       deliveryStarted = true
       const visible = await loadWorkflow(current.key)
       assert.equal(visible?.stage, 'review-ready')
       assert.equal(visible?.devInterrupted, false)
       assert.equal(visible?.reviewResult, null)
+      assert.equal(visible?.issueSnapshot?.title, 'metadata advanced')
     })
 
     assert.equal(completed, true)
     assert.equal(deliveryStarted, true)
+    assert.equal((await loadWorkflow(current.key))?.taskStateRevision, 1)
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome

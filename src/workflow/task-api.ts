@@ -1,16 +1,21 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { Context } from '@deepseek-ai/cordis'
+import type { JobId } from '@deepseek-ai/dsh-jobs'
 import { finishTask, pushTaskLine } from '../agent/task-supervisor.ts'
 import { decodeLiveLogLine, type LiveLogEvent } from '../infra/live-output.ts'
 import { type LiveTask, liveTasks, liveWaiters } from '../infra/runtime.ts'
+import { stopWorkflowTaskCommand } from '../infra/workflow-persistence.ts'
 import {
   findTaskHistory,
   findWorkflowByIssue,
   type IssueWorkflow,
+  loadAllWorkflows,
   loadWorkflow,
+  readLogHistory,
   readTaskLog,
-  saveWorkflow,
 } from '../infra/state.ts'
 import type { TaskMetrics } from '../infra/task-log-store.ts'
+import { observeWorkflowTask, type TaskOwnershipContext } from '../infra/task-ownership.ts'
 
 /** Consume incremental dev log/status for one task. */
 export async function pollDevelop(payload: unknown): Promise<
@@ -114,12 +119,13 @@ export async function getTaskHistory(req: IncomingMessage): Promise<
   const cursor = target.live?.log.read(Number.MAX_SAFE_INTEGER).cursor ?? 0
   const history = target.taskId
     ? await readTaskLog(target.workflow, target.kind, target.taskId)
-    : {
-        encodedLines: [],
-        events: [],
-        lines: [],
-        metrics: { startedAt: null, endedAt: null, durationMs: null, status: null, exitCode: null },
-      }
+    : await (() => {
+        const metrics = { startedAt: null, endedAt: null, durationMs: null, status: null, exitCode: null }
+        return readLogHistory(target.key, target.kind).then((encodedLines) => {
+          const events = encodedLines.map(decodeLiveLogLine)
+          return { encodedLines, events, lines: events.map((event) => event.text), metrics }
+        })
+      })()
   const events = history.events
   return {
     ok: true,
@@ -210,27 +216,77 @@ export function handleStream(req: IncomingMessage, res: ServerResponse): void {
   }
 }
 
-export function stopTask(
+export async function stopTask(
+  ctx: Context,
   payload: unknown,
-): { ok: true; taskId: string; stopped: boolean } | { ok: false; error: string } {
-  const taskId = String((payload as { taskId?: unknown } | undefined)?.taskId ?? '')
+): Promise<{ ok: true; taskId: string; stopped: boolean } | { ok: false; error: string }> {
+  const input = payload as { taskId?: unknown; confirmedStopped?: unknown } | undefined
+  const taskId = String(input?.taskId ?? '')
+  const confirmedStopped = input?.confirmedStopped === true
   const task = liveTasks.get(taskId)
-  if (!task) return { ok: false, error: `未知任务 ${taskId}` }
+  if (!task) {
+    const stored = await findTaskHistory(taskId)
+    const currentWorkflow = stored
+      ? await loadWorkflow(stored.workflow.key)
+      : (await loadAllWorkflows()).find((workflow) => workflow.devTaskId === taskId || workflow.reviewTaskId === taskId)
+    if (!currentWorkflow) {
+      return stored ? { ok: true, taskId, stopped: false } : { ok: false, error: `未知任务 ${taskId}` }
+    }
+    const ownership = observeWorkflowTask(ctx as unknown as TaskOwnershipContext, currentWorkflow)
+    if (ownership.state === 'none') return { ok: true, taskId, stopped: false }
+    if (ownership.taskId !== taskId) {
+      return { ok: false, error: `任务请求已过期:当前任务为 ${ownership.taskId},请刷新后重试` }
+    }
+    const kind = ownership.kind
+    let hostJobId = kind === 'dev' ? currentWorkflow.devHostJobId : currentWorkflow.reviewHostJobId
+    if (ownership.state === 'interrupted' || (ownership.state === 'unknown' && confirmedStopped)) {
+      const saved = await markTaskStopped(currentWorkflow, kind, taskId)
+      if (saved.status === 'ownership-lost') {
+        return { ok: false, error: '任务请求已过期:当前任务代次已变化,请刷新后重试' }
+      }
+      return { ok: true, taskId, stopped: false }
+    }
+    if (!hostJobId && ctx.jobs) {
+      const label = `clickvibe:${currentWorkflow.key}:${kind}:${taskId}`
+      try {
+        hostJobId = String(
+          ctx.jobs.list().find((job) => job.label === label && (job.status === 'running' || job.status === 'stopping'))
+            ?.id ?? '',
+        )
+      } catch (error) {
+        return { ok: false, error: `宿主任务查询失败:${String(error instanceof Error ? error.message : error)}` }
+      }
+    }
+    if (!hostJobId || !ctx.jobs) {
+      return { ok: false, error: `任务 ${taskId} 的宿主归属无法确认,请在宿主任务视图停止后刷新` }
+    }
+    try {
+      const result = ctx.jobs.kill(hostJobId as JobId, undefined, `ClickVibe stop ${taskId}`)
+      const saved = await markTaskStopped(currentWorkflow, kind, taskId)
+      if (saved.status === 'ownership-lost') {
+        return { ok: false, error: '任务请求已过期:当前任务代次已变化,请刷新后重试' }
+      }
+      return { ok: true, taskId, stopped: result === 'requested' }
+    } catch (error) {
+      return { ok: false, error: `宿主任务停止失败:${String(error instanceof Error ? error.message : error)}` }
+    }
+  }
   if (task.closed) return { ok: true, taskId, stopped: false }
   pushTaskLine(task, '[clickvibe] 用户请求停止任务')
   task.status = 'stopped'
   const stopped = task.process?.kill() ?? false
   if (!task.process) finishTask(task, 'stopped', null)
-  void (async () => {
-    const workflow = await loadWorkflow(task.workflowKey)
-    if (!workflow) return
-    if (task.kind === 'dev') {
-      workflow.stage = 'developing'
-      workflow.devInterrupted = true
-    } else {
-      workflow.stage = 'review-ready'
-    }
-    await saveWorkflow(workflow)
-  })()
+  const workflow = await loadWorkflow(task.workflowKey)
+  if (!workflow) return { ok: false, error: `任务 ${taskId} 已停止,但 workflow 不存在,无法提交撤销` }
+  const saved = await markTaskStopped(workflow, task.kind, task.taskId)
+  if (saved.status === 'ownership-lost') {
+    // A successor already revoked this stale local lease. The requested local
+    // process is stopped and no current workflow generation was modified.
+    return { ok: true, taskId, stopped }
+  }
   return { ok: true, taskId, stopped }
+}
+
+function markTaskStopped(workflow: IssueWorkflow, kind: 'dev' | 'review', taskId: string) {
+  return stopWorkflowTaskCommand(workflow, { kind, taskId })
 }

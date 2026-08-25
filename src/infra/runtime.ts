@@ -40,7 +40,7 @@ import {
 import { LineBuffer } from './line-buffer.ts'
 import { type RepositoryFreshness, RepositoryFreshnessGate, RepositoryRefreshClock } from './repo-freshness.ts'
 import { ExclusiveTaskGate } from './task-gate.ts'
-import type { IssueWorkflow } from './state.ts'
+import type { IssueWorkflow, WorkflowTaskLease } from './state.ts'
 
 const MAX_BODY_BYTES = 64 * 1024
 
@@ -80,6 +80,8 @@ export interface LiveTask {
   timeout?: ReturnType<typeof setTimeout>
   cleanup?: ReturnType<typeof setTimeout>
   sessionId: string | null // 从事件流捕获的 agent 会话 id(续会话用)
+  /** Claim-signed lifecycle capability; never reconstructed from persisted workflow state. */
+  workflowLease: WorkflowTaskLease | null
 }
 
 export const liveTasks = new Map<string, LiveTask>()
@@ -255,6 +257,11 @@ export async function runCommand(
     throw new Error(`命令输出超过上限且无 spill 文件,无法获取完整输出`)
   }
   return out.text.trim()
+}
+
+/** Read a host subprocess spill file: the byte-complete stream beyond the in-memory cap. */
+export async function readHostSpillFile(path: string): Promise<string> {
+  return readFile(path, 'utf8')
 }
 
 export function fetchTtlMs(config: ClickVibeConfig): number {

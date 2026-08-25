@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { ensurePullRequest } from '../github/pr.ts'
 import { parseUrl } from '../infra/runtime.ts'
-import { appendLog, issueKey, loadWorkflow, saveWorkflow } from '../infra/state.ts'
+import { appendLog, issueKey, loadWorkflow, commitWorkflowMetadata, workflowRevision } from '../infra/state.ts'
 import { workflowBaseBranch } from './state-view.ts'
 
 export async function createPullRequest(
@@ -24,7 +24,10 @@ export async function createPullRequest(
       title: workflow.issueSnapshot?.title || `Deliver issue #${parsed.number}`,
     })
     workflow.prNumber = result.number
-    await saveWorkflow(workflow)
+    Object.assign(
+      workflow,
+      await commitWorkflowMetadata(workflow, workflowRevision(workflow), { prNumber: workflow.prNumber }),
+    )
     await appendLog(workflow.key, 'dev', `[clickvibe] ${result.created ? '已创建' : '已复用'} PR #${result.number}`)
     return { ok: true, prNumber: result.number, created: result.created }
   } catch (error) {

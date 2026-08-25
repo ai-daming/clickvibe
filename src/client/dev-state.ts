@@ -194,10 +194,11 @@ export function useDevSection({
       setBusy(null)
     }
   }
-  const stop = async () => {
-    if (!activeTaskId) return
-    const res = await apiCall<{ ok: boolean; error?: string }>('stop', { taskId: activeTaskId })
+  const stop = async (taskId = activeTaskId, confirmedStopped = false) => {
+    if (!taskId) return
+    const res = await apiCall<{ ok: boolean; error?: string }>('stop', { taskId, confirmedStopped })
     if (!res.ok) setError(res.error ?? '停止失败')
+    else await refresh()
   }
   const syncWorktree = async () => {
     setBusy('syncing')

@@ -1,6 +1,6 @@
 import { RunningDuration } from '../duration.ts'
 import { type Workflow, stageLabel } from '../domain.ts'
-import { reviewVerdictView } from '../runtime.ts'
+import { reviewVerdictView, selectUnknownTaskId } from '../runtime.ts'
 import { sectionStorageKey } from './collapsible-section.ts'
 import { type GhIssue } from './issue-view.tsx'
 import { LiveTerminal } from './live-terminal.tsx'
@@ -63,6 +63,7 @@ export function DevSection({
     workflowEvents,
   } = useDevSection({ url, issue, workflow, onWorkflow, autoAction, onAutoActionHandled, onDelivered })
   const freshEntry = freshSessionEntry(effectiveAction.kind, derived?.freshSession)
+  const unknownTaskId = selectUnknownTaskId(workflow)
   const runFreshSession = () => {
     const userContext = contextToSubmit(contextText)
     if (freshEntry === 'develop') void resume(userContext, true)
@@ -291,6 +292,21 @@ export function DevSection({
         {activeTaskId ? (
           <button className="cv-dev-btn cv-dev-warn" onClick={() => void stop()}>
             停止任务
+          </button>
+        ) : null}
+        {stage === 'task-unknown' && unknownTaskId ? (
+          <button
+            className="cv-dev-btn cv-dev-warn"
+            disabled={busy !== null}
+            onClick={() => {
+              if (
+                window.confirm('仅当你已在宿主任务视图或系统进程中确认旧 agent 已停止时继续。确认后将解除双开门禁。')
+              ) {
+                void stop(unknownTaskId, true)
+              }
+            }}
+          >
+            确认旧任务已停止
           </button>
         ) : null}
       </div>
