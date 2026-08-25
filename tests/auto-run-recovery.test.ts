@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
-import { commitWorkflowFixture } from './workflow-fixture.ts'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { issueKey, loadWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
+import { type IssueWorkflow, issueKey, loadWorkflow } from '../src/infra/state.ts'
 import { requestAutoRunReconcile } from '../src/workflow/auto-run.ts'
+import { commitWorkflowFixture } from './workflow-fixture.ts'
 
 test('a reconcile exception is preserved as controller-error, never session-interrupted', async () => {
   const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-reconcile-'))
@@ -72,6 +72,23 @@ test('a reconcile exception is preserved as controller-error, never session-inte
     // 证据必须落盘:暂停原因之外,原始错误文本要写进本地事件(#90 事故:两次
     // controller-error 暂停均无法追溯,console 诊断几分钟内被滚动缓冲冲掉)。
     assert.match(observed?.events.at(-1)?.note ?? '', /forced reconcile failure/)
+    const diagnosticPath = join(tempHome, '.clickvibe', 'state', 'owner', 'repo', 'issue-111', 'diagnostics.jsonl')
+    let diagnostics = ''
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      diagnostics = await readFile(diagnosticPath, 'utf8').catch(() => '')
+      if (diagnostics.includes('auto-run-reconcile-error')) break
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    assert.notEqual(diagnostics, '')
+    const reconcileError = diagnostics
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line))
+      .find((record) => record.event === 'auto-run-reconcile-error')
+    assert.equal(reconcileError.errorName, 'Error')
+    assert.equal(reconcileError.errorMessage, 'forced reconcile failure')
+    assert.match(reconcileError.errorStack, /forced reconcile failure/)
+    assert.equal(reconcileError.workflowKey, key)
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome

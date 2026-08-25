@@ -75,14 +75,30 @@ export function issueKey(repoKey: string, number: string): string {
   return `issue-${Buffer.from(repoKey, 'utf8').toString('base64url')}-${number}`
 }
 
-export function legacyIssueKey(key: string): string | null {
+export function parseIssueKey(key: unknown): { owner: string; repo: string; issue: string } | null {
+  if (typeof key !== 'string') return null
   const match = key.match(/^issue-([A-Za-z0-9_-]+)-([1-9]\d*)$/)
   if (!match) return null
   try {
     const repoKey = Buffer.from(match[1], 'base64url').toString('utf8')
-    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repoKey)) return null
-    return `${repoKey.replace('/', '-')}-${match[2]}`
+    const slash = repoKey.indexOf('/')
+    const owner = repoKey.slice(0, slash)
+    const repo = repoKey.slice(slash + 1)
+    if (!validGithubComponent(owner) || !validGithubComponent(repo)) return null
+    return { owner, repo, issue: match[2] }
   } catch {
     return null
   }
+}
+
+export function diagnosticLogPath(root: string, workflowKey?: unknown): string {
+  const coordinates = parseIssueKey(workflowKey)
+  return coordinates
+    ? join(issueDirectory(root, coordinates.owner, coordinates.repo, coordinates.issue), 'diagnostics.jsonl')
+    : join(root, 'diagnostics.jsonl')
+}
+
+export function legacyIssueKey(key: string): string | null {
+  const coordinates = parseIssueKey(key)
+  return coordinates ? `${coordinates.owner}-${coordinates.repo}-${coordinates.issue}` : null
 }
