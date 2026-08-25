@@ -69,6 +69,9 @@ test('a reconcile exception is preserved as controller-error, never session-inte
     assert.equal(observed?.autoRun?.status, 'paused')
     assert.equal(observed?.autoRun?.pausedReason, 'controller-error')
     assert.match(observed?.events.at(-1)?.note ?? '', /controller-error/)
+    // 证据必须落盘:暂停原因之外,原始错误文本要写进本地事件(#90 事故:两次
+    // controller-error 暂停均无法追溯,console 诊断几分钟内被滚动缓冲冲掉)。
+    assert.match(observed?.events.at(-1)?.note ?? '', /forced reconcile failure/)
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
