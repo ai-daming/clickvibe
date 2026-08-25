@@ -29,7 +29,7 @@ workflow 每次提交都携带持久化 revision;所有普通写要求 expected 
 
 - 开发/返工中断:使用「恢复开发」,只在原 agent 归属匹配时续接已记录的 session;session 缺失、归属不匹配或被 agent 拒绝时按既有规则降级为同一 worktree 的全新会话。
 - Review 中断:确认旧宿主任务已经停止后使用「重新 Review」,重新审查当前 HEAD;不得沿用未物化结论的旧 Review。
-- 自动跑到底:只有任务失败/停止/超时或上述宿主终止证据才使用 `session-interrupted`;GitHub、git、宿主 registry/controller/占位等非 Agent 故障使用 `controller-error`,由人处理后重新挂起。系统不得根据本地 step 或日志时间戳自动双开任务。
+- 自动跑到底:只有任务失败/停止/超时或上述宿主终止证据才使用 `session-interrupted`;GitHub、git、文件系统、宿主 registry/controller/占位等基础设施故障在预算内指数退避重试。相同错误栈连续三次只临时熔断为 `controller-error`,看门狗冷却后自动重挂;`unknown` ownership 继续 fail closed,不得启动第二个任务。`session-interrupted`、`task-timeout`、`budget-exhausted`、`rounds-exhausted` 等语义暂停不由看门狗恢复。
 
 方案评估与选型:
 
@@ -39,7 +39,7 @@ workflow 每次提交都携带持久化 revision;所有普通写要求 expected 
 | 宿主重启时插件接管旧任务 | `ctx.jobs` 是进程内 host registry,注册不随插件 producer/controller fiber 消失;可覆盖热重载和多模块实例,但不能跨宿主进程 | **选用作同宿主重载的任务所有权事实源**;启动前同步占位,持久化 host job ID 并校验 workflow/task label |
 | 运行探活(PID/进程扫描/agent 日志游标) | shell 契约不暴露稳定 PID;扫描命令行或看日志新鲜度既不能证明所有权,也不能安全停止/接管 | 拒绝单信号探活;仅使用 supervisor 的 job 生命周期事实 |
 
-实现同时输出 `runtimeInstanceId`、PID、模块加载时间和任务 `set/close/delete`、host job 注册、auto-run 判断/异常的结构化诊断。`requestAutoRunReconcile()` 的未知异常记录为 `controller-error`,不再冒充 agent 会话中断。
+实现同时输出 `runtimeInstanceId`、PID、模块加载时间和任务 `set/close/delete`、host job 注册、auto-run 判断/异常的结构化诊断。`requestAutoRunReconcile()` 的未知异常记录错误类型、原始消息、完整栈、fingerprint、连续次数、总重试次数和下次时间,不再冒充 agent 会话中断。GitHub 限流另按响应头 reset 调度。
 
 这些控制器诊断除同步写入 `console.warn` 外,还会 best-effort 追加到持久 JSONL。带有效 `workflowKey` 的事件写入 `~/.clickvibe/state/<owner>/<repo>/issue-<number>/diagnostics.jsonl`;无 workflow 归属或 key 无法解析的事件写入全局 `~/.clickvibe/state/diagnostics.jsonl`。活动文件默认上限为 5 MiB,可在 `~/.clickvibe/config.yaml` 设置 `diagnosticsMaxBytes` 覆盖;追加将超限时,上一段保留为同目录的 `diagnostics.1.jsonl`,再创建新的活动文件。轮转不截断单条事件,所以单条记录大于上限时允许独占一个文件段。诊断落盘失败不影响请求路径或 console 输出。
 

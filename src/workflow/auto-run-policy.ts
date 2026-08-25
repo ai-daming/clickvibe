@@ -10,12 +10,28 @@ export interface AutoRunConfig {
 }
 
 export type AutoRunTaskOutcome = 'done' | 'failed' | 'stopped' | 'timed_out'
+export type AutoRunSemanticFailure = 'authorization-denied'
 export const AUTO_RUN_RETRY_MS = 5_000
+
+export interface AutoRunFailureClassification {
+  semanticFailure?: AutoRunSemanticFailure
+}
+
+/** Keep controller-only classification out of the JSON response contract. */
+export function classifiedAutoRunFailure(
+  error: string,
+  semanticFailure: AutoRunSemanticFailure,
+): { ok: false; error: string } & AutoRunFailureClassification {
+  return Object.defineProperty({ ok: false as const, error }, 'semanticFailure', {
+    value: semanticFailure,
+    enumerable: false,
+  }) as { ok: false; error: string } & AutoRunFailureClassification
+}
 
 export type AutoRunDecision =
   | { kind: 'manual' }
   | { kind: 'wait'; rounds: number; unresolved: AutoRunUnresolvedRound[] }
-  | { kind: 'complete'; rounds: number; unresolved: AutoRunUnresolvedRound[] }
+  | { kind: 'complete'; reason?: 'issue-closed'; rounds: number; unresolved: AutoRunUnresolvedRound[] }
   | {
       kind: 'trigger'
       action: Extract<NextActionKind, 'develop' | 'create-pr' | 'review' | 'rework' | 'sync' | 'merge' | 'cleanup'>
@@ -109,13 +125,14 @@ export function autoRunFailureReason(
     cleanupPending?: boolean
     gateFailures?: unknown[]
     controllerError?: boolean
+    semanticFailure?: AutoRunSemanticFailure
   },
 ): AutoRunPausedReason {
   if (result.controllerError) return 'controller-error'
   if (result.cleanupPending || (action === 'cleanup' && result.merged)) return 'cleanup-failed'
   if (result.conflict) return 'sync-conflict'
   if (action === 'merge' || action === 'cleanup' || result.gateFailures) return 'merge-gate-rejected'
-  if (/授权|快照/.test(result.error ?? '')) return 'authorization-denied'
+  if (result.semanticFailure) return result.semanticFailure
   return 'controller-error'
 }
 
@@ -125,15 +142,17 @@ export function decideAutoRun(input: {
   now: number
   reviewEvents: readonly IssueWorkflow['events'][number][]
   taskOutcome?: AutoRunTaskOutcome
+  issueOpen?: boolean
 }): AutoRunDecision {
   if (!input.autoRun || input.autoRun.status !== 'running') return { kind: 'manual' }
   const autoRun = input.autoRun
   const reviews = aggregateAutoRunReviews(autoRun, input.reviewEvents)
+  if (input.now >= Date.parse(input.autoRun.deadline)) return paused('budget-exhausted', reviews)
   if (input.taskOutcome === 'timed_out') return paused('task-timeout', reviews)
   if (input.taskOutcome === 'failed' || input.taskOutcome === 'stopped') {
     return paused('session-interrupted', reviews)
   }
-  if (input.now >= Date.parse(input.autoRun.deadline)) return paused('budget-exhausted', reviews)
+  if (input.issueOpen === false) return { kind: 'complete', reason: 'issue-closed', ...reviews }
   if (reviews.rounds >= input.autoRun.maxRounds && input.nextAction.kind === 'rework') {
     return paused('rounds-exhausted', reviews)
   }

@@ -117,7 +117,11 @@ export function sameSnapshot(left: PromptSnapshot, right: PromptSnapshot): boole
   return JSON.stringify(left) === JSON.stringify(right)
 }
 
+export const GITHUB_USAGE_REQUIREMENT =
+  '查询 PR/Issue 上下文优先使用 `gh api` REST，不使用 `gh pr view` / `gh issue view` 的 GraphQL 聚合；同一资源在单任务内只查询一次，除非写动作后必须回读验证或已有事实明确失效。'
+
 const COMMON_DEVELOPMENT_REQUIREMENTS = [
+  GITHUB_USAGE_REQUIREMENT,
   '先理解当前需求快照;如有歧义可自行判断或提问。',
   '实现代码改动,并保留现有 worktree 中尚未提交的有效工作。',
   '运行相关测试。',
@@ -224,6 +228,7 @@ export async function buildReviewPrompt(
     requirements: [
       '本轮 review 采用根因 review 协议:先读取 PR/issue 上全部历史 review 轮次做母题分类(同类复发必须点名轮次),对每个 finding 给出代码根因(什么构造让这类问题不可能)与过程根因(为什么活到本轮);先做静态枚举审计(枚举全部可违反路径,非构造保护即为 finding,不需要复现),再做动态对抗验证(CRITICAL 必须复现,含失败率);判定修复高度时对比改造前后的公开 API/导出面,排除改名式修复;结论按 verdict 输出(pass/fix-these/stop-and-redesign),同类连续复发或 diff 持续发散时输出 stop-and-redesign 而非问题清单。若仓库存在 skills/root-cause-review/SKILL.md 或 docs/fix-discipline.md,以其全文为准。',
       '先执行 git fetch origin 同步远端最新状态(并行开发时 base 可能已变化)。',
+      GITHUB_USAGE_REQUIREMENT,
       `执行 git diff ${base}...HEAD 查看完整改动。`,
       ...(sessionId ? ['先复核之前发现的问题是否已解决,再审查全部新改动。'] : []),
       '严格按当前需求快照中的验收标准逐条审查,同时检查 bug、安全隐患和测试覆盖。',

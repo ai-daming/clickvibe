@@ -56,6 +56,7 @@ import {
 } from '../infra/task-ownership.ts'
 import { withWorkflowLock } from '../infra/workflow-lock.ts'
 import { deriveAutoDevelopment } from './auto-development.ts'
+import { type AutoRunFailureClassification, classifiedAutoRunFailure } from './auto-run-policy.ts'
 import { deriveDevelopmentEventKind } from './delivery-audit.ts'
 import { finalizeDevRun } from './dev-completion.ts'
 import { deriveWorkflowState } from './derive.ts'
@@ -126,7 +127,8 @@ export async function startDevelop(
   payload: unknown,
   authorizedSnapshot: IssuePromptSnapshot | null,
 ): Promise<
-  { ok: true; taskId: string; worktree: string; branch: string } | { ok: false; error: string; controllerError?: true }
+  | { ok: true; taskId: string; worktree: string; branch: string }
+  | ({ ok: false; error: string; controllerError?: true } & AutoRunFailureClassification)
 > {
   const body = (payload ?? {}) as {
     url?: unknown
@@ -179,7 +181,10 @@ export async function startDevelop(
       automaticSnapshot = fetched
       const current = issueSnapshot(fetched.data.item as Record<string, unknown>)
       if (!sameSnapshot(current, authorizedSnapshot)) {
-        return { ok: false, error: 'Issue 内容在确认后已变化,旧授权已失效;请刷新面板并按当前快照重新确认' }
+        return classifiedAutoRunFailure(
+          'Issue 内容在确认后已变化,旧授权已失效;请刷新面板并按当前快照重新确认',
+          'authorization-denied',
+        )
       }
       launchSnapshot = { snapshot: current, freshness: 'current' }
     } else {

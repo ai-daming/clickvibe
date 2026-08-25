@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer, request, type RequestListener } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import test from 'node:test'
+import test, { after } from 'node:test'
 import { apply, fetchRepositoryIssues } from '../src/index.ts'
 import { decodeLiveLogLine, encodeLiveLogEvent } from '../src/infra/live-output.ts'
 import {
@@ -18,6 +18,17 @@ import {
   type IssueWorkflow,
 } from '../src/infra/state.ts'
 import { createFakeJobs } from './fake-jobs.ts'
+
+// Route tests exercise /state background reconciliation; never let that controller
+// discover or mutate the developer's real ~/.clickvibe workflow files.
+const routesOriginalHome = process.env.HOME
+const routesTestHome = await mkdtemp(join(tmpdir(), 'clickvibe-routes-home-'))
+process.env.HOME = routesTestHome
+after(async () => {
+  if (routesOriginalHome === undefined) delete process.env.HOME
+  else process.env.HOME = routesOriginalHome
+  await rm(routesTestHome, { recursive: true, force: true })
+})
 
 const saveWorkflow = (workflow: IssueWorkflow) => commitWorkflowFixture(workflow, workflow.revision ?? null)
 

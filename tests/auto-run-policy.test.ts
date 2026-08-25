@@ -4,6 +4,7 @@ import {
   aggregateAutoRunReviews,
   autoRunFailureReason,
   autoRunRetryDelay,
+  classifiedAutoRunFailure,
   decideAutoRun,
   isOrphanedAutoRun,
   validateAutoRunConfig,
@@ -254,6 +255,27 @@ test('deadline and task outcomes converge to explicit pause reasons', () => {
     decideAutoRun({ autoRun: running(), nextAction, now: 0, reviewEvents: [], taskOutcome: 'failed' }).reason,
     'session-interrupted',
   )
+  assert.equal(
+    decideAutoRun({
+      autoRun: running(),
+      nextAction,
+      now: Date.parse('2026-08-24T00:00:00Z'),
+      reviewEvents: [],
+      taskOutcome: 'failed',
+    }).reason,
+    'budget-exhausted',
+  )
+})
+
+test('a closed issue terminates auto-run after the budget gate without inventing more work', () => {
+  const decision = decideAutoRun({
+    autoRun: running(),
+    nextAction: { kind: 'none', label: '已关闭', hint: '' },
+    now: Date.parse('2026-08-23T01:00:00Z'),
+    reviewEvents: [],
+    issueOpen: false,
+  })
+  assert.deepEqual(decision, { kind: 'complete', reason: 'issue-closed', rounds: 0, unresolved: [] })
 })
 
 test('temporary observation gaps retry within the wall-clock budget', () => {
@@ -269,4 +291,19 @@ test('cleanup failures remain distinct from merge gate rejection', () => {
   assert.equal(autoRunFailureReason('review', { ok: false, controllerError: true }), 'controller-error')
   assert.equal(autoRunFailureReason('create-pr', { ok: false, error: 'GitHub network failed' }), 'controller-error')
   assert.equal(autoRunFailureReason('sync', { ok: false, error: 'git authentication failed' }), 'controller-error')
+  assert.equal(
+    autoRunFailureReason('develop', { ok: false, error: '无法读取授权快照文件: EACCES' }),
+    'controller-error',
+  )
+  assert.equal(
+    autoRunFailureReason('develop', {
+      error: 'Issue contract changed',
+      semanticFailure: 'authorization-denied',
+    }),
+    'authorization-denied',
+  )
+  assert.equal(
+    JSON.stringify(classifiedAutoRunFailure('Issue contract changed', 'authorization-denied')),
+    '{"ok":false,"error":"Issue contract changed"}',
+  )
 })
