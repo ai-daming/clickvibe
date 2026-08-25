@@ -3321,32 +3321,41 @@ test('/fetch maps PR REST fields and latest reviews without any GraphQL read com
 })
 
 test('rate-limit response opens a circuit and returns the friendly recovery time on later routes', async () => {
-  const reset = Math.floor((Date.now() + 10 * 60_000) / 1000)
-  let requests = 0
-  const handler = createHandler(async () => {
-    requests++
-    return {
-      exitCode: 1,
-      stdout: {
-        text: [
-          'HTTP/2.0 403 Forbidden',
-          'x-ratelimit-remaining: 0',
-          `x-ratelimit-reset: ${reset}`,
-          '',
-          JSON.stringify({ message: 'API rate limit exceeded' }),
-        ].join('\n'),
-      },
-      stderr: { text: '' },
-    }
-  })
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-rate-circuit-'))
+  process.env.HOME = tempHome
+  try {
+    const reset = Math.floor((Date.now() + 10 * 60_000) / 1000)
+    let requests = 0
+    const handler = createHandler(async () => {
+      requests++
+      return {
+        exitCode: 1,
+        stdout: {
+          text: [
+            'HTTP/2.0 403 Forbidden',
+            'x-ratelimit-remaining: 0',
+            `x-ratelimit-reset: ${reset}`,
+            '',
+            JSON.stringify({ message: 'API rate limit exceeded' }),
+          ].join('\n'),
+        },
+        stderr: { text: '' },
+      }
+    })
 
-  const first = await post(handler, '/clickvibe/api/fetch', { url: 'https://github.com/o/r/issues/41' })
-  const second = await post(handler, '/clickvibe/api/state', { repoKey: 'o/r' })
-  assert.equal(first.status, 429)
-  assert.equal(second.status, 429)
-  assert.match(first.body.error ?? '', /^GitHub 额度已用完,约 \d{2}:\d{2} 恢复$/)
-  assert.equal(second.body.error, first.body.error)
-  assert.equal(requests, 1, 'open circuit must reject without another GitHub request')
+    const first = await post(handler, '/clickvibe/api/fetch', { url: 'https://github.com/o/r/issues/41' })
+    const second = await post(handler, '/clickvibe/api/state', { repoKey: 'o/r' })
+    assert.equal(first.status, 429)
+    assert.equal(second.status, 429)
+    assert.match(first.body.error ?? '', /^GitHub 额度已用完,约 \d{2}:\d{2} 恢复$/)
+    assert.equal(second.body.error, first.body.error)
+    assert.equal(requests, 1, 'open circuit must reject without another GitHub request')
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
 })
 
 test('repository GitHub aggregation uses its short TTL cache and force refresh bypasses it', async () => {
