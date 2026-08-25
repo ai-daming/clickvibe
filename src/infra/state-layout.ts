@@ -82,6 +82,7 @@ export function parseIssueKey(key: unknown): { owner: string; repo: string; issu
   try {
     const repoKey = Buffer.from(match[1], 'base64url').toString('utf8')
     const slash = repoKey.indexOf('/')
+    if (slash < 0 || repoKey.indexOf('/', slash + 1) !== -1) return null
     const owner = repoKey.slice(0, slash)
     const repo = repoKey.slice(slash + 1)
     if (!validGithubComponent(owner) || !validGithubComponent(repo)) return null

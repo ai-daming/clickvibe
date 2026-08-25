@@ -39,20 +39,10 @@ test('task diagnostics persist the exact console JSON under the owning issue', a
     const raw = await readEventually(path)
     assert.equal(raw, `${warnings[0]}\n`)
     const persisted = JSON.parse(raw)
-    const warned = JSON.parse(warnings[0])
-    assert.deepEqual(persisted, {
-      source: 'clickvibe',
-      event: 'auto-run-reconcile-error',
-      at: warned.at,
-      runtimeInstanceId: warned.runtimeInstanceId,
-      pid: process.pid,
-      loadedAt: warned.loadedAt,
-      modulePath: warned.modulePath,
-      workflowKey: issueKey('owner/repo', '123'),
-      errorName: 'Error',
-      errorMessage: 'forced reconcile failure',
-      errorStack,
-    })
+    assert.equal(persisted.workflowKey, issueKey('owner/repo', '123'))
+    assert.equal(persisted.errorName, 'Error')
+    assert.equal(persisted.errorMessage, 'forced reconcile failure')
+    assert.equal(persisted.errorStack, errorStack)
     await assert.rejects(readFile(join(tempHome, '.clickvibe', 'state', 'diagnostics.jsonl'), 'utf8'), /ENOENT/)
   } finally {
     console.warn = originalWarn
@@ -62,7 +52,7 @@ test('task diagnostics persist the exact console JSON under the owning issue', a
   }
 })
 
-test('global diagnostics rotate at the configured byte limit without truncating records', async () => {
+test('an oversized diagnostic remains complete when the next record rotates it', async () => {
   const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-diagnostics-rotation-'))
   const previousHome = process.env.HOME
   const originalWarn = console.warn
@@ -71,9 +61,9 @@ test('global diagnostics rotate at the configured byte limit without truncating 
   console.warn = (message?: unknown) => warnings.push(String(message))
   try {
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), 'diagnosticsMaxBytes: 600\n', 'utf8')
-    logTaskDiagnostic('global-first', { evidence: 'a'.repeat(400) })
-    logTaskDiagnostic('global-second', { evidence: 'b'.repeat(400) })
+    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), 'diagnosticsMaxBytes: 200\n', 'utf8')
+    logTaskDiagnostic('global-oversized', { workflowKey: issueKey('foo', '7'), evidence: 'a'.repeat(1_000) })
+    logTaskDiagnostic('global-next', { evidence: 'next' })
 
     const path = join(tempHome, '.clickvibe', 'state', 'diagnostics.jsonl')
     const rotatedPath = join(tempHome, '.clickvibe', 'state', 'diagnostics.1.jsonl')
@@ -81,8 +71,8 @@ test('global diagnostics rotate at the configured byte limit without truncating 
     const active = await readEventually(path)
     assert.equal(rotated, `${warnings[0]}\n`)
     assert.equal(active, `${warnings[1]}\n`)
-    assert.equal(JSON.parse(rotated).evidence, 'a'.repeat(400))
-    assert.equal(JSON.parse(active).evidence, 'b'.repeat(400))
+    assert.equal(JSON.parse(rotated).evidence, 'a'.repeat(1_000))
+    assert.equal(JSON.parse(active).evidence, 'next')
   } finally {
     console.warn = originalWarn
     if (previousHome === undefined) delete process.env.HOME

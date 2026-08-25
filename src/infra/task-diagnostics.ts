@@ -1,8 +1,7 @@
 import { randomUUID } from 'node:crypto'
-import { homedir } from 'node:os'
-import { join } from 'node:path'
 import { appendDiagnosticLine, DEFAULT_DIAGNOSTIC_MAX_BYTES, waitForDiagnosticLines } from './diagnostic-log-store.ts'
 import { loadConfig } from './runtime.ts'
+import { stateDir } from './state.ts'
 
 export const runtimeIdentity = Object.freeze({
   runtimeInstanceId: randomUUID(),
@@ -25,12 +24,10 @@ export function logTaskDiagnostic(event: string, fields: Record<string, unknown>
   const maxBytes = loadConfig()
     .then((config) => config.diagnosticsMaxBytes ?? DEFAULT_DIAGNOSTIC_MAX_BYTES)
     .catch(() => DEFAULT_DIAGNOSTIC_MAX_BYTES)
-  void appendDiagnosticLine(join(homedir(), '.clickvibe', 'state'), fields.workflowKey, line, maxBytes).catch(
-    () => undefined,
-  )
+  void appendDiagnosticLine(stateDir(), fields.workflowKey, line, maxBytes).catch(() => undefined)
 }
 
 /** Await best-effort writes before a task releases or deletes its persistence directory. */
 export function waitForTaskDiagnosticPersistence(workflowKey: unknown): Promise<void> {
-  return waitForDiagnosticLines(join(homedir(), '.clickvibe', 'state'), workflowKey)
+  return waitForDiagnosticLines(stateDir(), workflowKey)
 }
