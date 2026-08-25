@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { ensureWorktree } from '../agent/worktree.ts'
-import { fetchIssue, issueSnapshot } from '../github/issue.ts'
+import { fetchIssue, issueSnapshot, sameIssueContract } from '../github/issue.ts'
+import { githubRest, isGithubRateLimitError, recoveryLabel } from '../github/rest.ts'
 import { type IssuePromptSnapshot } from '../infra/develop-core.ts'
 import { liveTasks, parseUrl } from '../infra/runtime.ts'
 import {
@@ -42,6 +43,52 @@ const running = new Set<string>()
 const queued = new Map<string, AutoRunTaskOutcome | undefined>()
 const deadlineTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const observationTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const rateRetryTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+/** #120 切片②:限流按 reset 自动重试的缓冲,避免压着恢复时刻立即再撞。 */
+const RATE_RETRY_BUFFER_MS = 2_000
+
+function clearRateRetry(key: string): void {
+  const timer = rateRetryTimers.get(key)
+  if (timer) clearTimeout(timer)
+  rateRetryTimers.delete(key)
+}
+
+/** Defer instead of pausing when the only failure is a GitHub rate limit. */
+async function scheduleRateRetry(ctx: Context, key: string, resetAt: number, source: string): Promise<void> {
+  clearRateRetry(key)
+  const delay = Math.max(0, resetAt + RATE_RETRY_BUFFER_MS - Date.now())
+  logTaskDiagnostic('auto-run-rate-deferred', {
+    workflowKey: key,
+    retryAt: new Date(resetAt + RATE_RETRY_BUFFER_MS).toISOString(),
+    resetAt: new Date(resetAt).toISOString(),
+    source,
+    delayMs: delay,
+  })
+  const workflow = await loadWorkflow(key)
+  if (workflow?.autoRun?.status === 'running') {
+    await appendEvent(
+      workflow,
+      {
+        kind: 'auto-run',
+        at: new Date().toISOString(),
+        round: workflow.autoRun.rounds,
+        step: workflow.autoRun.step,
+        note: `自动跑到底遇 GitHub 限流(${source}),自动等待至 ${recoveryLabel(resetAt + RATE_RETRY_BUFFER_MS)} 重试(不暂停)`,
+      },
+      workflowRevision(workflow) ?? 0,
+    )
+  }
+  const timer = setTimeout(
+    () => {
+      rateRetryTimers.delete(key)
+      requestAutoRunReconcile(ctx, key)
+    },
+    Math.min(delay, 2_147_483_647),
+  )
+  timer.unref?.()
+  rateRetryTimers.set(key, timer)
+}
 
 function liveTaskFor(taskRef: WorkflowTaskRef | null): LiveTask | null {
   if (!taskRef) return null
@@ -62,11 +109,25 @@ async function persistDecision(key: string, decision: Exclude<AutoRunDecision, {
   )
 }
 
-async function pauseAutoRun(key: string, reason: AutoRunPausedReason): Promise<void> {
+interface PauseEvidence {
+  action?: string
+  error?: string
+}
+
+async function pauseAutoRun(key: string, reason: AutoRunPausedReason, evidence?: PauseEvidence): Promise<void> {
   const workflow = await loadWorkflow(key)
   if (!workflow?.autoRun || workflow.autoRun.status !== 'running') return
+  const evidenceNote = evidence
+    ? `(${[
+        evidence.action ? `动作 ${evidence.action}` : null,
+        evidence.error ? `错误: ${evidence.error.slice(0, 200)}` : null,
+      ]
+        .filter(Boolean)
+        .join(' · ')})`
+    : ''
   logTaskDiagnostic('auto-run-pause', {
     reason,
+    ...(evidence ? { action: evidence.action ?? null, error: evidence.error?.slice(0, 500) ?? null } : {}),
     workflowKey: key,
     step: workflow.autoRun.step ?? 0,
     updatedAt: workflow.updatedAt,
@@ -84,12 +145,13 @@ async function pauseAutoRun(key: string, reason: AutoRunPausedReason): Promise<v
       at: new Date().toISOString(),
       round: workflow.autoRun.rounds,
       step: workflow.autoRun.step,
-      note: `自动跑到底已暂停:${reason}`,
+      note: `自动跑到底已暂停:${reason}${evidenceNote}`,
     },
     workflowRevision(workflow) ?? 0,
   )
   clearDeadline(key)
   clearObservation(key)
+  clearRateRetry(key)
 }
 
 async function completeAutoRun(key: string): Promise<void> {
@@ -110,6 +172,7 @@ async function completeAutoRun(key: string): Promise<void> {
   )
   clearDeadline(key)
   clearObservation(key)
+  clearRateRetry(key)
 }
 
 function clearObservation(key: string): void {
@@ -212,7 +275,23 @@ async function applyDecision(ctx: Context, key: string, decision: AutoRunDecisio
       break
   }
   if (!result.ok) {
-    await pauseAutoRun(key, autoRunFailureReason(decision.action, result))
+    const circuit = githubRest(ctx as never).rateLimitError()
+    if (circuit) {
+      await scheduleRateRetry(ctx, key, circuit.resetAt, `动作 ${decision.action}`)
+      return
+    }
+    if (result.conflict) {
+      // 原则 10(可恢复性优于预防):sync 冲突现场已由 syncWorktree 保留并记录,
+      // 属可恢复工作——不暂停,直接排队下一轮 reconcile,由 derive 推导出 resume
+      // 并自动转交 agent 解决(#107 现场:并行落后 61 提交,首步 sync 必撞冲突,
+      // 旧路径每次都要人工重挂一次)。
+      requestAutoRunReconcile(ctx, key)
+      return
+    }
+    await pauseAutoRun(key, autoRunFailureReason(decision.action, result), {
+      action: decision.action,
+      error: result.error,
+    })
     return
   }
   if (decision.action === 'create-pr' || decision.action === 'sync') requestAutoRunReconcile(ctx, key)
@@ -257,7 +336,13 @@ export function requestAutoRunReconcile(ctx: Context, key: string, outcome?: Aut
         errorMessage: error instanceof Error ? error.message : String(error),
         errorStack: error instanceof Error ? error.stack : null,
       })
-      await pauseAutoRun(key, 'controller-error')
+      if (isGithubRateLimitError(error)) {
+        await scheduleRateRetry(ctx, key, error.resetAt, 'reconcile')
+      } else {
+        await pauseAutoRun(key, 'controller-error', {
+          error: `${error instanceof Error ? error.message : String(error)}`,
+        })
+      }
     } finally {
       running.delete(key)
     }
@@ -287,8 +372,8 @@ export async function startAutoRun(
   const refreshed = await fetchIssue(ctx, { url, forceRefresh: true })
   if (!refreshed.ok) return { ok: false, error: `执行前无法刷新 Issue 快照: ${refreshed.error}` }
   const currentSnapshot = issueSnapshot(refreshed.data.item as Record<string, unknown>)
-  if (JSON.stringify(currentSnapshot) !== JSON.stringify(authorizedSnapshot)) {
-    return { ok: false, error: 'Issue 快照已变化,拒绝使用旧授权启动自动跑到底' }
+  if (!sameIssueContract(currentSnapshot, authorizedSnapshot)) {
+    return { ok: false, error: 'Issue 契约已变化(正文/标题/状态),拒绝使用旧授权启动自动跑到底' }
   }
   const key = issueKey(`${parsed.owner}/${parsed.repo}`, parsed.number)
   const ensured = await ensureWorktree(ctx, parsed)

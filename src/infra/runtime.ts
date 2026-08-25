@@ -39,8 +39,8 @@ import {
 } from './develop-core.ts'
 import { LineBuffer } from './line-buffer.ts'
 import { type RepositoryFreshness, RepositoryFreshnessGate, RepositoryRefreshClock } from './repo-freshness.ts'
-import { ExclusiveTaskGate } from './task-gate.ts'
 import type { IssueWorkflow, WorkflowTaskLease } from './state.ts'
+import { ExclusiveTaskGate } from './task-gate.ts'
 
 const MAX_BODY_BYTES = 64 * 1024
 
@@ -49,6 +49,8 @@ export interface ClickVibeConfig {
   worktreeRoot: string
   /** Remote-ref refresh interval for read paths. Clamped to 30-60 seconds. */
   fetchTtlSeconds?: number
+  /** Maximum active controller-diagnostic JSONL size before one-segment rotation. */
+  diagnosticsMaxBytes?: number
 }
 
 export const DEFAULT_FETCH_TTL_SECONDS = 45
@@ -131,6 +133,7 @@ export async function loadConfig(): Promise<ClickVibeConfig> {
       repos: parsed?.repos ?? {},
       worktreeRoot: parsed?.worktreeRoot ? expandHome(parsed.worktreeRoot) : join(homedir(), '.clickvibe', 'worktrees'),
       fetchTtlSeconds: parsed?.fetchTtlSeconds,
+      diagnosticsMaxBytes: parsed?.diagnosticsMaxBytes,
     }
   } catch {
     return {

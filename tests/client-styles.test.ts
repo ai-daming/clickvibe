@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { measureStyleTokenCoverage, MINIMUM_STYLE_TOKEN_COVERAGE } from '../scripts/check-style-tokens.mjs'
 import { PANEL_CSS } from '../src/client/styles.ts'
 
 const DSH_THEME_TOKENS = new Set([
@@ -37,6 +38,11 @@ const DSH_THEME_TOKENS = new Set([
   '--dsw-alias-state-warn-secondary',
   '--dsw-alias-state-warn-tertiary',
   '--dsw-shadow-lv3',
+  '--dsw-font-base-16-font-size',
+  '--dsw-font-s-14-font-size',
+  '--dsw-font-xs-13-font-size',
+  '--dsw-font-xxs-12-font-size',
+  '--dsw-font-xxxs-11-font-size',
 ])
 
 function between(start: string, end: string): string {
@@ -53,6 +59,33 @@ function declarations(selector: string): string {
   assert.notEqual(match, null, `missing ${selector}`)
   return match?.[1] ?? ''
 }
+
+const SEMANTIC_COLOR_SELECTOR =
+  /^\.cv-(?:badge-(?:open|closed|merged|kind)|stage-[\w-]+|link(?:$|:hover$)|link-state-[\w-]+|tl-kind-[\w-]+|tl-public(?:$|:hover$)|pr-(?:open|merged|closed)|issue-(?:open|closed)|row-(?:lag|contract|ready)|tl-(?:pass|fail|publish-fail))$/
+
+function duplicateSemanticRules(): string[][][] {
+  const rulesByDeclarations = new Map<string, string[][]>()
+  for (const match of PANEL_CSS.matchAll(/^([^@\n][^{]+) \{[^{}]*\}/gm)) {
+    const selectors = (match[1] ?? '')
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter((selector) => SEMANTIC_COLOR_SELECTOR.test(selector))
+    if (selectors.length === 0) continue
+    const declarations = (match[0].slice(match[0].indexOf('{') + 1, -1) ?? '').trim().replace(/\s+/g, ' ')
+    const rules = rulesByDeclarations.get(declarations) ?? []
+    rules.push(selectors)
+    rulesByDeclarations.set(declarations, rules)
+  }
+  return [...rulesByDeclarations.values()].filter((rules) => rules.length > 1)
+}
+
+test('at least 80% of common color and font-size materials use theme tokens', () => {
+  const coverage = measureStyleTokenCoverage(PANEL_CSS)
+  assert.ok(
+    coverage.ratio >= MINIMUM_STYLE_TOKEN_COVERAGE,
+    `style token coverage ${(coverage.ratio * 100).toFixed(2)}% (${coverage.covered}/${coverage.total}) is below ${MINIMUM_STYLE_TOKEN_COVERAGE * 100}%`,
+  )
+})
 
 test('panel common materials use only real DSH theme tokens', () => {
   const namedTokens = [...PANEL_CSS.matchAll(/var\((--dsw-[a-z0-9-]+)/g)].map((match) => match[1] ?? '')
@@ -79,6 +112,10 @@ test('only the minimal ClickVibe semantic palette follows the DSH body theme fla
   assert.doesNotMatch(PANEL_CSS, /prefers-color-scheme|MutationObserver|ui-theme\.preference/)
 })
 
+test('semantic color rules cannot repeat equivalent declarations independently', () => {
+  assert.deepEqual(duplicateSemanticRules(), [])
+})
+
 test('every text entry surface explicitly binds its background, text and placeholder to DSH', () => {
   for (const selector of ['.cv-input', '.cv-context-input']) {
     assert.match(declarations(selector), /background:\s*var\(--dsw-/)
@@ -91,8 +128,16 @@ test('terminal keeps an explicit fixed dark palette outside theme overrides', ()
   const terminal = between('/* Fixed dark terminal palette: start */', '/* Fixed dark terminal palette: end */')
   assert.match(terminal, /\.cv-terminal\s*\{[^}]*background:\s*#0d1117;/s)
   assert.match(terminal, /\.cv-terminal-head \.cv-running-duration\s*\{[^}]*color:\s*inherit;[^}]*font:\s*inherit;/s)
+  assert.match(terminal, /\.cv-terminal-head \.cv-running-dot\s*\{[^}]*background:\s*#3fb950;/s)
   assert.doesNotMatch(terminal, /var\(--dsw-/)
   assert.doesNotMatch(PANEL_CSS, /body\[data-ds-dark-theme\][^{]*\.cv-terminal/)
+})
+
+test('running duration owns one shared visual status marker', () => {
+  assert.match(declarations('.cv-running-duration'), /display:\s*inline-flex;/)
+  assert.match(declarations('.cv-running-duration'), /align-items:\s*center;/)
+  assert.match(declarations('.cv-running-dot'), /background:\s*var\(--dsw-alias-state-success-primary\);/)
+  assert.match(declarations('.cv-running-dot'), /border-radius:\s*50%;/)
 })
 
 test('terminal keeps long logical lines intact and exposes horizontal scrolling', () => {

@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises'
+import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
 
 interface ShellContext {
   shell: {
@@ -65,7 +66,7 @@ function isRateLimited(response: IncludedResponse, detail: string): boolean {
   return response.status === 403 && /(?:rate limit|secondary rate)/i.test(detail)
 }
 
-function recoveryLabel(resetAt: number): string {
+export function recoveryLabel(resetAt: number): string {
   return new Date(resetAt).toLocaleTimeString('zh-CN', {
     hour: '2-digit',
     minute: '2-digit',
@@ -73,13 +74,24 @@ function recoveryLabel(resetAt: number): string {
   })
 }
 
+export type GithubRateLimitKind = 'primary' | 'secondary' | 'unknown'
+
 export class GithubRateLimitError extends Error {
   readonly resetAt: number
+  readonly kind: GithubRateLimitKind
 
-  constructor(resetAt: number) {
-    super(`GitHub 额度已用完,约 ${recoveryLabel(resetAt)} 恢复`)
+  constructor(resetAt: number, kind: GithubRateLimitKind = 'primary') {
+    const label = recoveryLabel(resetAt)
+    super(
+      kind === 'secondary'
+        ? `GitHub 二级限流(突发检测),约 ${label} 恢复`
+        : kind === 'unknown'
+          ? `GitHub 限流(类型未知),约 ${label} 恢复`
+          : `GitHub 额度已用完,约 ${label} 恢复`,
+    )
     this.name = 'GithubRateLimitError'
     this.resetAt = resetAt
+    this.kind = kind
   }
 }
 
@@ -185,7 +197,13 @@ export class GithubRestReader {
       const detail = [result.stderr?.text, stdout].filter(Boolean).join('\n').trim()
       if (result.exitCode !== 0 && /(?:rate limit|secondary rate)/i.test(detail)) {
         this.circuitUntil = Date.now() + 60 * 60_000
-        throw new GithubRateLimitError(this.circuitUntil)
+        logTaskDiagnostic('github-rate-circuit-trip', {
+          kind: 'unknown' as const,
+          path,
+          until: this.circuitUntil,
+          note: 'gh CLI 失败且无响应头,按 60 分钟保守熔断',
+        })
+        throw new GithubRateLimitError(this.circuitUntil, 'unknown')
       }
       if (result.exitCode !== 0) throw new Error(detail || `gh api 执行失败(exit ${result.exitCode})`)
       throw parseError
@@ -193,7 +211,16 @@ export class GithubRestReader {
     const detail = [result.stderr?.text, response.body].filter(Boolean).join('\n')
     if (isRateLimited(response, detail)) {
       this.circuitUntil = resetFrom(response.headers, Date.now())
-      throw new GithubRateLimitError(this.circuitUntil)
+      const kind: GithubRateLimitKind = response.headers.get('x-ratelimit-remaining') === '0' ? 'primary' : 'secondary'
+      logTaskDiagnostic('github-rate-circuit-trip', {
+        kind,
+        path,
+        remaining: response.headers.get('x-ratelimit-remaining'),
+        reset: response.headers.get('x-ratelimit-reset'),
+        retryAfter: response.headers.get('retry-after'),
+        until: this.circuitUntil,
+      })
+      throw new GithubRateLimitError(this.circuitUntil, kind)
     }
     if (result.exitCode !== 0 || response.status < 200 || response.status >= 300) {
       let message = response.body.trim()

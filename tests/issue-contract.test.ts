@@ -1,95 +1,32 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { checkIssueContract } from '../src/workflow/issue-contract.ts'
+import { issueSnapshot, sameIssueContract } from '../src/github/issue.ts'
 
-const GOOD = `## 目标
+const base = {
+  url: 'https://github.com/o/r/issues/5',
+  title: '目标',
+  body: '## 目标\n做一件事',
+  state: 'OPEN',
+  updatedAt: '2026-08-25T03:00:00Z',
+}
 
-一键开发功能完善。
+/**
+ * 重挂授权的契约身份(#123 事故,2026-08-25):协议要求 agent 在运行中向 issue
+ * 发评论(不变量、Dev Meta),评论与 updatedAt 变化不得使授权失效;正文/标题/
+ * 状态变化才需要重新授权。与 review 结论的 bodyHash 契约同一原则。
+ */
+test('sameIssueContract ignores comments and updatedAt, binds to body/title/state/url', async () => {
+  const { sameIssueContract } = await import('../src/github/issue.ts')
+  const authorized = issueSnapshot({ ...base, comments: [] })
+  const withAgentComments = issueSnapshot({
+    ...base,
+    updatedAt: '2026-08-25T03:18:04Z',
+    comments: [{ author: { login: 'ai-daming' }, body: '## 开发前不变量…' }],
+  })
+  assert.ok(sameIssueContract(authorized, withAgentComments), '协议要求的评论不应使授权失效')
 
-## 验收标准
-
-- [ ] dry-run 模式可用
-- [ ] 自举验证通过
-
-## 依赖
-
-无
-`
-
-test('complete contract passes', () => {
-  const result = checkIssueContract(GOOD)
-  assert.equal(result.ok, true)
-  assert.deepEqual(result.missing, [])
-})
-
-test('accepts Blocked by #NN dependency form', () => {
-  const body = GOOD.replace(/^无$/m, 'Blocked by #7')
-  const result = checkIssueContract(body)
-  assert.equal(result.ok, true)
-})
-
-test('missing 目标 is reported', () => {
-  const body = GOOD.replace(/## 目标\n\n[^#]+/, '')
-  const result = checkIssueContract(body)
-  assert.equal(result.ok, false)
-  assert.deepEqual(result.missing, ['目标'])
-})
-
-test('missing 验收标准 is reported even when 依赖 present', () => {
-  const body = GOOD.replace(/## 验收标准\n\n- \[ \] [^#]+/, '')
-  const result = checkIssueContract(body)
-  assert.equal(result.ok, false)
-  assert.ok(result.missing.includes('验收标准'))
-})
-
-test('验收标准 without a - [ ] checklist item is rejected', () => {
-  const body = GOOD.replace(/- \[ \] dry-run 模式可用\n- \[ \] 自举验证通过/, '文字描述验收,无 checklist')
-  const result = checkIssueContract(body)
-  assert.equal(result.ok, false)
-  assert.deepEqual(result.missing, ['验收标准'])
-})
-
-test('missing 依赖 is reported', () => {
-  const body = GOOD.replace(/## 依赖\n\n无/, '')
-  const result = checkIssueContract(body)
-  assert.equal(result.ok, false)
-  assert.deepEqual(result.missing, ['依赖'])
-})
-
-test('依赖 section with garbage text is not accepted', () => {
-  const body = GOOD.replace(/^无$/m, '等 #7 做完')
-  const result = checkIssueContract(body)
-  assert.equal(result.ok, false)
-  assert.ok(result.missing.includes('依赖'))
-})
-
-test('empty body reports all three required sections', () => {
-  const result = checkIssueContract('')
-  assert.equal(result.ok, false)
-  assert.deepEqual(result.missing, ['目标', '验收标准', '依赖'])
-})
-
-test('checked checklist items count as acceptance criteria', () => {
-  const body = GOOD.replace(/- \[ \] dry-run 模式可用/, '- [x] dry-run 模式可用')
-  const result = checkIssueContract(body)
-  assert.equal(result.ok, true)
-})
-
-test('section parse stops at the next heading, not the document end', () => {
-  const body = `## 目标
-
-做 A。
-
-## 验收标准
-
-- [ ] A 完成
-
-总结一句不属于任何节。
-
-## 依赖
-
-无
-`
-  const result = checkIssueContract(body)
-  assert.equal(result.ok, true)
+  assert.ok(!sameIssueContract(authorized, issueSnapshot({ ...base, body: '## 目标\n改需求了' })))
+  assert.ok(!sameIssueContract(authorized, issueSnapshot({ ...base, title: '新标题' })))
+  assert.ok(!sameIssueContract(authorized, issueSnapshot({ ...base, state: 'CLOSED' })))
+  assert.ok(!sameIssueContract(authorized, issueSnapshot({ ...base, url: 'https://github.com/o/r/issues/6' })))
 })

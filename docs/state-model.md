@@ -41,6 +41,8 @@ workflow 每次提交都携带持久化 revision;所有普通写要求 expected 
 
 实现同时输出 `runtimeInstanceId`、PID、模块加载时间和任务 `set/close/delete`、host job 注册、auto-run 判断/异常的结构化诊断。`requestAutoRunReconcile()` 的未知异常记录为 `controller-error`,不再冒充 agent 会话中断。
 
+这些控制器诊断除同步写入 `console.warn` 外,还会 best-effort 追加到持久 JSONL。带有效 `workflowKey` 的事件写入 `~/.clickvibe/state/<owner>/<repo>/issue-<number>/diagnostics.jsonl`;无 workflow 归属或 key 无法解析的事件写入全局 `~/.clickvibe/state/diagnostics.jsonl`。活动文件默认上限为 5 MiB,可在 `~/.clickvibe/config.yaml` 设置 `diagnosticsMaxBytes` 覆盖;追加将超限时,上一段保留为同目录的 `diagnostics.1.jsonl`,再创建新的活动文件。轮转不截断单条事件,所以单条记录大于上限时允许独占一个文件段。诊断落盘失败不影响请求路径或 console 输出。
+
 ## 二、事实分级
 
 | 级别 | 事实 | 来源 | 获取手段 |
