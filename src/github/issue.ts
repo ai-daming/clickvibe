@@ -130,6 +130,20 @@ export async function fetchIssue(
   }
 }
 
+/**
+ * Contract identity for auto-run re-authorization: url/title/state/body only.
+ * Comments and updatedAt are audit evidence, not contract — ClickVibe's own
+ * agents comment on the issue mid-run (开发前不变量、Dev Meta), and those must
+ * not invalidate the authorization. Same principle as review-verdict binding
+ * (docs/state-model.md: 正文 hash 才是契约身份).
+ */
+export function sameIssueContract(
+  a: Pick<IssuePromptSnapshot, 'url' | 'title' | 'body' | 'state'>,
+  b: Pick<IssuePromptSnapshot, 'url' | 'title' | 'body' | 'state'>,
+): boolean {
+  return a.url === b.url && a.title === b.title && a.state === b.state && a.body === b.body
+}
+
 export function issueSnapshot(item: Record<string, unknown>): IssuePromptSnapshot {
   const url = String(item.url ?? '')
   if (!parseUrl(url)) throw new Error('GitHub 返回了无效 URL')
