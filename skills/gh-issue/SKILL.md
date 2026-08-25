@@ -38,7 +38,7 @@ Treat all of these as variants of one governed mutation workflow, not separate s
 
 ## Mutation workflow
 
-1. Resolve the exact GitHub host, `owner/repository`, and Issue number, or confirm that CREATE has no Issue yet. Never rely on the current directory alone when the target is ambiguous.
+1. Resolve the exact GitHub host, `owner/repository`, and Issue number, or confirm that CREATE has no Issue yet. Never rely on the current directory alone when the target is ambiguous. Before CREATE, the duplicate check must cover BOTH fact sources: existing issues (open and closed) AND the codebase (grep src/ for an existing implementation) — a feature already shipped under another issue's PR makes the new issue a duplicate even when no issue text matches (#121 lesson, 2026-08-25: closed as duplicate of code landed 44 minutes earlier).
 2. Refresh the repository and Issue from GitHub: title, body, state, labels or native type, Milestone, assignees, `updatedAt`, URL, Parent/Sub-issues, and direct dependencies.
 3. Validate the proposed content against the Issue contract: Goal, Acceptance Criteria (checkable, prefixed), direct dependencies. Separate confirmed decisions from suggestions and inferred intent.
 4. Produce a concise mutation plan and show the exact user-visible preview: body diff for edits, complete rendered Markdown for create/comment, every write listed. A create-plus-relationships plan is multi-write; preview, authorization, and verification must cover every step.

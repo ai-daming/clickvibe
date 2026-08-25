@@ -52,7 +52,6 @@ export function LiveTerminal({
   const terminal = (
     <div className="cv-terminal" data-agent={agent ?? undefined}>
       <div className="cv-terminal-head">
-        <span aria-hidden="true">●</span>
         <span className="cv-terminal-agent" data-agent={agent ?? undefined}>
           {agent ?? 'agent'}
         </span>

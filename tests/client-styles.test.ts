@@ -114,8 +114,16 @@ test('terminal keeps an explicit fixed dark palette outside theme overrides', ()
   const terminal = between('/* Fixed dark terminal palette: start */', '/* Fixed dark terminal palette: end */')
   assert.match(terminal, /\.cv-terminal\s*\{[^}]*background:\s*#0d1117;/s)
   assert.match(terminal, /\.cv-terminal-head \.cv-running-duration\s*\{[^}]*color:\s*inherit;[^}]*font:\s*inherit;/s)
+  assert.match(terminal, /\.cv-terminal-head \.cv-running-dot\s*\{[^}]*background:\s*#3fb950;/s)
   assert.doesNotMatch(terminal, /var\(--dsw-/)
   assert.doesNotMatch(PANEL_CSS, /body\[data-ds-dark-theme\][^{]*\.cv-terminal/)
+})
+
+test('running duration owns one shared visual status marker', () => {
+  assert.match(declarations('.cv-running-duration'), /display:\s*inline-flex;/)
+  assert.match(declarations('.cv-running-duration'), /align-items:\s*center;/)
+  assert.match(declarations('.cv-running-dot'), /background:\s*var\(--dsw-alias-state-success-primary\);/)
+  assert.match(declarations('.cv-running-dot'), /border-radius:\s*50%;/)
 })
 
 test('terminal keeps long logical lines intact and exposes horizontal scrolling', () => {
