@@ -183,3 +183,76 @@ test('a rate-limit reconcile failure defers to the reset time instead of pausing
     await rm(tempHome, { recursive: true, force: true })
   }
 })
+
+// ---- defer 去抖(#122 现场:面板轮询使 open circuit 期间每 5s 产生一条限流事件+一次提交) ----
+
+test('rapid rate-limit reconciles during one circuit window defer only once', async () => {
+  const { GithubRateLimitError } = await import('../src/github/rest.ts')
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-defer-dedupe-'))
+  const previousHome = process.env.HOME
+  process.env.HOME = tempHome
+  try {
+    const key = issueKey('owner/repo', '122')
+    const workflow: IssueWorkflow = {
+      key,
+      url: 'https://github.com/owner/repo/issues/122',
+      repoKey: 'owner/repo',
+      worktree: tempHome,
+      branch: 'clickvibe-issue-122',
+      stage: 'developing',
+      devAgent: null,
+      devTaskId: 'dev-task-122',
+      devHostJobId: 'clickvibe-122',
+      devSessionId: null,
+      devSessionAgent: null,
+      devInterrupted: false,
+      reviewAgent: null,
+      reviewTaskId: null,
+      reviewSessionId: null,
+      reviewSessionAgent: null,
+      reviewResult: null,
+      prNumber: null,
+      issueState: 'OPEN',
+      baseRef: 'origin/main @ 82e55b2',
+      autoRun: {
+        status: 'running',
+        autoMerge: false,
+        devAgent: 'codex',
+        reviewAgent: 'codex',
+        maxRounds: 20,
+        budgetHours: 24,
+        startedAt: '2026-08-25T00:00:00Z',
+        deadline: '2026-08-26T00:00:00Z',
+        step: 1,
+        rounds: 0,
+        unresolved: [],
+        lastObservedAt: null,
+        pausedReason: null,
+      },
+      updatedAt: Date.now(),
+      events: [],
+    }
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
+    const resetAt = Date.now() + 120_000 // 远离触发,只验证去抖
+    const ctx = Object.defineProperty({}, 'jobs', {
+      get() {
+        throw new GithubRateLimitError(resetAt)
+      },
+    })
+    // 模拟面板轮询:熔断窗口内连续 3 次 reconcile
+    requestAutoRunReconcile(ctx as never, key)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    requestAutoRunReconcile(ctx as never, key)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    requestAutoRunReconcile(ctx as never, key)
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    const observed = await loadWorkflow(key)
+    const defers = (observed?.events ?? []).filter((event) => (event.note ?? '').includes('限流'))
+    assert.equal(defers.length, 1, `同一熔断窗口只应记录一次等待,实际 ${defers.length} 次`)
+    assert.equal(observed?.autoRun?.status, 'running')
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})

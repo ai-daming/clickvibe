@@ -7,6 +7,7 @@ import { liveTasks, parseUrl } from '../infra/runtime.ts'
 import {
   appendEvent,
   type AutoRunPausedReason,
+  WorkflowConflictError,
   issueKey,
   loadWorkflow,
   commitWorkflowMetadata,
@@ -44,23 +45,37 @@ const queued = new Map<string, AutoRunTaskOutcome | undefined>()
 const deadlineTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const observationTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const rateRetryTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const rateRetryResets = new Map<string, number>()
 
-/** #120 切片②:限流按 reset 自动重试的缓冲,避免压着恢复时刻立即再撞。 */
+/** #120 切片②:限流自动重试的缓冲与上限。等待时长取 min(GitHub 报告的 reset, 3 分钟)
+ * ——报告值偏保守,提前探测失败的成本只是一次请求+再次去抖等待;抖动防多流水线齐醒。 */
 const RATE_RETRY_BUFFER_MS = 2_000
+const RATE_RETRY_MAX_WAIT_MS = 3 * 60_000
+const RATE_RETRY_JITTER_MS = 15_000
 
 function clearRateRetry(key: string): void {
   const timer = rateRetryTimers.get(key)
   if (timer) clearTimeout(timer)
   rateRetryTimers.delete(key)
+  rateRetryResets.delete(key)
 }
 
 /** Defer instead of pausing when the only failure is a GitHub rate limit. */
 async function scheduleRateRetry(ctx: Context, key: string, resetAt: number, source: string): Promise<void> {
+  // 去抖(#122 现场):熔断窗口内的面板轮询会反复走到这里;已有 ≤ 本次 resetAt 的
+  // 等待在排队时完全跳过——不写事件、不提交、不重排,每回合一次付清。
+  const pending = rateRetryResets.get(key)
+  if (pending !== undefined && pending <= resetAt) return
+  const effectiveResetAt = Math.min(resetAt, Date.now() + RATE_RETRY_MAX_WAIT_MS)
   clearRateRetry(key)
-  const delay = Math.max(0, resetAt + RATE_RETRY_BUFFER_MS - Date.now())
+  rateRetryResets.set(key, resetAt)
+  const baseDelay = Math.max(0, effectiveResetAt + RATE_RETRY_BUFFER_MS - Date.now())
+  // 抖动只用于长等待(>30s),防多流水线齐醒;短等待保持确定,便于测试与快速探测
+  const jitter = baseDelay > 30_000 ? Math.floor(Math.random() * RATE_RETRY_JITTER_MS) : 0
+  const delay = baseDelay + jitter
   logTaskDiagnostic('auto-run-rate-deferred', {
     workflowKey: key,
-    retryAt: new Date(resetAt + RATE_RETRY_BUFFER_MS).toISOString(),
+    retryAt: new Date(Date.now() + delay).toISOString(),
     resetAt: new Date(resetAt).toISOString(),
     source,
     delayMs: delay,
@@ -74,7 +89,7 @@ async function scheduleRateRetry(ctx: Context, key: string, resetAt: number, sou
         at: new Date().toISOString(),
         round: workflow.autoRun.rounds,
         step: workflow.autoRun.step,
-        note: `自动跑到底遇 GitHub 限流(${source}),自动等待至 ${recoveryLabel(resetAt + RATE_RETRY_BUFFER_MS)} 重试(不暂停)`,
+        note: `自动跑到底遇 GitHub 限流(${source}),自动等待至 ${recoveryLabel(Date.now() + delay)} 重试(不暂停)`,
       },
       workflowRevision(workflow) ?? 0,
     )
@@ -103,10 +118,23 @@ async function persistDecision(key: string, decision: Exclude<AutoRunDecision, {
   workflow.autoRun.unresolved = decision.unresolved
   if (decision.kind === 'trigger') workflow.autoRun.step = decision.step
   workflow.autoRun.lastObservedAt = new Date().toISOString()
-  Object.assign(
-    workflow,
-    await commitWorkflowMetadata(workflow, workflowRevision(workflow), { autoRun: workflow.autoRun }),
-  )
+  try {
+    Object.assign(
+      workflow,
+      await commitWorkflowMetadata(workflow, workflowRevision(workflow), { autoRun: workflow.autoRun }),
+    )
+  } catch (error) {
+    if (!(error instanceof WorkflowConflictError)) throw error
+    // 记账数据(rounds/step/lastObservedAt)每轮 reconcile 重算重写;条件提交拦住
+    // 旧写是它正确工作。对"有人更新"的正确反应是放手让路(#122 现场:与 defer
+    // 事件/完成收尾并发写撞车曾把控制器打停)。丢一次记账,下一轮自愈。
+    logTaskDiagnostic('auto-run-persist-skipped', {
+      workflowKey: key,
+      reason: 'revision-conflict',
+      rounds: decision.rounds,
+      step: decision.kind === 'trigger' ? decision.step : null,
+    })
+  }
 }
 
 interface PauseEvidence {
