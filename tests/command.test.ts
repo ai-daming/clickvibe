@@ -194,7 +194,7 @@ test('status command returns readable workflow state derived from the same /stat
           state: 'open',
           merged_at: null,
           head: { ref: workflow.branch, sha: 'abc' },
-          base: { ref: 'main' },
+          base: { ref: 'main', sha: '1111111111111111' },
         },
       })
       if (api) return api
@@ -409,6 +409,7 @@ test('merge command surfaces every gate failure and supports the manual override
         at: 'now',
         hash: '1111111',
         verdict: { passed: true, issues: [] },
+        reviewBase: { ref: 'main', sha: '1111111111111111' },
         // 契约也变更:两个门禁同时失败,命令应把清单全量列出
         issueContract: { bodyHash: issueBodyHash('## 验收标准\n- old'), updatedAt: '2026-08-22T00:00:00Z' },
       },
@@ -430,7 +431,7 @@ test('merge command surfaces every gate failure and supports the manual override
             state: 'open',
             merged_at: null,
             head: { ref: workflow.branch, sha: '2222222222222222' },
-            base: { ref: 'main' },
+            base: { ref: 'main', sha: '1111111111111111' },
           },
         })
         if (api) return api
@@ -441,7 +442,6 @@ test('merge command surfaces every gate failure and supports the manual override
       },
     )
 
-    // 不带放行:门禁拒绝,可读文本列出全部失败项 + 放行路径
     const rejected = await post(handler, { command: 'merge #23' }, PRIVILEGED)
     assert.equal(rejected.status, 400, JSON.stringify(rejected.body))
     const failures = rejected.body.gateFailures as { key: string }[]
@@ -458,12 +458,12 @@ test('merge command surfaces every gate failure and supports the manual override
     assert.equal(override.status, 200, JSON.stringify(override.body))
     assert.equal(override.body.needsConfirmation, true)
     assert.match(String(override.body.text), /人工放行/)
+    assert.match(String(override.body.text), /PR base:main @ 1111111111111111/)
     assert.match(String(override.body.text), /已人工核对,同意放行/)
     const authorization = override.body.authorization as Record<string, unknown>
     assert.ok(authorization.authorizationId)
     assert.ok((authorization.override as { skipped: string[] }).skipped.includes('review-hash'))
 
-    // override= 只属于 merge
     const misplaced = parseCommand('develop #8 override=理由')
     assert.equal(misplaced.ok, false)
   } finally {

@@ -29,7 +29,7 @@ workflow 每次提交都携带持久化 revision;所有普通写要求 expected 
 
 - 开发/返工中断:使用「恢复开发」,只在原 agent 归属匹配时续接已记录的 session;session 缺失、归属不匹配或被 agent 拒绝时按既有规则降级为同一 worktree 的全新会话。
 - Review 中断:确认旧宿主任务已经停止后使用「重新 Review」,重新审查当前 HEAD;不得沿用未物化结论的旧 Review。
-- 自动跑到底:只有任务失败/停止/超时或上述宿主终止证据才使用 `session-interrupted`;GitHub、git、宿主 registry/controller/占位等非 Agent 故障使用 `controller-error`,由人处理后重新挂起。系统不得根据本地 step 或日志时间戳自动双开任务。
+- 自动跑到底:只有任务失败/停止/超时或上述宿主终止证据才使用 `session-interrupted`;GitHub、git、文件系统、宿主 registry/controller/占位等基础设施故障在预算内指数退避重试。相同错误栈连续三次只临时熔断为 `controller-error`,看门狗冷却后自动重挂;`unknown` ownership 继续 fail closed,不得启动第二个任务。`session-interrupted`、`task-timeout`、`budget-exhausted`、`rounds-exhausted` 等语义暂停不由看门狗恢复。
 
 方案评估与选型:
 
@@ -39,7 +39,7 @@ workflow 每次提交都携带持久化 revision;所有普通写要求 expected 
 | 宿主重启时插件接管旧任务 | `ctx.jobs` 是进程内 host registry,注册不随插件 producer/controller fiber 消失;可覆盖热重载和多模块实例,但不能跨宿主进程 | **选用作同宿主重载的任务所有权事实源**;启动前同步占位,持久化 host job ID 并校验 workflow/task label |
 | 运行探活(PID/进程扫描/agent 日志游标) | shell 契约不暴露稳定 PID;扫描命令行或看日志新鲜度既不能证明所有权,也不能安全停止/接管 | 拒绝单信号探活;仅使用 supervisor 的 job 生命周期事实 |
 
-实现同时输出 `runtimeInstanceId`、PID、模块加载时间和任务 `set/close/delete`、host job 注册、auto-run 判断/异常的结构化诊断。`requestAutoRunReconcile()` 的未知异常记录为 `controller-error`,不再冒充 agent 会话中断。
+实现同时输出 `runtimeInstanceId`、PID、模块加载时间和任务 `set/close/delete`、host job 注册、auto-run 判断/异常的结构化诊断。`requestAutoRunReconcile()` 的未知异常记录错误类型、原始消息、完整栈、fingerprint、连续次数、总重试次数和下次时间,不再冒充 agent 会话中断。GitHub 限流另按响应头 reset 调度。
 
 这些控制器诊断除同步写入 `console.warn` 外,还会 best-effort 追加到持久 JSONL。带有效 `workflowKey` 的事件写入 `~/.clickvibe/state/<owner>/<repo>/issue-<number>/diagnostics.jsonl`;无 workflow 归属或 key 无法解析的事件写入全局 `~/.clickvibe/state/diagnostics.jsonl`。活动文件默认上限为 5 MiB,可在 `~/.clickvibe/config.yaml` 设置 `diagnosticsMaxBytes` 覆盖;追加将超限时,上一段保留为同目录的 `diagnostics.1.jsonl`,再创建新的活动文件。轮转不截断单条事件,所以单条记录大于上限时允许独占一个文件段。诊断落盘失败不影响请求路径或 console 输出。
 
@@ -52,8 +52,8 @@ workflow 每次提交都携带持久化 revision;所有普通写要求 expected 
 | **硬** | worktree 有无、registered branch | 本地 git | `git worktree list --porcelain` 交叉约定路径 |
 | **硬** | 目标分支有无(本地/远端) | 本地 git | `git show-ref` / `for-each-ref` |
 | **硬** | 内容更新(不管是否 commit) | 本地 git | `git status --porcelain` + `git log <fork点>..HEAD` |
-| **硬** | fork 点(baseline 曾经是什么) | 本地 git | `git merge-base origin/main <branch>` |
-| **硬** | 应同步基线(现在该是什么) | 本地 git | `origin/HEAD` / `origin/main` 当前 tip |
+| **硬** | 开发基线身份与最后已知 tip | 本地 git | `workflow.baseRef` 中不可变的远端分支与最近一次成功同步持久化的 hash |
+| **硬** | 应同步基线(现在该是什么) | 本地 git | `baseRef` 对应 `origin/<branch>` 的当前 tip(默认 origin/HEAD) |
 | **硬** | PR 存在 / open / merged / closed | GitHub | `gh pr list --head <branch>` + `gh pr view` |
 | **硬** | GitHub 原生 review(APPROVED/CHANGES_REQUESTED/COMMENTED) | GitHub | `gh pr view --json reviews`(受控词表,字段保证存在) |
 | **软** | review 结论(通过 + 问题列表) | 本地事件 / comment meta | 见降级链 |
@@ -86,7 +86,7 @@ workflow 每次提交都携带持久化 revision;所有普通写要求 expected 
 | 有分支(有内容)+ 无 worktree | 「恢复 worktree 继续开发」 |
 | 有分支(空)+ 无 worktree | 「开始开发」(复用/重建) |
 | worktree 在,但 detached / 错分支 | 「修复 worktree」 |
-| worktree 落后 origin/main | 「同步 worktree」——优先于一切阶段动作 |
+| worktree 落后冻结的远端基线 | 「同步 worktree」——优先于一切阶段动作 |
 
 ### P3 开发生命周期(结构正常)
 
@@ -159,7 +159,7 @@ workflow 每次提交都携带持久化 revision;所有普通写要求 expected 
 ### 原则
 
 1. **基础事实常驻,派生信号按需**——客观存在的信息常显;对比算出来的信息"有情况才显示,没情况不显示"。
-2. **worktree 对比对象只有一个:origin/main(远端)**。worktree 推导不使用本地 main;本地 main 只出现在下述独立的主仓库本体信号中。
+2. **worktree 对比对象只有一个:冻结基线对应的 origin/<branch>(远端)**。默认选择 origin/HEAD，解析后行为与原 origin/main 路径一致;worktree 推导不使用本地 main，本地 main 只出现在下述独立的主仓库本体信号中。
 3. **数字必须带语义**,不能裸数字:"落后 2"要能读成"主干有 2 个新提交我还没有"。
 
 ### 基础事实(常驻 3 项)
@@ -170,15 +170,15 @@ workflow 每次提交都携带持久化 revision;所有普通写要求 expected 
 📍 基线        origin/main @ 8715172                                (从哪出发,定格不变)
 ```
 
-- 基线 = 创建分支时的 `origin/HEAD`(兼容回退 `origin/main`)+ 当时 hash
-- 基线**永远不变**,主干怎么前进它都定格
+- 基线 = 首次开发选择的 fetch 后 `origin/*` 分支(默认 `origin/HEAD`，兼容回退 `origin/main`)+ 最近一次成功同步持久化的 tip；分支身份定格不变，显式同步时只推进 tip
+- 基线的**分支身份永远不变**；`@ tip` 只在显式同步成功 fetch 后前进
 
 ### 派生信号(按需出现)
 
 | 状态 | 显示 | 语义 | 按钮 |
 |---|---|---|---|
 | 落后 0 · 领先 0 | 无 | 干净,无需关注 | 无 |
-| 落后 N > 0 | ⚠ 落后 origin/main N | 主干自基线后新增 N 个提交,还没并入 | 「同步 worktree」 |
+| 落后 N > 0 | ⚠ 落后 origin/&lt;base&gt; N | 所选基线分支新增 N 个提交,还没并入 | 「同步 worktree」 |
 | 领先 M > 0 | 领先 M | 比主干多 M 个提交(开发成果/待 review 量) | 无(状态徽章已表达"有内容") |
 | 领先 M · 落后 N(分叉) | 领先 M · 落后 N | 分支与主干分叉,同步将 merge 主干进来 | 「同步 worktree」 |
 | 契约已变 | 📋 issue 契约已改 | issue 正文目标/验收与结论绑定指纹不符,结论过期 | 「重新 Review」 |

@@ -125,7 +125,6 @@ export async function resumeDevelop(
   if (ownedDevSession.invalid) {
     pushTaskLine(live, '[clickvibe] dev sessionId 归属缺失或与当前 agent 不一致,已清除并启动全新会话')
   }
-
   // 用精确会话 id 续会话(不能用 --last/--continue:worktree 里可能有多个
   // agent 会话,--last 续的是"最近那个",不一定是我们这个)。
   // sessionId 缺失时回退 --last/--continue(尽力而为)。

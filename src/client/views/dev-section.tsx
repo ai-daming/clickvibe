@@ -5,6 +5,7 @@ import { sectionStorageKey } from './collapsible-section.ts'
 import { type GhIssue } from './issue-view.tsx'
 import { LiveTerminal } from './live-terminal.tsx'
 import { useDevSection } from '../dev-state.ts'
+import { DevelopAuthorizationDialog } from './develop-authorization-dialog.tsx'
 import { DeliveryTimeline } from './delivery-timeline.tsx'
 import { AutoRunForm } from './auto-run-form.tsx'
 import { apiCall } from '../domain.ts'
@@ -34,6 +35,9 @@ export function DevSection({
     agentPolicy,
     busy,
     busyLabel,
+    cancelDevelopAuthorization,
+    chooseBaseline,
+    confirmDevelopAuthorization,
     contextOpen,
     contextSupported,
     contextText,
@@ -46,6 +50,7 @@ export function DevSection({
     mergeWithOverride,
     overrideEntryVisible,
     overrideGates,
+    pendingDevelopAuthorization,
     openStream,
     runAction,
     setAgentChoice,
@@ -89,6 +94,12 @@ export function DevSection({
     : null
   return (
     <div className="cv-dev">
+      <DevelopAuthorizationDialog
+        pending={pendingDevelopAuthorization}
+        onBaseline={(baseline) => void chooseBaseline(baseline)}
+        onCancel={cancelDevelopAuthorization}
+        onConfirm={confirmDevelopAuthorization}
+      />
       {/* 状态卡:当前状态 + 关键事实 */}
       <div className="cv-dev-head">
         🚀 开发流程 <span className={`cv-stage cv-stage-${stage}`}>{stageLabel(stage, workflow)}</span>
@@ -130,7 +141,7 @@ export function DevSection({
         </div>
       ) : null}
 
-      {/* 权威状态视图:worktree / main / 远端 三方对比(issue #5) */}
+      {/* 权威状态视图:worktree / main / 冻结基线远端 三方对比(issue #5/#60) */}
       {derived ? (
         <div className="cv-state">
           <div className="cv-state-head">📊 状态视图</div>
@@ -157,12 +168,19 @@ export function DevSection({
                 <tr>
                   <td className="cv-state-k">远端</td>
                   <td className="cv-state-v">
-                    origin/main <code className="cv-tl-hash">{derived.originMainHead}</code>
+                    origin/{derived.baseBranch} <code className="cv-tl-hash">{derived.originMainHead}</code>
                     <span className="cv-state-delta">
                       worktree 落后 {derived.behindBase} · 领先 {derived.aheadOfBase}
                     </span>
                     {derived.needsSync ? <span className="cv-state-warn">⚠ 需要同步</span> : null}
                     {derived.mergeConflict ? <span className="cv-state-warn">⚠ 合并冲突待解决(转交 agent)</span> : null}
+                  </td>
+                </tr>
+              ) : workflow?.baseRef && !derived.baseRefAvailable ? (
+                <tr>
+                  <td className="cv-state-k">远端</td>
+                  <td className="cv-state-v">
+                    origin/{derived.baseBranch} <span className="cv-state-warn">⚠ 基线分支已不存在</span>
                   </td>
                 </tr>
               ) : null}

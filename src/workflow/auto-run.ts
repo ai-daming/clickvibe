@@ -1,24 +1,19 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { ensureWorktree } from '../agent/worktree.ts'
 import { fetchIssue, issueSnapshot, sameIssueContract } from '../github/issue.ts'
-import { githubRest, isGithubRateLimitError, recoveryLabel } from '../github/rest.ts'
+import { githubRest } from '../github/rest.ts'
 import { type IssuePromptSnapshot } from '../infra/develop-core.ts'
 import { liveTasks, parseUrl } from '../infra/runtime.ts'
 import {
   appendEvent,
-  type AutoRunPausedReason,
+  WorkflowConflictError,
   issueKey,
   loadWorkflow,
   commitWorkflowMetadata,
   workflowRevision,
 } from '../infra/state.ts'
 import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
-import {
-  observeWorkflowTask,
-  taskLaunchDecision,
-  type TaskOwnershipContext,
-  type WorkflowTaskRef,
-} from '../infra/task-ownership.ts'
+import { observeWorkflowTask, type TaskOwnershipContext } from '../infra/task-ownership.ts'
 import { createPullRequest } from './create-pr.ts'
 import { startDevelop } from './develop-start.ts'
 import { mergeAndCleanup } from './merge.ts'
@@ -27,74 +22,40 @@ import {
   type AutoRunConfig,
   type AutoRunTaskOutcome,
   autoRunFailureReason,
-  autoRunRetryDelay,
   decideAutoRun,
   validateAutoRunConfig,
 } from './auto-run-policy.ts'
 import type { AutoRunState, IssueWorkflow } from '../infra/state.ts'
-import type { LiveTask } from '../infra/runtime.ts'
+import {
+  armAutoRunDeadline,
+  autoRunWakePending,
+  AutoRunControllerError,
+  clearAutoRunControllerFailure,
+  completeAutoRun,
+  handleAutoRunControllerFailure,
+  maintainPausedAutoRun,
+  pauseAutoRun,
+  scheduleAutoRunObservation,
+} from './auto-run-recovery.ts'
 import { registerAutoRunReconciler } from './auto-run-signal.ts'
 import { enrichWorkflowStates } from './repository-state.ts'
 import { resumeDevelop } from './resume.ts'
 import { startReview } from './review-flow.ts'
 import { syncWorktree } from './sync.ts'
 
-const running = new Set<string>()
-const queued = new Map<string, AutoRunTaskOutcome | undefined>()
-const deadlineTimers = new Map<string, ReturnType<typeof setTimeout>>()
-const observationTimers = new Map<string, ReturnType<typeof setTimeout>>()
-const rateRetryTimers = new Map<string, ReturnType<typeof setTimeout>>()
-
-/** #120 切片②:限流按 reset 自动重试的缓冲,避免压着恢复时刻立即再撞。 */
-const RATE_RETRY_BUFFER_MS = 2_000
-
-function clearRateRetry(key: string): void {
-  const timer = rateRetryTimers.get(key)
-  if (timer) clearTimeout(timer)
-  rateRetryTimers.delete(key)
+interface AutoRunCommandState {
+  running: Set<string>
+  queued: Map<string, AutoRunTaskOutcome | undefined>
 }
 
-/** Defer instead of pausing when the only failure is a GitHub rate limit. */
-async function scheduleRateRetry(ctx: Context, key: string, resetAt: number, source: string): Promise<void> {
-  clearRateRetry(key)
-  const delay = Math.max(0, resetAt + RATE_RETRY_BUFFER_MS - Date.now())
-  logTaskDiagnostic('auto-run-rate-deferred', {
-    workflowKey: key,
-    retryAt: new Date(resetAt + RATE_RETRY_BUFFER_MS).toISOString(),
-    resetAt: new Date(resetAt).toISOString(),
-    source,
-    delayMs: delay,
-  })
-  const workflow = await loadWorkflow(key)
-  if (workflow?.autoRun?.status === 'running') {
-    await appendEvent(
-      workflow,
-      {
-        kind: 'auto-run',
-        at: new Date().toISOString(),
-        round: workflow.autoRun.rounds,
-        step: workflow.autoRun.step,
-        note: `自动跑到底遇 GitHub 限流(${source}),自动等待至 ${recoveryLabel(resetAt + RATE_RETRY_BUFFER_MS)} 重试(不暂停)`,
-      },
-      workflowRevision(workflow) ?? 0,
-    )
-  }
-  const timer = setTimeout(
-    () => {
-      rateRetryTimers.delete(key)
-      requestAutoRunReconcile(ctx, key)
-    },
-    Math.min(delay, 2_147_483_647),
-  )
-  timer.unref?.()
-  rateRetryTimers.set(key, timer)
+const commandStateSymbol = Symbol.for('clickvibe.auto-run-command-state')
+const commandStateRoot = globalThis as unknown as Record<PropertyKey, unknown>
+const commandState = (commandStateRoot[commandStateSymbol] as AutoRunCommandState | undefined) ?? {
+  running: new Set(),
+  queued: new Map(),
 }
-
-function liveTaskFor(taskRef: WorkflowTaskRef | null): LiveTask | null {
-  if (!taskRef) return null
-  const task = liveTasks.get(taskRef.taskId)
-  return task && !task.closed ? task : null
-}
+commandStateRoot[commandStateSymbol] = commandState
+const { running, queued } = commandState
 
 async function persistDecision(key: string, decision: Exclude<AutoRunDecision, { kind: 'manual' }>): Promise<void> {
   const workflow = await loadWorkflow(key)
@@ -103,139 +64,40 @@ async function persistDecision(key: string, decision: Exclude<AutoRunDecision, {
   workflow.autoRun.unresolved = decision.unresolved
   if (decision.kind === 'trigger') workflow.autoRun.step = decision.step
   workflow.autoRun.lastObservedAt = new Date().toISOString()
-  Object.assign(
-    workflow,
-    await commitWorkflowMetadata(workflow, workflowRevision(workflow), { autoRun: workflow.autoRun }),
-  )
-}
-
-interface PauseEvidence {
-  action?: string
-  error?: string
-}
-
-async function pauseAutoRun(key: string, reason: AutoRunPausedReason, evidence?: PauseEvidence): Promise<void> {
-  const workflow = await loadWorkflow(key)
-  if (!workflow?.autoRun || workflow.autoRun.status !== 'running') return
-  const evidenceNote = evidence
-    ? `(${[
-        evidence.action ? `动作 ${evidence.action}` : null,
-        evidence.error ? `错误: ${evidence.error.slice(0, 200)}` : null,
-      ]
-        .filter(Boolean)
-        .join(' · ')})`
-    : ''
-  logTaskDiagnostic('auto-run-pause', {
-    reason,
-    ...(evidence ? { action: evidence.action ?? null, error: evidence.error?.slice(0, 500) ?? null } : {}),
-    workflowKey: key,
-    step: workflow.autoRun.step ?? 0,
-    updatedAt: workflow.updatedAt,
-    devTaskId: workflow.devTaskId,
-    reviewTaskId: workflow.reviewTaskId,
-    liveTaskKeys: [...liveTasks.entries()].filter(([, task]) => !task.closed).map(([taskId]) => taskId),
-  })
-  workflow.autoRun.status = 'paused'
-  workflow.autoRun.pausedReason = reason
-  workflow.autoRun.lastObservedAt = new Date().toISOString()
-  await appendEvent(
-    workflow,
-    {
-      kind: 'auto-run',
-      at: new Date().toISOString(),
-      round: workflow.autoRun.rounds,
-      step: workflow.autoRun.step,
-      note: `自动跑到底已暂停:${reason}${evidenceNote}`,
-    },
-    workflowRevision(workflow) ?? 0,
-  )
-  clearDeadline(key)
-  clearObservation(key)
-  clearRateRetry(key)
-}
-
-async function completeAutoRun(key: string): Promise<void> {
-  const workflow = await loadWorkflow(key)
-  if (!workflow?.autoRun || workflow.autoRun.status !== 'running') return
-  workflow.autoRun.status = 'completed'
-  workflow.autoRun.pausedReason = null
-  await appendEvent(
-    workflow,
-    {
-      kind: 'auto-run',
-      at: new Date().toISOString(),
-      round: workflow.autoRun.rounds,
-      step: workflow.autoRun.step,
-      note: '自动跑到底已收敛,等待人工合并',
-    },
-    workflowRevision(workflow) ?? 0,
-  )
-  clearDeadline(key)
-  clearObservation(key)
-  clearRateRetry(key)
-}
-
-function clearObservation(key: string): void {
-  const timer = observationTimers.get(key)
-  if (timer) clearTimeout(timer)
-  observationTimers.delete(key)
-}
-
-function scheduleObservation(ctx: Context, key: string, deadline: string): void {
-  clearObservation(key)
-  const delay = autoRunRetryDelay(Date.now(), Date.parse(deadline))
-  if (delay === null) return
-  const timer = setTimeout(() => {
-    observationTimers.delete(key)
-    requestAutoRunReconcile(ctx, key)
-  }, delay)
-  timer.unref?.()
-  observationTimers.set(key, timer)
-}
-
-function clearDeadline(key: string): void {
-  const timer = deadlineTimers.get(key)
-  if (timer) clearTimeout(timer)
-  deadlineTimers.delete(key)
-}
-
-function armDeadline(ctx: Context, key: string, deadline: string): void {
-  clearDeadline(key)
-  const delay = Math.max(0, Date.parse(deadline) - Date.now())
-  const timer = setTimeout(
-    () => {
-      void (async () => {
-        if (Date.now() < Date.parse(deadline)) {
-          armDeadline(ctx, key, deadline)
-          return
-        }
-        await pauseAutoRun(key, 'budget-exhausted')
-        const workflow = await loadWorkflow(key)
-        if (workflow) {
-          const gate = taskLaunchDecision(observeWorkflowTask(ctx as unknown as TaskOwnershipContext, workflow))
-          if (!gate.allowed && gate.running) liveTaskFor(gate.task)?.process?.kill()
-        }
-      })()
-    },
-    Math.min(delay, 2_147_483_647),
-  )
-  timer.unref?.()
-  deadlineTimers.set(key, timer)
+  try {
+    Object.assign(
+      workflow,
+      await commitWorkflowMetadata(workflow, workflowRevision(workflow), { autoRun: workflow.autoRun }),
+    )
+  } catch (error) {
+    if (!(error instanceof WorkflowConflictError)) throw error
+    // 记账数据(rounds/step/lastObservedAt)每轮 reconcile 重算重写;条件提交拦住
+    // 旧写是它正确工作。对"有人更新"的正确反应是放手让路(#122 现场:与 defer
+    // 事件/完成收尾并发写撞车曾把控制器打停)。丢一次记账,下一轮自愈。
+    logTaskDiagnostic('auto-run-persist-skipped', {
+      workflowKey: key,
+      reason: 'revision-conflict',
+      rounds: decision.rounds,
+      step: decision.kind === 'trigger' ? decision.step : null,
+    })
+  }
 }
 
 async function applyDecision(ctx: Context, key: string, decision: AutoRunDecision): Promise<void> {
   if (decision.kind === 'manual') return
   if (decision.kind === 'wait') {
     const workflow = await loadWorkflow(key)
-    if (workflow?.autoRun?.status === 'running') scheduleObservation(ctx, key, workflow.autoRun.deadline)
+    if (workflow?.autoRun?.status === 'running') {
+      scheduleAutoRunObservation(ctx, key, workflow.autoRun.deadline, requestAutoRunReconcile)
+    }
     return
   }
   if (decision.kind === 'pause') {
-    await pauseAutoRun(key, decision.reason)
+    await pauseAutoRun(key, decision.reason, undefined, ctx)
     return
   }
   if (decision.kind === 'complete') {
-    await completeAutoRun(key)
+    await completeAutoRun(key, decision.reason === 'issue-closed' ? 'Issue 已关闭,自动跑到底结束' : undefined)
     return
   }
   const workflow = await loadWorkflow(key)
@@ -248,6 +110,7 @@ async function applyDecision(ctx: Context, key: string, decision: AutoRunDecisio
     cleanupPending?: boolean
     gateFailures?: unknown[]
     controllerError?: boolean
+    semanticFailure?: 'authorization-denied'
   }
   switch (decision.action) {
     case 'develop':
@@ -276,10 +139,7 @@ async function applyDecision(ctx: Context, key: string, decision: AutoRunDecisio
   }
   if (!result.ok) {
     const circuit = githubRest(ctx as never).rateLimitError()
-    if (circuit) {
-      await scheduleRateRetry(ctx, key, circuit.resetAt, `动作 ${decision.action}`)
-      return
-    }
+    if (circuit) throw circuit
     if (result.conflict) {
       // 原则 10(可恢复性优于预防):sync 冲突现场已由 syncWorktree 保留并记录,
       // 属可恢复工作——不暂停,直接排队下一轮 reconcile,由 derive 推导出 resume
@@ -288,19 +148,31 @@ async function applyDecision(ctx: Context, key: string, decision: AutoRunDecisio
       requestAutoRunReconcile(ctx, key)
       return
     }
-    await pauseAutoRun(key, autoRunFailureReason(decision.action, result), {
-      action: decision.action,
-      error: result.error,
-    })
+    const reason = autoRunFailureReason(decision.action, result)
+    if (reason === 'controller-error' || reason === 'cleanup-failed') {
+      throw new AutoRunControllerError(`action:${decision.action}`, result.error ?? reason)
+    }
+    await pauseAutoRun(
+      key,
+      reason,
+      {
+        action: decision.action,
+        error: result.error,
+      },
+      ctx,
+    )
     return
   }
   if (decision.action === 'create-pr' || decision.action === 'sync') requestAutoRunReconcile(ctx, key)
 }
 
 async function reconcileOnce(ctx: Context, key: string, outcome?: AutoRunTaskOutcome): Promise<void> {
-  clearObservation(key)
   const workflow = await loadWorkflow(key)
   if (!workflow?.autoRun || workflow.autoRun.status !== 'running') return
+  if (Date.now() >= Date.parse(workflow.autoRun.deadline)) {
+    await pauseAutoRun(key, 'budget-exhausted', undefined, ctx)
+    return
+  }
   const [observed] = await enrichWorkflowStates(ctx, [workflow])
   if (!observed) return
   const decision = decideAutoRun({
@@ -308,10 +180,12 @@ async function reconcileOnce(ctx: Context, key: string, outcome?: AutoRunTaskOut
     nextAction: observed.derived.nextAction,
     now: Date.now(),
     reviewEvents: workflow.events,
+    issueOpen: observed.issueState !== 'CLOSED',
     ...(outcome ? { taskOutcome: outcome } : {}),
   })
   if (decision.kind !== 'manual') await persistDecision(key, decision)
   await applyDecision(ctx, key, decision)
+  await clearAutoRunControllerFailure(key)
 }
 
 export function requestAutoRunReconcile(ctx: Context, key: string, outcome?: AutoRunTaskOutcome): void {
@@ -325,7 +199,13 @@ export function requestAutoRunReconcile(ctx: Context, key: string, outcome?: Aut
     try {
       do {
         queued.delete(key)
-        await reconcileOnce(ctx, key, nextOutcome)
+        const current = await loadWorkflow(key)
+        if (current?.autoRun?.status === 'paused' && current.autoRun.pausedReason === 'controller-error') {
+          const maintained = await maintainPausedAutoRun(ctx, key, requestAutoRunReconcile)
+          if (maintained === 'reattached') await reconcileOnce(ctx, key, nextOutcome)
+        } else {
+          await reconcileOnce(ctx, key, nextOutcome)
+        }
         nextOutcome = queued.get(key)
       } while (queued.has(key))
     } catch (error) {
@@ -336,15 +216,15 @@ export function requestAutoRunReconcile(ctx: Context, key: string, outcome?: Aut
         errorMessage: error instanceof Error ? error.message : String(error),
         errorStack: error instanceof Error ? error.stack : null,
       })
-      if (isGithubRateLimitError(error)) {
-        await scheduleRateRetry(ctx, key, error.resetAt, 'reconcile')
-      } else {
-        await pauseAutoRun(key, 'controller-error', {
-          error: `${error instanceof Error ? error.message : String(error)}`,
-        })
-      }
+      const source = error instanceof AutoRunControllerError ? error.source : 'reconcile'
+      await handleAutoRunControllerFailure(ctx, key, error, source, requestAutoRunReconcile)
     } finally {
       running.delete(key)
+      if (queued.has(key)) {
+        const pending = queued.get(key)
+        queued.delete(key)
+        requestAutoRunReconcile(ctx, key, pending)
+      }
     }
   })()
 }
@@ -403,7 +283,7 @@ export async function startAutoRun(
     { kind: 'auto-run', at: startedAt, round: 0, note: '自动跑到底已启动' },
     workflowRevision(ensured.workflow) ?? 0,
   )
-  armDeadline(ctx, key, ensured.workflow.autoRun.deadline)
+  armAutoRunDeadline(ctx, key, ensured.workflow.autoRun.deadline, requestAutoRunReconcile)
   requestAutoRunReconcile(ctx, key)
   return { ok: true, workflowKey: key }
 }
@@ -413,24 +293,34 @@ export async function pauseOrphanedAutoRuns(
   workflows: readonly (IssueWorkflow & { autoRun?: AutoRunState })[],
 ): Promise<void> {
   for (const candidate of workflows) {
-    if (candidate.autoRun?.status !== 'running' || running.has(candidate.key) || observationTimers.has(candidate.key)) {
+    const autoRun = candidate.autoRun
+    if (!autoRun) continue
+    const eligible =
+      autoRun.status === 'running' || (autoRun.status === 'paused' && autoRun.pausedReason === 'controller-error')
+    if (!eligible || running.has(candidate.key) || autoRunWakePending(candidate.key)) {
       continue
     }
-    const ownership = observeWorkflowTask(ctx as unknown as TaskOwnershipContext, candidate)
+    armAutoRunDeadline(ctx, candidate.key, autoRun.deadline, requestAutoRunReconcile)
+    let ownership: ReturnType<typeof observeWorkflowTask> | null = null
+    try {
+      ownership = observeWorkflowTask(ctx as unknown as TaskOwnershipContext, candidate)
+    } catch (error) {
+      logTaskDiagnostic('auto-run-ownership-error', {
+        workflowKey: candidate.key,
+        error: error instanceof Error ? error.message : String(error),
+        trigger: 'state-refresh',
+      })
+    }
     logTaskDiagnostic('auto-run-ownership-observed', {
       workflowKey: candidate.key,
-      step: candidate.autoRun.step ?? 0,
+      step: autoRun.step ?? 0,
       updatedAt: candidate.updatedAt,
-      ownership,
+      ownership: ownership ?? { state: 'unknown', source: 'registry-error' },
       devTaskId: candidate.devTaskId,
       reviewTaskId: candidate.reviewTaskId,
       liveTaskKeys: [...liveTasks.entries()].filter(([, task]) => !task.closed).map(([taskId]) => taskId),
       trigger: 'state-refresh',
     })
-    if (ownership.state === 'interrupted') {
-      await pauseAutoRun(candidate.key, 'session-interrupted')
-      continue
-    }
-    requestAutoRunReconcile(ctx, candidate.key)
+    requestAutoRunReconcile(ctx, candidate.key, ownership?.state === 'interrupted' ? 'stopped' : undefined)
   }
 }

@@ -429,6 +429,32 @@ export function commitWorkflowMetadataCommand(
   return enqueueWorkflowCommand(identity, () => commitWorkflowMetadata(identity, expectedRevision, patch))
 }
 
+/**
+ * Hold the same durable workflow locks used by every metadata/task command.
+ * Baseline recovery uses this read-side transaction while it validates and
+ * restores one remote branch shared by several workflows.
+ */
+export function withBaselineRestoreWorkflowLocksCommand<T>(
+  identities: WorkflowStorageIdentity[],
+  operation: () => Promise<T>,
+): Promise<T> {
+  const unique = new Map(identities.map((identity) => [workflowStatePath(identity), identity]))
+  const ordered = [...unique.entries()].sort(([left], [right]) => left.localeCompare(right))
+  const acquire = (index: number): Promise<T> => {
+    if (index >= ordered.length) return operation()
+    const [path, identity] = ordered[index]
+    return enqueueWorkflowCommand(identity, async () => {
+      const release = await acquireLock(path)
+      try {
+        return await acquire(index + 1)
+      } finally {
+        await release()
+      }
+    })
+  }
+  return acquire(0)
+}
+
 /** Semantic claim command. Raw claim persistence remains private to this module. */
 export function claimWorkflowTaskCommand(
   identity: WorkflowStorageIdentity,

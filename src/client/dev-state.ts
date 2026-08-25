@@ -1,7 +1,7 @@
 import React from 'react'
 import { clearedContext, contextToSubmit, toggledContext } from './action-context.ts'
 import { deriveAgentChoicePolicy } from './agent-choice.ts'
-import { type AuthorizationPreview, authorizationSummary, expectedDevelopSnapshot } from './dev-authorization.ts'
+import { useAgentAuthorization } from './agent-authorization.ts'
 import { useDevStream } from './dev-stream.ts'
 import { type MergeGateFailure, type NextAction, OVERRIDE_REASON_MAX, type Workflow, apiCall } from './domain.ts'
 import { githubCompareUrl, latestDevelopmentEvent } from './runtime.ts'
@@ -33,6 +33,13 @@ export function useDevSection({
   )
   const [contextOpen, setContextOpen] = React.useState(false)
   const [contextText, setContextText] = React.useState('')
+  const authorizationFlow = useAgentAuthorization({
+    url,
+    issue,
+    workflowBaseRef: workflow?.baseRef,
+    setError,
+    setOverrideGates,
+  })
   const autoActionConsumedRef = React.useRef(false)
   const derived = workflow?.derived
   const stage = derived?.status ?? workflow?.stage ?? 'idle'
@@ -45,54 +52,7 @@ export function useDevSection({
   }
   const { activeTaskId, historyKind, logEvents, openStream, setHistoryKind, setLogEvents, streamNotice, streamState } =
     useDevStream(workflow, refresh)
-  const authorize = async (
-    action: 'develop' | 'review' | 'resume' | 'create-pr' | 'merge',
-    agent: 'codex' | 'claude' | null,
-    context = '',
-    freshSession = false,
-  ): Promise<{
-    authorizationId: string
-    authorizationDigest: string
-    target?: { prNumber: string; branch: string; head: string; mergeFlag: '--merge' }
-  } | null> => {
-    const expectedSnapshot = expectedDevelopSnapshot(url, issue)
-    const res = await apiCall<
-      | {
-          ok: true
-          authorizationId: string
-          authorizationDigest: string
-          target?: { prNumber: string; branch: string; head: string; mergeFlag: '--merge' }
-          preview: AuthorizationPreview
-        }
-      | { ok: false; error: string; gateFailures?: MergeGateFailure[] }
-    >('authorize', {
-      action,
-      url,
-      ...(agent ? { agent } : {}),
-      context,
-      ...(freshSession ? { freshSession: true } : {}),
-      ...(action === 'develop' ? { expectedSnapshot } : {}),
-    })
-    if (!res.ok) {
-      setError(res.error)
-      setOverrideGates(res.gateFailures ?? null)
-      return null
-    }
-    const summary = authorizationSummary({
-      action,
-      agent,
-      url,
-      authorizationDigest: res.authorizationDigest,
-      preview: res.preview,
-      freshSession,
-    })
-    if (!window.confirm(summary)) return null
-    return {
-      authorizationId: res.authorizationId,
-      authorizationDigest: res.authorizationDigest,
-      ...(res.target ? { target: res.target } : {}),
-    }
-  }
+  const { authorize } = authorizationFlow
   const clearUserContext = () => {
     const next = clearedContext()
     setContextText(next.text)
@@ -191,6 +151,31 @@ export function useDevSection({
       setBusy(null)
     }
   }
+  const restoreBase = async () => {
+    if (!workflow) return
+    setBusy('restoring-base')
+    setError(null)
+    try {
+      const authorization = await authorize('restore-base', null)
+      if (!authorization) return
+      const res = await apiCall<{ ok: true; baseBranch: string; baseHash: string } | { ok: false; error: string }>(
+        'sync',
+        { url, restoreBase: true, ...authorization },
+      )
+      if (!res.ok) {
+        setError(res.error)
+        return
+      }
+      await refresh()
+      const { repoKey, branch, baseRef, derived } = workflow
+      const compareUrl = githubCompareUrl(repoKey, branch, baseRef, derived?.baseBranch, true)
+      window.open(compareUrl, '_blank', 'noopener')
+    } catch (caught) {
+      setError(String(caught instanceof Error ? caught.message : caught))
+    } finally {
+      setBusy(null)
+    }
+  }
   const stop = async (taskId = activeTaskId, confirmedStopped = false) => {
     if (!taskId) return
     const res = await apiCall<{ ok: boolean; error?: string }>('stop', { taskId, confirmedStopped })
@@ -285,11 +270,20 @@ export function useDevSection({
             ok: true
             authorizationId: string
             authorizationDigest: string
-            target?: { prNumber: string; branch: string; head: string; mergeFlag: '--merge' }
+            target?: {
+              prNumber: string
+              branch: string
+              head: string
+              baseRef: string
+              baseSha: string
+              mergeFlag: '--merge'
+            }
             override?: { skipped: string[]; reason: string }
             preview: {
               prNumber?: string
               branch?: string
+              baseRef?: string
+              baseSha?: string
               mergeFlag?: string
               cleanup?: string[]
               override?: { skipped: string[]; reason: string; gates: MergeGateFailure[] }
@@ -319,7 +313,7 @@ export function useDevSection({
         }
         const preview = res.preview
         const confirmedMerge = window.confirm(
-          `⚠️ 人工放行合并(最后确认)\n\nPR: #${preview.prNumber ?? '?'}\n分支: ${preview.branch ?? '?'}\n策略: ${preview.mergeFlag ?? '--merge'} (merge commit)\n清理: ${(preview.cleanup ?? []).join('、')}\n\n跳过的门禁项:\n${override.skipped.map((key) => `• ${gateMessage(key)}`).join('\n')}\n放行原因: ${override.reason}\n操作者: 本机用户(将写入审计时间线)\n\n注意:仅跳过 ClickVibe 自身门禁;GitHub 分支保护若拒绝合并将直接报错。\n\n确认放行并执行合并与清理?`,
+          `⚠️ 人工放行合并(最后确认)\n\nPR: #${preview.prNumber ?? '?'}\n分支: ${preview.branch ?? '?'}\nPR base: ${preview.baseRef ?? '?'} @ ${preview.baseSha ?? '?'}\n策略: ${preview.mergeFlag ?? '--merge'} (merge commit)\n清理: ${(preview.cleanup ?? []).join('、')}\n\n跳过的门禁项:\n${override.skipped.map((key) => `• ${gateMessage(key)}`).join('\n')}\n放行原因: ${override.reason}\n操作者: 本机用户(将写入审计时间线)\n\n注意:仅跳过 ClickVibe 自身门禁;GitHub 分支保护若拒绝合并将直接报错。\n\n确认放行并执行合并与清理?`,
         )
         if (!confirmedMerge) {
           setBusy(null)
@@ -329,7 +323,7 @@ export function useDevSection({
         // 确认时门禁已全部通过(此前拒绝基于过期数据):按正常合并预览确认。
         const preview = res.preview
         const confirmedMerge = window.confirm(
-          `门禁已全部通过,无需放行。ClickVibe 将执行不可逆的合并与清理:\n\nPR: #${preview.prNumber ?? '?'}\n分支: ${preview.branch ?? '?'}\n策略: ${preview.mergeFlag ?? '--merge'}\n清理: ${(preview.cleanup ?? []).join('、')}\n\n确认合并并清理?`,
+          `门禁已全部通过,无需放行。ClickVibe 将执行不可逆的合并与清理:\n\nPR: #${preview.prNumber ?? '?'}\n分支: ${preview.branch ?? '?'}\nPR base: ${preview.baseRef ?? '?'} @ ${preview.baseSha ?? '?'}\n策略: ${preview.mergeFlag ?? '--merge'}\n清理: ${(preview.cleanup ?? []).join('、')}\n\n确认合并并清理?`,
         )
         if (!confirmedMerge) {
           setBusy(null)
@@ -389,6 +383,9 @@ export function useDevSection({
         break
       case 'sync':
         void syncWorktree()
+        break
+      case 'restore-base':
+        void restoreBase()
         break
       case 'create-pr':
         void createPr()
@@ -463,6 +460,7 @@ export function useDevSection({
           (effectiveAction.kind === 'none' && derived.issueContractUnknownReason === 'current-contract-unavailable')),
     )
   return {
+    ...authorizationFlow,
     actionButtonClass,
     activeTaskId,
     agentChoice,
