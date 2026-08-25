@@ -475,9 +475,7 @@ test('merge preface guides the resume/rework agent through conflict then stalene
     await rm(root, { recursive: true, force: true })
   }
 })
-
 // ---- #127 现场:merge/cleanup 持久化冲突的良性重放 ----
-
 test('replayMergeMetadata keeps concurrent disk events and memory cleanup state', async () => {
   const { replayMergeMetadata } = await import('../src/workflow/merge.ts')
   const disk = {
