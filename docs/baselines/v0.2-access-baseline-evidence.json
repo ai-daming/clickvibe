@@ -1,0 +1,180 @@
+{
+  "schemaVersion": 1,
+  "issue": 133,
+  "acceptedBaselineSha": "9f841f1bc93604e8d802e3776997016140840e47",
+  "measuredAt": "2026-08-26T13:54:29Z",
+  "environment": {
+    "head": "9f841f1bc93604e8d802e3776997016140840e47",
+    "dirtyPaths": [],
+    "aheadBehindOriginMain": [0, 0],
+    "platform": "Darwin 25.6.0 arm64",
+    "macOS": "26.6.2",
+    "node": "v26.4.0",
+    "pnpm": "11.21.0",
+    "git": "git version 2.50.1 (Apple Git-155)",
+    "gh": "gh version 2.72.0 (2025-04-30)",
+    "remote": "https://github.com/ai-daming/clickvibe.git"
+  },
+  "reproduce": {
+    "environment": "node scripts/measure-access-baseline.mjs environment",
+    "panelAlwaysOn": "node scripts/measure-access-baseline.mjs panel",
+    "multiWorkItem": "node scripts/measure-access-baseline.mjs multi",
+    "reviewDense": "node scripts/measure-access-baseline.mjs review",
+    "isolatedWrite": "node scripts/measure-access-baseline.mjs isolated-write",
+    "rateLimit": "node scripts/measure-access-baseline.mjs rate",
+    "note": "Live reads vary. The script refuses comparison when src differs from the accepted baseline; docs, script and test dirt are reported but do not alter the measured runtime source."
+  },
+  "scenarios": [
+    {
+      "id": "panel-always-on",
+      "source": "live GitHub reads plus real local Git",
+      "workItems": 1,
+      "concurrency": 1,
+      "rounds": 4,
+      "pollIntervalMs": 5000,
+      "cacheState": "cold first round; hot thereafter within current resource TTL",
+      "samples": [
+        { "round": 1, "elapsedMs": 4164.86, "physicalSubprocesses": 14, "ok": true },
+        { "round": 2, "elapsedMs": 480.07, "physicalSubprocesses": 12, "ok": true },
+        { "round": 3, "elapsedMs": 482.28, "physicalSubprocesses": 12, "ok": true },
+        { "round": 4, "elapsedMs": 600.77, "physicalSubprocesses": 12, "ok": true }
+      ],
+      "summary": {
+        "logicalScenarioRequests": 4,
+        "physicalSubprocesses": 50,
+        "localGitSubprocesses": 48,
+        "remoteGitSubprocesses": 0,
+        "githubRestSubprocesses": 2,
+        "upstreamRequests": 2,
+        "failures": 0,
+        "expectedProbeMisses": 8,
+        "p50Ms": 482.28,
+        "p95Ms": 4164.86
+      },
+      "coldCommands": [
+        "if git show-ref local branch; elif git show-ref origin branch; else exit 1; fi",
+        "git symbolic-ref --quiet --short refs/remotes/origin/HEAD",
+        "git rev-list --count origin/main..branch",
+        "gh api --include repos/.../pulls?state=all&head=...&per_page=1",
+        "gh api --include repos/.../issues/133",
+        "git rev-parse --short HEAD",
+        "git branch --show-current",
+        "git status --porcelain",
+        "git rev-parse --short main",
+        "git rev-list --left-right --count main...HEAD",
+        "git rev-parse --short origin/main",
+        "git rev-list --left-right --count origin/main...HEAD",
+        "git rev-parse --short origin/<workflow-branch>",
+        "git rev-parse --short MERGE_HEAD"
+      ],
+      "pollution": "The two non-zero rev-parse probes repeat every round and are expected misses, not successful observations."
+    },
+    {
+      "id": "multi-work-item-refresh",
+      "source": "live GitHub reads plus real local Git",
+      "workItems": 5,
+      "issueNumbers": [133, 134, 135, 136, 137],
+      "concurrency": 5,
+      "rounds": 2,
+      "pollIntervalMs": 0,
+      "cacheState": "cold first round; immediate hot second round",
+      "samples": [
+        { "round": 1, "elapsedMs": 22561.74, "physicalSubprocesses": 65, "ok": true },
+        { "round": 2, "elapsedMs": 501.88, "physicalSubprocesses": 55, "ok": true }
+      ],
+      "summary": {
+        "logicalScenarioRequests": 2,
+        "physicalSubprocesses": 120,
+        "localGitSubprocesses": 110,
+        "remoteGitSubprocesses": 0,
+        "githubRestSubprocesses": 10,
+        "upstreamRequests": 10,
+        "failures": 0,
+        "expectedProbeMisses": 30,
+        "p50Ms": 501.88,
+        "p95Ms": 22561.74
+      },
+      "githubSamplesMs": [1908.48, 1815.23, 2416.25, 3410.88, 1775.38, 1626.23, 1696.14, 1919.67, 2422.08, 3214.01]
+    },
+    {
+      "id": "review-dense-preflight",
+      "source": "live GitHub reads plus three real concurrent git fetch operations",
+      "workItems": 3,
+      "issueNumbers": [122, 131, 135],
+      "concurrency": 3,
+      "rounds": 1,
+      "cacheState": "force refresh; repository aggregate may singleflight",
+      "samples": [
+        { "issue": 122, "elapsedMs": 29224.45, "issueOk": true, "fetchOk": true, "headKnown": true },
+        { "issue": 131, "elapsedMs": 29222.51, "issueOk": true, "fetchOk": true, "headKnown": true },
+        { "issue": 135, "elapsedMs": 29221.8, "issueOk": true, "fetchOk": true, "headKnown": true }
+      ],
+      "summary": {
+        "logicalPreflights": 3,
+        "physicalSubprocesses": 18,
+        "localGitSubprocesses": 3,
+        "remoteGitSubprocesses": 3,
+        "githubRestSubprocesses": 12,
+        "upstreamRequests": 15,
+        "failures": 0,
+        "expectedProbeMisses": 0,
+        "p50Ms": 29222.51,
+        "p95Ms": 29224.45
+      },
+      "remoteGitSamplesMs": [2033.35, 2096.32, 3338.75],
+      "githubRestSamplesMs": [1703.34, 2388.3, 3263.29, 1688.47, 3688.45, 2046.62, 1841.84, 1883.91, 2178.51, 3293.74, 2661.9, 2572.04]
+    },
+    {
+      "id": "isolated-key-write-readback",
+      "source": "temporary local worktree and bare remote",
+      "workItems": 1,
+      "concurrency": 1,
+      "rounds": 10,
+      "cacheState": "not applicable",
+      "samplesMs": [135.65, 84.97, 89.16, 88.38, 96.96, 89.58, 141.59, 86.02, 90.78, 85.71],
+      "summary": {
+        "logicalWrites": 10,
+        "physicalSubprocesses": 20,
+        "remoteGitUpstreamRequests": 20,
+        "writeReadbacks": 10,
+        "consistentReadbacks": 10,
+        "failures": 0,
+        "p50Ms": 89.16,
+        "p95Ms": 141.59
+      },
+      "githubWriteLatency": null,
+      "missingReason": "No dedicated GitHub test repository was in scope; production writes are prohibited. Unknown is not zero."
+    },
+    {
+      "id": "github-rest-rate-sample",
+      "source": "live GitHub core REST bucket",
+      "logicalRequests": 5,
+      "physicalSubprocesses": 5,
+      "upstreamRequests": 5,
+      "samplesMs": [2947.6, 2637.69, 2059.27, 2463.16, 2954.03],
+      "p50Ms": 2637.69,
+      "p95Ms": 2954.03,
+      "rateLimit": {
+        "before": { "limit": 5000, "used": 0, "remaining": 5000, "reset": 1787756036 },
+        "after": { "limit": 5000, "used": 0, "remaining": 5000, "reset": 1787756051 },
+        "observedUsedDelta": 0,
+        "contaminated": true,
+        "interpretation": "The snapshot showed zero delta, but shared-credential traffic and endpoint accounting are not isolated; this cannot be interpreted as zero cost."
+      }
+    }
+  ],
+  "agentSamples": [
+    {
+      "stage": "coding",
+      "taskEvidence": "~/.clickvibe/state/ai-daming/clickvibe/issue-122/dev/2026-08-25T10-34-44-730Z--dev-1787654084730-lZXRHDcwdxGTX01X.jsonl",
+      "observed": ["git fetch", "git status", "git rev-parse", "git rev-list", "git branch", "git remote", "git for-each-ref", "git log", "git diff", "git push", "gh pr list/view", "gh issue comment", "gh api"],
+      "completeness": "representative observed sample only"
+    },
+    {
+      "stage": "review",
+      "taskEvidence": "~/.clickvibe/state/ai-daming/clickvibe/issue-122/review/2026-08-25T14-28-42-379Z--review-1787668122379-BBxcmQ6NHqEaDhX9.jsonl",
+      "observed": ["git fetch", "git log", "git diff", "git show", "git init/config/commit in temporary adversarial repositories", "gh api PR comments", "gh api PR reviews", "gh api check-runs"],
+      "completeness": "representative observed sample only; nested shell commands are not guaranteed to be exhaustively parsed"
+    }
+  ]
+}
