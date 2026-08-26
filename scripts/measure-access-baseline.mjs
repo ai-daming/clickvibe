@@ -1,15 +1,22 @@
 #!/usr/bin/env node
 
 import { execFile } from 'node:child_process'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 
 const exec = promisify(execFile)
-const BASELINE_SHA = '9f841f1bc93604e8d802e3776997016140840e47'
+const DEFAULT_BASELINE_SHA = '9f841f1bc93604e8d802e3776997016140840e47'
 const REPO_KEY = 'ai-daming/clickvibe'
+const DEFAULT_COMMAND_TIMEOUT_MS = 30_000
+const TOOL_PATH = fileURLToPath(import.meta.url)
+
+function selectedBaselineSha() {
+  return process.env.CLICKVIBE_ACCESS_BASELINE_SHA ?? DEFAULT_BASELINE_SHA
+}
 
 export function nearestRank(values, percentile) {
   if (values.length === 0) return null
@@ -18,9 +25,11 @@ export function nearestRank(values, percentile) {
 }
 
 export function classifyCommand(command) {
-  if (/(?:^|[;&|]\s*)git\s+(?:fetch|push|ls-remote)\b/.test(command)) return 'remoteGit'
-  if (/^gh\s+(?:api|pr|issue)\b/.test(command)) return 'githubRest'
-  if (/(?:^|[;&|]\s*)git\b/.test(command)) return 'localGit'
+  if (/(?:^|[;&|]\s*|(?:if|then|elif)\s+)git\s+(?:fetch|push|ls-remote)\b/.test(command)) return 'remoteGit'
+  if (/(?:^|[;&|]\s*)(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*gh\s+(?:api|pr|issue)\b/.test(command)) {
+    return 'githubRest'
+  }
+  if (/(?:^|[;&|]\s*|(?:if|then|elif)\s+)git\b/.test(command)) return 'localGit'
   if (/^(?:codex|claude)\b/.test(command)) return 'agentProcess'
   return 'other'
 }
@@ -41,7 +50,11 @@ export function summarizeCommands(commands) {
 async function runFile(file, args, options = {}) {
   const started = performance.now()
   try {
-    const result = await exec(file, args, { maxBuffer: 20 * 1024 * 1024, ...options })
+    const result = await exec(file, args, {
+      maxBuffer: 20 * 1024 * 1024,
+      timeout: DEFAULT_COMMAND_TIMEOUT_MS,
+      ...options,
+    })
     return { ...result, exitCode: 0, ms: Number((performance.now() - started).toFixed(2)) }
   } catch (error) {
     return {
@@ -59,36 +72,71 @@ async function git(args, cwd = process.cwd()) {
   return result.stdout.trim()
 }
 
-async function environment() {
-  const [head, dirty, sourceDiff, node, gitVersion, ghVersion, uname] = await Promise.all([
-    git(['rev-parse', 'HEAD']),
-    git(['status', '--porcelain=v1']),
-    runFile('git', ['diff', '--quiet', BASELINE_SHA, '--', 'src']),
-    Promise.resolve(process.version),
-    git(['--version']),
-    runFile('gh', ['--version']),
-    runFile('uname', ['-srm']),
-  ])
-  if (head !== BASELINE_SHA && sourceDiff.exitCode !== 0) {
-    throw new Error(`src differs from accepted baseline ${BASELINE_SHA}; refusing a mixed-source measurement`)
+export async function collectEnvironment(repoPath = process.cwd(), baselineSha = selectedBaselineSha()) {
+  const root = await git(['rev-parse', '--show-toplevel'], repoPath)
+  const baselineCheck = await runFile('git', ['cat-file', '-e', `${baselineSha}^{commit}`], { cwd: root })
+  if (baselineCheck.exitCode !== 0) {
+    throw new Error(
+      `accepted baseline ${baselineSha} is unavailable: ${baselineCheck.stderr.trim() || 'git cat-file failed'}`,
+    )
+  }
+  const [head, dirty, sourceDiff, untrackedSource, node, gitVersion, ghVersion, uname, toolContents] =
+    await Promise.all([
+      git(['rev-parse', 'HEAD'], root),
+      git(['status', '--porcelain=v1'], root),
+      runFile('git', ['diff', '--quiet', baselineSha, '--', ':(top)src'], { cwd: root }),
+      runFile('git', ['ls-files', '--others', '--exclude-standard', '--', ':(top)src'], { cwd: root }),
+      Promise.resolve(process.version),
+      git(['--version'], root),
+      runFile('gh', ['--version']),
+      runFile('uname', ['-srm']),
+      readFile(TOOL_PATH),
+    ])
+  if (sourceDiff.exitCode > 1) {
+    throw new Error(`cannot compare src with accepted baseline ${baselineSha}: ${sourceDiff.stderr.trim()}`)
+  }
+  if (untrackedSource.exitCode !== 0) {
+    throw new Error(`cannot enumerate untracked src paths: ${untrackedSource.stderr.trim()}`)
+  }
+  const untrackedSourcePaths = untrackedSource.stdout.trim() === '' ? [] : untrackedSource.stdout.trim().split('\n')
+  const trackedSourceDiffers = sourceDiff.exitCode === 1
+  if (trackedSourceDiffers || untrackedSourcePaths.length > 0) {
+    const reasons = [
+      ...(trackedSourceDiffers ? ['tracked source differs'] : []),
+      ...(untrackedSourcePaths.length > 0 ? ['untracked source exists'] : []),
+    ]
+    throw new Error(
+      `src differs from accepted baseline ${baselineSha}: ${reasons.join('; ')}; refusing a mixed-source measurement`,
+    )
   }
   return {
+    scenario: 'environment',
     measuredAt: new Date().toISOString(),
-    acceptedBaselineSha: BASELINE_SHA,
+    acceptedBaselineSha: baselineSha,
     head,
-    sourceMatchesBaseline: sourceDiff.exitCode === 0,
+    sourceMatchesBaseline: true,
+    untrackedSourcePaths,
     dirtyPaths: dirty === '' ? [] : dirty.split('\n'),
     platform: uname.stdout.trim(),
     node,
     git: gitVersion,
-    gh: ghVersion.stdout.split('\n')[0],
+    gh: {
+      available: ghVersion.exitCode === 0,
+      version: ghVersion.exitCode === 0 ? ghVersion.stdout.split('\n')[0] : null,
+      error: ghVersion.exitCode === 0 ? null : ghVersion.stderr.trim() || 'gh --version failed',
+    },
+    measurementTool: {
+      path: 'scripts/measure-access-baseline.mjs',
+      sha256: createHash('sha256').update(toolContents).digest('hex'),
+    },
   }
 }
 
 export function isExpectedProbeMiss(command) {
   return (
-    /^if git show-ref .*; else exit 1; fi$/.test(command) ||
-    /git rev-parse --short '(?:origin\/[^']+|MERGE_HEAD)'/.test(command)
+    /^if git show-ref .*refs\/heads\/clickvibe-issue-\d+.*refs\/remotes\/origin\/clickvibe-issue-\d+.*; else exit 1; fi$/.test(
+      command,
+    ) || /git rev-parse --short '(?:origin\/clickvibe-issue-\d+|MERGE_HEAD)'/.test(command)
   )
 }
 
@@ -102,13 +150,16 @@ function instrumentedContext(repoPath) {
           return spec
         },
         async run(spec) {
-          const result = await runFile('/bin/zsh', ['-lc', spec.command], {
+          const timeoutMs = spec.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS
+          const result = await runFile('/bin/zsh', ['-c', spec.command], {
             cwd: spec.workdir ?? repoPath,
-            timeout: spec.timeoutMs,
+            timeout: timeoutMs,
             input: spec.stdin,
           })
           commands.push({
             command: spec.command,
+            timeoutMs,
+            sandboxMode: spec.sandboxPolicy?.mode ?? null,
             ms: result.ms,
             exitCode: result.exitCode,
             ...(result.exitCode !== 0 && isExpectedProbeMiss(spec.command) ? { expectedProbeMiss: true } : {}),
@@ -144,7 +195,7 @@ function workflow(number, repoPath, branch = `clickvibe-issue-${number}`) {
     reviewResult: null,
     prNumber: null,
     issueState: 'OPEN',
-    baseRef: `origin/main @ ${BASELINE_SHA}`,
+    baseRef: `origin/main @ ${selectedBaselineSha()}`,
     updatedAt: Date.now(),
     events: [],
   }
@@ -280,7 +331,12 @@ function scenarioResult(name, parameters, rounds, commands) {
   }
 }
 
-async function isolatedWriteScenario() {
+export function readbackMatches(localSha, readback, expectedRef) {
+  const [remoteSha, remoteRef, ...extra] = readback.trim().split(/\s+/)
+  return extra.length === 0 && remoteSha === localSha && remoteRef === expectedRef
+}
+
+export async function isolatedWriteScenario() {
   const root = await mkdtemp(join(tmpdir(), 'clickvibe-133-write-'))
   const bare = join(root, 'remote.git')
   const worktree = join(root, 'work')
@@ -296,18 +352,25 @@ async function isolatedWriteScenario() {
       await git(['add', 'sample.txt'], worktree)
       await git(['commit', '-m', `sample ${round}`], worktree)
       const started = performance.now()
+      const localShaStarted = performance.now()
+      const localSha = await git(['rev-parse', 'HEAD'], worktree)
+      const localShaMs = Number((performance.now() - localShaStarted).toFixed(2))
       const pushStarted = performance.now()
       await git(['push', 'origin', 'HEAD:refs/heads/issue-133'], worktree)
       const pushMs = Number((performance.now() - pushStarted).toFixed(2))
       const readbackStarted = performance.now()
       const readback = await git(['ls-remote', '--exit-code', '--heads', 'origin', 'refs/heads/issue-133'], worktree)
       const readbackMs = Number((performance.now() - readbackStarted).toFixed(2))
+      const [remoteSha] = readback.split(/\s+/)
       samples.push({
         round,
         elapsedMs: Number((performance.now() - started).toFixed(2)),
+        localShaMs,
         pushMs,
         readbackMs,
-        consistent: /^[0-9a-f]{40}\s+refs\/heads\/issue-133$/.test(readback),
+        localSha,
+        remoteSha,
+        consistent: readbackMatches(localSha, readback, 'refs/heads/issue-133'),
       })
     }
     return {
@@ -319,11 +382,13 @@ async function isolatedWriteScenario() {
       samples,
       summary: {
         logicalWrites: 10,
-        physicalSubprocesses: 20,
+        physicalSubprocesses: 30,
+        localGitSubprocesses: 10,
+        remoteGitSubprocesses: 20,
         remoteGitUpstreamRequests: 20,
         writeReadbacks: 10,
         consistentReadbacks: samples.filter((item) => item.consistent).length,
-        failures: 0,
+        failures: samples.filter((item) => !item.consistent).length,
         p50Ms: nearestRank(
           samples.map((item) => item.elapsedMs),
           0.5,
@@ -340,8 +405,25 @@ async function isolatedWriteScenario() {
   }
 }
 
+export function parseCoreRateLimit(result) {
+  if (result.exitCode !== 0) throw new Error(result.stderr || 'gh api rate_limit failed')
+  let parsed
+  try {
+    parsed = JSON.parse(result.stdout)
+  } catch (error) {
+    throw new Error(
+      `gh api rate_limit returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+  const core = parsed?.resources?.core
+  if (!core || !['limit', 'used', 'remaining', 'reset'].every((field) => typeof core[field] === 'number')) {
+    throw new Error('gh api rate_limit response is missing numeric resources.core fields')
+  }
+  return { limit: core.limit, used: core.used, remaining: core.remaining, reset: core.reset }
+}
+
 async function rateScenario() {
-  const readRate = async () => JSON.parse((await runFile('gh', ['api', 'rate_limit'])).stdout).resources.core
+  const readRate = async () => parseCoreRateLimit(await runFile('gh', ['api', 'rate_limit']))
   const before = await readRate()
   const samples = []
   for (let index = 0; index < 5; index += 1) {
@@ -372,20 +454,20 @@ async function rateScenario() {
 async function main() {
   const scenario = process.argv[2]
   const runners = {
-    environment: async () => ({}),
+    environment: async () => null,
     panel: panelScenario,
     multi: multiScenario,
     review: reviewScenario,
     'isolated-write': isolatedWriteScenario,
     rate: rateScenario,
   }
-  if (!(scenario in runners)) {
+  if (!Object.hasOwn(runners, scenario)) {
     throw new Error(`usage: node scripts/measure-access-baseline.mjs <${Object.keys(runners).join('|')}>`)
   }
   const repoPath = process.cwd()
-  const metadata = await environment()
+  const metadata = await collectEnvironment(repoPath)
   const result = await runners[scenario](repoPath)
-  process.stdout.write(`${JSON.stringify({ ...metadata, ...result }, null, 2)}\n`)
+  process.stdout.write(`${JSON.stringify(result === null ? metadata : { ...metadata, ...result }, null, 2)}\n`)
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {

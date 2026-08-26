@@ -1,19 +1,52 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "artifactType": "curated-summary",
   "issue": 133,
   "acceptedBaselineSha": "9f841f1bc93604e8d802e3776997016140840e47",
-  "measuredAt": "2026-08-26T13:54:29Z",
+  "curation": {
+    "status": "manually curated from the immutable raw JSON Lines artifact",
+    "rule": "This summary is navigation only. Counts, per-command timing, exits, dirty paths, and contamination must be verified against rawEvidence.path."
+  },
+  "rawEvidence": {
+    "path": "v0.2-access-baseline-evidence-raw.jsonl",
+    "format": "JSON Lines; one complete script stdout object per line; JSON whitespace compacted only",
+    "records": 6,
+    "measurementToolSha256": "736dbe4523aef093028d819cd6c6a2ddb3babb3c4545f37e45b00cf7535c42e3",
+    "recordOrder": [
+      "environment",
+      "panel",
+      "multi",
+      "review",
+      "isolated-write",
+      "rate"
+    ]
+  },
   "environment": {
-    "head": "9f841f1bc93604e8d802e3776997016140840e47",
-    "dirtyPaths": [],
-    "aheadBehindOriginMain": [0, 0],
+    "scenario": "environment",
+    "measuredAt": "2026-08-26T15:28:04.970Z",
+    "acceptedBaselineSha": "9f841f1bc93604e8d802e3776997016140840e47",
+    "head": "8c9d01a87df712843800e3f275674ba4b106b2a7",
+    "sourceMatchesBaseline": true,
+    "untrackedSourcePaths": [],
+    "dirtyPaths": [
+      "M docs/baselines/v0.2-access-baseline-evidence.json",
+      " M docs/baselines/v0.2-access-baseline.md",
+      " M scripts/measure-access-baseline.mjs",
+      " M tests/access-baseline-script.test.ts",
+      "?? docs/baselines/v0.2-access-baseline-evidence-raw.jsonl"
+    ],
     "platform": "Darwin 25.6.0 arm64",
-    "macOS": "26.6.2",
     "node": "v26.4.0",
-    "pnpm": "11.21.0",
     "git": "git version 2.50.1 (Apple Git-155)",
-    "gh": "gh version 2.72.0 (2025-04-30)",
-    "remote": "https://github.com/ai-daming/clickvibe.git"
+    "gh": {
+      "available": true,
+      "version": "gh version 2.72.0 (2025-04-30)",
+      "error": null
+    },
+    "measurementTool": {
+      "path": "scripts/measure-access-baseline.mjs",
+      "sha256": "736dbe4523aef093028d819cd6c6a2ddb3babb3c4545f37e45b00cf7535c42e3"
+    }
   },
   "reproduce": {
     "environment": "node scripts/measure-access-baseline.mjs environment",
@@ -22,92 +55,130 @@
     "reviewDense": "node scripts/measure-access-baseline.mjs review",
     "isolatedWrite": "node scripts/measure-access-baseline.mjs isolated-write",
     "rateLimit": "node scripts/measure-access-baseline.mjs rate",
-    "note": "Live reads vary. The script refuses comparison when src differs from the accepted baseline; docs, script and test dirt are reported but do not alter the measured runtime source."
+    "candidateComparison": "CLICKVIBE_ACCESS_BASELINE_SHA=<candidate-sha> node scripts/measure-access-baseline.mjs <scenario>",
+    "note": "Run from any repository subdirectory. The guard anchors at the repository root and rejects tracked or untracked src drift. Live results vary; preserve complete stdout."
   },
   "scenarios": [
     {
       "id": "panel-always-on",
-      "source": "live GitHub reads plus real local Git",
-      "workItems": 1,
-      "concurrency": 1,
-      "rounds": 4,
-      "pollIntervalMs": 5000,
-      "cacheState": "cold first round; hot thereafter within current resource TTL",
-      "samples": [
-        { "round": 1, "elapsedMs": 4164.86, "physicalSubprocesses": 14, "ok": true },
-        { "round": 2, "elapsedMs": 480.07, "physicalSubprocesses": 12, "ok": true },
-        { "round": 3, "elapsedMs": 482.28, "physicalSubprocesses": 12, "ok": true },
-        { "round": 4, "elapsedMs": 600.77, "physicalSubprocesses": 12, "ok": true }
+      "rawRecordLine": 2,
+      "scope": "enrichWorkflowStates only; excludes the /state handler ensureConfiguredRepoFresh fetch gate",
+      "parameters": {
+        "workItems": 1,
+        "concurrency": 1,
+        "roundCount": 4,
+        "pollIntervalMs": 5000,
+        "cacheState": "cold first round; hot later rounds inside current 30s resource TTL"
+      },
+      "rounds": [
+        {
+          "round": 1,
+          "elapsedMs": 6251.41,
+          "physicalSubprocesses": 16,
+          "ok": true
+        },
+        {
+          "round": 2,
+          "elapsedMs": 263.48,
+          "physicalSubprocesses": 13,
+          "ok": true
+        },
+        {
+          "round": 3,
+          "elapsedMs": 259.66,
+          "physicalSubprocesses": 13,
+          "ok": true
+        },
+        {
+          "round": 4,
+          "elapsedMs": 268.86,
+          "physicalSubprocesses": 13,
+          "ok": true
+        }
       ],
       "summary": {
         "logicalScenarioRequests": 4,
-        "physicalSubprocesses": 50,
-        "localGitSubprocesses": 48,
+        "physicalSubprocesses": 55,
+        "localGitSubprocesses": 52,
         "remoteGitSubprocesses": 0,
-        "githubRestSubprocesses": 2,
-        "upstreamRequests": 2,
+        "githubRestSubprocesses": 3,
+        "agentProcessSubprocesses": 0,
         "failures": 0,
-        "expectedProbeMisses": 8,
-        "p50Ms": 482.28,
-        "p95Ms": 4164.86
-      },
-      "coldCommands": [
-        "if git show-ref local branch; elif git show-ref origin branch; else exit 1; fi",
-        "git symbolic-ref --quiet --short refs/remotes/origin/HEAD",
-        "git rev-list --count origin/main..branch",
-        "gh api --include repos/.../pulls?state=all&head=...&per_page=1",
-        "gh api --include repos/.../issues/133",
-        "git rev-parse --short HEAD",
-        "git branch --show-current",
-        "git status --porcelain",
-        "git rev-parse --short main",
-        "git rev-list --left-right --count main...HEAD",
-        "git rev-parse --short origin/main",
-        "git rev-list --left-right --count origin/main...HEAD",
-        "git rev-parse --short origin/<workflow-branch>",
-        "git rev-parse --short MERGE_HEAD"
-      ],
-      "pollution": "The two non-zero rev-parse probes repeat every round and are expected misses, not successful observations."
+        "expectedProbeMisses": 4,
+        "upstreamRequests": 3,
+        "p50Ms": 263.48,
+        "p95Ms": 6251.41
+      }
     },
     {
       "id": "multi-work-item-refresh",
-      "source": "live GitHub reads plus real local Git",
-      "workItems": 5,
-      "issueNumbers": [133, 134, 135, 136, 137],
-      "concurrency": 5,
-      "rounds": 2,
-      "pollIntervalMs": 0,
-      "cacheState": "cold first round; immediate hot second round",
-      "samples": [
-        { "round": 1, "elapsedMs": 22561.74, "physicalSubprocesses": 65, "ok": true },
-        { "round": 2, "elapsedMs": 501.88, "physicalSubprocesses": 55, "ok": true }
+      "rawRecordLine": 3,
+      "parameters": {
+        "workItems": 5,
+        "concurrency": 5,
+        "roundCount": 2,
+        "pollIntervalMs": 0,
+        "cacheState": "cold first round; hot later rounds inside current 30s resource TTL"
+      },
+      "rounds": [
+        {
+          "round": 1,
+          "elapsedMs": 23073.81,
+          "physicalSubprocesses": 70,
+          "ok": true
+        },
+        {
+          "round": 2,
+          "elapsedMs": 1845.42,
+          "physicalSubprocesses": 61,
+          "ok": true
+        }
       ],
       "summary": {
         "logicalScenarioRequests": 2,
-        "physicalSubprocesses": 120,
-        "localGitSubprocesses": 110,
+        "physicalSubprocesses": 131,
+        "localGitSubprocesses": 120,
         "remoteGitSubprocesses": 0,
-        "githubRestSubprocesses": 10,
-        "upstreamRequests": 10,
-        "failures": 0,
-        "expectedProbeMisses": 30,
-        "p50Ms": 501.88,
-        "p95Ms": 22561.74
-      },
-      "githubSamplesMs": [1908.48, 1815.23, 2416.25, 3410.88, 1775.38, 1626.23, 1696.14, 1919.67, 2422.08, 3214.01]
+        "githubRestSubprocesses": 11,
+        "agentProcessSubprocesses": 0,
+        "failures": 1,
+        "expectedProbeMisses": 20,
+        "upstreamRequests": 11,
+        "p50Ms": 1845.42,
+        "p95Ms": 23073.81
+      }
     },
     {
       "id": "review-dense-preflight",
-      "source": "live GitHub reads plus three real concurrent git fetch operations",
-      "workItems": 3,
-      "issueNumbers": [122, 131, 135],
-      "concurrency": 3,
-      "rounds": 1,
-      "cacheState": "force refresh; repository aggregate may singleflight",
+      "rawRecordLine": 4,
+      "parameters": {
+        "workItems": 3,
+        "concurrency": 3,
+        "roundCount": 1,
+        "cacheState": "force refresh; repository aggregate may singleflight"
+      },
       "samples": [
-        { "issue": 122, "elapsedMs": 29224.45, "issueOk": true, "fetchOk": true, "headKnown": true },
-        { "issue": 131, "elapsedMs": 29222.51, "issueOk": true, "fetchOk": true, "headKnown": true },
-        { "issue": 135, "elapsedMs": 29221.8, "issueOk": true, "fetchOk": true, "headKnown": true }
+        {
+          "issue": 122,
+          "elapsedMs": 39382.12,
+          "issueOk": true,
+          "fetchOk": true,
+          "headKnown": true
+        },
+        {
+          "issue": 131,
+          "elapsedMs": 39380.93,
+          "issueOk": true,
+          "fetchOk": true,
+          "headKnown": true
+        },
+        {
+          "issue": 135,
+          "elapsedMs": 39380.44,
+          "issueOk": true,
+          "fetchOk": true,
+          "headKnown": true
+        }
       ],
       "summary": {
         "logicalPreflights": 3,
@@ -115,51 +186,173 @@
         "localGitSubprocesses": 3,
         "remoteGitSubprocesses": 3,
         "githubRestSubprocesses": 12,
-        "upstreamRequests": 15,
+        "agentProcessSubprocesses": 0,
         "failures": 0,
         "expectedProbeMisses": 0,
-        "p50Ms": 29222.51,
-        "p95Ms": 29224.45
-      },
-      "remoteGitSamplesMs": [2033.35, 2096.32, 3338.75],
-      "githubRestSamplesMs": [1703.34, 2388.3, 3263.29, 1688.47, 3688.45, 2046.62, 1841.84, 1883.91, 2178.51, 3293.74, 2661.9, 2572.04]
+        "upstreamRequests": 15,
+        "p50Ms": 39380.93,
+        "p95Ms": 39382.12
+      }
     },
     {
       "id": "isolated-key-write-readback",
-      "source": "temporary local worktree and bare remote",
-      "workItems": 1,
-      "concurrency": 1,
-      "rounds": 10,
-      "cacheState": "not applicable",
-      "samplesMs": [135.65, 84.97, 89.16, 88.38, 96.96, 89.58, 141.59, 86.02, 90.78, 85.71],
+      "rawRecordLine": 5,
+      "parameters": {
+        "workItems": 1,
+        "concurrency": 1,
+        "roundCount": 10,
+        "remote": "local bare temporary repository"
+      },
+      "samples": [
+        {
+          "round": 1,
+          "elapsedMs": 101.69,
+          "localShaMs": 14.77,
+          "pushMs": 61.33,
+          "readbackMs": 25.46,
+          "localSha": "a8582321e00e2ee1b1b22517115c9a56802093d1",
+          "remoteSha": "a8582321e00e2ee1b1b22517115c9a56802093d1",
+          "consistent": true
+        },
+        {
+          "round": 2,
+          "elapsedMs": 101.89,
+          "localShaMs": 15.37,
+          "pushMs": 62.12,
+          "readbackMs": 24.39,
+          "localSha": "28089bab011e7251f16bff52a6ec2e7604ee0fac",
+          "remoteSha": "28089bab011e7251f16bff52a6ec2e7604ee0fac",
+          "consistent": true
+        },
+        {
+          "round": 3,
+          "elapsedMs": 102.28,
+          "localShaMs": 14.07,
+          "pushMs": 63.27,
+          "readbackMs": 24.91,
+          "localSha": "832f39806321bfb4390ec65fe02632e62e483d19",
+          "remoteSha": "832f39806321bfb4390ec65fe02632e62e483d19",
+          "consistent": true
+        },
+        {
+          "round": 4,
+          "elapsedMs": 101.46,
+          "localShaMs": 14.56,
+          "pushMs": 62.79,
+          "readbackMs": 24.08,
+          "localSha": "899733d2e98ab6965fc9329bfd21f3af84a7db4f",
+          "remoteSha": "899733d2e98ab6965fc9329bfd21f3af84a7db4f",
+          "consistent": true
+        },
+        {
+          "round": 5,
+          "elapsedMs": 103.05,
+          "localShaMs": 14.33,
+          "pushMs": 63.29,
+          "readbackMs": 25.41,
+          "localSha": "38c6f4296f489e98f5cb3ac2733728b19d5550e8",
+          "remoteSha": "38c6f4296f489e98f5cb3ac2733728b19d5550e8",
+          "consistent": true
+        },
+        {
+          "round": 6,
+          "elapsedMs": 99.76,
+          "localShaMs": 13.49,
+          "pushMs": 61.77,
+          "readbackMs": 24.48,
+          "localSha": "be409246cc3c4b63a8851a5215871b2786c97ca0",
+          "remoteSha": "be409246cc3c4b63a8851a5215871b2786c97ca0",
+          "consistent": true
+        },
+        {
+          "round": 7,
+          "elapsedMs": 97.64,
+          "localShaMs": 14.63,
+          "pushMs": 59.54,
+          "readbackMs": 23.46,
+          "localSha": "e3e82d08bb1a5a3bc2aa6f155a4a8c28e3e88b88",
+          "remoteSha": "e3e82d08bb1a5a3bc2aa6f155a4a8c28e3e88b88",
+          "consistent": true
+        },
+        {
+          "round": 8,
+          "elapsedMs": 99.15,
+          "localShaMs": 14.51,
+          "pushMs": 59.79,
+          "readbackMs": 24.83,
+          "localSha": "3917454f92f3952166e68d50edf57be55a558fdc",
+          "remoteSha": "3917454f92f3952166e68d50edf57be55a558fdc",
+          "consistent": true
+        },
+        {
+          "round": 9,
+          "elapsedMs": 101.74,
+          "localShaMs": 14.19,
+          "pushMs": 63.29,
+          "readbackMs": 24.25,
+          "localSha": "8c02644e3eb80bc5d715b3ca182c6db6a02b0c20",
+          "remoteSha": "8c02644e3eb80bc5d715b3ca182c6db6a02b0c20",
+          "consistent": true
+        },
+        {
+          "round": 10,
+          "elapsedMs": 100.77,
+          "localShaMs": 15.47,
+          "pushMs": 60.93,
+          "readbackMs": 24.35,
+          "localSha": "72dd568c928a7742141328548b190a394927ac72",
+          "remoteSha": "72dd568c928a7742141328548b190a394927ac72",
+          "consistent": true
+        }
+      ],
       "summary": {
         "logicalWrites": 10,
-        "physicalSubprocesses": 20,
+        "physicalSubprocesses": 30,
+        "localGitSubprocesses": 10,
+        "remoteGitSubprocesses": 20,
         "remoteGitUpstreamRequests": 20,
         "writeReadbacks": 10,
         "consistentReadbacks": 10,
         "failures": 0,
-        "p50Ms": 89.16,
-        "p95Ms": 141.59
+        "p50Ms": 101.46,
+        "p95Ms": 103.05
       },
-      "githubWriteLatency": null,
-      "missingReason": "No dedicated GitHub test repository was in scope; production writes are prohibited. Unknown is not zero."
+      "githubWriteLatency": "unknown: no dedicated test repository; production writes prohibited"
     },
     {
       "id": "github-rest-rate-sample",
-      "source": "live GitHub core REST bucket",
-      "logicalRequests": 5,
-      "physicalSubprocesses": 5,
-      "upstreamRequests": 5,
-      "samplesMs": [2947.6, 2637.69, 2059.27, 2463.16, 2954.03],
-      "p50Ms": 2637.69,
-      "p95Ms": 2954.03,
+      "rawRecordLine": 6,
+      "parameters": {
+        "logicalRequests": 5,
+        "physicalSubprocesses": 5,
+        "upstreamRequests": 5
+      },
+      "samplesMs": [
+        2345.12,
+        1909.87,
+        4065.5,
+        2235.25,
+        1607.32
+      ],
+      "p50Ms": 2235.25,
+      "p95Ms": 4065.5,
       "rateLimit": {
-        "before": { "limit": 5000, "used": 0, "remaining": 5000, "reset": 1787756036 },
-        "after": { "limit": 5000, "used": 0, "remaining": 5000, "reset": 1787756051 },
+        "before": {
+          "limit": 5000,
+          "used": 0,
+          "remaining": 5000,
+          "reset": 1787761811
+        },
+        "after": {
+          "limit": 5000,
+          "used": 0,
+          "remaining": 5000,
+          "reset": 1787761825
+        },
         "observedUsedDelta": 0,
         "contaminated": true,
-        "interpretation": "The snapshot showed zero delta, but shared-credential traffic and endpoint accounting are not isolated; this cannot be interpreted as zero cost."
+        "reason": "same credential may have concurrent traffic; snapshots are not transactionally isolated",
+        "interpretation": "The reported zero delta is contaminated and cannot be interpreted as zero request cost."
       }
     }
   ],
@@ -167,13 +360,36 @@
     {
       "stage": "coding",
       "taskEvidence": "~/.clickvibe/state/ai-daming/clickvibe/issue-122/dev/2026-08-25T10-34-44-730Z--dev-1787654084730-lZXRHDcwdxGTX01X.jsonl",
-      "observed": ["git fetch", "git status", "git rev-parse", "git rev-list", "git branch", "git remote", "git for-each-ref", "git log", "git diff", "git push", "gh pr list/view", "gh issue comment", "gh api"],
+      "observed": [
+        "git fetch",
+        "git status",
+        "git rev-parse",
+        "git rev-list",
+        "git branch",
+        "git remote",
+        "git for-each-ref",
+        "git log",
+        "git diff",
+        "git push",
+        "gh pr list/view",
+        "gh issue comment",
+        "gh api"
+      ],
       "completeness": "representative observed sample only"
     },
     {
       "stage": "review",
       "taskEvidence": "~/.clickvibe/state/ai-daming/clickvibe/issue-122/review/2026-08-25T14-28-42-379Z--review-1787668122379-BBxcmQ6NHqEaDhX9.jsonl",
-      "observed": ["git fetch", "git log", "git diff", "git show", "git init/config/commit in temporary adversarial repositories", "gh api PR comments", "gh api PR reviews", "gh api check-runs"],
+      "observed": [
+        "git fetch",
+        "git log",
+        "git diff",
+        "git show",
+        "git init/config/commit in temporary adversarial repositories",
+        "gh api PR comments",
+        "gh api PR reviews",
+        "gh api check-runs"
+      ],
       "completeness": "representative observed sample only; nested shell commands are not guaranteed to be exhaustively parsed"
     }
   ]
