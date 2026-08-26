@@ -13,11 +13,12 @@ const DEFAULT_BASELINE_SHA = '9f841f1bc93604e8d802e3776997016140840e47'
 const REPO_KEY = 'ai-daming/clickvibe'
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000
 const TOOL_PATH = fileURLToPath(import.meta.url)
-
+const SHELL_PREFIX = String.raw`(?:^|[;&|]\s*|(?:if|then|elif|else|do|!)\s+)`
+const ENV_PREFIX = String.raw`(?:[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|\S*)\s+)*`
+const resultMetadata = ({ ms, exitCode, killed, signal, timedOut }) => ({ ms, exitCode, killed, signal, timedOut })
 function selectedBaselineSha() {
   return process.env.CLICKVIBE_ACCESS_BASELINE_SHA ?? DEFAULT_BASELINE_SHA
 }
-
 export function nearestRank(values, percentile) {
   if (values.length === 0) return null
   const sorted = [...values].sort((left, right) => left - right)
@@ -25,11 +26,12 @@ export function nearestRank(values, percentile) {
 }
 
 export function classifyCommand(command) {
-  if (/(?:^|[;&|]\s*|(?:if|then|elif)\s+)git\s+(?:fetch|push|ls-remote)\b/.test(command)) return 'remoteGit'
-  if (/(?:^|[;&|]\s*)(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*gh\s+(?:api|pr|issue)\b/.test(command)) {
+  const git = `${SHELL_PREFIX}${ENV_PREFIX}git(?:\\s+-C\\s+(?:'[^']*'|"[^"]*"|\\S+))?`
+  if (new RegExp(`${git}\\s+(?:fetch|push|ls-remote)\\b`).test(command)) return 'remoteGit'
+  if (new RegExp(`${SHELL_PREFIX}${ENV_PREFIX}gh\\s+(?:api|pr|issue)\\b`).test(command)) {
     return 'githubRest'
   }
-  if (/(?:^|[;&|]\s*|(?:if|then|elif)\s+)git\b/.test(command)) return 'localGit'
+  if (new RegExp(`${git}\\b`).test(command)) return 'localGit'
   if (/^(?:codex|claude)\b/.test(command)) return 'agentProcess'
   return 'other'
 }
@@ -61,6 +63,9 @@ async function runFile(file, args, options = {}) {
       stdout: error.stdout ?? '',
       stderr: error.stderr ?? String(error),
       exitCode: typeof error.code === 'number' ? error.code : 1,
+      killed: error.killed === true,
+      signal: error.signal ?? null,
+      timedOut: error.code === 'ETIMEDOUT' || (error.killed === true && error.signal === 'SIGTERM'),
       ms: Number((performance.now() - started).toFixed(2)),
     }
   }
@@ -80,12 +85,13 @@ export async function collectEnvironment(repoPath = process.cwd(), baselineSha =
       `accepted baseline ${baselineSha} is unavailable: ${baselineCheck.stderr.trim() || 'git cat-file failed'}`,
     )
   }
-  const [head, dirty, sourceDiff, untrackedSource, node, gitVersion, ghVersion, uname, toolContents] =
+  const [head, dirty, sourceDiff, untrackedSource, ignoredSource, node, gitVersion, ghVersion, uname, toolContents] =
     await Promise.all([
       git(['rev-parse', 'HEAD'], root),
       git(['status', '--porcelain=v1'], root),
       runFile('git', ['diff', '--quiet', baselineSha, '--', ':(top)src'], { cwd: root }),
       runFile('git', ['ls-files', '--others', '--exclude-standard', '--', ':(top)src'], { cwd: root }),
+      runFile('git', ['ls-files', '--others', '--ignored', '--exclude-standard', '--', ':(top)src'], { cwd: root }),
       Promise.resolve(process.version),
       git(['--version'], root),
       runFile('gh', ['--version']),
@@ -98,12 +104,16 @@ export async function collectEnvironment(repoPath = process.cwd(), baselineSha =
   if (untrackedSource.exitCode !== 0) {
     throw new Error(`cannot enumerate untracked src paths: ${untrackedSource.stderr.trim()}`)
   }
+  if (ignoredSource.exitCode !== 0)
+    throw new Error(`cannot enumerate ignored src paths: ${ignoredSource.stderr.trim()}`)
   const untrackedSourcePaths = untrackedSource.stdout.trim() === '' ? [] : untrackedSource.stdout.trim().split('\n')
+  const ignoredSourcePaths = ignoredSource.stdout.trim() === '' ? [] : ignoredSource.stdout.trim().split('\n')
   const trackedSourceDiffers = sourceDiff.exitCode === 1
-  if (trackedSourceDiffers || untrackedSourcePaths.length > 0) {
+  if (trackedSourceDiffers || untrackedSourcePaths.length > 0 || ignoredSourcePaths.length > 0) {
     const reasons = [
       ...(trackedSourceDiffers ? ['tracked source differs'] : []),
       ...(untrackedSourcePaths.length > 0 ? ['untracked source exists'] : []),
+      ...(ignoredSourcePaths.length > 0 ? ['ignored source exists'] : []),
     ]
     throw new Error(
       `src differs from accepted baseline ${baselineSha}: ${reasons.join('; ')}; refusing a mixed-source measurement`,
@@ -116,6 +126,7 @@ export async function collectEnvironment(repoPath = process.cwd(), baselineSha =
     head,
     sourceMatchesBaseline: true,
     untrackedSourcePaths,
+    ignoredSourcePaths,
     dirtyPaths: dirty === '' ? [] : dirty.split('\n'),
     platform: uname.stdout.trim(),
     node,
@@ -133,10 +144,11 @@ export async function collectEnvironment(repoPath = process.cwd(), baselineSha =
 }
 
 export function isExpectedProbeMiss(command) {
+  const branch = "(?:clickvibe-issue-\\d+|codex/issue-\\d+(?:-[^']+)?)"
   return (
-    /^if git show-ref .*refs\/heads\/clickvibe-issue-\d+.*refs\/remotes\/origin\/clickvibe-issue-\d+.*; else exit 1; fi$/.test(
+    new RegExp(`^if git show-ref .*refs/heads/${branch}.*refs/remotes/origin/${branch}.*; else exit 1; fi$`).test(
       command,
-    ) || /git rev-parse --short '(?:origin\/clickvibe-issue-\d+|MERGE_HEAD)'/.test(command)
+    ) || new RegExp(`git rev-parse --short '(?:origin/${branch}|MERGE_HEAD)'`).test(command)
   )
 }
 
@@ -160,8 +172,7 @@ function instrumentedContext(repoPath) {
             command: spec.command,
             timeoutMs,
             sandboxMode: spec.sandboxPolicy?.mode ?? null,
-            ms: result.ms,
-            exitCode: result.exitCode,
+            ...resultMetadata(result),
             ...(result.exitCode !== 0 && isExpectedProbeMiss(spec.command) ? { expectedProbeMiss: true } : {}),
           })
           return {
@@ -378,15 +389,15 @@ export async function isolatedWriteScenario() {
       remote: 'local bare temporary repository',
       workItems: 1,
       concurrency: 1,
-      roundCount: 10,
+      roundCount: samples.length,
       samples,
       summary: {
-        logicalWrites: 10,
-        physicalSubprocesses: 30,
-        localGitSubprocesses: 10,
-        remoteGitSubprocesses: 20,
-        remoteGitUpstreamRequests: 20,
-        writeReadbacks: 10,
+        logicalWrites: samples.length,
+        physicalSubprocesses: samples.length * 3,
+        localGitSubprocesses: samples.length,
+        remoteGitSubprocesses: samples.length * 2,
+        remoteGitUpstreamRequests: samples.length * 2,
+        writeReadbacks: samples.length,
         consistentReadbacks: samples.filter((item) => item.consistent).length,
         failures: samples.filter((item) => !item.consistent).length,
         p50Ms: nearestRank(
@@ -422,12 +433,21 @@ export function parseCoreRateLimit(result) {
   return { limit: core.limit, used: core.used, remaining: core.remaining, reset: core.reset }
 }
 
-async function rateScenario() {
-  const readRate = async () => parseCoreRateLimit(await runFile('gh', ['api', 'rate_limit']))
+export async function rateScenario(run = runFile) {
+  const commands = []
+  const runGh = async (args) => {
+    const result = await run('gh', args)
+    commands.push({
+      command: `gh ${args.join(' ')}`,
+      ...resultMetadata(result),
+    })
+    return result
+  }
+  const readRate = async () => parseCoreRateLimit(await runGh(['api', 'rate_limit']))
   const before = await readRate()
   const samples = []
   for (let index = 0; index < 5; index += 1) {
-    const result = await runFile('gh', ['api', `repos/${REPO_KEY}/issues/133`])
+    const result = await runGh(['api', `repos/${REPO_KEY}/issues/133`])
     if (result.exitCode !== 0) throw new Error(result.stderr)
     samples.push(result.ms)
   }
@@ -436,8 +456,10 @@ async function rateScenario() {
     scenario: 'github-rest-rate-sample',
     resourceBucket: 'core',
     logicalRequests: 5,
-    physicalSubprocesses: 5,
-    upstreamRequests: 5,
+    measurementRequests: 2,
+    physicalSubprocesses: commands.length,
+    upstreamRequests: commands.length,
+    commands,
     samplesMs: samples,
     p50Ms: nearestRank(samples, 0.5),
     p95Ms: nearestRank(samples, 0.95),
@@ -459,7 +481,7 @@ async function main() {
     multi: multiScenario,
     review: reviewScenario,
     'isolated-write': isolatedWriteScenario,
-    rate: rateScenario,
+    rate: () => rateScenario(),
   }
   if (!Object.hasOwn(runners, scenario)) {
     throw new Error(`usage: node scripts/measure-access-baseline.mjs <${Object.keys(runners).join('|')}>`)

@@ -12,11 +12,13 @@ import {
   isolatedWriteScenario,
   nearestRank,
   parseCoreRateLimit,
+  rateScenario,
   readbackMatches,
   summarizeCommands,
 } from '../scripts/measure-access-baseline.mjs'
 
 const scriptPath = join(process.cwd(), 'scripts', 'measure-access-baseline.mjs')
+const baselineDocPath = join(process.cwd(), 'docs', 'baselines', 'v0.2-access-baseline.md')
 
 function runGit(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim()
@@ -50,6 +52,9 @@ test('access baseline keeps local, remote, GitHub and agent process costs separa
   assert.equal(classifyCommand('gh api --include repos/o/r/issues/1'), 'githubRest')
   assert.equal(classifyCommand('cd /tmp && gh api repos/o/r/issues/1'), 'githubRest')
   assert.equal(classifyCommand('GH_PAGER= gh issue view 1'), 'githubRest')
+  assert.equal(classifyCommand('! git fetch origin'), 'remoteGit')
+  assert.equal(classifyCommand('else git -C /tmp push origin HEAD'), 'remoteGit')
+  assert.equal(classifyCommand("GIT_CONFIG='a b' git status"), 'localGit')
   assert.equal(classifyCommand('codex exec --json'), 'agentProcess')
   assert.equal(classifyCommand('printf done'), 'other')
 
@@ -80,6 +85,7 @@ test('access baseline separates absent-ref probes from operational failures', ()
     true,
   )
   assert.equal(isExpectedProbeMiss("git rev-parse --short 'origin/clickvibe-issue-134'"), true)
+  assert.equal(isExpectedProbeMiss("git rev-parse --short 'origin/codex/issue-133-access-baseline'"), true)
   assert.equal(isExpectedProbeMiss("git rev-parse --short 'MERGE_HEAD'"), true)
   assert.equal(isExpectedProbeMiss("git rev-parse --short 'origin/main'"), false)
   assert.equal(isExpectedProbeMiss('git status --porcelain'), false)
@@ -108,6 +114,24 @@ test('access baseline guard rejects untracked source even when HEAD equals the b
     await assert.rejects(
       collectEnvironment(fixture.root, fixture.baseline),
       /src differs from accepted baseline.*untracked source exists/,
+    )
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true })
+  }
+})
+
+test('access baseline guard also rejects ignored untracked source', async () => {
+  const fixture = await gitFixture(false)
+  try {
+    await writeFile(join(fixture.root, '.gitignore'), '*.gen.ts\n')
+    runGit(fixture.root, 'add', '.gitignore')
+    runGit(fixture.root, 'commit', '-m', 'ignore generated source')
+    const baseline = runGit(fixture.root, 'rev-parse', 'HEAD')
+    await mkdir(join(fixture.root, 'src'))
+    await writeFile(join(fixture.root, 'src', 'ignored.gen.ts'), 'export const ignored = true\n')
+    await assert.rejects(
+      collectEnvironment(fixture.root, baseline),
+      /src differs from accepted baseline.*ignored source exists/,
     )
   } finally {
     await rm(fixture.root, { recursive: true, force: true })
@@ -160,8 +184,38 @@ test('access baseline rate parsing preserves the original command failure and re
   )
 })
 
+test('access baseline rate scenario audits five workload reads plus two rate snapshots', async () => {
+  let rateSnapshot = 0
+  let issueRead = 0
+  const result = await rateScenario(async (_file, args) => {
+    if (args[1] === 'rate_limit') {
+      rateSnapshot += 1
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          resources: { core: { limit: 5000, used: 10 + rateSnapshot, remaining: 4990 - rateSnapshot, reset: 42 } },
+        }),
+        stderr: '',
+        ms: rateSnapshot,
+      }
+    }
+    issueRead += 1
+    return { exitCode: 0, stdout: '{}', stderr: '', ms: issueRead * 10 }
+  })
+  assert.equal(result.logicalRequests, 5)
+  assert.equal(result.measurementRequests, 2)
+  assert.equal(result.physicalSubprocesses, 7)
+  assert.equal(result.upstreamRequests, 7)
+  assert.equal(result.commands.length, 7)
+  assert.deepEqual(result.samplesMs, [10, 20, 30, 40, 50])
+})
+
 test('access baseline CLI rejects inherited object properties as scenario names', () => {
-  const result = spawnSync(process.execPath, [scriptPath, 'constructor'], { cwd: process.cwd(), encoding: 'utf8' })
+  const result = spawnSync(process.execPath, [scriptPath, 'constructor'], {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+    timeout: 5_000,
+  })
   assert.notEqual(result.status, 0)
   assert.match(result.stderr, /usage:/)
 })
@@ -177,7 +231,7 @@ test('committed access baseline evidence names its curation and retains every ra
     .map((line) => JSON.parse(line))
   assert.equal(records.length, 6)
   assert.deepEqual(
-    records.map((record) => record.scenario ?? 'environment'),
+    records.map((record) => record.scenario),
     [
       'environment',
       'panel-always-on',
@@ -191,6 +245,7 @@ test('committed access baseline evidence names its curation and retains every ra
     records.every((record) => record.measurementTool.sha256 === curated.rawEvidence.measurementToolSha256),
     true,
   )
+  assert.deepEqual(curated.environment, records[0])
   assert.equal(
     createHash('sha256')
       .update(await readFile(scriptPath))
@@ -198,9 +253,42 @@ test('committed access baseline evidence names its curation and retains every ra
     curated.rawEvidence.measurementToolSha256,
   )
   for (const record of records.filter((item) => Array.isArray(item.commands))) {
-    assert.equal(record.commands.length, record.summary.physicalSubprocesses)
+    assert.equal(record.commands.length, record.summary?.physicalSubprocesses ?? record.physicalSubprocesses)
   }
   for (const scenario of curated.scenarios.filter((item) => item.summary)) {
     assert.deepEqual(scenario.summary, records[scenario.rawRecordLine - 1].summary)
   }
+  const curatedRate = curated.scenarios.find((item) => item.id === 'github-rest-rate-sample')
+  const rawRate = records[curatedRate.rawRecordLine - 1]
+  assert.deepEqual(curatedRate.parameters, {
+    logicalRequests: rawRate.logicalRequests,
+    measurementRequests: rawRate.measurementRequests,
+    physicalSubprocesses: rawRate.physicalSubprocesses,
+    upstreamRequests: rawRate.upstreamRequests,
+  })
+  assert.deepEqual(curatedRate.samplesMs, rawRate.samplesMs)
+  assert.equal(curatedRate.p50Ms, rawRate.p50Ms)
+  assert.equal(curatedRate.p95Ms, rawRate.p95Ms)
+  const { interpretation: _interpretation, ...curatedRateLimit } = curatedRate.rateLimit
+  assert.deepEqual(curatedRateLimit, rawRate.rateLimit)
+})
+
+test('frozen conclusions and evidence links agree with the curated evidence', async () => {
+  const [document, curatedText] = await Promise.all([
+    readFile(baselineDocPath, 'utf8'),
+    readFile(join(process.cwd(), 'docs', 'baselines', 'v0.2-access-baseline-evidence.json'), 'utf8'),
+  ])
+  const curated = JSON.parse(curatedText)
+  const [panel, multi, review] = curated.scenarios
+  assert.match(document, /Raw evidence: \[v0\.2-access-baseline-evidence-raw\.jsonl\]/)
+  assert.match(document, /Curated summary: \[v0\.2-access-baseline-evidence\.json\]/)
+  assert.match(document, new RegExp(`hot.*${panel.rounds[1].physicalSubprocesses} local Git subprocesses`, 'i'))
+  assert.match(
+    document,
+    new RegExp(
+      `${multi.rounds[0].physicalSubprocesses} subprocesses cold and ${multi.rounds[1].physicalSubprocesses} hot`,
+    ),
+  )
+  assert.match(document, new RegExp(`${multi.summary.githubRestSubprocesses} GitHub`))
+  assert.match(document, new RegExp(`${(review.summary.p50Ms / 1000).toFixed(2)}s`))
 })

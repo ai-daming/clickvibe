@@ -11,7 +11,7 @@
     "path": "v0.2-access-baseline-evidence-raw.jsonl",
     "format": "JSON Lines; one complete script stdout object per line; JSON whitespace compacted only",
     "records": 6,
-    "measurementToolSha256": "736dbe4523aef093028d819cd6c6a2ddb3babb3c4545f37e45b00cf7535c42e3",
+    "measurementToolSha256": "5558b3d386a1b723d09c5d009832c706b269be61a32d86828685bb2ceaddc358",
     "recordOrder": [
       "environment",
       "panel",
@@ -23,17 +23,15 @@
   },
   "environment": {
     "scenario": "environment",
-    "measuredAt": "2026-08-26T15:28:04.970Z",
+    "measuredAt": "2026-08-26T17:09:14.053Z",
     "acceptedBaselineSha": "9f841f1bc93604e8d802e3776997016140840e47",
-    "head": "8c9d01a87df712843800e3f275674ba4b106b2a7",
+    "head": "130e8e2561f4afb6f094898163babc83bd2febfb",
     "sourceMatchesBaseline": true,
     "untrackedSourcePaths": [],
+    "ignoredSourcePaths": [],
     "dirtyPaths": [
-      "M docs/baselines/v0.2-access-baseline-evidence.json",
-      " M docs/baselines/v0.2-access-baseline.md",
-      " M scripts/measure-access-baseline.mjs",
-      " M tests/access-baseline-script.test.ts",
-      "?? docs/baselines/v0.2-access-baseline-evidence-raw.jsonl"
+      "M scripts/measure-access-baseline.mjs",
+      " M tests/access-baseline-script.test.ts"
     ],
     "platform": "Darwin 25.6.0 arm64",
     "node": "v26.4.0",
@@ -45,7 +43,7 @@
     },
     "measurementTool": {
       "path": "scripts/measure-access-baseline.mjs",
-      "sha256": "736dbe4523aef093028d819cd6c6a2ddb3babb3c4545f37e45b00cf7535c42e3"
+      "sha256": "5558b3d386a1b723d09c5d009832c706b269be61a32d86828685bb2ceaddc358"
     }
   },
   "reproduce": {
@@ -56,7 +54,7 @@
     "isolatedWrite": "node scripts/measure-access-baseline.mjs isolated-write",
     "rateLimit": "node scripts/measure-access-baseline.mjs rate",
     "candidateComparison": "CLICKVIBE_ACCESS_BASELINE_SHA=<candidate-sha> node scripts/measure-access-baseline.mjs <scenario>",
-    "note": "Run from any repository subdirectory. The guard anchors at the repository root and rejects tracked or untracked src drift. Live results vary; preserve complete stdout."
+    "note": "Run from any repository subdirectory. The guard anchors at the repository root and rejects tracked, untracked, or ignored src drift. Live results vary; preserve complete stdout."
   },
   "scenarios": [
     {
@@ -73,25 +71,25 @@
       "rounds": [
         {
           "round": 1,
-          "elapsedMs": 6251.41,
+          "elapsedMs": 5555.85,
           "physicalSubprocesses": 16,
           "ok": true
         },
         {
           "round": 2,
-          "elapsedMs": 263.48,
+          "elapsedMs": 207.09,
           "physicalSubprocesses": 13,
           "ok": true
         },
         {
           "round": 3,
-          "elapsedMs": 259.66,
+          "elapsedMs": 226.75,
           "physicalSubprocesses": 13,
           "ok": true
         },
         {
           "round": 4,
-          "elapsedMs": 268.86,
+          "elapsedMs": 237.36,
           "physicalSubprocesses": 13,
           "ok": true
         }
@@ -106,8 +104,8 @@
         "failures": 0,
         "expectedProbeMisses": 4,
         "upstreamRequests": 3,
-        "p50Ms": 263.48,
-        "p95Ms": 6251.41
+        "p50Ms": 226.75,
+        "p95Ms": 5555.85
       }
     },
     {
@@ -123,29 +121,29 @@
       "rounds": [
         {
           "round": 1,
-          "elapsedMs": 23073.81,
+          "elapsedMs": 16357.54,
           "physicalSubprocesses": 70,
           "ok": true
         },
         {
           "round": 2,
-          "elapsedMs": 1845.42,
-          "physicalSubprocesses": 61,
+          "elapsedMs": 251.31,
+          "physicalSubprocesses": 60,
           "ok": true
         }
       ],
       "summary": {
         "logicalScenarioRequests": 2,
-        "physicalSubprocesses": 131,
+        "physicalSubprocesses": 130,
         "localGitSubprocesses": 120,
         "remoteGitSubprocesses": 0,
-        "githubRestSubprocesses": 11,
+        "githubRestSubprocesses": 10,
         "agentProcessSubprocesses": 0,
-        "failures": 1,
+        "failures": 0,
         "expectedProbeMisses": 20,
-        "upstreamRequests": 11,
-        "p50Ms": 1845.42,
-        "p95Ms": 23073.81
+        "upstreamRequests": 10,
+        "p50Ms": 251.31,
+        "p95Ms": 16357.54
       }
     },
     {
@@ -160,21 +158,21 @@
       "samples": [
         {
           "issue": 122,
-          "elapsedMs": 39382.12,
+          "elapsedMs": 21813.42,
           "issueOk": true,
           "fetchOk": true,
           "headKnown": true
         },
         {
           "issue": 131,
-          "elapsedMs": 39380.93,
+          "elapsedMs": 21812.4,
           "issueOk": true,
           "fetchOk": true,
           "headKnown": true
         },
         {
           "issue": 135,
-          "elapsedMs": 39380.44,
+          "elapsedMs": 21811.92,
           "issueOk": true,
           "fetchOk": true,
           "headKnown": true
@@ -190,8 +188,8 @@
         "failures": 0,
         "expectedProbeMisses": 0,
         "upstreamRequests": 15,
-        "p50Ms": 39380.93,
-        "p95Ms": 39382.12
+        "p50Ms": 21812.4,
+        "p95Ms": 21813.42
       }
     },
     {
@@ -206,102 +204,102 @@
       "samples": [
         {
           "round": 1,
-          "elapsedMs": 101.69,
-          "localShaMs": 14.77,
-          "pushMs": 61.33,
-          "readbackMs": 25.46,
-          "localSha": "a8582321e00e2ee1b1b22517115c9a56802093d1",
-          "remoteSha": "a8582321e00e2ee1b1b22517115c9a56802093d1",
+          "elapsedMs": 75.49,
+          "localShaMs": 10.9,
+          "pushMs": 43.78,
+          "readbackMs": 20.71,
+          "localSha": "12c312c281ebd22d499bdc1b8e53af04199aba9d",
+          "remoteSha": "12c312c281ebd22d499bdc1b8e53af04199aba9d",
           "consistent": true
         },
         {
           "round": 2,
-          "elapsedMs": 101.89,
-          "localShaMs": 15.37,
-          "pushMs": 62.12,
-          "readbackMs": 24.39,
-          "localSha": "28089bab011e7251f16bff52a6ec2e7604ee0fac",
-          "remoteSha": "28089bab011e7251f16bff52a6ec2e7604ee0fac",
+          "elapsedMs": 73.95,
+          "localShaMs": 11.34,
+          "pushMs": 44.4,
+          "readbackMs": 18.19,
+          "localSha": "733bd4693b7e5846acb30e2234b4696a051167ed",
+          "remoteSha": "733bd4693b7e5846acb30e2234b4696a051167ed",
           "consistent": true
         },
         {
           "round": 3,
-          "elapsedMs": 102.28,
-          "localShaMs": 14.07,
-          "pushMs": 63.27,
-          "readbackMs": 24.91,
-          "localSha": "832f39806321bfb4390ec65fe02632e62e483d19",
-          "remoteSha": "832f39806321bfb4390ec65fe02632e62e483d19",
+          "elapsedMs": 73.63,
+          "localShaMs": 11.28,
+          "pushMs": 44.35,
+          "readbackMs": 17.98,
+          "localSha": "6e1248fd0c7bc54b9e1a9bbc278c7a921f9bc1ce",
+          "remoteSha": "6e1248fd0c7bc54b9e1a9bbc278c7a921f9bc1ce",
           "consistent": true
         },
         {
           "round": 4,
-          "elapsedMs": 101.46,
-          "localShaMs": 14.56,
-          "pushMs": 62.79,
-          "readbackMs": 24.08,
-          "localSha": "899733d2e98ab6965fc9329bfd21f3af84a7db4f",
-          "remoteSha": "899733d2e98ab6965fc9329bfd21f3af84a7db4f",
+          "elapsedMs": 73.77,
+          "localShaMs": 11.41,
+          "pushMs": 44.58,
+          "readbackMs": 17.77,
+          "localSha": "81bd21e1fdf8f2ef7064620e9640210d9a2b5182",
+          "remoteSha": "81bd21e1fdf8f2ef7064620e9640210d9a2b5182",
           "consistent": true
         },
         {
           "round": 5,
-          "elapsedMs": 103.05,
-          "localShaMs": 14.33,
-          "pushMs": 63.29,
-          "readbackMs": 25.41,
-          "localSha": "38c6f4296f489e98f5cb3ac2733728b19d5550e8",
-          "remoteSha": "38c6f4296f489e98f5cb3ac2733728b19d5550e8",
+          "elapsedMs": 74.23,
+          "localShaMs": 10.84,
+          "pushMs": 44.52,
+          "readbackMs": 18.86,
+          "localSha": "8ba1a67d8680ec56fe22b347737da6ac30bc4b01",
+          "remoteSha": "8ba1a67d8680ec56fe22b347737da6ac30bc4b01",
           "consistent": true
         },
         {
           "round": 6,
-          "elapsedMs": 99.76,
-          "localShaMs": 13.49,
-          "pushMs": 61.77,
-          "readbackMs": 24.48,
-          "localSha": "be409246cc3c4b63a8851a5215871b2786c97ca0",
-          "remoteSha": "be409246cc3c4b63a8851a5215871b2786c97ca0",
+          "elapsedMs": 75.35,
+          "localShaMs": 10.95,
+          "pushMs": 46.07,
+          "readbackMs": 18.33,
+          "localSha": "04b55dcc842f9d667fcc5f91c63b706ae8d62fc8",
+          "remoteSha": "04b55dcc842f9d667fcc5f91c63b706ae8d62fc8",
           "consistent": true
         },
         {
           "round": 7,
-          "elapsedMs": 97.64,
-          "localShaMs": 14.63,
-          "pushMs": 59.54,
-          "readbackMs": 23.46,
-          "localSha": "e3e82d08bb1a5a3bc2aa6f155a4a8c28e3e88b88",
-          "remoteSha": "e3e82d08bb1a5a3bc2aa6f155a4a8c28e3e88b88",
+          "elapsedMs": 73.6,
+          "localShaMs": 10.77,
+          "pushMs": 44.88,
+          "readbackMs": 17.94,
+          "localSha": "8786d299fa29e9204131b848f203ff6efde67ab2",
+          "remoteSha": "8786d299fa29e9204131b848f203ff6efde67ab2",
           "consistent": true
         },
         {
           "round": 8,
-          "elapsedMs": 99.15,
-          "localShaMs": 14.51,
-          "pushMs": 59.79,
-          "readbackMs": 24.83,
-          "localSha": "3917454f92f3952166e68d50edf57be55a558fdc",
-          "remoteSha": "3917454f92f3952166e68d50edf57be55a558fdc",
+          "elapsedMs": 73.74,
+          "localShaMs": 10.95,
+          "pushMs": 44.9,
+          "readbackMs": 17.88,
+          "localSha": "61a273211993a0bcd405877b9f1d3e6309a8e8ba",
+          "remoteSha": "61a273211993a0bcd405877b9f1d3e6309a8e8ba",
           "consistent": true
         },
         {
           "round": 9,
-          "elapsedMs": 101.74,
-          "localShaMs": 14.19,
-          "pushMs": 63.29,
-          "readbackMs": 24.25,
-          "localSha": "8c02644e3eb80bc5d715b3ca182c6db6a02b0c20",
-          "remoteSha": "8c02644e3eb80bc5d715b3ca182c6db6a02b0c20",
+          "elapsedMs": 77.18,
+          "localShaMs": 11.94,
+          "pushMs": 44.72,
+          "readbackMs": 20.5,
+          "localSha": "fdd4c7f86c36d096f11db70c3acbd3806eed2e41",
+          "remoteSha": "fdd4c7f86c36d096f11db70c3acbd3806eed2e41",
           "consistent": true
         },
         {
           "round": 10,
-          "elapsedMs": 100.77,
-          "localShaMs": 15.47,
-          "pushMs": 60.93,
-          "readbackMs": 24.35,
-          "localSha": "72dd568c928a7742141328548b190a394927ac72",
-          "remoteSha": "72dd568c928a7742141328548b190a394927ac72",
+          "elapsedMs": 74.92,
+          "localShaMs": 11.24,
+          "pushMs": 45.29,
+          "readbackMs": 18.38,
+          "localSha": "d7878cf1494fe1128c9b239d2e4cca0651b7c31a",
+          "remoteSha": "d7878cf1494fe1128c9b239d2e4cca0651b7c31a",
           "consistent": true
         }
       ],
@@ -314,8 +312,8 @@
         "writeReadbacks": 10,
         "consistentReadbacks": 10,
         "failures": 0,
-        "p50Ms": 101.46,
-        "p95Ms": 103.05
+        "p50Ms": 73.95,
+        "p95Ms": 77.18
       },
       "githubWriteLatency": "unknown: no dedicated test repository; production writes prohibited"
     },
@@ -324,30 +322,31 @@
       "rawRecordLine": 6,
       "parameters": {
         "logicalRequests": 5,
-        "physicalSubprocesses": 5,
-        "upstreamRequests": 5
+        "measurementRequests": 2,
+        "physicalSubprocesses": 7,
+        "upstreamRequests": 7
       },
       "samplesMs": [
-        2345.12,
-        1909.87,
-        4065.5,
-        2235.25,
-        1607.32
+        1311.87,
+        1360.2,
+        1354.76,
+        1366.54,
+        1309.57
       ],
-      "p50Ms": 2235.25,
-      "p95Ms": 4065.5,
+      "p50Ms": 1354.76,
+      "p95Ms": 1366.54,
       "rateLimit": {
         "before": {
           "limit": 5000,
           "used": 0,
           "remaining": 5000,
-          "reset": 1787761811
+          "reset": 1787767837
         },
         "after": {
           "limit": 5000,
           "used": 0,
           "remaining": 5000,
-          "reset": 1787761825
+          "reset": 1787767845
         },
         "observedUsedDelta": 0,
         "contaminated": true,
