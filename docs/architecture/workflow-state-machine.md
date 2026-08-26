@@ -43,7 +43,8 @@ baseline 推进造成的合并冲突属于可恢复工程工作。ClickVibe 保�
 ```mermaid
 stateDiagram-v2
   [*] --> Normal
-  Normal --> Observing: Loop Guard 触发
+  Normal --> HumanRequired: Loop Guard 触发且未启用 Observer
+  Normal --> Observing: Loop Guard 触发且策略启用 Observer
   Observing --> Redirected: continue-rework / redirect
   Observing --> Redesign: stop-and-redesign
   Observing --> HumanRequired: 证据不足、越权或 Observer 失败
@@ -53,4 +54,4 @@ stateDiagram-v2
   HumanRequired --> Normal: 人改变合同、策略或授权
 ```
 
-进入 `Observing` 后，当前 workflow 的普通 Coding/Review 推进必须冻结，但其他 Issue 可继续并行。Observer 结束后只能通过同一串行 workflow 命令域提交判决并恢复；迟到的 Observer 结果必须携带 generation/evidenceHash，在临界区内被拒绝，不能覆盖后继轮次。
+Loop Guard 在 v0.3 即可直接进入带最低完整证据的 `HumanRequired`。v0.6 数据证明有效且策略启用 Runtime Observer 时才进入 `Observing`；此后当前 workflow 的普通 Coding/Review 推进必须冻结，但其他 Issue 可继续并行。Observer 结束后只能通过同一串行 workflow 命令域提交判决并恢复；迟到的 Observer 结果必须携带 generation/evidenceHash，在临界区内被拒绝，不能覆盖后继轮次。

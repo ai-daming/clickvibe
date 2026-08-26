@@ -1,12 +1,12 @@
 # ClickVibe 当前有效架构
 
-> Status: Accepted | Owner: ClickVibe maintainers | Last updated: 2026-08-26 | Scope: v0.2 architecture baseline; v0.1 differences are called out explicitly
+> Status: Accepted | Owner: ClickVibe maintainers | Last updated: 2026-08-26 | Scope: target architecture; implementation order is governed by [roadmap](roadmap.md)
 
 本文是 ClickVibe 架构的唯一入口。它回答“当前系统由什么组成、事实由谁拥有、变化如何进入系统”。详细设计放在 `docs/architecture/`，重要取舍放在 `docs/architecture/decisions/`；带日期的 `docs/plans/` 只记录一次实施过程，不自动成为当前架构。
 
 ## 产品边界
 
-ClickVibe 是一个 **local-first、GitHub-native、BYO-agent 的 Issue-to-Merge 交付控制面**。它不替代 Coding Agent，也不判断业务需求是否正确；它把已定义的 GitHub Issue 交付契约变成可隔离、可恢复、可审查、可自动推进的工程闭环。v0.2 仍以 GitHub 为首个完整适配器，但核心 Work Item 身份采用 provider/instance/container/id 四元组，避免把 GitHub 数字 Issue 编号固化为永久领域模型。
+ClickVibe 是一个 **local-first、GitHub-native、BYO-agent 的 Issue-to-Merge 交付控制面**。它不替代 Coding Agent，也不判断业务需求是否正确；它把已定义的 GitHub Issue 交付契约变成可隔离、可恢复、可审查、可自动推进的工程闭环。GitHub 是首个完整适配器，但核心 Work Item 身份采用 provider/instance/container/id 四元组，避免把 GitHub 数字 Issue 编号固化为永久领域模型。
 
 ```mermaid
 flowchart LR
@@ -19,8 +19,10 @@ flowchart LR
   agent --> git[本地 Git / Worktree]
   delivery --> github[GitHub Issue / PR / Review]
   delivery --> guard{Loop Guard}
-  guard -->|停滞 / 发散| observer[DSH Runtime Observer]
-  observer -->|唯一介入指令| delivery
+  guard -->|停滞 / 发散| pause[冻结证据 / human-required]
+  pause -. v0.6 数据与策略允许 .-> observer[DSH Runtime Observer]
+  observer -->|只读诊断 / 唯一介入指令| delivery
+  pause -->|人工修订 / 恢复| delivery
   git --> observe[重新观察权威事实]
   github --> observe
   observe --> delivery
@@ -29,9 +31,9 @@ flowchart LR
 
 业务 Issue 负责描述变化；架构负责约束变化怎样进入系统；PR 负责证明变化既满足验收标准，也没有破坏系统契约。
 
-## 当前 v0.1 与 v0.2 目标
+## 当前 v0.1 与目标架构
 
-| 维度 | v0.1 现状 | v0.2 架构基线 |
+| 维度 | v0.1 现状 | 目标架构（按 roadmap 分阶段实现） |
 |---|---|---|
 | 产品闭环 | 基本可工作的实验性单 Issue 流水线 | 可恢复、证据驱动的 Issue-to-Merge 控制面 |
 | 设计入口 | 产品、状态、计划文档分散 | 本文为唯一入口，ADR 记录决策替代关系 |
@@ -39,8 +41,8 @@ flowchart LR
 | Issue 到 coding | 目标/验收/依赖可直接进入开发 | 先做架构影响分级；L2/L3 先设计后开发 |
 | 自动化 | 可自动开发/review/返工；merge 可配置 | 策略允许时自动推进与合并；异常和高风险才升级给人 |
 | Agent 权限 | 能调用 git/gh，但边界主要靠提示词和流程 | Agent 拥有完成工作所需工具；控制器、门禁和 GitHub 规则决定结果是否生效 |
-| 循环收敛 | 协议 Observer 仅有 Skill；运行时主要依赖总轮次上限 | 纯规则 Loop Guard 识别停滞/发散，DSH Runtime Observer 在人工介入前给出一次受约束的修法重定向 |
-| 可观测性 | 日志、事件、diagnostics 已有但入口分散 | 统一事件信封、因果链、原始错误和可复盘快照 |
+| 循环收敛 | 协议 Observer 仅有 Skill；运行时主要依赖总轮次上限 | v0.3 由纯规则 Loop Guard 安全停机；v0.6 完成人工介入产品化，并按数据决定是否启用只读 Runtime Observer |
+| 可观测性 | 日志、事件、diagnostics 已有但入口分散 | v0.2 落最小诊断与迁移证据；v0.3 落自主决策事件链；v0.4 完整恢复与复盘 |
 
 ### v0.1 已实现的数据流
 
@@ -59,13 +61,13 @@ flowchart LR
   derive --> ui
 ```
 
-v0.1 已验证部分事实推导、Agent 流程和持久化能力，但它没有保留特权。v0.2 以目标不变量为准，逐项决定复用、重构、迁移、归档或废弃；妨碍单一事实源和长期边界的实现可以直接替换，重写本身也不能免除测试、证据、数据处置和回滚责任。并行流水线首先受 GitHub/gh 与本地 Git 请求争用约束，因此请求枚举、统一入口、缓存/去重、写后失效和关键门禁刷新是 v0.2 的 P0。
+v0.1 已验证部分事实推导、Agent 流程和持久化能力，但它没有保留特权。后续版本以目标不变量为准，逐项决定复用、重构、迁移、归档或废弃；妨碍单一事实源和长期边界的实现可以直接替换，重写本身也不能免除测试、证据、数据处置和回滚责任。并行流水线首先受 GitHub/gh 与本地 Git 请求争用约束，因此 v0.2 先落最小身份、ProjectBinding、WorkItemContract 与 Local Git Snapshot、Remote Git Coordinator、GitHub REST Gateway 三个访问平面；后续控制、事件和并行能力按 roadmap 随真实消费者落地。
 
 ## 系统视图
 
 - [产品演进路线](roadmap.md)：v0.2.0 至 v0.10.0 的主矛盾、顺序与退出标准。
 - [系统上下文](architecture/system-context.md)：DSH、ClickVibe、Agent、Git 与 GitHub 的责任边界。
-- [Canonical Domain Model](architecture/canonical-domain-model.md)：v0.2 全部 Domain、关系、生命周期、事实所有者与稳定等级。
+- [Canonical Domain Model](architecture/canonical-domain-model.md)：目标 Domain、关系、生命周期、事实所有者与稳定等级；实现顺序见 roadmap。
 - [核心数据契约](architecture/core-contracts.md)：跨平台身份、DeliveryBasis、Run、Review、Decision、Event 和 v0.1 迁移语义。
 - [核心数据流](architecture/core-data-flow.md)：从 Issue 到合并/暂停的数据流，以及读缓存和写后回读。
 - [事实源与状态权威](architecture/authority-model.md)：哪些事实可以决定动作，哪些只是缓存或证据增强。
@@ -74,6 +76,7 @@ v0.1 已验证部分事实推导、Agent 流程和持久化能力，但它没有
 - [循环监督与 Observer](architecture/observer-intervention.md)：Loop Guard、DSH Runtime Observer、协议演化和人工升级边界。
 - [可观测性与复盘](architecture/observability.md)：日志、事件、错误、证据与架构版本绑定。
 - [架构决策记录](architecture/decisions/README.md)：Accepted、Superseded 和 Draft 决策。
+- [三访问平面决策](architecture/decisions/0007-three-git-github-access-planes.md)：Local Git、Remote Git、GitHub REST 与 Agent 直接调用的治理边界。
 
 ## 代码结构
 

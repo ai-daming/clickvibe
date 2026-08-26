@@ -1,6 +1,8 @@
 # ADR-0005：确定性 Loop Guard 驱动独立 Runtime Observer
 
-> Status: Accepted | Date: 2026-08-26
+> Status: Superseded | Date: 2026-08-26 | Superseded by: [ADR-0008](0008-deterministic-loop-guard-and-optional-runtime-observer.md)
+
+本文保留最初的“Loop Guard 触发后默认启动 Runtime Observer”决策背景。当前决策已改为 Loop Guard 能独立安全停机，Runtime Observer 只有在数据与策略允许时才作为可选诊断路径。
 
 ## Context
 

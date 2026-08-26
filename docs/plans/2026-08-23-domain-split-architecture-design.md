@@ -1,6 +1,8 @@
 # ClickVibe 领域拆分架构设计(issue #61)
 
-> 2026-08-23 设计沉淀。目标读者:issue #61 的执行 agent 与后续维护者。
+> Status: Historical | Current rules: [AGENTS.md](../../AGENTS.md) / [当前有效架构](../architecture.md)
+>
+> 2026-08-23 设计沉淀。目标读者:issue #61 的执行 agent 与后续维护者。本文解释当时的拆分施工，不是今天新增功能或架构决策的生效入口。
 > 本文回答三个问题:**把什么搬到哪、凭什么搬对、怎么证明搬对了**。
 
 ## 0. 一页总结

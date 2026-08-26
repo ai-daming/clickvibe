@@ -1,5 +1,9 @@
 # Issue #49：合并门禁「人工放行」兜底设计
 
+> Status: Historical | Superseded policy: [ADR-0004](../architecture/decisions/0004-policy-controlled-autonomous-delivery.md)
+>
+> 本文记录 issue #49 当时的实现设计。其中“合并必须人点”不再是当前产品原则；当前规则是由项目/任务策略与全部事实门禁共同决定是否自动合并。人工 override 仍是独立、高风险且必须审计的例外能力。
+
 ## 目标与边界
 
 ClickVibe 自身合并门禁(PR HEAD 与 review 结论哈希一致、验收契约快照存在/可读/未变更)拒绝合并时,面板在拒绝原因旁提供「仍要合并(人工放行)」兜底入口。人工放行只跳过 ClickVibe 自身门禁,不绕过 GitHub 侧保护(protected branch / required reviews 等);`gh pr merge` 失败时错误原样透传。未人工放行的拒绝行为与报错文案保持不变,「合并必须人点」的规则不变——放行本身就是一次人工点击加二次确认。

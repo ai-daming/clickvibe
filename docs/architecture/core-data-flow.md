@@ -51,12 +51,14 @@ sequenceDiagram
   alt 正在收敛
     G-->>C: continue-rework
   else 停滞或发散
-    G-->>C: observe(trigger, evidenceHash)
-    C->>E: observer.triggered；冻结普通 Coding/Review 推进
-    C->>O: 专属只读会话 + 完整跨轮证据
-    O-->>C: structured ObserverResult
-    C->>E: observer.completed + sessionId + evidenceHash
-    C->>C: 纯策略选择 redirect / redesign / human-required
+    G-->>C: stop(trigger, evidenceHash)
+    C->>E: 冻结推进；记录最小 human-required 证据
+    opt v0.6 数据证明有效且策略启用 Observer
+      C->>O: 专属只读会话 + 完整跨轮证据
+      O-->>C: structured ObserverResult
+      C->>E: observer.completed + sessionId + evidenceHash
+      C->>C: 纯策略选择 redirect / redesign / human-required
+    end
   end
 ```
 
@@ -66,9 +68,19 @@ Loop Guard 只消费已经持久化的结构化事实；模型不决定自己何
 
 Observer 只允许按完整 `evidenceHash` 幂等复用。该哈希至少覆盖 Work Item 契约指纹、架构 baseline、各轮 exact HEAD、结构化 Review 结论和 Observer 策略版本。任一输入变化都必须重新运行；旧结果仍保留为历史证据，但不得决定当前动作。
 
+## 三个访问平面
+
+| 平面 | 身份与作用域 | 负责 | 不负责 |
+|---|---|---|---|
+| Local Git Snapshot | worktree/repository + refresh generation | 本地 HEAD、diff、worktree、冲突和提交关系的一致快照 | 网络请求、远端 refs、GitHub API |
+| Remote Git Coordinator | repositoryId + remote | `fetch`、`push`、`ls-remote` 的共享队列、singleflight/串行化、失效和写后重读 | Issue/PR/Review REST；替 Agent 解释冲突 |
+| GitHub REST Gateway | account/provider instance + repository/resource/operation | REST 优先级、请求合并、TTL/ETag、rate-limit 和写后失效 | 本地 Git；任意 Agent 子进程的透明代理 |
+
+Controller-owned 调用必须经过对应平面。Agent-owned 直接 `git`/`gh` 调用保留真实工具权限，ClickVibe 通过 ObservationBundle 减少重复探测并在关键动作后重新观察；不能因为 Controller 已收口就声称“全部调用”已经统一缓存。
+
 ## GitHub 读取与缓存
 
-GitHub 请求统一经过 `src/github` 适配层。缓存只减少请求，不产生新的事实源：
+Controller-owned 的 GitHub 请求统一经过 `src/github` 中的 GitHub REST Gateway。Agent 会话内的直接调用按前述边界治理，不冒充 Gateway 流量。缓存只减少请求，不产生新的事实源：
 
 | 数据 | 缓存策略 | 绕过/失效条件 |
 |---|---|---|
@@ -89,7 +101,7 @@ GitHub 请求统一经过 `src/github` 适配层。缓存只减少请求，不�
 
 ## 本地 Git 数据流
 
-本地 Git 查询不进入 GitHub REST 缓存。一个刷新周期内可以生成不可变 `LocalGitSnapshot` 供多个纯函数消费，但下一次用户动作、任务完成、fetch/sync/merge 后必须重新采样。冲突现场是正式状态，不能通过 stash、reset 或删除 worktree 抹掉。
+本地 Git 查询不进入 GitHub REST 缓存。一个刷新周期内生成不可变 `LocalGitSnapshot` 供多个纯函数消费，但下一次用户动作、任务完成或 Remote Git Coordinator 完成 fetch/push 后必须重新采样。冲突现场是正式状态，不能通过 stash、reset 或删除 worktree 抹掉。
 
 ## 架构数据流
 

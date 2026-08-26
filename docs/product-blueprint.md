@@ -1,6 +1,6 @@
 # ClickVibe 产品蓝图
 
-> 2026-08-21 讨论沉淀，2026-08-26 按 v0.2 架构基线更新。产品方向以本文为准，系统边界与生效规则以 [当前有效架构](architecture.md) 为准。
+> 2026-08-21 讨论沉淀，2026-08-26 按目标架构与分阶段 roadmap 更新。产品方向以本文为准，系统边界与生效规则以 [当前有效架构](architecture.md) 为准，实现顺序以[产品演进路线](roadmap.md)为准。
 
 ## 一、定位
 
@@ -45,7 +45,7 @@ Milestone(交付批次:如"一期自动入群承接系统")
 │  └─ ClickVibe 面板:                          │
 │       [项目选择] → [issue 列表按依赖] → [下单] │
 │       → 并行 worktree → review → Loop Guard   │
-│       → Runtime Observer(按需) → PR / merge    │
+│       → 暂停 / 人工介入 / Observer(按需) → merge │
 └────────────────────────────────────────────┘
          │                        │
    本机(mac)                ubuntu 服务器
@@ -85,7 +85,7 @@ Milestone(交付批次:如"一期自动入群承接系统")
 ## 六、自动化边界(信任设计)
 
 - **自动化**:开发、review、rework、worktree 调度、baseline 同步、可恢复冲突、PR 协作，以及显式策略允许且门禁全部通过的 merge。
-- **循环监督**:每轮 Review 后由确定性 Loop Guard 判断是否收敛；停滞或发散时先启动任务专属 Runtime Observer，介入后同母题仍复发才交给人。
+- **循环监督**:每轮 Review 后由确定性 Loop Guard 判断是否收敛；停滞或发散时先冻结证据并安全暂停。v0.6 数据证明有效且策略启用时，才在人工处理前运行一次任务专属、只读 Runtime Observer；否则直接进入人工介入。
 - **人工介入**:架构/业务合同改变、unknown ownership、override、反复无进展、证据无法验证、release/deploy 等超出单 Issue 交付策略的动作。
 - **关键区分**:Agent 可以拥有完成工作所需的 git/gh 工具，但 Agent 声明不是事实；ClickVibe 必须重新读取 exact HEAD、契约、Review、CI 和 GitHub 结果。
 - v0.1 的部分路径仍会停在人工合并；这是实现现状，不再是长期产品原则。正式决策见 [ADR-0004](architecture/decisions/0004-policy-controlled-autonomous-delivery.md)。
@@ -106,7 +106,7 @@ Milestone(交付批次:如"一期自动入群承接系统")
 4. **跨 agent 会话不混**:codex/claude 各自 session id,UI 只显示锁定 agent
 5. **评论形成 PR 内流水**(#4):开发完成 / review 结论都发 PR,可追溯
 6. **业务 Issue 不直接编译成代码**:进入 coding 前完成架构影响分级；L2/L3 先形成 Accepted 设计或 ADR
-7. **循环不能靠 Agent 自觉停机**:Loop Guard 持有确定性触发规则；Runtime Observer 修正当前任务，Protocol Observer 才能提出全局协议变更
+7. **循环不能靠 Agent 自觉停机**:Loop Guard 持有确定性触发规则并能独立安全停机；Runtime Observer 只提供当前任务的可选诊断，Protocol Observer 才能提出全局协议变更
 
 ## 九、Issue 契约
 

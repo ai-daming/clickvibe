@@ -1,8 +1,8 @@
-# ClickVibe v0.2 核心数据契约
+# ClickVibe 核心数据契约
 
 > Status: Accepted | Parent: [Canonical Domain Model](canonical-domain-model.md) | Decision: [ADR-0006](decisions/0006-canonical-domain-model-and-contracts.md)
 
-本文中的 TypeScript 是持久化/wire 语义草图，不承诺物理文件位置，也不等于立即修改公开 API。每个字段必须先有唯一语义，再进入实现。
+本文中的 TypeScript 是持久化/wire 语义草图，不承诺物理文件位置，也不等于全部契约在 v0.2 一次实现或立即修改公开 API。每个字段必须先有唯一语义，再按[产品演进路线](../roadmap.md)随真实消费者进入实现。
 
 ## 通用规则
 
@@ -13,6 +13,14 @@
 5. `unknown` 是明确状态；缺字段不能自动等价为 false、成功、终止或空集合。
 6. 大型 prompt、日志、diff 和原始响应保存为 ArtifactRef，不复制进每个状态对象。
 7. 所有哈希使用明确的 canonical serialization 与算法版本；字段顺序、空值和换行规范必须固定。
+
+### 实现版本边界
+
+- **v0.2**：WorkItemIdentity、ProjectBinding、WorkItemContractSnapshot、Observation/Cache、ArtifactRef、DiagnosticRecord 与三个访问平面需要的作用域；保留并迁移 legacy WorkflowEvent 的有效语义。
+- **v0.3**：DeliveryBasis、AutomationPolicySnapshot、WorkflowControlState、CapabilityLease、Run、ReviewConclusion、Decision/ActionResult、完整判别式 EventEnvelope 和 Loop Guard。
+- **v0.4+**：在上述契约上补齐完整恢复/复盘、并行协调、介入产品化和后续 Provider 验证，不另造同义身份、SHA、generation 或 evidence。
+
+WorkItemContract 与 EventEnvelope 的排期差异来自真实消费者，不来自“迁移目标天然算消费者”：现有 `issueSnapshot` 已在读取、授权、Coding 和 Review 路径生效；完整因果 EventEnvelope 的首个生产者是 v0.3 自主决策链。legacy WorkflowEvent 仍被部分现行控制逻辑读取，v0.2 必须保留和映射其有效语义，不能静默删除。
 
 ## 1. 平台与 Work Item 身份
 
@@ -81,7 +89,7 @@ interface WorkflowIdentity {
 }
 ```
 
-v0.2 以 Work Item 为交付单元，一个 Work Item 对应一个 Workflow。重复开发、Review、重开、恢复和 Observer 介入由 Run、round 与 generation 表达。
+目标架构以 Work Item 为交付单元，一个 Work Item 对应一个 Workflow。重复开发、Review、重开、恢复和 Observer 介入由 Run、round 与 generation 表达。
 
 如果未来同一 Work Item 需要同时驱动多个独立交付，必须新增 Delivery Slice；不能在 `WorkflowIdentity` 上偷偷拼 branch 或 run id。
 
@@ -324,7 +332,7 @@ interface ReviewConclusion {
 }
 ```
 
-`passed + issues[]` 不足以驱动 0.2。Finding 必须有稳定 id、severity、theme 和证据，才能被 Rework、Loop Guard、Observer、merge gate 和复盘共同消费。
+`passed + issues[]` 不足以驱动目标自主闭环。Finding 必须有稳定 id、severity、theme 和证据，才能被 Rework、Loop Guard、Observer、merge gate 和复盘共同消费。
 
 ReviewConclusion 只对自己的 DeliveryBasis 有效；当前 contract、architecture、baseline 或 head 变化后，它仍是历史证据，但不再授权 merge。
 
@@ -424,6 +432,20 @@ type WorkflowEvent =
   | EventEnvelope<'delivery.merged', DeliveryRecord>
 ```
 
+### `basis` 非空规则
+
+| Event type | `basis` | 原因 |
+|---|---|---|
+| `workflow.observed` | 可为空 | 前置观察可能发生在 contract、baseline 或 head 尚不完整时；缺失必须显式表示 unknown，不能进入动作授权 |
+| `decision.made` | 必须非空 | 决策必须说明针对哪版需求、架构、baseline 和 head |
+| `run.started` | 必须非空 | 没有冻结 basis 不得签发 Run 或写权限 |
+| `run.settled` | 必须非空 | 结果必须与启动它的 exact basis 关联 |
+| `review.completed` | 必须非空 | Review 只对 exact contract/baseline/head 有效 |
+| `observer.completed` | 必须非空 | 诊断只能作用于触发它的 generation 与 evidence |
+| `delivery.merged` | 必须非空 | 交付记录必须证明合并的是通过门禁的 exact head |
+
+DiagnosticRecord 不使用 EventEnvelope 的 `basis` 表达前置基础设施错误；它通过可空 workflow、operation、原始错误和 ArtifactRef 保存证据。迁移后的 legacy event 若无法恢复完整 basis，必须标记 legacy/unknown，只能展示和复盘，不能授权当前动作。
+
 事件用于审计与投影，不意味着所有当前状态都必须从零重放。WorkflowControlState 仍由串行命令域原子持久化，事件追加失败必须作为明确错误处理，不能静默丢失因果链。
 
 ## 13. Schema 演化规则
@@ -435,11 +457,11 @@ type WorkflowEvent =
 5. 未知 event type 原样保留并跳过 Projection，不能删除或解释成成功。
 6. Hash 输入包含 schema/canonicalization 版本，算法变化不会冒充相同 fingerprint。
 
-## 14. v0.1 → v0.2 迁移映射
+## 14. v0.1 → Canonical Contract 迁移映射
 
 下表是“决定保留该资产时如何迁移”的映射，不是对全部 v0.1 内部结构的兼容承诺。实施前先把每类代码和持久数据标记为保留、重构、迁移、归档或废弃；废弃项必须说明理由、影响范围和备份位置。
 
-| v0.1 字段/结构 | v0.2 目标 | 迁移规则 |
+| v0.1 字段/结构 | 目标契约 | 迁移规则 |
 |---|---|---|
 | `repoKey: owner/repo` | WorkItem `provider/instance/container` | 当前映射为 `github/github.com/repoKey` |
 | Issue URL 中的 number | `WorkItemIdentity.id` | 转为十进制字符串；URL 保留为 locator |

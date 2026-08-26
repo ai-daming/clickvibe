@@ -1,10 +1,10 @@
-# ClickVibe v0.2 Canonical Domain Model
+# ClickVibe Canonical Domain Model
 
-> Status: Accepted | Parent: [当前有效架构](../architecture.md) | Decision: [ADR-0006](decisions/0006-canonical-domain-model-and-contracts.md) | Detailed schemas: [核心数据契约](core-contracts.md)
+> Status: Accepted | Parent: [当前有效架构](../architecture.md) | Decisions: [ADR-0006](decisions/0006-canonical-domain-model-and-contracts.md), [ADR-0007](decisions/0007-three-git-github-access-planes.md) | Detailed schemas: [核心数据契约](core-contracts.md)
 
 ## 目的
 
-本文定义 ClickVibe v0.2 的共同领域语言：系统有哪些 Domain、各自拥有什么数据、彼此通过什么契约连接，以及哪些概念应长期稳定。它不规定数据库、文件布局或 TypeScript 文件位置，也不预设 v0.1 必须复用或必须重写；选择标准是目标不变量、现有证据和切换成本。
+本文定义 ClickVibe 的目标共同领域语言：系统有哪些 Domain、各自拥有什么数据、彼此通过什么契约连接，以及哪些概念应长期稳定。它不规定数据库、文件布局或 TypeScript 文件位置，也不表示所有类型必须在 v0.2 一次实现；实际顺序由[产品演进路线](../roadmap.md)按真实消费者决定。
 
 统一领域模型不等于建立一个全局超级对象。每个 Domain 拥有自己的数据；其他 Domain 只持有 identity、ref、冻结快照或明确 command/result。
 
@@ -15,6 +15,8 @@
 | A：长期稳定 | Identity、DeliveryBasis、Authority、generation/revision/sequence 语义、Decision→Action→Re-observe 因果链 | 变更必须新增或 Supersede ADR，并提供迁移 |
 | B：版本化慢变 | Contract、Observation、Policy、Run、Review、ObserverResult、DeliveryRecord、Event payload | 持久化边界带 schemaVersion；默认做显式迁移 |
 | C：可替换 | UI DTO、状态文案、缓存 TTL、prompt、provider/model、阈值、内部类和文件组织 | 可独立迭代，不得反向成为事实源 |
+
+Provider 中立性在第二个真实 Adapter 完成前仍是设计假设。每个版本都要审计核心契约是否泄漏 GitHub 专属类型，但不得提前建设没有第二个消费者的 Adapter SPI 或插件框架。
 
 ## Domain 关系图
 
@@ -150,7 +152,7 @@ Agent、缓存、Observer 和 UI 都不能绕过这条链直接宣布完成。
 |---|---|---|---|
 | 平台接入 | Provider、External Container、WorkItem | 把 GitHub/GitLab/Jira 等外部表示映射为标准身份和资源 | 推导交付下一动作 |
 | 需求与架构契约 | WorkItemContractSnapshot、ArchitectureBaseline、DependencyGraph | 冻结“做什么、按什么规则做” | 判断代码是否实现正确 |
-| 代码与协作事实 | LocalGitSnapshot、RemoteGitObservation、ProviderResourceSnapshot | 读取/写回 Git、远端 Git 和平台事实 | 把缓存命中当 current |
+| 代码与协作事实 | LocalGitSnapshot、RemoteGitCoordinator、ProviderResourceSnapshot | 读取/写回 Git、远端 Git 和平台事实；按各自作用域协调缓存与写入 | 把缓存命中当 current；建立万能中央队列 |
 | 观察与证据 | Observation、EvidenceRef、ArtifactRef | 冻结一次读取和原始证据引用 | 决定是否 merge |
 | 交付控制 | Workflow、DeliveryBasis、PolicySnapshot、DecisionRecord | 串行化状态变更并决定下一动作 | 执行模型推理或 shell |
 | 执行 | Run、CapabilityLease、AgentSessionRef | 启动、监督和收敛一次开发/review/同步/Observer 动作 | 把 Agent 声明当系统事实 |
@@ -160,7 +162,7 @@ Agent、缓存、Observer 和 UI 都不能绕过这条链直接宣布完成。
 
 ## 核心关系与基数
 
-| 关系 | v0.2 约束 |
+| 关系 | 目标约束 |
 |---|---|
 | Provider Instance → Project Binding | 一个实例可绑定多个外部容器/本地仓库 |
 | Project Binding → Work Item | 一个项目包含多个 Work Item |
@@ -169,8 +171,8 @@ Agent、缓存、Observer 和 UI 都不能绕过这条链直接宣布完成。
 | Workflow → Run | 一对多；同一 workflow 任何时刻最多一个会改变共享状态的 active claim |
 | Workflow → ReviewConclusion | 一对多；只有 exact basis current 的最新结论可进入 merge gate |
 | Workflow → DecisionRecord/Event | 一对多、追加式、按 sequence 排序 |
-| Workflow → DeliveryRecord | v0.2 最多一个当前交付结果；清理失败是该结果的后续状态，不回退 merge 事实 |
-| Review history → Runtime Observer | Loop Guard 触发时冻结一次跨轮证据；Observer 不常驻 |
+| Workflow → DeliveryRecord | 最多一个当前交付结果；清理失败是该结果的后续状态，不回退 merge 事实 |
+| Review history → Runtime Observer | Loop Guard 已停止且数据/策略允许时冻结一次跨轮证据；Observer 不常驻 |
 | Runtime Observer → Protocol Observer | 只传 protocolCandidate；不得直接修改全局协议 |
 
 如果未来需要一个 Work Item 同时驱动多个相互独立的交付，应新增显式 Delivery Slice 概念和 ADR；不能偷偷把 Run 当成第二个 Workflow。
@@ -226,12 +228,12 @@ stateDiagram-v2
 5. 原始证据保留 ArtifactRef，结构化摘要和分类标签不能覆盖原文。
 6. 凭据值不进入任何核心契约；只保存 credential ref、provider/model 标识和脱敏后的诊断。
 
-## v0.2 实施顺序
+## 分阶段实施
 
-1. 固定核心契约和 canonical hash/version 规则。
-2. 盘点 v0.1 资产并逐项决定保留、重构、迁移、归档或废弃；任何数据处置先有备份和回滚边界。
-3. 按资产决策切换新的 Review/Event 写入；需要保留的旧记录显式迁移或兼容读取，无价值记录在留证后废弃。
-4. 让 Git/GitHub Gateway、Loop Guard、Observer 和可观测性共同消费相同 Basis/Evidence。
-5. 最后收缩 `IssueWorkflow`，删除已无消费者的 legacy 字段和整对象写能力。
+1. **v0.2 可信访问与身份地基**：实现 WorkItemIdentity、ProjectBinding、WorkItemContractSnapshot、Local Git Snapshot、Remote Git Coordinator、GitHub REST Gateway、最小 DiagnosticRecord/ArtifactRef 和逐类迁移。WorkItemContract 在本版本落地，因为现有 `issueSnapshot` 已参与读取与授权，缓存 freshness 和旧授权失效直接消费它。
+2. **v0.3 自主交付安全边界**：实现 DeliveryBasis、WorkflowControlState、generation、CapabilityLease、最小 Policy、判别式 EventEnvelope 因果链和纯规则 Loop Guard。v0.2 只保留并映射 legacy WorkflowEvent 的有效语义，不建立无消费者的完整自主事件总包。
+3. **v0.4–v0.5 可恢复再并行**：先完成全因果链恢复与复盘，再扩大到同仓库多 Work Item 的 baseline、冲突和合并顺序协调。
+4. **v0.6 介入产品化**：面板提供证据查看、指令修改和受控恢复；模型型 Runtime Observer 仅在数据证明能降低人工时间时启用。
+5. 每一步都按资产决定保留、重构、迁移、归档或废弃；任何数据处置先有备份和回滚边界，已切换状态不得形成长期双写。
 
 任何一步都不允许“为了迁移方便”恢复公开的无条件整对象写入口。

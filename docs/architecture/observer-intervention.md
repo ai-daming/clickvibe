@@ -1,10 +1,10 @@
 # 循环监督与 Observer
 
-> Status: Accepted | Parent: [当前有效架构](../architecture.md) | Decision: [ADR-0005](decisions/0005-deterministic-loop-guard-and-runtime-observer.md) | Scope: v0.2 target; v0.1 仅有协议 Skill，尚未接线运行时 Observer
+> Status: Accepted | Parent: [当前有效架构](../architecture.md) | Decision: [ADR-0008](decisions/0008-deterministic-loop-guard-and-optional-runtime-observer.md) | Schedule: pure Loop Guard in v0.3; intervention UX and optional Runtime Observer in v0.6
 
 ## 目的与非目标
 
-运行时 Observer 用于在 Coding → Review → Rework 循环停滞或发散时，在人工介入前独立诊断循环、验证关键 finding，并把下一轮收敛为一个明确方向。它不是第三个代码 reviewer，不直接修代码，也不替代确定性门禁。
+Loop Guard 用于在 Coding → Review → Rework 循环停滞或发散时确定性停机。模型型 Runtime Observer 是 v0.6 的可选诊断增强：只有数据证明它能降低人工处理时间时，才在人工介入前独立验证关键 finding 并给出一个明确方向。它不是第三个代码 reviewer，不直接修代码，也不替代确定性门禁。
 
 本设计不建设通用“AI 判断平台”，只定义 Observer 这一条真实纵向用例。第二个独立用例出现后，才从实际调用中提取通用 DSH Judgment Gateway。
 
@@ -12,7 +12,7 @@
 
 | 角色 | 观察范围 | 产出 | 是否进入单 Issue 循环 |
 |---|---|---|---|
-| Runtime Observer | 一个 workflow 的多轮 Coding/Review 证据 | `continue-rework`、`redirect`、`stop-and-redesign` 或 `human-required`，以及唯一指令 | 仅在 Loop Guard 触发时介入一次 |
+| Runtime Observer | 一个 workflow 的多轮 Coding/Review 证据 | `continue-rework`、`redirect`、`stop-and-redesign` 或 `human-required`，以及唯一指令 | 仅在 Loop Guard 已停止且数据/策略允许时介入一次 |
 | Protocol Observer | 多个任务重复出现的系统性工作方法缺陷 | ADR、prompt/Skill/门禁候选和验证计划 | 否；作为独立架构变更执行 |
 
 Runtime Observer 可以提出 `protocolCandidate`，但不得直接应用。只有跨任务证据足够时，Protocol Observer 才创建独立设计与实现工作。
@@ -35,8 +35,8 @@ flowchart TD
   persist --> snapshot[冻结 LoopEvidenceSnapshot]
   snapshot --> guard{LoopHealthEvaluator}
   guard -->|continue| rework[正常 Rework]
-  guard -->|observe| freeze[冻结同一 workflow 推进]
-  guard -->|hard failure| human[human-required]
+  guard -->|stop; observer enabled| freeze[冻结同一 workflow 推进]
+  guard -->|stop; no observer / hard failure| human[human-required + evidence]
   freeze --> runner[DSH ObserverRunner]
   runner --> result[ObserverResult + 原始会话证据]
   result --> policy{InterventionPolicy}
@@ -50,17 +50,17 @@ flowchart TD
 
 ## 触发策略
 
-Loop Guard 在每次 Review 事件持久化后执行。v0.2 的默认策略为：
+Loop Guard 在每次 Review 事件持久化后执行。v0.3 的最小策略为：
 
-1. Review 明确给出 `stop-and-redesign`：立即观察。
-2. 同一 CRITICAL `theme` 连续两轮出现：立即观察。
-3. 本次 auto-run 连续三轮 Review 未通过：进入下一轮前观察。
-4. 修复 diff 连续两轮净增长，且高优 finding 集合没有缩小：观察。
-5. 人显式触发：观察。
+1. Review 明确给出 `stop-and-redesign`：立即停止自动返工。
+2. 同一 CRITICAL `theme` 连续两轮出现：立即停止自动返工。
+3. 本次 auto-run 连续三轮 Review 未通过：进入下一轮前停止。
+4. 修复 diff 连续两轮净增长，且高优 finding 集合没有缩小：停止。
+5. 人显式要求暂停或观察：永远允许，不需要满足量化阈值。
 
 第 2～4 条需要结构化证据；若旧 Review 只有自由文本而无法可靠分类，结果为 `unknown`，不能假装没有复发。阈值可由版本化项目策略调整，但不能由 Observer 会话自行改变。
 
-一次 Observer 介入只允许一个带指令的验证轮。验证轮仍出现相同母题，或 Observer 不能验证关键 finding、输出无法解析、请求超时、需要扩大权限/修改业务合同，立即进入 `human-required`。
+没有启用 Runtime Observer 时，上述停止直接进入 v0.3 最小 `human-required`，保存触发规则、最低完整证据和明确下一步。启用 Runtime Observer 时，停止可以进入一次只读观察；一次介入只允许一个带指令的验证轮。验证轮仍出现相同母题，或 Observer 不能验证关键 finding、输出无法解析、请求超时、需要扩大权限/修改业务合同，立即进入 `human-required`。
 
 ## 输入契约
 
@@ -151,10 +151,11 @@ interface LoopControlState {
 | Observer 建议越过权限或 merge 门禁 | `InterventionPolicy` 拒绝并记录 authority violation |
 | Runtime Observer 反复提出同一 protocolCandidate | 不自修改；跨任务聚合后创建 Protocol Observer 工作 |
 
-## 分阶段实施
+## v0.3 与 v0.6 的边界
 
-1. **证据与停机**：扩展 Review 事件，落 `theme/verdict/finding identity/diff`；实现纯 Loop Guard 和可见的 `observer-required` 暂停。
-2. **DSH Runtime Observer**：接入宿主任务专属会话、结构化输出、generation fencing、日志和一次验证轮。
-3. **协议演化**：跨任务聚合 protocolCandidate，启动独立 Protocol Observer；全局协议变更仍走设计、Review 和 merge。
+1. **v0.3 最小证据与停机**：扩展 Review 事件，落 `theme/verdict/finding identity/diff`；实现纯 Loop Guard；暂停时持久化原因、最低完整证据和明确下一步。v0.3 不建设证据浏览、指令编辑和恢复交互。
+2. **v0.6 介入产品化**：面板展示冻结证据与失败母题，允许人在受控边界内修改指令、选择恢复点，并在恢复前重新观察权威事实。
+3. **v0.6 可选 Runtime Observer**：只有 v0.3–v0.5 的 Loop Guard 触发率、人工介入时间、诊断命中率、误导率、成本和延迟证明有效时，才接入宿主专属会话、结构化输出、generation fencing 和一次验证轮。
+4. **v0.8 协议演化**：跨任务聚合 protocolCandidate，启动独立 Protocol Observer；全局协议变更仍走设计、Review 和 merge。
 
-阶段 1 即使没有模型也能阻止循环失控；阶段 2 恢复无人值守收敛能力；阶段 3 可以延后，不阻塞 0.2 的基本闭环。
+模型数据不达标不影响 v0.6 介入产品化发布，也不阻塞 v0.7。任何阶段都不得让 Observer 获得修改代码、解除冻结、授权写入或决定合并的权限。
