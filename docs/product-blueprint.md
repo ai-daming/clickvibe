@@ -1,13 +1,12 @@
 # ClickVibe 产品蓝图
 
-> 2026-08-21 讨论沉淀。目标读者:ClickVibe 后续开发(含自举开发)的参考。
+> 2026-08-21 讨论沉淀，2026-08-26 按 v0.2 架构基线更新。产品方向以本文为准，系统边界与生效规则以 [当前有效架构](architecture.md) 为准。
 
 ## 一、定位
 
-**ClickVibe = 里程碑驱动的异步开发执行器。**
+**ClickVibe = local-first、GitHub-native、BYO-agent 的 Issue-to-Merge 交付控制面。**
 
-不是又一个 agent 编排器,不是 IDE。它把"人不在电脑前的时间"变成"有效开发时间":
-人用碎片时间做**架构设计 + 落单 + 验收决策**,中间(开发 → review → rework → PR)由 ClickVibe 按依赖图自动施工、跨机器并行执行,全程无人值守。
+不是又一个 agent 编排器,不是 IDE。它把"人不在电脑前的时间"变成"有效开发时间":人定义业务合同、架构慢变量和自动化策略；ClickVibe 按依赖图驱动开发、review、rework、冲突解决、PR 与策略允许的合并。证据不足、超出策略或无法安全收敛时才交还人处理。
 
 ## 二、为什么自研(相对 orca)
 
@@ -30,10 +29,11 @@ Milestone(交付批次:如"一期自动入群承接系统")
 ```
 
 - **blockedBy + worktree = 并行开发的手段**:依赖图中无依赖的 issue 是天然并行集,各占一个 worktree 同时开发。
-- **人的职责只有两端**:
-  1. 架构设计:拆 issue、定依赖、排并行 → 产出"施工图"
-  2. 验收决策:看结果、点合并、拍板发版 → 消费"施工成果"
-- 中间(ClickVibe + agent)按施工图自动施工,无需人。
+- **人的职责在慢变量和例外**:
+  1. 定义业务目标、验收、Non-Goals 与 L2/L3 架构设计；
+  2. 配置项目级自动化/合并策略；
+  3. 处理证据不足、权限不明、反复无进展和 release/deploy 等高风险动作。
+- 常规开发、review、返工、baseline 同步、可恢复冲突与满足门禁后的合并由 ClickVibe + agent 按策略推进，不要求逐项点击。
 
 ## 四、架构
 
@@ -44,15 +44,16 @@ Milestone(交付批次:如"一期自动入群承接系统")
 │  ├─ 落单:gh 提 milestone / issue / 依赖(人在) │
 │  └─ ClickVibe 面板:                          │
 │       [项目选择] → [issue 列表按依赖] → [下单] │
-│       → 并行 worktree → 跨机器 → review → PR  │
+│       → 并行 worktree → review → Loop Guard   │
+│       → Runtime Observer(按需) → PR / merge    │
 └────────────────────────────────────────────┘
          │                        │
    本机(mac)                ubuntu 服务器
    执行 agent               执行 agent
 ```
 
-- **控制面(dsh + ClickVibe 面板)**:手机必须可达(人在碎片时间访问),宜跑在 7x24 在线的 ubuntu,或经 Tailscale/局域网。
-- **执行面(施工)**:先单机,后多机(repo → 机器映射)。
+- **控制面(dsh + ClickVibe 面板)**:v0.2 仍限定本机回环、同源和专用请求头，不直接暴露到局域网/公网。手机访问是后续独立的认证中继设计，不能靠开放当前 Agent 启动接口实现。
+- **执行面(施工)**:v0.2 先单宿主；后续多机需要独立的身份、租约、任务所有权和日志汇聚设计(repo → machine 映射)，不能把本地进程假装成分布式控制面。
 - **手机端 = 对话优先**:手机上"要讨论"是刚需,ClickVibe 操作应是**对话可触发的动作**(在对话里说"把 #8 下单开发"),UI 只是入口之一。核心设计约束:**动作命令化,可被对话触发**。
 
 ## 五、UI 演进
@@ -83,9 +84,11 @@ Milestone(交付批次:如"一期自动入群承接系统")
 
 ## 六、自动化边界(信任设计)
 
-- **自动化**:开发、review、rework、worktree 调度、跨机器派发 —— 全自动
-- **人决策**:merge、发版(milestone 拍板)、卡住时的介入 —— 必须人点
-- 原因:从 afu 工作流看,用户极在意"版本能不能发"这类判断,这是核心决策权,不可让渡。
+- **自动化**:开发、review、rework、worktree 调度、baseline 同步、可恢复冲突、PR 协作，以及显式策略允许且门禁全部通过的 merge。
+- **循环监督**:每轮 Review 后由确定性 Loop Guard 判断是否收敛；停滞或发散时先启动任务专属 Runtime Observer，介入后同母题仍复发才交给人。
+- **人工介入**:架构/业务合同改变、unknown ownership、override、反复无进展、证据无法验证、release/deploy 等超出单 Issue 交付策略的动作。
+- **关键区分**:Agent 可以拥有完成工作所需的 git/gh 工具，但 Agent 声明不是事实；ClickVibe 必须重新读取 exact HEAD、契约、Review、CI 和 GitHub 结果。
+- v0.1 的部分路径仍会停在人工合并；这是实现现状，不再是长期产品原则。正式决策见 [ADR-0004](architecture/decisions/0004-policy-controlled-autonomous-delivery.md)。
 
 ## 七、Issue 队列(待开发)
 | # | 内容 | 状态 |
@@ -102,6 +105,8 @@ Milestone(交付批次:如"一期自动入群承接系统")
 3. **历史以磁盘为准,SSE 只做增量**(#3 原则)
 4. **跨 agent 会话不混**:codex/claude 各自 session id,UI 只显示锁定 agent
 5. **评论形成 PR 内流水**(#4):开发完成 / review 结论都发 PR,可追溯
+6. **业务 Issue 不直接编译成代码**:进入 coding 前完成架构影响分级；L2/L3 先形成 Accepted 设计或 ADR
+7. **循环不能靠 Agent 自觉停机**:Loop Guard 持有确定性触发规则；Runtime Observer 修正当前任务，Protocol Observer 才能提出全局协议变更
 
 ## 九、Issue 契约
 

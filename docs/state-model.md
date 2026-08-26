@@ -98,7 +98,7 @@ workflow 每次提交都携带持久化 revision;所有普通写要求 expected 
 | 4 | 有提交,无 PR | 「创建 PR」(开发完成,推送建 PR 后 Review) |
 | 5 | PR open,无 review 结论 | 「Review」 |
 | 6 | review 未通过 | 「按意见返工」 |
-| 7 | review 通过 + HEAD == 结论哈希 + 验收契约 current | 「合并 PR」 |
+| 7 | review 通过 + HEAD == 结论哈希 + 验收契约 current | auto-merge 策略开启则执行同一合并门禁；否则显示「合并 PR」 |
 | 8 | review 通过 + HEAD ≠ 结论哈希 | 「重新 Review」(结论过期) |
 | 9 | review 通过 + 验收契约 changed | 「重新 Review」(验收已变更) |
 | 10 | review 通过 + 当前验收契约读取失败(unknown) | 无合并动作,显示「刷新验收状态」 |

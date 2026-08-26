@@ -1,10 +1,10 @@
 # AGENTS.md — ClickVibe 代码治理(改动代码的 Agent 必读)
 
-> 本文件定义任何 agent / 维护者在 ClickVibe 仓库改代码时必须遵守的结构规则、契约红线与开发方法论。完整设计出处:`docs/plans/2026-08-23-domain-split-architecture-design.md`(issue #61 技术架构逻辑)。
+> 本文件定义任何 agent / 维护者在 ClickVibe 仓库改代码时必须遵守的施工规则。当前有效架构入口是 `docs/architecture.md`；带日期的 `docs/plans/` 仅为历史实施记录。
 
 ## 0. 项目是什么
 
-ClickVibe 是一个 DSH Web 插件:右侧面板把 GitHub issue 变成「开发 → review → 返工 → 合并」的异步流水线,git + GitHub 是唯一事实源,merge 留给人拍板。宿主侧(server)与客户端(client)分居 `src/index.ts` 与 `src/client/index.tsx` 两个 bundle 入口(构建与产物见 `tsdown.config.ts`)。
+ClickVibe 是一个 DSH Web 插件和 Issue-to-Merge 交付控制面:右侧面板把 GitHub issue 变成「开发 → review → 返工 → 合并」的可恢复异步流水线。Git/GitHub 原生事实决定代码与远端协作状态；本地状态拥有会话、租约和事件等 ClickVibe 自有事实。Agent 可使用完成任务所需的 git/gh 工具；merge 由项目/任务策略与全部门禁共同决定，不再永久限定为人工点击。宿主侧(server)与客户端(client)分居 `src/index.ts` 与 `src/client/index.tsx` 两个 bundle 入口(构建与产物见 `tsdown.config.ts`)。
 
 ### 主仓库开发守则
 
@@ -35,6 +35,12 @@ ClickVibe 是一个 DSH Web 插件:右侧面板把 GitHub issue 变成「开发 
 - 纯函数 → 落 workflow / agent 的纯逻辑文件,并配纯逻辑测试(无沙箱依赖)。
 
 ## 2. 开发方法论(所有新代码必须遵守)
+
+**2.0 业务 Issue 不得直接编译成代码。**
+- coding 前读取 `docs/architecture.md`、与变更相关的架构视图、Accepted ADR 和 Issue 的架构影响等级。
+- L0/L1 可在既有边界内开发；L2 必须先有跨模块设计或 ADR；L3 必须先定义事实源、不变量、原子边界、失败模式、迁移与回滚。
+- L2/L3 缺设计基线时停止 coding，先完成设计 PR；不得由 Coding Agent 在实现过程中顺便发明新架构。
+- Coding/Review 记录使用的 baseline SHA；Review 同时检查业务 AC 和架构契约。
 
 **2.1 TDD(测试先行)。**
 - 任何新功能 / 修复:**先写失败测试(red)→ 最小实现(green)→ 重构(refactor)**;禁止"先写实现后补测试",更禁止"实现完再写测试凑数"。
@@ -92,6 +98,7 @@ ClickVibe 是一个 DSH Web 插件:右侧面板把 GitHub issue 变成「开发 
 
 ## 6. 关联文档
 
+- 当前有效架构:`docs/architecture.md`;系统视图与 ADR:`docs/architecture/`
 - 领域拆分完整设计:`docs/plans/2026-08-23-domain-split-architecture-design.md`(§3 三规则、§4/§5 目标结构、§7 门禁、§8 PR 序列)
-- 修复纪律与并发不变量:`docs/fix-discipline.md`;根因 review 流程:`skills/root-cause-review/SKILL.md`;循环外协议审计:`skills/observer/SKILL.md`
+- 修复纪律与并发不变量:`docs/fix-discipline.md`;根因 review 流程:`skills/root-cause-review/SKILL.md`;运行时循环监督:`docs/architecture/observer-intervention.md`;跨任务协议审计:`skills/observer/SKILL.md`
 - 状态模型与按钮决策:`docs/state-model.md`;命令参考:`docs/command-reference.md`;产品蓝图:`docs/product-blueprint.md`
