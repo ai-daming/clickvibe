@@ -1,0 +1,395 @@
+{
+  "schemaVersion": 2,
+  "artifactType": "curated-summary",
+  "issue": 133,
+  "acceptedBaselineSha": "9f841f1bc93604e8d802e3776997016140840e47",
+  "curation": {
+    "status": "manually curated from the immutable raw JSON Lines artifact",
+    "rule": "This summary is navigation only. Counts, per-command timing, exits, dirty paths, and contamination must be verified against rawEvidence.path."
+  },
+  "rawEvidence": {
+    "path": "v0.2-access-baseline-evidence-raw.jsonl",
+    "format": "JSON Lines; one complete script stdout object per line; JSON whitespace compacted only",
+    "records": 6,
+    "measurementToolSha256": "5558b3d386a1b723d09c5d009832c706b269be61a32d86828685bb2ceaddc358",
+    "recordOrder": [
+      "environment",
+      "panel",
+      "multi",
+      "review",
+      "isolated-write",
+      "rate"
+    ]
+  },
+  "environment": {
+    "scenario": "environment",
+    "measuredAt": "2026-08-26T17:09:14.053Z",
+    "acceptedBaselineSha": "9f841f1bc93604e8d802e3776997016140840e47",
+    "head": "130e8e2561f4afb6f094898163babc83bd2febfb",
+    "sourceMatchesBaseline": true,
+    "untrackedSourcePaths": [],
+    "ignoredSourcePaths": [],
+    "dirtyPaths": [
+      "M scripts/measure-access-baseline.mjs",
+      " M tests/access-baseline-script.test.ts"
+    ],
+    "platform": "Darwin 25.6.0 arm64",
+    "node": "v26.4.0",
+    "git": "git version 2.50.1 (Apple Git-155)",
+    "gh": {
+      "available": true,
+      "version": "gh version 2.72.0 (2025-04-30)",
+      "error": null
+    },
+    "measurementTool": {
+      "path": "scripts/measure-access-baseline.mjs",
+      "sha256": "5558b3d386a1b723d09c5d009832c706b269be61a32d86828685bb2ceaddc358"
+    }
+  },
+  "reproduce": {
+    "environment": "node scripts/measure-access-baseline.mjs environment",
+    "panelAlwaysOn": "node scripts/measure-access-baseline.mjs panel",
+    "multiWorkItem": "node scripts/measure-access-baseline.mjs multi",
+    "reviewDense": "node scripts/measure-access-baseline.mjs review",
+    "isolatedWrite": "node scripts/measure-access-baseline.mjs isolated-write",
+    "rateLimit": "node scripts/measure-access-baseline.mjs rate",
+    "candidateComparison": "CLICKVIBE_ACCESS_BASELINE_SHA=<candidate-sha> node scripts/measure-access-baseline.mjs <scenario>",
+    "note": "Run from any repository subdirectory. The guard anchors at the repository root and rejects tracked, untracked, or ignored src drift. Live results vary; preserve complete stdout."
+  },
+  "scenarios": [
+    {
+      "id": "panel-always-on",
+      "rawRecordLine": 2,
+      "scope": "enrichWorkflowStates only; excludes the /state handler ensureConfiguredRepoFresh fetch gate",
+      "parameters": {
+        "workItems": 1,
+        "concurrency": 1,
+        "roundCount": 4,
+        "pollIntervalMs": 5000,
+        "cacheState": "cold first round; hot later rounds inside current 30s resource TTL"
+      },
+      "rounds": [
+        {
+          "round": 1,
+          "elapsedMs": 5555.85,
+          "physicalSubprocesses": 16,
+          "ok": true
+        },
+        {
+          "round": 2,
+          "elapsedMs": 207.09,
+          "physicalSubprocesses": 13,
+          "ok": true
+        },
+        {
+          "round": 3,
+          "elapsedMs": 226.75,
+          "physicalSubprocesses": 13,
+          "ok": true
+        },
+        {
+          "round": 4,
+          "elapsedMs": 237.36,
+          "physicalSubprocesses": 13,
+          "ok": true
+        }
+      ],
+      "summary": {
+        "logicalScenarioRequests": 4,
+        "physicalSubprocesses": 55,
+        "localGitSubprocesses": 52,
+        "remoteGitSubprocesses": 0,
+        "githubRestSubprocesses": 3,
+        "agentProcessSubprocesses": 0,
+        "failures": 0,
+        "expectedProbeMisses": 4,
+        "upstreamRequests": 3,
+        "p50Ms": 226.75,
+        "p95Ms": 5555.85
+      }
+    },
+    {
+      "id": "multi-work-item-refresh",
+      "rawRecordLine": 3,
+      "parameters": {
+        "workItems": 5,
+        "concurrency": 5,
+        "roundCount": 2,
+        "pollIntervalMs": 0,
+        "cacheState": "cold first round; hot later rounds inside current 30s resource TTL"
+      },
+      "rounds": [
+        {
+          "round": 1,
+          "elapsedMs": 16357.54,
+          "physicalSubprocesses": 70,
+          "ok": true
+        },
+        {
+          "round": 2,
+          "elapsedMs": 251.31,
+          "physicalSubprocesses": 60,
+          "ok": true
+        }
+      ],
+      "summary": {
+        "logicalScenarioRequests": 2,
+        "physicalSubprocesses": 130,
+        "localGitSubprocesses": 120,
+        "remoteGitSubprocesses": 0,
+        "githubRestSubprocesses": 10,
+        "agentProcessSubprocesses": 0,
+        "failures": 0,
+        "expectedProbeMisses": 20,
+        "upstreamRequests": 10,
+        "p50Ms": 251.31,
+        "p95Ms": 16357.54
+      }
+    },
+    {
+      "id": "review-dense-preflight",
+      "rawRecordLine": 4,
+      "parameters": {
+        "workItems": 3,
+        "concurrency": 3,
+        "roundCount": 1,
+        "cacheState": "force refresh; repository aggregate may singleflight"
+      },
+      "samples": [
+        {
+          "issue": 122,
+          "elapsedMs": 21813.42,
+          "issueOk": true,
+          "fetchOk": true,
+          "headKnown": true
+        },
+        {
+          "issue": 131,
+          "elapsedMs": 21812.4,
+          "issueOk": true,
+          "fetchOk": true,
+          "headKnown": true
+        },
+        {
+          "issue": 135,
+          "elapsedMs": 21811.92,
+          "issueOk": true,
+          "fetchOk": true,
+          "headKnown": true
+        }
+      ],
+      "summary": {
+        "logicalPreflights": 3,
+        "physicalSubprocesses": 18,
+        "localGitSubprocesses": 3,
+        "remoteGitSubprocesses": 3,
+        "githubRestSubprocesses": 12,
+        "agentProcessSubprocesses": 0,
+        "failures": 0,
+        "expectedProbeMisses": 0,
+        "upstreamRequests": 15,
+        "p50Ms": 21812.4,
+        "p95Ms": 21813.42
+      }
+    },
+    {
+      "id": "isolated-key-write-readback",
+      "rawRecordLine": 5,
+      "parameters": {
+        "workItems": 1,
+        "concurrency": 1,
+        "roundCount": 10,
+        "remote": "local bare temporary repository"
+      },
+      "samples": [
+        {
+          "round": 1,
+          "elapsedMs": 75.49,
+          "localShaMs": 10.9,
+          "pushMs": 43.78,
+          "readbackMs": 20.71,
+          "localSha": "12c312c281ebd22d499bdc1b8e53af04199aba9d",
+          "remoteSha": "12c312c281ebd22d499bdc1b8e53af04199aba9d",
+          "consistent": true
+        },
+        {
+          "round": 2,
+          "elapsedMs": 73.95,
+          "localShaMs": 11.34,
+          "pushMs": 44.4,
+          "readbackMs": 18.19,
+          "localSha": "733bd4693b7e5846acb30e2234b4696a051167ed",
+          "remoteSha": "733bd4693b7e5846acb30e2234b4696a051167ed",
+          "consistent": true
+        },
+        {
+          "round": 3,
+          "elapsedMs": 73.63,
+          "localShaMs": 11.28,
+          "pushMs": 44.35,
+          "readbackMs": 17.98,
+          "localSha": "6e1248fd0c7bc54b9e1a9bbc278c7a921f9bc1ce",
+          "remoteSha": "6e1248fd0c7bc54b9e1a9bbc278c7a921f9bc1ce",
+          "consistent": true
+        },
+        {
+          "round": 4,
+          "elapsedMs": 73.77,
+          "localShaMs": 11.41,
+          "pushMs": 44.58,
+          "readbackMs": 17.77,
+          "localSha": "81bd21e1fdf8f2ef7064620e9640210d9a2b5182",
+          "remoteSha": "81bd21e1fdf8f2ef7064620e9640210d9a2b5182",
+          "consistent": true
+        },
+        {
+          "round": 5,
+          "elapsedMs": 74.23,
+          "localShaMs": 10.84,
+          "pushMs": 44.52,
+          "readbackMs": 18.86,
+          "localSha": "8ba1a67d8680ec56fe22b347737da6ac30bc4b01",
+          "remoteSha": "8ba1a67d8680ec56fe22b347737da6ac30bc4b01",
+          "consistent": true
+        },
+        {
+          "round": 6,
+          "elapsedMs": 75.35,
+          "localShaMs": 10.95,
+          "pushMs": 46.07,
+          "readbackMs": 18.33,
+          "localSha": "04b55dcc842f9d667fcc5f91c63b706ae8d62fc8",
+          "remoteSha": "04b55dcc842f9d667fcc5f91c63b706ae8d62fc8",
+          "consistent": true
+        },
+        {
+          "round": 7,
+          "elapsedMs": 73.6,
+          "localShaMs": 10.77,
+          "pushMs": 44.88,
+          "readbackMs": 17.94,
+          "localSha": "8786d299fa29e9204131b848f203ff6efde67ab2",
+          "remoteSha": "8786d299fa29e9204131b848f203ff6efde67ab2",
+          "consistent": true
+        },
+        {
+          "round": 8,
+          "elapsedMs": 73.74,
+          "localShaMs": 10.95,
+          "pushMs": 44.9,
+          "readbackMs": 17.88,
+          "localSha": "61a273211993a0bcd405877b9f1d3e6309a8e8ba",
+          "remoteSha": "61a273211993a0bcd405877b9f1d3e6309a8e8ba",
+          "consistent": true
+        },
+        {
+          "round": 9,
+          "elapsedMs": 77.18,
+          "localShaMs": 11.94,
+          "pushMs": 44.72,
+          "readbackMs": 20.5,
+          "localSha": "fdd4c7f86c36d096f11db70c3acbd3806eed2e41",
+          "remoteSha": "fdd4c7f86c36d096f11db70c3acbd3806eed2e41",
+          "consistent": true
+        },
+        {
+          "round": 10,
+          "elapsedMs": 74.92,
+          "localShaMs": 11.24,
+          "pushMs": 45.29,
+          "readbackMs": 18.38,
+          "localSha": "d7878cf1494fe1128c9b239d2e4cca0651b7c31a",
+          "remoteSha": "d7878cf1494fe1128c9b239d2e4cca0651b7c31a",
+          "consistent": true
+        }
+      ],
+      "summary": {
+        "logicalWrites": 10,
+        "physicalSubprocesses": 30,
+        "localGitSubprocesses": 10,
+        "remoteGitSubprocesses": 20,
+        "remoteGitUpstreamRequests": 20,
+        "writeReadbacks": 10,
+        "consistentReadbacks": 10,
+        "failures": 0,
+        "p50Ms": 73.95,
+        "p95Ms": 77.18
+      },
+      "githubWriteLatency": "unknown: no dedicated test repository; production writes prohibited"
+    },
+    {
+      "id": "github-rest-rate-sample",
+      "rawRecordLine": 6,
+      "parameters": {
+        "logicalRequests": 5,
+        "measurementRequests": 2,
+        "physicalSubprocesses": 7,
+        "upstreamRequests": 7
+      },
+      "samplesMs": [
+        1311.87,
+        1360.2,
+        1354.76,
+        1366.54,
+        1309.57
+      ],
+      "p50Ms": 1354.76,
+      "p95Ms": 1366.54,
+      "rateLimit": {
+        "before": {
+          "limit": 5000,
+          "used": 0,
+          "remaining": 5000,
+          "reset": 1787767837
+        },
+        "after": {
+          "limit": 5000,
+          "used": 0,
+          "remaining": 5000,
+          "reset": 1787767845
+        },
+        "observedUsedDelta": 0,
+        "contaminated": true,
+        "reason": "same credential may have concurrent traffic; snapshots are not transactionally isolated",
+        "interpretation": "The reported zero delta is contaminated and cannot be interpreted as zero request cost."
+      }
+    }
+  ],
+  "agentSamples": [
+    {
+      "stage": "coding",
+      "taskEvidence": "~/.clickvibe/state/ai-daming/clickvibe/issue-122/dev/2026-08-25T10-34-44-730Z--dev-1787654084730-lZXRHDcwdxGTX01X.jsonl",
+      "observed": [
+        "git fetch",
+        "git status",
+        "git rev-parse",
+        "git rev-list",
+        "git branch",
+        "git remote",
+        "git for-each-ref",
+        "git log",
+        "git diff",
+        "git push",
+        "gh pr list/view",
+        "gh issue comment",
+        "gh api"
+      ],
+      "completeness": "representative observed sample only"
+    },
+    {
+      "stage": "review",
+      "taskEvidence": "~/.clickvibe/state/ai-daming/clickvibe/issue-122/review/2026-08-25T14-28-42-379Z--review-1787668122379-BBxcmQ6NHqEaDhX9.jsonl",
+      "observed": [
+        "git fetch",
+        "git log",
+        "git diff",
+        "git show",
+        "git init/config/commit in temporary adversarial repositories",
+        "gh api PR comments",
+        "gh api PR reviews",
+        "gh api check-runs"
+      ],
+      "completeness": "representative observed sample only; nested shell commands are not guaranteed to be exhaustively parsed"
+    }
+  ]
+}
