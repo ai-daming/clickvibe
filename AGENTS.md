@@ -74,7 +74,7 @@ ClickVibe 是一个 DSH Web 插件和 Issue-to-Merge 交付控制面:右侧面�
 1. **测试全绿**:`pnpm run typecheck && pnpm run build && pnpm test` 必须全绿;拆分 PR 中测试只允许改 import 路径,断言 / fixture / 行为一律不动。
 2. **导出面锚点**:以下被测试直接引用的导出必须继续从 `src/index.ts` re-export,不得转移后断供:`apply`、`fetchRepositoryIssues`、`deriveWorkflowState`、`enrichWorkflowStates`、`buildMergePreface`、`resumeDevelop`、`syncWorktree`、`assertReviewHeadMatchesPr`、`isSyncEquivalentMerge`。
 3. **构建入口固定**:`src/index.ts`、`src/invariant.ts`、`src/client/index.tsx`(`tsdown.config.ts`),搬移不得移动这三个文件本身。
-4. **对外契约不变**:17 个 `/clickvibe/api/*` method(fetch/projects/repo/issues/state/authorize/develop/develop/poll/history/stream/review/resume/stop/sync/merge/command)、响应形状、`~/.clickvibe/state/` 持久化格式、agent 两阶段授权命令(预览→一次性 2 分钟授权→执行)与文本命令语法。
+4. **对外契约默认不变**:17 个 `/clickvibe/api/*` method(fetch/projects/repo/issues/state/authorize/develop/develop/poll/history/stream/review/resume/stop/sync/merge/command)、响应形状、`~/.clickvibe/state/` 当前代次格式、agent 两阶段授权命令(预览→一次性 2 分钟授权→执行)与文本命令语法。只有 Accepted ADR + 显式 preview/authorization/backup/recovery/read-back 升级协议可以授权持久化代次切换；ADR-0009 仅授权一次 v0.1→v0.2 clean break，不授权普通功能 PR 随意改格式或长期双写。
 5. **状态推导纪律**:git/GitHub 原生事实是门槛,workflow 文件与 comment meta 只是缓存/增强器(见 `docs/state-model.md`);review 结论必须绑定其审查的 commit 与契约指纹,不得冒充。
 6. **错误不埋葬**:任何被捕获、降级或归类处理的错误,原始信息(动作/错误文本)必须同时落盘(本地事件持久)并可在面板展示;可以处理,不可抹去。归类标签(如 controller-error)是分类,不是替代证据(#90 两次暂停不可追溯的教训,2026-08-25)。
 

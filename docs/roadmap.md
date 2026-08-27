@@ -1,6 +1,6 @@
 # ClickVibe 产品演进路线
 
-> Status: Accepted | Updated: 2026-08-26 | Current execution: [v0.2.0 Milestone](https://github.com/ai-daming/clickvibe/milestone/2) / [Tracking Issue #132](https://github.com/ai-daming/clickvibe/issues/132)
+> Status: Accepted | Updated: 2026-08-27 | Current execution: [v0.2.0 Milestone](https://github.com/ai-daming/clickvibe/milestone/2) / [Tracking Issue #132](https://github.com/ai-daming/clickvibe/issues/132)
 
 本文是版本方向、先后依赖、用户结果和退出标准的唯一事实源。架构约束以[当前有效架构](architecture.md)和 Accepted ADR 为准；GitHub Milestone 只保存一句范围摘要并链接本文，Tracking Issue 只管理当前版本的切片、依赖和退出证据。
 
@@ -58,13 +58,14 @@ Controller-owned 调用必须经过对应平面。Agent 可以直接使用真实
 ### P2：Work Item 契约与最小证据
 
 - 落 WorkItemContractSnapshot、规范化 fingerprint 和原始 ArtifactRef。
-- WorkItemContract 留在 v0.2，因为现有 `issueSnapshot` 已参与读取、授权、Coding 和 Review，缓存 freshness 与旧授权失效直接消费它。
-- v0.2 保留并迁移 legacy WorkflowEvent 的有效语义，但不建立完整自主决策事件总包；判别式 EventEnvelope 及首条 Decision→Action→Re-observe 因果链在 v0.3 随真实生产者落地。
+- WorkItemContract 留在 v0.2，因为新的读取、授权、Coding 和 Review 路径需要共享同一需求快照、freshness 与失效语义；v0.1 `issueSnapshot` 不进入 v0.2 active state。
+- v0.2 按 ADR-0009 对本地 config/state 做显式 clean break：旧 state 整体冷备份但不进入 active runtime；不迁移 legacy WorkflowEvent，也不建立完整自主决策事件总包。判别式 EventEnvelope 及首条 Decision→Action→Re-observe 因果链在 v0.3 随真实生产者落地。
 - 所有被捕获、降级或归类的错误保存 DiagnosticRecord 与原始证据引用。
 
 ### P3：迁移与退出验收
 
-- v0.1 资产逐项决定保留、重构、迁移、归档或废弃；数据处置先备份并定义回滚边界。
+- v0.1 代码资产逐项决定保留、重构、归档或废弃；本地 config/state 依 ADR-0009 先精确预览和备份，再切换到单一 v0.2 schema。冷备份不参与运行，也不自动删除。
+- Git worktree、branch、commit、dirty/conflict 和 Provider 事实不属于旧 state：升级只盘点并保留，既有现场冲突时阻止新任务，不自动导入、删除、reset、stash 或 push。
 - 每类已切换状态只有一个写入模型；尚未进入 v0.2 的状态类别不得冒充已完成切换，新旧结构不得长期双写。
 - 并发验收在编码前冻结 Work Item 数、请求基线和目标阈值；记录总请求、上游请求、命中率、P50/P95 等待、rate-limit 消耗和失败数，禁止验收后补阈值。
 
