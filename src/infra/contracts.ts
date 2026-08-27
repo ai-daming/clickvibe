@@ -1,6 +1,40 @@
 /** Plain-data contracts shared by adapters and upper-layer workflows. */
 export type AgentKind = 'codex' | 'claude'
 
+/** Provider-neutral identity of one external work item. */
+export interface WorkItemIdentity {
+  provider: string
+  instance: string
+  container: string
+  id: string
+}
+
+export interface ProjectContainerIdentity {
+  provider: string
+  instance: string
+  id: string
+}
+
+/** Machine-local binding between one provider container and one real Git clone. */
+export interface ProjectBinding {
+  schemaVersion: 1
+  bindingId: string
+  container: ProjectContainerIdentity
+  repository: {
+    repositoryId: string
+    localPath: string
+    primaryRemote: string
+  }
+}
+
+export interface ClickVibeConfigV1 {
+  schemaVersion: 1
+  worktreeRoot: string
+  fetchTtlSeconds?: number
+  diagnosticsMaxBytes?: number
+  projectBindings: ProjectBinding[]
+}
+
 export interface PromptSnapshot {
   url: string
   title: string
