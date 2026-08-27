@@ -2,6 +2,7 @@ import { appendFile, link, mkdir, readFile, readdir, rm, rmdir, writeFile } from
 import { dirname, join } from 'node:path'
 import { decodeLiveLogLine, encodeLiveLogEvent, type LiveLogEvent } from './live-output.ts'
 import { taskLogPath, type WorkflowStorageIdentity } from './state-layout.ts'
+import { assertLegacyStateWriteAllowed } from './v02-generation-fence.ts'
 
 export type TaskLogKind = 'dev' | 'review'
 export type TaskExitStatus = 'done' | 'failed' | 'stopped' | 'timed_out'
@@ -118,6 +119,7 @@ export async function startTaskLog(
   kind: TaskLogKind,
   taskId: string,
 ): Promise<void> {
+  assertLegacyStateWriteAllowed(root)
   const path = taskLogPath(root, workflow, kind, taskId)
   await enqueue(path, async () => {
     await mkdir(dirname(path), { recursive: true })
@@ -138,6 +140,7 @@ export async function appendTaskLog(
   encodedLine: string,
   options: AppendTaskLogOptions = {},
 ): Promise<void> {
+  assertLegacyStateWriteAllowed(root)
   const path = taskLogPath(root, workflow, kind, taskId)
   const record = taskRecord(taskId, sequence, encodedLine, options)
   await enqueue(path, async () => {
@@ -212,6 +215,7 @@ export async function appendTaskLogNext(
   encodedLine: string,
   options: AppendTaskLogOptions = {},
 ): Promise<void> {
+  assertLegacyStateWriteAllowed(root)
   const path = taskLogPath(root, workflow, kind, taskId)
   await enqueue(path, async () => {
     await mkdir(dirname(path), { recursive: true })
@@ -241,6 +245,7 @@ export async function migrateLegacyLog(
   legacyPath: string,
   timestamp: string,
 ): Promise<void> {
+  assertLegacyStateWriteAllowed(root)
   const destination = taskLogPath(root, workflow, kind, taskId)
   const raw = await readFile(legacyPath, 'utf8')
   const lines = raw.split('\n')

@@ -69,6 +69,10 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export { ROUTE } from './infra/http-contract.ts'
+export { createV02GenerationFence } from './infra/v02-generation-fence.ts'
+export { applyV02Upgrade } from './infra/v02-upgrade-execution.ts'
+export { previewV02UpgradeRecovery, resumeV02Upgrade, rollbackV02Upgrade } from './infra/v02-upgrade-recovery.ts'
+export { previewV02Upgrade, v02UpgradePlanFingerprint } from './infra/v02-upgrade.ts'
 
 export const name = 'clickvibe'
 

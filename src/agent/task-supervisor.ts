@@ -37,6 +37,7 @@ import {
 } from '../infra/runtime.ts'
 import { appendTaskLog, type IssueWorkflow, startTaskLog } from '../infra/state.ts'
 import { logTaskDiagnostic, waitForTaskDiagnosticPersistence } from '../infra/task-diagnostics.ts'
+import { assertLegacyTaskStartAllowed } from '../infra/v02-generation-fence.ts'
 import {
   type AgentKind,
   lossyAgentOutputNotice,
@@ -147,6 +148,7 @@ export function createLiveTask(
   agent: DevelopAgent,
   sessionId: string | null,
 ): LiveTask {
+  assertLegacyTaskStartAllowed()
   for (const [id, task] of liveTasks) {
     if (liveTasks.size < MAX_TASKS) break
     if (task.closed) {

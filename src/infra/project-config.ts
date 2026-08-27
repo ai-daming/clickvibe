@@ -4,11 +4,13 @@ import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { isMap, parseDocument } from 'yaml'
+import { assertLegacyStateWriteAllowed } from './v02-generation-fence.ts'
 
 export async function addProjectRepoMapping(
   repoKey: string,
   projectPath: string,
 ): Promise<{ added: true } | { added: false; error: string }> {
+  assertLegacyStateWriteAllowed(join(homedir(), '.clickvibe', 'state'))
   const path = join(homedir(), '.clickvibe', 'config.yaml')
   let raw: string
   try {

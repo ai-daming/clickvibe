@@ -6,6 +6,7 @@ import { isDeepStrictEqual } from 'node:util'
 import type { IssueWorkflow } from './state.ts'
 import { workflowPath, type WorkflowStorageIdentity } from './state-layout.ts'
 import { applyWorkflowMetadataPatch, TASK_STATE_FIELDS, type WorkflowMetadataPatch } from './workflow-metadata.ts'
+import { assertLegacyStateWriteAllowed } from './v02-generation-fence.ts'
 
 export type { WorkflowMetadataPatch } from './workflow-metadata.ts'
 
@@ -115,6 +116,7 @@ const workflowCommandQueues = new Map<string, Promise<void>>()
  */
 function enqueueWorkflowCommand<T>(workflow: WorkflowStorageIdentity, execute: () => Promise<T>): Promise<T> {
   const key = workflowStatePath(workflow)
+  assertLegacyStateWriteAllowed(join(homedir(), '.clickvibe', 'state'))
   const previous = workflowCommandQueues.get(key) ?? Promise.resolve()
   const operation = previous.catch(() => undefined).then(execute)
   const tail = operation.then(
@@ -221,6 +223,7 @@ async function readCurrent(path: string): Promise<IssueWorkflow | null> {
 }
 
 async function atomicWrite(path: string, workflow: IssueWorkflow): Promise<void> {
+  assertLegacyStateWriteAllowed(join(homedir(), '.clickvibe', 'state'))
   await mkdir(dirname(path), { recursive: true })
   const temporary = `${path}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`
   try {

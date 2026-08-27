@@ -1,6 +1,7 @@
 import { appendFile, mkdir, rename, rm, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { diagnosticLogPath } from './state-layout.ts'
+import { assertLegacyStateWriteAllowed } from './v02-generation-fence.ts'
 
 export const DEFAULT_DIAGNOSTIC_MAX_BYTES = 5 * 1024 * 1024
 
@@ -50,6 +51,7 @@ export function appendDiagnosticLine(
   line: string,
   maxBytes: unknown | Promise<unknown>,
 ): Promise<void> {
+  assertLegacyStateWriteAllowed(root)
   const path = diagnosticLogPath(root, workflowKey)
   return enqueue(path, async () => {
     const limit = configuredMaxBytes(await maxBytes)

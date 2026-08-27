@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -27,6 +27,9 @@ import { join, resolve } from 'node:path'
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { parse as parseYaml } from 'yaml'
+import { parseClickVibeConfigV1 } from './project-binding.ts'
+import { verifyProjectBindingRepository } from './repository-identity.ts'
+import { v02UpgradePlanFingerprint, type V02UpgradePlan } from './v02-upgrade.ts'
 import {
   type AgentAuthorization,
   type AgentAuthorizationInput,
@@ -45,6 +48,7 @@ import { ExclusiveTaskGate } from './task-gate.ts'
 const MAX_BODY_BYTES = 64 * 1024
 
 export interface ClickVibeConfig {
+  schemaVersion?: 1
   repos: Record<string, string>
   worktreeRoot: string
   /** Remote-ref refresh interval for read paths. Clamped to 30-60 seconds. */
@@ -123,25 +127,90 @@ export function expandHome(path: string): string {
   return path
 }
 
-/** Read and parse ~/.clickvibe/config.yaml; missing/invalid yields a default. */
-export async function loadConfig(): Promise<ClickVibeConfig> {
-  const path = join(homedir(), '.clickvibe', 'config.yaml')
+async function loadV02Config(home: string, raw: string, parsed: unknown): Promise<ClickVibeConfig> {
+  const root = join(home, '.clickvibe')
+  const config = parseClickVibeConfigV1(parsed)
+  const [journalRaw, markerRaw] = await Promise.all([
+    readFile(join(root, 'upgrade-v0.2.json'), 'utf8'),
+    readFile(join(root, 'state', '.clickvibe-state.json'), 'utf8'),
+  ])
+  const journal = JSON.parse(journalRaw) as {
+    schemaVersion?: unknown
+    phase?: unknown
+    planFingerprint?: unknown
+    plan?: V02UpgradePlan
+  }
+  const marker = JSON.parse(markerRaw) as { schemaVersion?: unknown; generation?: unknown; planFingerprint?: unknown }
+  if (journal.schemaVersion !== 1 || journal.phase !== 'verified' || typeof journal.planFingerprint !== 'string') {
+    throw new Error('v0.2 config is not paired with a verified upgrade journal')
+  }
+  if (!journal.plan || v02UpgradePlanFingerprint(journal.plan) !== journal.planFingerprint) {
+    throw new Error('v0.2 upgrade journal plan fingerprint is invalid')
+  }
+  if (
+    journal.plan.paths.root !== root ||
+    journal.plan.paths.activeConfig !== join(root, 'config.yaml') ||
+    journal.plan.paths.activeState !== join(root, 'state') ||
+    journal.plan.paths.journal !== join(root, 'upgrade-v0.2.json')
+  ) {
+    throw new Error('v0.2 upgrade journal paths do not belong to this ClickVibe home')
+  }
+  if (
+    marker.schemaVersion !== 1 ||
+    marker.generation !== 'v0.2' ||
+    marker.planFingerprint !== journal.planFingerprint
+  ) {
+    throw new Error('v0.2 state marker fingerprint does not match the verified journal')
+  }
+  const digest = createHash('sha256').update(raw).digest('hex')
+  if (journal.plan.targetConfig.sha256 !== digest) throw new Error('v0.2 config fingerprint does not match the journal')
+  const repos: Record<string, string> = {}
+  for (const binding of config.projectBindings) {
+    if (binding.container.provider !== 'github' || binding.container.instance !== 'github.com') {
+      throw new Error(
+        `unsupported active ProjectBinding provider: ${binding.container.provider}@${binding.container.instance}`,
+      )
+    }
+    const verified = await verifyProjectBindingRepository(binding)
+    repos[binding.container.id] = verified.localPath
+  }
+  return {
+    schemaVersion: 1,
+    repos,
+    worktreeRoot: config.worktreeRoot,
+    fetchTtlSeconds: config.fetchTtlSeconds,
+    diagnosticsMaxBytes: config.diagnosticsMaxBytes,
+  }
+}
+
+/** Read config for an explicit home; schema-1 requires a verified config/state pair. */
+export async function loadConfigFromHome(home: string): Promise<ClickVibeConfig> {
+  const path = join(home, '.clickvibe', 'config.yaml')
   try {
     const raw = await readFile(path, 'utf8')
-    const parsed = parseYaml(raw) as Partial<ClickVibeConfig> | null
+    const parsed = parseYaml(raw) as (Partial<ClickVibeConfig> & { schemaVersion?: unknown }) | null
+    if (parsed?.schemaVersion === 1) return loadV02Config(home, raw, parsed)
+    if (parsed?.schemaVersion !== undefined)
+      throw new Error(`unsupported ClickVibe config schemaVersion: ${parsed.schemaVersion}`)
     return {
       repos: parsed?.repos ?? {},
-      worktreeRoot: parsed?.worktreeRoot ? expandHome(parsed.worktreeRoot) : join(homedir(), '.clickvibe', 'worktrees'),
+      worktreeRoot: parsed?.worktreeRoot ? expandHome(parsed.worktreeRoot) : join(home, '.clickvibe', 'worktrees'),
       fetchTtlSeconds: parsed?.fetchTtlSeconds,
       diagnosticsMaxBytes: parsed?.diagnosticsMaxBytes,
     }
-  } catch {
+  } catch (reason) {
+    if ((reason as NodeJS.ErrnoException).code !== 'ENOENT') throw reason
     return {
       repos: {},
-      worktreeRoot: join(homedir(), '.clickvibe', 'worktrees'),
+      worktreeRoot: join(home, '.clickvibe', 'worktrees'),
       fetchTtlSeconds: DEFAULT_FETCH_TTL_SECONDS,
     }
   }
+}
+
+/** Read and strictly validate ~/.clickvibe/config.yaml. */
+export function loadConfig(): Promise<ClickVibeConfig> {
+  return loadConfigFromHome(homedir())
 }
 
 /** Extract owner/repo and issue number from a GitHub issue/PR URL. */
