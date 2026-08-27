@@ -69,6 +69,15 @@ interface ProjectBinding {
     primaryRemote: string
   }
 }
+
+interface ClickVibeConfigV1 {
+  schemaVersion: 1
+  /** Single source of truth for generated worktree paths and collision guards. */
+  worktreeRoot: string
+  fetchTtlSeconds?: number
+  diagnosticsMaxBytes?: number
+  projectBindings: ProjectBinding[]
+}
 ```
 
 | 字段 | 说人话 |
@@ -80,6 +89,8 @@ interface ProjectBinding {
 | `primaryRemote` | 远端协调默认使用哪个 Git remote，通常是 `origin` |
 
 `ProjectBinding` 是机器/部署配置，不是 Git/GitHub 事实。一个外部项目没有本地 binding 时仍可只读展示，但不能启动需要 worktree 的 Run。
+
+config schema、WorkItem/Binding tuple schema 与 hash policy 独立版本化。v0.1 的合法 `worktreeRoot`、`fetchTtlSeconds`、`diagnosticsMaxBytes` 在 schema 1 转换时保留；缺失 `worktreeRoot` 固定为 `~/.clickvibe/worktrees`。完整 cutover、逐条排除和恢复规则见[v0.2 升级协议](v02-upgrade-protocol.md)。
 
 ## 3. WorkflowIdentity
 

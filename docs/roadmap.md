@@ -1,6 +1,6 @@
 # ClickVibe 产品演进路线
 
-> Status: Accepted | Updated: 2026-08-26 | Current execution: [v0.2.0 Milestone](https://github.com/ai-daming/clickvibe/milestone/2) / [Tracking Issue #132](https://github.com/ai-daming/clickvibe/issues/132)
+> Status: Accepted | Updated: 2026-08-27 | Current execution: [v0.2.0 Milestone](https://github.com/ai-daming/clickvibe/milestone/2) / [Tracking Issue #132](https://github.com/ai-daming/clickvibe/issues/132)
 
 本文是版本方向、先后依赖、用户结果和退出标准的唯一事实源。架构约束以[当前有效架构](architecture.md)和 Accepted ADR 为准；GitHub Milestone 只保存一句范围摘要并链接本文，Tracking Issue 只管理当前版本的切片、依赖和退出证据。
 

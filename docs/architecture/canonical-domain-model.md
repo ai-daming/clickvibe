@@ -1,6 +1,6 @@
 # ClickVibe Canonical Domain Model
 
-> Status: Accepted | Parent: [当前有效架构](../architecture.md) | Decisions: [ADR-0006](decisions/0006-canonical-domain-model-and-contracts.md), [ADR-0007](decisions/0007-three-git-github-access-planes.md) | Detailed schemas: [核心数据契约](core-contracts.md)
+> Status: Accepted | Parent: [当前有效架构](../architecture.md) | Decisions: [ADR-0006](decisions/0006-canonical-domain-model-and-contracts.md), [ADR-0007](decisions/0007-three-git-github-access-planes.md), [ADR-0009](decisions/0009-v02-clean-break-local-state-and-config.md) | Detailed schemas: [核心数据契约](core-contracts.md)
 
 ## 目的
 

@@ -1,6 +1,6 @@
 # #134 WorkItemIdentity 与 ProjectBinding L3 设计
 
-> Status: Draft | Maintainer direction: clean break confirmed | Issue: [#134](https://github.com/ai-daming/clickvibe/issues/134) | Code baseline: `dc19103fa67bfbea60010038117f971f1e68d930` | Architecture baseline: `9f841f1bc93604e8d802e3776997016140840e47` | Required decision: [ADR-0009](../architecture/decisions/0009-v02-clean-break-local-state-and-config.md)
+> Status: Review candidate | Maintainer direction: clean break confirmed | Issue: [#134](https://github.com/ai-daming/clickvibe/issues/134) | Code baseline: `dc19103fa67bfbea60010038117f971f1e68d930` | Architecture baseline: `9f841f1bc93604e8d802e3776997016140840e47` | Required decision: [ADR-0009](../architecture/decisions/0009-v02-clean-break-local-state-and-config.md) | Upgrade protocol: [v0.2 本地配置与状态升级协议](../architecture/v02-upgrade-protocol.md)
 
 ## 0. 结论
 
@@ -9,7 +9,7 @@
 - “这是哪个外部 Work Item”只由 `WorkItemIdentity(provider, instance, container, id)` 回答；
 - “这台机器用哪个 Git clone 执行”只由 `ProjectBinding` 回答。
 
-本设计选择 v0.2 clean break：v0.1 state 冷备份，新的空 v0.2 state 继续使用 `~/.clickvibe/state`；旧 Git worktree/branch 原样保留但不自动导入。它推翻了已发布基线中的 legacy event 迁移要求；本地文档与 GitHub Issue #132、#134、#136、#137 已作为一组协调提案同步，但在 ADR-0009 与本设计 PR 的 exact-SHA review 通过并合入前，本文仍是 Draft，禁止 Coding。
+本设计选择 v0.2 clean break：v0.1 state 冷备份，新的空 v0.2 state 继续使用 `~/.clickvibe/state`；旧 Git worktree/branch 原样保留但不自动导入。它推翻了已发布基线中的 legacy event 迁移要求；本地文档与 GitHub Issue #132、#134、#136、#137 已作为一组协调提案同步。PR 分支不是架构事实源；只有 exact-SHA review 通过并合入 `main` 后，这组 `Accepted` 文档才成为 Coding baseline。
 
 ## 1. 范围
 
@@ -45,7 +45,7 @@ interface IssueWorkflow {
 }
 ```
 
-仓库中约有 95 处 `repoKey` 使用、22 个 `issueKey(...)` 调用；`config.yaml` 使用未版本化的 `owner/repo -> localPath` 映射。当前 state path 又从 `repoKey + Issue URL number` 推导。结果是：
+当前 `src/` 中 `repoKey` 分布在 39 个文件、262 行、共 290 次文本匹配，另有 22 行 `issueKey(...)` 调用；口径分别由 `rg -l 'repoKey' src`、`rg -n 'repoKey' src`、`rg -o 'repoKey' src` 和 `rg -n 'issueKey\(' src` 复核。`config.yaml` 使用未版本化的 `owner/repo -> localPath` 映射。当前 state path 又从 `repoKey + Issue URL number` 推导。结果是：
 
 - URL、repoKey、workflow key 和 path 都在不同位置冒充身份；
 - GitHub number 验证渗入 workflow/infra；
@@ -98,6 +98,9 @@ Git/GitHub 仍是代码、worktree、refs、Issue、PR、Review 和 CI 的权威
 10. v0.1 state 冷备份和 Git 现场不被自动删除；新 v0.2 runtime 不读取冷备份授权动作。
 11. 既有 worktree/path/branch 冲突时拒绝创建或覆盖；dirty、conflicted、ahead 均保持原样。
 12. unknown schema、损坏记录、缺失 identity 或部分升级不能解释成空状态或成功。
+13. apply 从授权复核到 `verified`/`rolled_back` 必须持有跨进程升级锁与宿主 generation fence；单靠新版本锁不能声称阻止旧二进制。
+14. journal 与 config/state 必须内容原子且 durable；路径存在不等于内容完整，rename 成功不等于父目录已经持久化。
+15. 同机目标 config 中 repositoryId 必须唯一；复制 clone 产生的重复 ID 必须显式 regenerate/rebind，禁止静默认作同一 clone。
 
 ## 5. 核心契约
 
@@ -135,8 +138,10 @@ Provider Adapter 负责 provider-specific normalization；core serializer 不自
 - 固定 array 顺序，不按对象键枚举；
 - 四字段缺失、空串或非字符串直接拒绝；
 - JSON escaping 负责换行、引号和反斜杠，不使用分隔符拼接；
-- hash algorithm version 固定为 `sha256-v1`；
+- hash policy version 固定为 `sha256-v1`；它与 tuple、config 和产品版本各自独立；
 - durable key 为 `wi1_<sha256 bytes 的 base64url>`。
+
+tuple 中的 `1` 与 `wi1_`/`pb1_` 表示各自 canonical serialization schema；config `schemaVersion: 1` 只表示 config schema；`sha256-v1` 只表示 hash policy。三根版本轴数字相同不代表联动升级。
 
 state root 使用：
 
@@ -160,7 +165,9 @@ repositoryId 文件：
 <git-common-dir>/clickvibe/repository-id
 ```
 
-首次注册用 exclusive create 原子生成 `repo_<UUID>`；已存在时只读并验证格式，禁止覆盖。并发注册只能有一个创建者，其他调用读取赢家结果。路径移动不改变 ID；重新 clone 得到新的 common-dir 和新的 ID。
+首次注册生成 `repo_<UUID>` 时，必须先在同目录 exclusive-create temp、写完整内容并 fsync，再用 hard link 竞争性发布最终路径并 fsync 父目录；不能把 `O_EXCL open` 与“内容原子”混为一谈。已存在时只读并验证完整格式，禁止覆盖；空/半写/symlink 文件 fail-closed。并发注册只能有一个发布者，其他调用读取赢家结果。路径移动不改变 ID；重新 clone 得到新的 common-dir 和新的 ID。
+
+preview、启动和高风险动作必须检查目标 config 内 repositoryId 唯一。同一 ID 指向不同 real common-dir（典型原因是 `cp -r` clone）时，两条 Binding 都不可写，必须显式 regenerate/rebind 其中一个 clone。当前 Slice 只接受带工作树的顶层 repository；bare repository 和 submodule fail-closed。
 
 ### 5.4 ProjectBinding 与 config
 
@@ -193,6 +200,9 @@ config v0.2 示例（这是第一版带版本的 config schema，因此从 `1` �
 
 ```yaml
 schemaVersion: 1
+worktreeRoot: /Users/example/.clickvibe/worktrees
+fetchTtlSeconds: 45
+diagnosticsMaxBytes: 10485760
 projectBindings:
   - schemaVersion: 1
     bindingId: pb1_<base64url-sha256>
@@ -206,7 +216,7 @@ projectBindings:
       primaryRemote: origin
 ```
 
-config 中的 repositoryId 是 expected pin，不是 clone 身份源。启动和每次高风险动作前至少验证：path 是 Git repository、common-dir ID 匹配、primaryRemote 存在。缺少 Binding 时 Provider 只读展示仍可用，需要 worktree/Git 的动作不可用。
+config 中的 repositoryId 是 expected pin，不是 clone 身份源。v0.1 的合法 `worktreeRoot`、`fetchTtlSeconds`、`diagnosticsMaxBytes` 在转换中保留；`worktreeRoot` 缺失时目标值固定为 `~/.clickvibe/worktrees`，也是 worktree collision guard 的唯一根路径。启动和每次高风险动作前至少验证：path 是带工作树的顶层 Git repository、common-dir ID 匹配且同机唯一、primaryRemote 存在。缺少 Binding 时 Provider 只读展示仍可用，需要 worktree/Git 的动作不可用。
 
 ## 6. 数据流
 
@@ -230,80 +240,17 @@ workflow、cache、authorization、diagnostic 和后续 access plane 只接收 i
 
 ## 7. v0.1 → v0.2 显式升级
 
-全新安装没有 legacy config/state 时不进入升级状态机：通过同样的 Binding preview/authorization 创建 repositoryId、schema 1 config 和空 state。只有检测到未版本化 config、v0.1 state 或未完成 upgrade journal 时，才进入以下升级流程并阻止普通写操作。
+[v0.2 本地配置与状态升级协议](../architecture/v02-upgrade-protocol.md)是 Slice 2 的规范性实现规格；本节只保留决策摘要，避免历史 plan 与当前架构各自维护一套恢复规则。
 
-### 7.1 原子边界
+全新安装没有 legacy config/state 时不进入 legacy 状态机，但创建 Binding、repositoryId、schema 1 config 和空 state 仍走 preview/authorization。检测到未版本化 config、v0.1 state 或未完成/损坏 journal 时，普通写操作全部阻断。
 
-state rename、config replace 和多个 Git common-dir 写入无法组成单个文件系统原子事务。升级必须用位于 active state 之外的 journal：
+升级不是“先检查再搬目录”：apply 必须先取得跨进程升级锁和宿主 generation fence，在临界区重新确认旧进程不能启动并重算 fingerprint。单靠 v0.2 新锁无法约束旧二进制；无法停用旧入口的环境必须退出宿主并使用离线升级。
 
-```text
-~/.clickvibe/upgrade-v0.2.json
-```
+所有易失败准备先完成：durable journal、精确 config backup、内容原子的 repositoryId、可完整解析的 staged config、带 marker 的 staged state。只有准备全部回读通过，才允许把旧 state rename 到 cold backup、激活 staged state、原子替换 config。每次 journal/config/marker 写入都使用同目录 temp + file fsync + rename/link + parent-directory fsync。
 
-journal 带 schemaVersion、plan fingerprint、授权标识、每阶段状态、目标/备份路径和原始错误。只有 journal 为 `verified` 且所有 read-back 通过时，普通 v0.2 runtime 才可写入。
+状态机显式包含 facts changed 后 `authorized → previewed`、prepare/cutover 失败后的 recovery preview、以及经新授权的 resume/rollback。未完成 journal 优先于全新 preview；journal torn/corrupt/missing/unknown 或 config/state 混合代次都只能进入只读 recovery inventory，不能解释成空项目。
 
-### 7.2 状态机
-
-```mermaid
-stateDiagram-v2
-  [*] --> detected
-  detected --> previewed: 只读盘点 + 计划指纹
-  previewed --> authorized: 用户确认精确计划
-  authorized --> backed_up: config/state 备份
-  backed_up --> repositories_bound: 原子创建/读取 repo IDs
-  repositories_bound --> config_written: 写 v0.2 config
-  config_written --> state_created: 创建新 ~/.clickvibe/state
-  state_created --> verified: 逐项回读
-  verified --> [*]
-  backed_up --> failed
-  repositories_bound --> failed
-  config_written --> failed
-  state_created --> failed
-```
-
-### 7.3 Preview 内容
-
-preview 至少显示：
-
-- code/architecture baseline SHA；
-- 旧 config hash、目标 config 完整内容和备份路径；
-- 旧 state 路径、文件数/字节数、目标冷备份路径和新 state 路径；
-- 每个 Binding 的 container、localPath、common-dir、repositoryId 现状、primaryRemote；
-- live process/job 检查；
-- `git worktree list` 中每个 worktree 的 path、branch、HEAD、dirty/conflict、ahead/behind；
-- 会被写入、创建、rename 的每个路径；
-- plan fingerprint 和明确不可逆项（本方案无自动删除）。
-
-执行前重新读取 config hash、state identity 和 worktree inventory；与 preview 不同则授权失效，必须重新预览。
-
-### 7.4 Apply 与 read-back
-
-1. 再次确认没有 live task/job；旧 persisted `running` 只作为警告。
-2. 写入 upgrade journal，并保存旧 config 备份。
-3. 将旧 state rename 到唯一 cold-backup 目标；禁止覆盖。
-4. 为每个已验证 repository 原子创建或读取 repositoryId。
-5. 写临时 v0.2 config、设置权限、fsync/rename，再完整解析回读。
-6. 创建新的空 `~/.clickvibe/state` 和 schema marker。
-7. 验证 config pin/common-dir ID、primaryRemote、新 state schema 和 cold backup 可读。
-8. journal 标记 `verified`；此后才允许普通写操作。
-
-升级不删除旧 config backup、cold state backup、worktree、branch 或 remote ref。
-
-### 7.5 失败与恢复
-
-| 失败 | 系统状态 | 恢复 |
-|---|---|---|
-| preview 前配置/仓库无效 | 零写入 | 修复事实后重新 preview |
-| 授权后 config/state 已变化 | 零业务写入 | 授权失效，重新 preview |
-| state backup rename 失败 | 旧运行态不变 | 保留错误，停止 |
-| 部分 repo ID 已创建 | 旧 state 已备份，ID sidecar 可存在 | journal 记录；重试读取同一 ID，不覆盖 |
-| v0.2 config 写失败 | 不进入普通 runtime | 从 config backup 回滚；按 journal 恢复旧 state 路径或继续 |
-| 新 state 创建/验证失败 | cold backup 保留 | 删除仅限本次创建且经 journal 证明的空/无效新目录，再恢复或重试 |
-| read-back 不一致 | fail-closed | 不猜测成功；人工选择 resume/rollback |
-| repositoryId mismatch | Binding 不可写 | 显式 rebind，新 preview/authorization |
-| worktree dirty/conflicted/ahead | Git 现场原样保留 | 不阻塞升级，但阻止冲突的新任务，逐个处理 |
-
-回滚不会删除已成功创建的 repositoryId sidecar；它没有授予动作的能力，后续注册可复用。回滚必须恢复旧 config 与旧 state 路径的配对，不能产生两个 active state。
+无效 repos 条目必须逐条修复或显式 exclude，选择与原因进入 fingerprint；旧 config backup 保留完整原值。固定备份路径为 `config-v0.1-backup-<timestamp>-<nonce>.yaml` 与 `state-v0.1-backup-<timestamp>-<nonce>`，均不自动删除。
 
 ## 8. 旧 worktree 与新任务
 
@@ -339,9 +286,10 @@ v0.2 启动时从 Git 实时读取 worktree/branch，而不是从 cold state 推
 
 - 主 checkout 与 linked worktree 读取同一 repositoryId；
 - 两个相同 remote 的独立 clone 得到不同 ID；
+- `cp -r` 复制出的重复 repositoryId 在目标 config 校验时 fail-closed，显式 regenerate 后恢复唯一；
 - repository 目录移动后 ID 不变；
-- 并发首次注册只产生一个 ID；
-- 已存在无效/不一致 ID fail-closed；
+- 并发首次注册只产生一个完整 ID；temp write/fsync/link 各窗口失败不能留下空/半写最终文件；
+- 已存在无效/不一致/symlink ID fail-closed；bare repository 与 submodule 不注册；
 - 显式 primaryRemote 缺失时 Binding 不可写；
 - dirty/conflicted/ahead worktree 在 preview/apply 后字节、HEAD、refs 不变。
 
@@ -349,8 +297,12 @@ v0.2 启动时从 Git 实时读取 worktree/branch，而不是从 cold state 推
 
 - preview 对 config、state、common-dir、worktree 零写入；
 - plan fingerprint 绑定全部目标，任一事实变化使授权失效；
+- 两个 upgrader 只能有一个锁赢家；旧 v0.1 job 在 generation fence 内无法启动；
 - 成功升级生成 config backup、cold state backup、新同路径 state 和 verified journal；
-- 每个 apply 阶段注入真实文件系统失败，证明可重试或可回滚；
+- 每次 file fsync、rename、directory fsync 和 journal replace 前后注入真实文件系统失败，证明可 resume 或 rollback；
+- journal torn/corrupt/missing/unknown 与 config/state 混合代次只进入 recovery inventory；
+- 旧 state 初始缺失与 cutover 后缺失可由 durable journal 明确区分；
+- v0.1 `worktreeRoot`、`fetchTtlSeconds`、`diagnosticsMaxBytes` 保留/默认/非法输入与 dead repo 逐条 exclude 均有转换测试；
 - 旧 config/state 不被 v0.2 active runtime 兼容读取；
 - 未完成 journal、未知 schema、live task、ID mismatch 均阻止写；
 - 备份目标重名不覆盖；cold backup 永不自动删除；
@@ -390,8 +342,9 @@ pnpm run check:state-writes
 
 ### Slice 2：显式升级器与 state cutover
 
-- 先写 preview/apply/recovery 和真实 Git/文件系统 RED；
-- 实现 journal、备份、config 转换、新 state 创建和 read-back；
+- 先按[规范升级协议](../architecture/v02-upgrade-protocol.md)写锁/generation fence、preview/apply/recovery 和真实 Git/文件系统 RED；
+- 实现 durable journal、内容原子 repositoryId、精确备份、完整 config 转换、staged state、cutover 和 read-back；
+- 遵守本设计 PR 已同步的 `AGENTS.md` state 格式红线；只有 Accepted ADR + 显式升级协议可以授权代次切换；
 - 保留 worktree collision guard，不实现旧现场采用。
 
 Slice 1/2 是否拆为两个实现 PR，由设计 PR Review 根据实际 diff 与迁移原子边界决定；不得把设计变更和功能实现放进同一 PR。

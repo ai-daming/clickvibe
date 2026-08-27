@@ -1,6 +1,6 @@
 # ClickVibe 当前有效架构
 
-> Status: Accepted | Owner: ClickVibe maintainers | Last updated: 2026-08-26 | Scope: target architecture; implementation order is governed by [roadmap](roadmap.md)
+> Status: Accepted | Owner: ClickVibe maintainers | Last updated: 2026-08-27 | Scope: target architecture; implementation order is governed by [roadmap](roadmap.md)
 
 本文是 ClickVibe 架构的唯一入口。它回答“当前系统由什么组成、事实由谁拥有、变化如何进入系统”。详细设计放在 `docs/architecture/`，重要取舍放在 `docs/architecture/decisions/`；带日期的 `docs/plans/` 只记录一次实施过程，不自动成为当前架构。
 
@@ -69,6 +69,7 @@ v0.1 已验证部分事实推导、Agent 流程和持久化能力，但它没有
 - [系统上下文](architecture/system-context.md)：DSH、ClickVibe、Agent、Git 与 GitHub 的责任边界。
 - [Canonical Domain Model](architecture/canonical-domain-model.md)：目标 Domain、关系、生命周期、事实所有者与稳定等级；实现顺序见 roadmap。
 - [核心数据契约](architecture/core-contracts.md)：跨平台身份、DeliveryBasis、Run、Review、Decision、Event，以及 v0.1 本地状态冷备份与 v0.2 clean-break 边界。
+- [v0.2 本地配置与状态升级协议](architecture/v02-upgrade-protocol.md)：升级锁、旧运行时代次门禁、durable journal、原子 cutover 与恢复矩阵。
 - [核心数据流](architecture/core-data-flow.md)：从 Issue 到合并/暂停的数据流，以及读缓存和写后回读。
 - [事实源与状态权威](architecture/authority-model.md)：哪些事实可以决定动作，哪些只是缓存或证据增强。
 - [交付状态机](architecture/workflow-state-machine.md)：Observe → Decide → Apply → Re-observe 的收敛循环。

@@ -1,6 +1,6 @@
 # ADR-0009：v0.2 本地状态与配置 clean break
 
-> Status: Draft | Date: 2026-08-27 | Maintainer direction: clean break confirmed | Proposed partial supersession: [ADR-0006](0006-canonical-domain-model-and-contracts.md)
+> Status: Accepted | Date: 2026-08-27 | Partially supersedes: [ADR-0006](0006-canonical-domain-model-and-contracts.md) for v0.1 local config/state cutover | Protocol: [v0.2 本地配置与状态升级协议](../v02-upgrade-protocol.md)
 
 ## Context
 
@@ -10,7 +10,7 @@ ADR-0006 将 v0.1 的 `IssueWorkflow`、`WorkflowEvent`、`repoKey` 和 Issue UR
 
 ## Decision
 
-如果本 ADR 被接受，v0.2 按以下规则切换：
+v0.2 按以下规则切换：
 
 1. v0.2 active runtime 只接受 v0.2 `config.yaml` 和 state schema，不包含 v0.1 `repos`、`IssueWorkflow`、legacy workflow key 或 `WorkflowEvent` 的兼容读取/写入分支。
 2. 升级前将整个 `~/.clickvibe/state` 原子改名为唯一的 `~/.clickvibe/state-v0.1-backup-<timestamp>-<nonce>`；随后在原路径创建新的空 `~/.clickvibe/state`。冷备份不参与 v0.2 运行，也不自动删除。
@@ -22,9 +22,9 @@ ADR-0006 将 v0.1 的 `IssueWorkflow`、`WorkflowEvent`、`repoKey` 和 Issue UR
 
 本 ADR 只改变 v0.1 本地状态和配置的升级策略。它不改变 ADR-0006 的 provider-neutral 身份、Domain 边界、事实等级和未来事件契约。
 
-## Required Baseline Changes Before Acceptance
+## Coordinated Baseline Changes
 
-接受本 ADR 前必须在同一设计变更中同步：
+本 ADR 与以下基线在同一设计变更中同步，main 上不得只出现其中一半：
 
 - `docs/roadmap.md` 中“v0.2 保留并迁移 legacy WorkflowEvent”的要求；
 - `docs/architecture/canonical-domain-model.md`、`core-contracts.md` 和 `observability.md` 的 legacy event 排期；
@@ -32,7 +32,7 @@ ADR-0006 将 v0.1 的 `IssueWorkflow`、`WorkflowEvent`、`repoKey` 和 Issue UR
 - Issue #136 对 legacy `WorkflowEvent` 的验收标准；
 - Issue #137 对 v0.1 资产逐类迁移的范围，使其区分 active migration、cold archive 和 Git 现场处置。
 
-本地文档提案与 GitHub Issue #132、#134、#136、#137 已在 2026-08-27 按 clean break 方向同步；在本设计 PR 的 exact-SHA Review 通过并合入前，本 ADR 保持 Draft，不能作为 Coding Agent 的基线。
+本地文档提案与 GitHub Issue #132、#134、#136、#137 已在 2026-08-27 按 clean break 方向同步。ADR 文件在 PR 中标为 `Accepted`，是为了让合入后的 main 树没有治理中间态；PR 分支本身仍不是 Coding baseline，只有 exact-SHA Review 通过并合入后才生效。
 
 ## Consequences
 
@@ -75,6 +75,7 @@ ADR-0006 将 v0.1 的 `IssueWorkflow`、`WorkflowEvent`、`repoKey` 和 Issue UR
 ## References
 
 - [#134 WorkItemIdentity 与 ProjectBinding L3 设计](../../plans/2026-08-27-work-item-identity-project-binding-design.md)
+- [v0.2 本地配置与状态升级协议](../v02-upgrade-protocol.md)
 - [事实源与状态权威](../authority-model.md)
 - [核心数据契约](../core-contracts.md)
 - [Issue 架构门禁](0003-issue-architecture-gate.md)
