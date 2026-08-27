@@ -170,3 +170,20 @@ test('bare repositories, submodules, symlink and malformed repositoryId files ar
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('a crafted checkout .git file cannot redirect repositoryId writes to an unrelated Git directory', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'clickvibe-gitdir-escape-'))
+  const unrelated = join(root, 'unrelated')
+  const crafted = join(root, 'crafted')
+  try {
+    await initRepository(unrelated)
+    await mkdir(crafted)
+    await writeFile(join(crafted, '.git'), `gitdir: ${join(unrelated, '.git')}\n`)
+    await assert.rejects(ensureRepositoryId(crafted), /untrusted gitdir/)
+    await assert.rejects(readFile(join(unrelated, '.git', 'clickvibe', 'repository-id'), 'utf8'), {
+      code: 'ENOENT',
+    })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

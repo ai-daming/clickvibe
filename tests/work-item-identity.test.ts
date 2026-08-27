@@ -28,6 +28,7 @@ test('WorkItemIdentity rejects missing, empty and non-string fields without norm
     { provider: 'github', instance: 'github.com', container: '', id: '1' },
     { provider: 'github', instance: 'github.com', container: 'o/r', id: '' },
     { provider: 'github', instance: 'github.com', container: 'o/r', id: 1 },
+    { provider: 'github', instance: 'github.com', container: 'o/r', id: '1', displayKey: '#1' },
   ]) {
     assert.throws(() => parseWorkItemIdentity(value), /WorkItemIdentity/)
   }
@@ -58,7 +59,23 @@ test('GitHub adapter owns positive issue-number validation and host normalizatio
     githubWorkItemIdentity({ instance: 'github.example.com', owner: 'o', repository: 'r', number: '99' }).id,
     '99',
   )
-  for (const number of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '', '0', '01', '1.5', 'abc']) {
+  assert.deepEqual(
+    githubWorkItemIdentity({ instance: 'GITHUB.COM', owner: 'AI-Daming', repository: 'ClickVibe', number: 134 }),
+    githubWorkItemIdentity({ instance: 'github.com', owner: 'ai-daming', repository: 'clickvibe', number: '134' }),
+  )
+  for (const number of [
+    0,
+    -1,
+    1.5,
+    Number.MAX_SAFE_INTEGER + 1,
+    '',
+    '0',
+    '01',
+    '1.5',
+    'abc',
+    String(BigInt(Number.MAX_SAFE_INTEGER) + 1n),
+    '9'.repeat(10_000),
+  ]) {
     assert.throws(
       () => githubWorkItemIdentity({ instance: 'github.com', owner: 'o', repository: 'r', number }),
       /positive integer/,
@@ -67,9 +84,17 @@ test('GitHub adapter owns positive issue-number validation and host normalizatio
   for (const coordinates of [
     { instance: '', owner: 'o', repository: 'r', number: 1 },
     { instance: 1, owner: 'o', repository: 'r', number: 1 },
+    { instance: ' github.com', owner: 'o', repository: 'r', number: 1 },
+    { instance: 'https://github.com', owner: 'o', repository: 'r', number: 1 },
+    { instance: 'github.com/path', owner: 'o', repository: 'r', number: 1 },
+    { instance: 'github.com?query=1', owner: 'o', repository: 'r', number: 1 },
     { instance: 'github.com', owner: '', repository: 'r', number: 1 },
     { instance: 'github.com', owner: 'o', repository: '', number: 1 },
     { instance: 'github.com', owner: 'o/x', repository: 'r', number: 1 },
+    { instance: 'github.com', owner: '.', repository: 'r', number: 1 },
+    { instance: 'github.com', owner: 'o', repository: '..', number: 1 },
+    { instance: 'github.com', owner: 'o'.repeat(40), repository: 'r', number: 1 },
+    { instance: 'github.com', owner: 'o', repository: 'r'.repeat(101), number: 1 },
   ]) {
     assert.throws(() => githubWorkItemIdentity(coordinates as never), /GitHub/)
   }

@@ -81,7 +81,17 @@ test('schema 1 config rejects unknown shapes instead of treating corruption as e
     { ...base, fetchTtlSeconds: 45.5 },
     { ...base, diagnosticsMaxBytes: -1 },
     { ...base, diagnosticsMaxBytes: 1.5 },
+    { ...base, fetchTtlSecond: 30 },
     { ...base, projectBindings: 'not-an-array' },
+    { ...base, projectBindings: [{ ...binding, unexpected: true }] },
+    {
+      ...base,
+      projectBindings: [{ ...binding, container: { ...binding.container, displayName: 'ClickVibe' } }],
+    },
+    {
+      ...base,
+      projectBindings: [{ ...binding, repository: { ...binding.repository, remoteUrl: 'ignored' } }],
+    },
     {
       ...base,
       projectBindings: [{ ...binding, repository: { ...binding.repository, localPath: 'relative/repo' } }],

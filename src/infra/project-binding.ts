@@ -12,6 +12,11 @@ function objectValue(value: unknown, contract: string): Record<string, unknown> 
   return value as Record<string, unknown>
 }
 
+function exactKeys(input: Record<string, unknown>, allowed: readonly string[], contract: string): void {
+  const surplus = Object.keys(input).filter((key) => !allowed.includes(key))
+  if (surplus.length > 0) throw new Error(`${contract} contains unknown field(s): ${surplus.join(', ')}`)
+}
+
 function nonEmptyString(value: unknown, field: string, contract: string): string {
   if (typeof value !== 'string' || value.length === 0) {
     throw new Error(`${contract}.${field} must be a non-empty string`)
@@ -35,6 +40,7 @@ function absolutePath(value: unknown, field: string, contract: string): string {
 
 function parseContainer(value: unknown): ProjectContainerIdentity {
   const input = objectValue(value, 'ProjectBinding.container')
+  exactKeys(input, ['provider', 'instance', 'id'], 'ProjectBinding.container')
   return {
     provider: nonEmptyString(input.provider, 'provider', 'ProjectBinding.container'),
     instance: nonEmptyString(input.instance, 'instance', 'ProjectBinding.container'),
@@ -66,9 +72,11 @@ export function projectBindingKey(container: unknown, repositoryId: unknown): st
 
 export function parseProjectBinding(value: unknown): ProjectBinding {
   const input = objectValue(value, 'ProjectBinding')
+  exactKeys(input, ['schemaVersion', 'bindingId', 'container', 'repository'], 'ProjectBinding')
   if (input.schemaVersion !== 1) throw new Error('ProjectBinding.schemaVersion must be 1')
   const container = parseContainer(input.container)
   const repository = objectValue(input.repository, 'ProjectBinding.repository')
+  exactKeys(repository, ['repositoryId', 'localPath', 'primaryRemote'], 'ProjectBinding.repository')
   const repositoryId = nonEmptyString(repository.repositoryId, 'repositoryId', 'ProjectBinding.repository')
   if (!isRepositoryId(repositoryId)) throw new Error('ProjectBinding.repository.repositoryId is invalid')
   const bindingId = nonEmptyString(input.bindingId, 'bindingId', 'ProjectBinding')
@@ -96,6 +104,11 @@ export function createProjectBinding(value: Omit<ProjectBinding, 'schemaVersion'
 
 export function parseClickVibeConfigV1(value: unknown): ClickVibeConfigV1 {
   const input = objectValue(value, 'ClickVibeConfigV1')
+  exactKeys(
+    input,
+    ['schemaVersion', 'worktreeRoot', 'fetchTtlSeconds', 'diagnosticsMaxBytes', 'projectBindings'],
+    'ClickVibeConfigV1',
+  )
   if (input.schemaVersion !== 1) throw new Error('ClickVibeConfigV1.schemaVersion must be 1')
   if (!Array.isArray(input.projectBindings)) {
     throw new Error('ClickVibeConfigV1.projectBindings must be an array')

@@ -21,6 +21,8 @@ function identityField(value: unknown, field: keyof WorkItemIdentity): string {
 
 export function parseWorkItemIdentity(value: unknown): WorkItemIdentity {
   const input = record(value)
+  const surplus = Object.keys(input).filter((key) => !['provider', 'instance', 'container', 'id'].includes(key))
+  if (surplus.length > 0) throw new Error(`WorkItemIdentity contains unknown field(s): ${surplus.join(', ')}`)
   return {
     provider: identityField(input.provider, 'provider'),
     instance: identityField(input.instance, 'instance'),

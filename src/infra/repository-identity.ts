@@ -20,13 +20,53 @@ export interface VerifiedProjectBindingRepository extends RepositoryIdentityLoca
   primaryRemoteUrl: string
 }
 
+export interface RepositoryIdentityWriteHandle {
+  writeFile(value: string): Promise<void>
+  sync(): Promise<void>
+  close(): Promise<void>
+}
+
+export interface RepositoryIdentityDirectoryHandle {
+  sync(): Promise<void>
+  close(): Promise<void>
+}
+
+/** Narrow file-operation boundary for deterministic durability failure testing. */
+export interface RepositoryIdentityPublicationOperations {
+  openTemporary(path: string): Promise<RepositoryIdentityWriteHandle>
+  publish(temporary: string, destination: string): Promise<void>
+  openDirectory(path: string): Promise<RepositoryIdentityDirectoryHandle>
+  remove(path: string): Promise<void>
+}
+
+const nodePublicationOperations: RepositoryIdentityPublicationOperations = {
+  async openTemporary(path) {
+    const handle = await open(path, 'wx', 0o600)
+    return {
+      writeFile: (value) => handle.writeFile(value, 'utf8'),
+      sync: () => handle.sync(),
+      close: () => handle.close(),
+    }
+  },
+  publish: link,
+  async openDirectory(path) {
+    const handle = await open(path, 'r')
+    return {
+      sync: () => handle.sync(),
+      close: () => handle.close(),
+    }
+  },
+  remove: unlink,
+}
+
 async function git(repositoryPath: string, ...args: string[]): Promise<string> {
   try {
     const result = await execFileAsync('git', ['-C', repositoryPath, ...args], { encoding: 'utf8' })
     return result.stdout.trim()
   } catch (reason) {
     const detail = reason as { stderr?: string; message?: string }
-    throw new Error(detail.stderr?.trim() || detail.message || String(reason))
+    const command = ['git', '-C', repositoryPath, ...args].join(' ')
+    throw new Error(`${command} failed: ${detail.stderr?.trim() || detail.message || String(reason)}`)
   }
 }
 
@@ -42,6 +82,21 @@ export async function inspectRepositoryIdentityLocation(repositoryPath: string):
     throw new Error(`repository identity requires the top-level checkout path: ${topLevel}`)
   }
   const commonDir = await realpath(await git(requestedPath, 'rev-parse', '--path-format=absolute', '--git-common-dir'))
+  const dotGitPath = join(topLevel, '.git')
+  const dotGit = await lstat(dotGitPath)
+  if (dotGit.isSymbolicLink()) throw new Error(`untrusted gitdir symlink: ${dotGitPath}`)
+  if (dotGit.isDirectory()) {
+    if ((await realpath(dotGitPath)) !== commonDir) {
+      throw new Error(`untrusted gitdir outside checkout: ${dotGitPath}`)
+    }
+  } else if (dotGit.isFile()) {
+    const gitDir = await realpath(await git(requestedPath, 'rev-parse', '--path-format=absolute', '--git-dir'))
+    if (dirname(gitDir) !== join(commonDir, 'worktrees')) {
+      throw new Error(`untrusted gitdir outside registered worktrees: ${gitDir}`)
+    }
+  } else {
+    throw new Error(`untrusted gitdir type: ${dotGitPath}`)
+  }
   return {
     localPath: topLevel,
     commonDir,
@@ -81,13 +136,30 @@ async function ensureIdentityDirectory(path: string): Promise<void> {
   if (!metadata.isDirectory()) throw new Error(`repository identity path is not a directory: ${path}`)
 }
 
-async function syncDirectory(path: string): Promise<void> {
-  const handle = await open(path, 'r')
+function errorMessage(reason: unknown): string {
+  return reason instanceof Error ? reason.message : String(reason)
+}
+
+async function captureFailure(failures: unknown[], operation: () => Promise<void>): Promise<void> {
   try {
-    await handle.sync()
-  } finally {
-    await handle.close()
+    await operation()
+  } catch (reason) {
+    failures.push(reason)
   }
+}
+
+function throwFailures(failures: unknown[], action: string): void {
+  if (failures.length === 0) return
+  if (failures.length === 1) throw failures[0]
+  throw new AggregateError(failures, `${action}: ${failures.map(errorMessage).join('; ')}`)
+}
+
+async function syncDirectory(path: string, operations: RepositoryIdentityPublicationOperations): Promise<void> {
+  const handle = await operations.openDirectory(path)
+  const failures: unknown[] = []
+  await captureFailure(failures, () => handle.sync())
+  await captureFailure(failures, () => handle.close())
+  throwFailures(failures, `directory sync failed for ${path}`)
 }
 
 export async function readRepositoryId(repositoryPath: string): Promise<string> {
@@ -97,7 +169,10 @@ export async function readRepositoryId(repositoryPath: string): Promise<string> 
   return repositoryId
 }
 
-export async function ensureRepositoryId(repositoryPath: string): Promise<string> {
+export async function ensureRepositoryId(
+  repositoryPath: string,
+  operations: RepositoryIdentityPublicationOperations = nodePublicationOperations,
+): Promise<string> {
   const location = await inspectRepositoryIdentityLocation(repositoryPath)
   const identityDirectory = dirname(location.repositoryIdPath)
   await ensureIdentityDirectory(identityDirectory)
@@ -106,27 +181,31 @@ export async function ensureRepositoryId(repositoryPath: string): Promise<string
 
   const repositoryId = `repo_${randomUUID()}`
   const temporary = join(identityDirectory, `.repository-id.tmp-${process.pid}-${randomUUID()}`)
-  const handle = await open(temporary, 'wx', 0o600)
-  try {
-    await handle.writeFile(`${repositoryId}\n`, 'utf8')
-    await handle.sync()
-  } finally {
-    await handle.close()
+  const handle = await operations.openTemporary(temporary)
+  const preparationFailures: unknown[] = []
+  await captureFailure(preparationFailures, () => handle.writeFile(`${repositoryId}\n`))
+  if (preparationFailures.length === 0) await captureFailure(preparationFailures, () => handle.sync())
+  await captureFailure(preparationFailures, () => handle.close())
+  if (preparationFailures.length > 0) {
+    await captureFailure(preparationFailures, () => operations.remove(temporary))
+    throwFailures(preparationFailures, `repositoryId temporary preparation failed for ${temporary}`)
   }
 
   let published = false
+  let contended = false
+  const publicationFailures: unknown[] = []
   try {
-    try {
-      await link(temporary, location.repositoryIdPath)
-      published = true
-      await syncDirectory(identityDirectory)
-    } catch (reason) {
-      if ((reason as NodeJS.ErrnoException).code !== 'EEXIST') throw reason
-    }
-  } finally {
-    await unlink(temporary).catch(() => {})
-    if (published) await syncDirectory(identityDirectory)
+    await operations.publish(temporary, location.repositoryIdPath)
+    published = true
+  } catch (reason) {
+    if ((reason as NodeJS.ErrnoException).code === 'EEXIST') contended = true
+    else publicationFailures.push(reason)
   }
+  if (published || contended) {
+    await captureFailure(publicationFailures, () => syncDirectory(identityDirectory, operations))
+  }
+  await captureFailure(publicationFailures, () => operations.remove(temporary))
+  throwFailures(publicationFailures, `repositoryId publication failed for ${location.repositoryIdPath}`)
   return published ? repositoryId : readRepositoryIdPath(location.repositoryIdPath)
 }
 
