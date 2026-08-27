@@ -1,6 +1,6 @@
 # ClickVibe 核心数据契约
 
-> Status: Accepted | Parent: [Canonical Domain Model](canonical-domain-model.md) | Decision: [ADR-0006](decisions/0006-canonical-domain-model-and-contracts.md)
+> Status: Accepted | Parent: [Canonical Domain Model](canonical-domain-model.md) | Decisions: [ADR-0006](decisions/0006-canonical-domain-model-and-contracts.md), [ADR-0009](decisions/0009-v02-clean-break-local-state-and-config.md)
 
 本文中的 TypeScript 是持久化/wire 语义草图，不承诺物理文件位置，也不等于全部契约在 v0.2 一次实现或立即修改公开 API。每个字段必须先有唯一语义，再按[产品演进路线](../roadmap.md)随真实消费者进入实现。
 
@@ -16,11 +16,11 @@
 
 ### 实现版本边界
 
-- **v0.2**：WorkItemIdentity、ProjectBinding、WorkItemContractSnapshot、Observation/Cache、ArtifactRef、DiagnosticRecord 与三个访问平面需要的作用域；保留并迁移 legacy WorkflowEvent 的有效语义。
+- **v0.2**：WorkItemIdentity、ProjectBinding、WorkItemContractSnapshot、Observation/Cache、ArtifactRef、DiagnosticRecord 与三个访问平面需要的作用域；依 ADR-0009 对 v0.1 本地 config/state 做 cold-backup clean break，不迁移 legacy WorkflowEvent。
 - **v0.3**：DeliveryBasis、AutomationPolicySnapshot、WorkflowControlState、CapabilityLease、Run、ReviewConclusion、Decision/ActionResult、完整判别式 EventEnvelope 和 Loop Guard。
 - **v0.4+**：在上述契约上补齐完整恢复/复盘、并行协调、介入产品化和后续 Provider 验证，不另造同义身份、SHA、generation 或 evidence。
 
-WorkItemContract 与 EventEnvelope 的排期差异来自真实消费者，不来自“迁移目标天然算消费者”：现有 `issueSnapshot` 已在读取、授权、Coding 和 Review 路径生效；完整因果 EventEnvelope 的首个生产者是 v0.3 自主决策链。legacy WorkflowEvent 仍被部分现行控制逻辑读取，v0.2 必须保留和映射其有效语义，不能静默删除。
+WorkItemContract 与 EventEnvelope 的排期差异来自真实消费者：新的读取、授权、Coding 和 Review 路径在 v0.2 直接消费 WorkItemContract；完整因果 EventEnvelope 的首个生产者是 v0.3 自主决策链。v0.1 `issueSnapshot`、WorkflowEvent 和 task/session 只保存在冷备份中，不进入 v0.2 active state，也不授权当前动作。
 
 ## 1. 平台与 Work Item 身份
 
@@ -444,7 +444,7 @@ type WorkflowEvent =
 | `observer.completed` | 必须非空 | 诊断只能作用于触发它的 generation 与 evidence |
 | `delivery.merged` | 必须非空 | 交付记录必须证明合并的是通过门禁的 exact head |
 
-DiagnosticRecord 不使用 EventEnvelope 的 `basis` 表达前置基础设施错误；它通过可空 workflow、operation、原始错误和 ArtifactRef 保存证据。迁移后的 legacy event 若无法恢复完整 basis，必须标记 legacy/unknown，只能展示和复盘，不能授权当前动作。
+DiagnosticRecord 不使用 EventEnvelope 的 `basis` 表达前置基础设施错误；它通过可空 workflow、operation、原始错误和 ArtifactRef 保存证据。v0.1 legacy event 不进入 active projection；需要复盘时只从只读冷备份人工提取，不能授权当前动作。
 
 事件用于审计与投影，不意味着所有当前状态都必须从零重放。WorkflowControlState 仍由串行命令域原子持久化，事件追加失败必须作为明确错误处理，不能静默丢失因果链。
 
@@ -452,27 +452,24 @@ DiagnosticRecord 不使用 EventEnvelope 的 `basis` 表达前置基础设施错
 
 1. 只在持久化/wire 边界设置 schemaVersion；当前首版为 `1`。
 2. 新增可选展示字段可以向前兼容；改变身份、权威、状态语义必须升级版本。
-3. 每个版本提供显式、幂等迁移函数；迁移前备份，失败保留原文件并停止写入。
-4. 旧记录读取后进入目标内存模型，但新写入只使用目标 schema，禁止长期双写。
+3. v0.1 → v0.2 依 ADR-0009 做 cold-backup clean break；v0.2 及后续正式 schema 的升级提供显式、幂等迁移函数，迁移前备份，失败保留原文件并停止写入。
+4. v0.1 旧记录不进入 v0.2 active 内存模型；后续 schema 迁移完成后只写目标 schema，禁止长期双写。
 5. 未知 event type 原样保留并跳过 Projection，不能删除或解释成成功。
 6. Hash 输入包含 schema/canonicalization 版本，算法变化不会冒充相同 fingerprint。
 
-## 14. v0.1 → Canonical Contract 迁移映射
+## 14. v0.1 cold archive 与 v0.2 重建映射
 
-下表是“决定保留该资产时如何迁移”的映射，不是对全部 v0.1 内部结构的兼容承诺。实施前先把每类代码和持久数据标记为保留、重构、迁移、归档或废弃；废弃项必须说明理由、影响范围和备份位置。
+v0.1 本地 config/state 整体冷备份，不由 v0.2 active runtime 读取。下表定义新 state 如何从当前 Provider/Git 事实重新建立语义，以及哪些旧字段只留在冷备份。它不是 legacy reader 规格。
 
-| v0.1 字段/结构 | 目标契约 | 迁移规则 |
+| v0.1 字段/结构 | v0.2 目标 | clean-break 规则 |
 |---|---|---|
-| `repoKey: owner/repo` | WorkItem `provider/instance/container` | 当前映射为 `github/github.com/repoKey` |
-| Issue URL 中的 number | `WorkItemIdentity.id` | 转为十进制字符串；URL 保留为 locator |
-| `IssueWorkflow.key` | WorkflowIdentity 的存储键 | 兼容读取旧 key；新 canonical key 包含 provider/instance/container/id |
-| `worktree/branch` | ProjectBinding + Run scope/Projection | path 是 locator，不进入身份 |
-| `baseRef` 拼接字符串 | `DeliveryBasis.baseline.ref/sha` | 能可靠解析才迁移；不完整则标记 unknown，禁止猜 |
-| `issueSnapshot` | WorkItemContractSnapshot | 原文进入 ArtifactRef；缺 AC/Non-Goals 等按 legacy/unknown 处理 |
-| dev/review task/session 字段 | RunRecord + CapabilityLease | 迁移当前引用；没有 generation 证据的旧 Run 不获得新写权限 |
-| `reviewResult.passed/issues` | legacy ReviewConclusion | 缺 exact basis/theme/evidence 时只能展示，不能授权自动 merge |
-| `autoRun` | AutomationPolicySnapshot + WorkflowControlState | 配置与进度拆分；旧状态保留原始 ArtifactRef |
-| `WorkflowEvent` 可选字段对象 | 判别式 EventEnvelope | 按 kind 映射；无法判定的字段进入 legacy payload，不丢弃 |
-| `stage` | Workflow Projection | 作为迁移提示，不提升为 Git/GitHub 事实 |
+| `repoKey`、Issue URL、旧 workflow key | WorkItemIdentity + canonical key | 不读旧 state；从当前 Provider item 经 Adapter 生成新四元组和 key |
+| 未版本化 `config.yaml.repos` | schema 1 ProjectBinding config | 升级器精确预览、备份并一次性转换；普通 runtime 不兼容读取 |
+| `worktree/branch` | Git fact + 新 Run locator | Git 现场原样保留；冲突时阻止新任务，不自动导入或覆盖 |
+| `baseRef` 拼接字符串 | 新 DeliveryBasis | 不导入；新动作重新观察 remote ref 与 exact SHA |
+| `issueSnapshot` | WorkItemContractSnapshot | 不导入；从当前 Provider contract 重新抓取并保存新 ArtifactRef |
+| dev/review task/session 字段 | 新 Run/CapabilityLease | 不导入；旧 session/task 不获得 v0.2 写权限 |
+| `reviewResult`、`WorkflowEvent`、`stage` | 冷备份 | 不进入 active projection；需要复盘时只读人工提取 |
+| `autoRun` | 新 AutomationPolicy/ControlState | 不导入；v0.3 按新契约创建 |
 
-迁移完成标准不是“新类型能读取旧 JSON”，而是：旧记录不会获得比原来更多的权限，unknown 不被补成确定值，且新写入只有一个事实源。
+clean break 完成标准是：旧 config/state 有可验证冷备份，新 `~/.clickvibe/state` 与 schema 1 config 逐项回读通过，v0.2 没有 active legacy reader，Git/Provider 事实未被删除或覆盖，且新写入只有一个事实源。

@@ -224,16 +224,16 @@ stateDiagram-v2
 1. 任何外部读取失败都产生 `unknown` Observation 或 DiagnosticRecord，不能合成为“没有依赖/任务已死/检查已通过”。
 2. 动作返回成功只表示请求完成；必须重新观察目标事实。
 3. generation、revision、sequence、round、step 是不同坐标，禁止互换。
-4. 旧 schema 的兼容读取只用于迁移；新旧模型不得长期双写为两个事实源。
+4. v0.1 本地 config/state 依 ADR-0009 冷备份后 clean break，v0.2 active runtime 不做兼容读取；v0.2 及后续正式 schema 的升级使用显式迁移，新旧模型不得长期双写为两个事实源。
 5. 原始证据保留 ArtifactRef，结构化摘要和分类标签不能覆盖原文。
 6. 凭据值不进入任何核心契约；只保存 credential ref、provider/model 标识和脱敏后的诊断。
 
 ## 分阶段实施
 
-1. **v0.2 可信访问与身份地基**：实现 WorkItemIdentity、ProjectBinding、WorkItemContractSnapshot、Local Git Snapshot、Remote Git Coordinator、GitHub REST Gateway、最小 DiagnosticRecord/ArtifactRef 和逐类迁移。WorkItemContract 在本版本落地，因为现有 `issueSnapshot` 已参与读取与授权，缓存 freshness 和旧授权失效直接消费它。
-2. **v0.3 自主交付安全边界**：实现 DeliveryBasis、WorkflowControlState、generation、CapabilityLease、最小 Policy、判别式 EventEnvelope 因果链和纯规则 Loop Guard。v0.2 只保留并映射 legacy WorkflowEvent 的有效语义，不建立无消费者的完整自主事件总包。
+1. **v0.2 可信访问与身份地基**：实现 WorkItemIdentity、ProjectBinding、WorkItemContractSnapshot、Local Git Snapshot、Remote Git Coordinator、GitHub REST Gateway、最小 DiagnosticRecord/ArtifactRef，并依 ADR-0009 显式切换本地 config/state。WorkItemContract 在本版本落地，因为新的读取、授权、Coding 和 Review 路径需要共享需求快照、freshness 和失效语义。
+2. **v0.3 自主交付安全边界**：实现 DeliveryBasis、WorkflowControlState、generation、CapabilityLease、最小 Policy、判别式 EventEnvelope 因果链和纯规则 Loop Guard。v0.2 不迁移 legacy WorkflowEvent，也不预建无消费者的完整自主事件总包。
 3. **v0.4–v0.5 可恢复再并行**：先完成全因果链恢复与复盘，再扩大到同仓库多 Work Item 的 baseline、冲突和合并顺序协调。
 4. **v0.6 介入产品化**：面板提供证据查看、指令修改和受控恢复；模型型 Runtime Observer 仅在数据证明能降低人工时间时启用。
-5. 每一步都按资产决定保留、重构、迁移、归档或废弃；任何数据处置先有备份和回滚边界，已切换状态不得形成长期双写。
+5. 每一步都按资产决定保留、重构、迁移、归档或废弃；v0.1 本地 config/state 使用 ADR-0009 的 cold-backup clean break，Git/Provider 事实原样保留。任何数据处置先有备份和回滚边界，已切换状态不得形成长期双写。
 
 任何一步都不允许“为了迁移方便”恢复公开的无条件整对象写入口。

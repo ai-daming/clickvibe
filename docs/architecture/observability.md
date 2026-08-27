@@ -53,7 +53,7 @@
 }
 ```
 
-这是目标契约，不等于 v0.2 一次实现全部事件。v0.2 先统一 DiagnosticRecord、ArtifactRef、请求指标和 legacy event 迁移语义；v0.3 为自主决策链写入完整判别式 EventEnvelope；v0.4 才以恢复和复盘为退出标准补齐全因果链。旧日志按复盘价值决定迁移、兼容读取、归档或备份后废弃，不为无价值旧格式建立永久兼容层。
+这是目标契约，不等于 v0.2 一次实现全部事件。v0.2 先统一新 state 的 DiagnosticRecord、ArtifactRef 和请求指标；v0.3 为自主决策链写入完整判别式 EventEnvelope；v0.4 才以恢复和复盘为退出标准补齐全因果链。v0.1 日志随 state 整体冷备份，不进入 v0.2 active runtime；需要复盘时只读人工提取，不为旧格式建立兼容层。
 
 ## 复盘必须回答的问题
 
