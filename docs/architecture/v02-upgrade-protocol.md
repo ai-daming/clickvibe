@@ -34,7 +34,7 @@
 
 ### 3.1 两种机制缺一不可
 
-升级锁负责阻止两个 v0.2 upgrader 并发。实现复用 `src/infra/workflow-persistence.ts` 的 link 型跨进程锁模式：候选文件写入完整 owner token 后通过 hard link 争抢固定锁；只在确认 owner 进程已死亡后回收 stale lock。锁 token、PID、进程启动标识和 plan fingerprint 写入 journal，模糊存活状态一律不抢锁。
+升级锁负责阻止两个 v0.2 upgrader 并发。实现复用 `src/infra/workflow-persistence.ts` 的 link 型跨进程锁模式：候选文件写入完整 owner token 后通过 hard link 争抢固定锁。schema 1 旧 owner 的启动字符串受 locale/timezone 影响：PID 存活时一律不抢，只接受 `ESRCH` 明确死亡；schema 2 owner 使用固定 `LANG/LC_ALL=C`、`TZ=UTC` 的启动身份，PID 对应 zombie 或启动身份变化时才按 PID 复用回收。锁 token、PID、进程启动标识和 plan fingerprint 写入 journal，身份读取不明继续 fail closed。
 
 锁本身不能约束不认识它的 v0.1 二进制。因此 apply 还必须取得宿主提供的 generation fence：
 
@@ -45,9 +45,25 @@
 
 如果安装环境不能证明“旧入口已停用且不会在临界区重启”，apply 必须拒绝，要求关闭宿主后由离线升级入口执行。直接再次运行已被替换的 v0.1 二进制属于显式 downgrade：必须先走 rollback preview/authorization，不能把 v0.2 state 当作空 v0.1 state 打开。
 
+未来的在线宿主集成必须提供三个动作：原子关闭 legacy start entry、独立确认该关闭仍生效、按升级终态恢复旧入口或完成新 bundle 接管。fence 在关闭入口后同时读取宿主 live task/job 与操作系统进程表，等待全部退出，并在进入 prepare 前再次确认入口仍关闭。只传入一份调用方声称为空的 activity 列表不构成 fence；缺少任一宿主动作时只能拒绝在线 apply。
+
+当前 Slice 2 只开放离线 factory：操作者必须显式声明 DSH 宿主已经停止且升级期间不会重启；factory 同时枚举 argv 可识别的独立 legacy 进程作为第二信号。进程内插件无法由 `ps` 的 argv 证明，因此这份离线声明是操作边界，不得包装成在线证明。在线 factory 在宿主 capability 真正接线前固定拒绝；`apply`/`resume`/`rollback` 还会在创建锁候选文件前拒绝任何调用方自造的 fence 对象。
+
+旧进程长期持有已打开文件描述符是 cutover 的危险窗口：仅看路径名无法发现它仍可向 rename 后的 cold backup 写入。因此进程退出必须发生在 state rename 之前；最终 verify 还必须重新计算 cold backup 的 inode、文件数、字节数和内容 hash。任一项漂移都不得写 `verified`。内容校验是第二道伤害检测，不替代先停旧进程，因为已污染的 backup 可能无法自动 rollback。
+
 ### 3.2 临界区顺序
 
-apply 的顺序固定为：取得升级锁 → 取得 generation fence → 临界区内活性检查 → 重算 fingerprint → 写 durable journal → prepare → cutover → read-back → `verified`/`rolled_back` → 释放 fence 和锁。任何失败都保持锁和 fence，直到进程退出或进入明确终态；新进程看到未完成 journal 时只能进入 recovery。
+apply 的顺序固定为：验证 fence 来自批准 factory → 取得升级锁 → 取得 generation fence → 临界区内活性检查 → 重算 fingerprint → 写 durable journal → prepare → cutover → read-back → `verified`/`rolled_back` → 释放 fence 和锁。失败时必须先把原始错误和当前阶段写入 journal，再尝试释放 fence 和锁；两个释放动作都必须执行，任一释放失败都向调用方报错。新进程看到未完成 journal 时只能进入 recovery。
+
+### 3.3 人工处理残留锁
+
+只有在自动 recovery 因 `upgrade-v0.2.lock` 残留而无法取得锁时才进入人工处置；journal、backup 和 staging 资产都不得随锁删除。
+
+1. 停止 DSH 宿主和所有 ClickVibe 升级命令，确认处置期间不会自动重启。
+2. 读取 `~/.clickvibe/upgrade-v0.2.lock`，记录 `schemaVersion`、`token`、`pid`、`acquiredAt` 和 `planFingerprint`；文件不是普通文件、JSON 损坏或字段不全时停止，不猜测 owner。
+3. 用操作系统进程查询同时验证该 PID 不存在；只有明确得到 `ESRCH`/“no such process”才可判定 owner 已死。PID 存活、权限不足或查询结果不明时禁止删锁；schema 1 的 `processStart` 不参与人工死亡判断。
+4. 删除前再次回读锁文件，确认 token 与第 2 步一致，避免删掉刚接管的新 owner。随后只删除精确路径 `~/.clickvibe/upgrade-v0.2.lock`，不得使用通配符或递归删除。
+5. 重新运行只读 recovery preview。存在未完成 journal 时只能按其精确 fingerprint 授权 resume/rollback，不能当成全新升级。
 
 ## 4. repositoryId 与 Binding 准备
 
@@ -168,10 +184,12 @@ rollback 用 config backup 生成同目录 temp，再按 fsync + atomic replace 
 
 损坏或缺失 journal 时，recovery inventory 必须展示所有候选 config/state/backup/staging 的 inode、schema、hash、mtime 和配对判断，零写入。重建 journal 与 rollback 都需要新的精确 preview/authorization，原始损坏 journal 不得覆盖。
 
+当前 Slice 2 对“journal 缺失/损坏且存在升级证据”作显式降级：返回 `manual-recovery-required` 与完整只读 inventory，不提供自动重建或无 journal rollback。原因是缺失 journal 时无法从文件名反推出原 plan、排除项和 identity 绑定，自动猜测会制造第二个阶段事实源。后续若实现 journal reconstruction，必须另做 L3 设计并授权精确 inode/path/hash；在此之前普通 preview、apply 和 runtime 一律 fail-closed。没有 journal 且不存在 backup/staging/schema-1 config/v0.2 marker 等升级证据时，才允许视为从未 apply。
+
 ## 11. 实现与测试门禁
 
-- 双 upgrader 竞争只能有一个锁赢家；stale recovery 不得删除新 owner 的锁。
-- 在临界区活性检查前后尝试启动 v0.1 job，generation fence 必须拒绝；无法取得 fence 时 apply 为零写入。
+- 双 upgrader 竞争只能有一个锁赢家；stale recovery 不得删除新 owner 的锁；PID 复用或 zombie 必须由固定 locale/TZ 的启动身份与进程状态识别，不能永久卡锁。
+- 调用方自造/no-op fence 必须在锁候选文件产生前拒绝；在线 factory 在宿主接线前固定拒绝；离线 factory 必须要求显式 host-stopped 声明并拒绝可枚举的 legacy 进程。
 - 在每次 file fsync、rename、directory fsync 和 journal replace 前后注入真实文件系统失败，证明状态可 resume 或 rollback。
 - repositoryId 在 temp write、fsync、link 和目录 fsync 各窗口崩溃后，最终文件只能是完整合法值或不存在；不得出现空/半写最终文件。
 - `cp -r` 复制 sidecar、相同 remote 的独立 clone、linked worktree、路径移动、bare repository 和 submodule 均有真实 Git 测试。

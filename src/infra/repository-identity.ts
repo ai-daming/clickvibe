@@ -173,13 +173,36 @@ export async function ensureRepositoryId(
   repositoryPath: string,
   operations: RepositoryIdentityPublicationOperations = nodePublicationOperations,
 ): Promise<string> {
+  return ensureRepositoryIdValue(repositoryPath, null, operations)
+}
+
+/** Publish the exact repositoryId frozen by an authorized upgrade plan. */
+export async function ensurePlannedRepositoryId(
+  repositoryPath: string,
+  plannedRepositoryId: string,
+  operations: RepositoryIdentityPublicationOperations = nodePublicationOperations,
+): Promise<string> {
+  if (!isRepositoryId(plannedRepositoryId)) throw new Error('planned repositoryId is invalid')
+  return ensureRepositoryIdValue(repositoryPath, plannedRepositoryId, operations)
+}
+
+async function ensureRepositoryIdValue(
+  repositoryPath: string,
+  plannedRepositoryId: string | null,
+  operations: RepositoryIdentityPublicationOperations,
+): Promise<string> {
   const location = await inspectRepositoryIdentityLocation(repositoryPath)
   const identityDirectory = dirname(location.repositoryIdPath)
   await ensureIdentityDirectory(identityDirectory)
   const existing = await existingRepositoryId(location.repositoryIdPath)
-  if (existing !== null) return existing
+  if (existing !== null) {
+    if (plannedRepositoryId !== null && existing !== plannedRepositoryId) {
+      throw new Error(`repositoryId changed after preview: planned ${plannedRepositoryId}, found ${existing}`)
+    }
+    return existing
+  }
 
-  const repositoryId = `repo_${randomUUID()}`
+  const repositoryId = plannedRepositoryId ?? `repo_${randomUUID()}`
   const temporary = join(identityDirectory, `.repository-id.tmp-${process.pid}-${randomUUID()}`)
   const handle = await operations.openTemporary(temporary)
   const preparationFailures: unknown[] = []
@@ -206,7 +229,11 @@ export async function ensureRepositoryId(
   }
   await captureFailure(publicationFailures, () => operations.remove(temporary))
   throwFailures(publicationFailures, `repositoryId publication failed for ${location.repositoryIdPath}`)
-  return published ? repositoryId : readRepositoryIdPath(location.repositoryIdPath)
+  const result = published ? repositoryId : await readRepositoryIdPath(location.repositoryIdPath)
+  if (plannedRepositoryId !== null && result !== plannedRepositoryId) {
+    throw new Error(`repositoryId changed during publication: planned ${plannedRepositoryId}, found ${result}`)
+  }
+  return result
 }
 
 export async function verifyProjectBindingRepository(value: unknown): Promise<VerifiedProjectBindingRepository> {

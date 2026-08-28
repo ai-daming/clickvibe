@@ -6,6 +6,7 @@ import { isDeepStrictEqual } from 'node:util'
 import type { IssueWorkflow } from './state.ts'
 import { workflowPath, type WorkflowStorageIdentity } from './state-layout.ts'
 import { applyWorkflowMetadataPatch, TASK_STATE_FIELDS, type WorkflowMetadataPatch } from './workflow-metadata.ts'
+import { assertLegacyStateWriteAllowed } from './v02-generation-fence.ts'
 
 export type { WorkflowMetadataPatch } from './workflow-metadata.ts'
 
@@ -115,8 +116,14 @@ const workflowCommandQueues = new Map<string, Promise<void>>()
  */
 function enqueueWorkflowCommand<T>(workflow: WorkflowStorageIdentity, execute: () => Promise<T>): Promise<T> {
   const key = workflowStatePath(workflow)
+  assertLegacyStateWriteAllowed(join(homedir(), '.clickvibe', 'state'))
   const previous = workflowCommandQueues.get(key) ?? Promise.resolve()
-  const operation = previous.catch(() => undefined).then(execute)
+  const operation = previous
+    .catch(() => undefined)
+    .then(async () => {
+      assertLegacyStateWriteAllowed(join(homedir(), '.clickvibe', 'state'))
+      return execute()
+    })
   const tail = operation.then(
     () => undefined,
     () => undefined,
@@ -221,10 +228,13 @@ async function readCurrent(path: string): Promise<IssueWorkflow | null> {
 }
 
 async function atomicWrite(path: string, workflow: IssueWorkflow): Promise<void> {
+  assertLegacyStateWriteAllowed(join(homedir(), '.clickvibe', 'state'))
   await mkdir(dirname(path), { recursive: true })
   const temporary = `${path}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`
   try {
+    assertLegacyStateWriteAllowed(join(homedir(), '.clickvibe', 'state'))
     await writeFile(temporary, JSON.stringify(workflow, null, 2), { encoding: 'utf8', mode: 0o600 })
+    assertLegacyStateWriteAllowed(join(homedir(), '.clickvibe', 'state'))
     await rename(temporary, path)
   } finally {
     await rm(temporary, { force: true }).catch(() => undefined)

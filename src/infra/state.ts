@@ -24,6 +24,7 @@ import {
   workflowRevision,
   workflowStatePath,
 } from './workflow-persistence.ts'
+import { assertLegacyStateWriteAllowed, isV02GenerationViolation } from './v02-generation-fence.ts'
 export { WorkflowConflictError } from './workflow-persistence.ts'
 export type * from './workflow-persistence.ts'
 export { workflowRevision }
@@ -234,14 +235,17 @@ async function storedWorkflowFiles(): Promise<string[]> {
 }
 
 async function migrateWorkflowLogs(workflow: IssueWorkflow): Promise<void> {
+  const root = stateDir()
+  assertLegacyStateWriteAllowed(root)
   for (const kind of ['dev', 'review'] as const) {
     const taskId = kind === 'dev' ? workflow.devTaskId : workflow.reviewTaskId
     if (!taskId) continue
     const storageKeys = [workflow.key, legacyIssueKey(workflow.key)].filter((key): key is string => key !== null)
     for (const storageKey of storageKeys) {
       try {
+        assertLegacyStateWriteAllowed(root)
         await migrateLegacyLog(
-          stateDir(),
+          root,
           workflow,
           kind,
           taskId,
@@ -249,7 +253,8 @@ async function migrateWorkflowLogs(workflow: IssueWorkflow): Promise<void> {
           new Date(workflow.updatedAt || 0).toISOString(),
         )
         break
-      } catch {
+      } catch (reason) {
+        if (isV02GenerationViolation(reason)) throw reason
         // Best effort: try the legacy alias or leave the source for a later retry.
       }
     }
@@ -257,6 +262,8 @@ async function migrateWorkflowLogs(workflow: IssueWorkflow): Promise<void> {
 }
 
 async function migrateLegacyWorkflowFile(path: string): Promise<void> {
+  const root = stateDir()
+  assertLegacyStateWriteAllowed(root)
   const workflow = await readWorkflowFile(path)
   if (!workflow) return
   const destination = statePath(workflow)
@@ -264,12 +271,16 @@ async function migrateLegacyWorkflowFile(path: string): Promise<void> {
     const existing = await readWorkflowFile(destination)
     if (existing && existing.key !== workflow.key) throw new Error('workflow migration target belongs to another issue')
     if (!existing) {
+      assertLegacyStateWriteAllowed(root)
       await mkdir(join(destination, '..'), { recursive: true })
+      assertLegacyStateWriteAllowed(root)
       await link(path, destination)
     }
+    assertLegacyStateWriteAllowed(root)
     await rm(path)
     await migrateWorkflowLogs(workflow)
-  } catch {
+  } catch (reason) {
+    if (isV02GenerationViolation(reason)) throw reason
     // Migration is retryable and must not prevent startup.
   }
 }
@@ -278,10 +289,12 @@ const migrations = new Map<string, Promise<void>>()
 
 async function migrateLegacyState(): Promise<void> {
   const root = stateDir()
+  assertLegacyStateWriteAllowed(root)
   const existing = migrations.get(root)
   if (existing) return existing
   const migration = (async () => {
     try {
+      assertLegacyStateWriteAllowed(root)
       for (const entry of await readdir(root, { withFileTypes: true })) {
         if (entry.isFile() && entry.name.endsWith('.json')) {
           await migrateLegacyWorkflowFile(join(root, entry.name))
@@ -289,14 +302,18 @@ async function migrateLegacyState(): Promise<void> {
       }
       const archive = join(root, 'archive')
       try {
+        assertLegacyStateWriteAllowed(root)
         for (const entry of await readdir(archive, { withFileTypes: true })) {
           if (entry.isFile() && entry.name.endsWith('.json')) await migrateLegacyWorkflowFile(join(archive, entry.name))
         }
+        assertLegacyStateWriteAllowed(root)
         await rm(archive, { recursive: false }).catch(() => undefined)
-      } catch {
+      } catch (reason) {
+        if (isV02GenerationViolation(reason)) throw reason
         // No legacy archive directory.
       }
-    } catch {
+    } catch (reason) {
+      if (isV02GenerationViolation(reason)) throw reason
       // Missing state root or a transient read failure is non-fatal.
     }
   })()
@@ -362,7 +379,8 @@ export async function startTaskLog(
 ): Promise<void> {
   try {
     await createTaskLog(stateDir(), workflow, kind, taskId)
-  } catch {
+  } catch (reason) {
+    if (isV02GenerationViolation(reason)) throw reason
     // Log persistence remains best-effort.
   }
 }
@@ -377,7 +395,8 @@ export async function appendTaskLog(
 ): Promise<void> {
   try {
     await appendTaskLogRecord(stateDir(), workflow, kind, taskId, sequence, line, options)
-  } catch {
+  } catch (reason) {
+    if (isV02GenerationViolation(reason)) throw reason
     // Log persistence remains best-effort.
   }
 }
@@ -413,9 +432,12 @@ export async function appendLog(key: string, kind: 'dev' | 'review', line: strin
       }
     }
     const legacyPath = join(stateDir(), storageKey, `${kind}.log`)
+    assertLegacyStateWriteAllowed(stateDir())
     await mkdir(join(legacyPath, '..'), { recursive: true })
+    assertLegacyStateWriteAllowed(stateDir())
     await appendFile(legacyPath, `${line}\n`, 'utf8')
-  } catch {
+  } catch (reason) {
+    if (isV02GenerationViolation(reason)) throw reason
     // log persistence is best-effort
   }
 }

@@ -4,11 +4,13 @@ import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { isMap, parseDocument } from 'yaml'
+import { assertLegacyStateWriteAllowed } from './v02-generation-fence.ts'
 
 export async function addProjectRepoMapping(
   repoKey: string,
   projectPath: string,
 ): Promise<{ added: true } | { added: false; error: string }> {
+  assertLegacyStateWriteAllowed(join(homedir(), '.clickvibe', 'state'))
   const path = join(homedir(), '.clickvibe', 'config.yaml')
   let raw: string
   try {
@@ -34,9 +36,12 @@ export async function addProjectRepoMapping(
   document.setIn(['repos', repoKey], projectPath)
   const next = document.toString()
   const temporary = `${path}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`
+  assertLegacyStateWriteAllowed(join(homedir(), '.clickvibe', 'state'))
   await mkdir(dirname(path), { recursive: true })
   try {
+    assertLegacyStateWriteAllowed(join(homedir(), '.clickvibe', 'state'))
     await writeFile(temporary, next, { encoding: 'utf8', mode: 0o600 })
+    assertLegacyStateWriteAllowed(join(homedir(), '.clickvibe', 'state'))
     await rename(temporary, path)
   } catch (reason) {
     await unlink(temporary).catch(() => {})
