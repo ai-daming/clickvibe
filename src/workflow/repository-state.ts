@@ -28,7 +28,10 @@ import {
   readConfiguredBranchFacts,
 } from '../github/facts.ts'
 import { githubErrorMessage, githubRest } from '../github/rest.ts'
+import { existsSync } from 'node:fs'
 import { type ClickVibeConfig, loadConfig } from '../infra/runtime.ts'
+import { observeTaskOwnership, type TaskOwnershipContext } from '../infra/task-ownership.ts'
+import type { WorktreeSample } from '../infra/local-git-sampler.ts'
 import { type IssueWorkflow } from '../infra/state.ts'
 import {
   buildDependencyUnlockComment,
@@ -42,30 +45,137 @@ import { deriveWorkflowState, type WorkflowDerived } from './derive.ts'
 import { checkIssueContract } from './issue-contract.ts'
 import { fetchIssueContract } from './merge-gates.ts'
 import { workflowBaseBranch } from './state-view.ts'
+import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
+import type { ClickVibeConfigV1 } from '../infra/contracts.ts'
 import { frozenBaseHash } from '../agent/baseline.ts'
 import { type LocalGitSnapshotReader, resolveConfiguredRepoPath } from '../infra/local-git-snapshot.ts'
+
+/** Sample once per generation; a failed sample retries exactly once (issue #122 Q2). */
+async function sampleWorktreeWithRetry(
+  ctx: Context,
+  observation: LocalGitSnapshotReader,
+  config: ClickVibeConfig,
+  workflow: IssueWorkflow,
+): Promise<{ ok: true; sample: WorktreeSample } | { ok: false; error: string; cause: unknown }> {
+  // Mirror the legacy existsSync gate: a missing worktree yields the all-null
+  // facts without invoking git at all, and branch facts still come from the
+  // configured checkout.
+  if (!existsSync(workflow.worktree)) {
+    return {
+      ok: true,
+      sample: {
+        gitFacts: {
+          exists: false,
+          head: null,
+          branch: null,
+          hasUncommittedChanges: false,
+          mainHead: null,
+          aheadOfMain: 0,
+          behindMain: 0,
+          originMainHead: null,
+          aheadOfBase: 0,
+          behindBase: 0,
+          upstreamHead: null,
+          aheadOfUpstream: null,
+          behindUpstream: null,
+          mergeConflict: false,
+        },
+        branchFacts: await readConfiguredBranchFacts(
+          ctx,
+          config,
+          workflow,
+          workflow.baseRef ? workflowBaseBranch(workflow.baseRef) : undefined,
+        ),
+      },
+    }
+  }
+  const input = {
+    worktree: workflow.worktree,
+    branch: workflow.branch,
+    baseBranch: workflowBaseBranch(workflow.baseRef),
+    baseBranchNeedsDefault: workflowBaseBranch(workflow.baseRef, '') === '',
+    frozenBase: frozenBaseHash(workflow.baseRef),
+    repoPath: resolveConfiguredRepoPath(config, workflow.repoKey),
+  }
+  try {
+    return { ok: true, sample: await observation.worktreeSample(ctx, workflow.repoKey, input) }
+  } catch (firstError) {
+    try {
+      return { ok: true, sample: await observation.worktreeSample(ctx, workflow.repoKey, input) }
+    } catch (secondError) {
+      const message = String(secondError instanceof Error ? secondError.message : secondError)
+      console.warn(
+        `[clickvibe] local git snapshot sample failed twice for ${workflow.key}: ${message}`,
+        firstError instanceof Error ? firstError.message : firstError,
+      )
+      return { ok: false, error: message, cause: secondError }
+    }
+  }
+}
 
 export async function enrichWorkflowStates(
   ctx: Context,
   workflows: IssueWorkflow[],
   configOverride?: ClickVibeConfig,
   observation?: LocalGitSnapshotReader,
-): Promise<Array<IssueWorkflow & { runStartedAt: number | null; derived: WorkflowDerived }>> {
+): Promise<
+  Array<
+    | (IssueWorkflow & { runStartedAt: number | null; derived: WorkflowDerived })
+    | (IssueWorkflow & {
+        runStartedAt: null
+        derived: null
+        observation: { freshness: 'unknown'; error: string }
+      })
+  >
+> {
   const config = configOverride ?? (await loadConfig())
   return Promise.all(
     workflows.map(async (workflow) => {
-      const sample = observation
-        ? await observation
-            .worktreeSample(ctx, workflow.repoKey, {
-              worktree: workflow.worktree,
-              branch: workflow.branch,
-              baseBranch: workflowBaseBranch(workflow.baseRef),
-              baseBranchNeedsDefault: workflowBaseBranch(workflow.baseRef, '') === '',
-              frozenBase: frozenBaseHash(workflow.baseRef),
-              repoPath: resolveConfiguredRepoPath(config, workflow.repoKey),
-            })
-            .catch(() => null)
-        : null
+      const attempt = observation ? await sampleWorktreeWithRetry(ctx, observation, config, workflow) : null
+      if (attempt !== null && !attempt.ok) {
+        // Legacy parity: GitHub-side failures — notably rate limits — surface
+        // even when the local snapshot is unavailable, so callers (auto-run
+        // reconcile) keep their rate-limit deferral semantics. Task ownership
+        // (ctx.jobs) is part of that observation surface.
+        observeTaskOwnership(
+          ctx as unknown as TaskOwnershipContext,
+          workflow,
+          () => false,
+          () => null,
+        )
+        await Promise.all([
+          fetchGithubPrFact(ctx, workflow.repoKey, workflow.branch, workflow.prNumber),
+          fetchGithubIssueState(ctx, workflow.url),
+        ])
+        // issue #122 Q2: a failed snapshot must not degrade into legacy
+        // per-fact reads that render "clean" from a failure. Fail closed:
+        // no derived state, an explicit unknown observation, raw diagnostics.
+        const reason = `本地 Git 快照采样失败（已重试一次）: ${attempt.error}`
+        logTaskDiagnostic('local-git-snapshot-sample-failed', {
+          workflowKey: workflow.key,
+          repoKey: workflow.repoKey,
+          worktree: workflow.worktree,
+          error: attempt.error,
+        })
+        const row: IssueWorkflow & {
+          runStartedAt: null
+          derived: null
+          observation: { freshness: 'unknown'; error: string }
+        } = {
+          ...workflow,
+          runStartedAt: null,
+          derived: null,
+          observation: { freshness: 'unknown' as const, error: reason },
+        }
+        // Keep the original failure reachable (错误不埋葬): auto-run reconcile
+        // rethrows it so controller-failure fingerprints stay stable.
+        Object.defineProperty(row, 'localGitSampleCause', {
+          value: attempt.cause,
+          enumerable: false,
+        })
+        return row
+      }
+      const sample = attempt && attempt.ok ? attempt.sample : null
       const branchFacts = sample
         ? sample.branchFacts
         : await readConfiguredBranchFacts(

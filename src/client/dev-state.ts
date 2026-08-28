@@ -359,7 +359,7 @@ export function useDevSection({
     }
   }
   const issueClosed = String(issue.state ?? '').toUpperCase() === 'CLOSED'
-  const effectiveAction = effectiveActionForIssue(issueClosed, nextAction, workflow !== null)
+  const effectiveAction = effectiveActionForIssue(issueClosed, nextAction, workflow !== null, workflow?.observation)
   const runAction = () => {
     const userContext = contextToSubmit(contextText)
     switch (effectiveAction.kind) {

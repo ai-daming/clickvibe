@@ -63,6 +63,17 @@ test('client action fallback preserves closed, existing and brand-new issue beha
   assert.equal(effectiveActionForIssue(false, undefined, true).kind, 'none')
 })
 
+test('an unknown local-git observation fails closed with an explicit label', () => {
+  const observation = { freshness: 'unknown' as const, error: '本地 Git 快照采样失败（已重试一次）: boom' }
+  const action = effectiveActionForIssue(false, undefined, true, observation)
+  assert.equal(action.kind, 'none')
+  assert.equal(action.label, '本地状态未知')
+  assert.match(action.hint, /boom/)
+  // A healthy observation never alters the decision.
+  const review = { kind: 'review' as const, label: 'Review', hint: 'review now' }
+  assert.deepEqual(effectiveActionForIssue(false, review, true, undefined), review)
+})
+
 test('fresh and continuation requests split before command and prompt construction', () => {
   const owned = { sessionId: 'old-session', invalid: false }
   assert.deepEqual(selectSessionLaunch(false, owned), { sessionId: 'old-session', startsFresh: false })

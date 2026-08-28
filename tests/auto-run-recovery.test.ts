@@ -110,7 +110,7 @@ test('the reconcile queue fuses three identical stacks and coalesces watchdog si
   assert.match(observed?.events.at(-1)?.note ?? '', /连续 3 次.*fingerprint/)
   const fuse = (await diagnosticRecords(tempHome, '1202')).find((record) => record.event === 'auto-run-controller-fuse')
   assert.equal(fuse?.consecutive, 3)
-  assert.match(String(fuse?.errorStack), /缺少与该 OPEN Issue 绑定的服务端确认快照/)
+  assert.match(String(fuse?.errorStack), /deterministic reconcile failure/)
   assert.equal(typeof fuse?.fingerprint, 'string')
   assert.match(String(fuse?.basis), /same-stack.*3/)
 
