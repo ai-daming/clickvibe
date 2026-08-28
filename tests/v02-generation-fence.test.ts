@@ -93,10 +93,11 @@ test('process enumeration finds a real legacy ClickVibe process and fence waits 
       true,
       JSON.stringify(observed),
     )
-    await assert.rejects(
-      offlineFence(enumerateLegacyClickVibeProcesses).acquire('sha256:plan'),
-      /old ClickVibe processes.*still active/,
-    )
+    await assert.rejects(offlineFence(enumerateLegacyClickVibeProcesses).acquire('sha256:plan'), (reason: unknown) => {
+      assert.match(String(reason), /old ClickVibe processes.*still active/)
+      assert.doesNotMatch(String(reason), /live tasks|live jobs/)
+      return true
+    })
   } finally {
     child.kill()
     if (child.exitCode === null) await once(child, 'exit')

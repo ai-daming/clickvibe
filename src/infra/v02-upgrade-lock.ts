@@ -9,13 +9,19 @@ import { durableWriteExclusive, syncDirectory, type V02UpgradeCheckpoint } from 
 const execFileAsync = promisify(execFile)
 
 export interface V02UpgradeLockOwner {
-  schemaVersion: 1
+  schemaVersion: 2
   token: string
   pid: number
   processStart: string
   acquiredAt: string
   planFingerprint: string
 }
+
+interface LegacyV02UpgradeLockOwner extends Omit<V02UpgradeLockOwner, 'schemaVersion'> {
+  schemaVersion: 1
+}
+
+type ReadV02UpgradeLockOwner = V02UpgradeLockOwner | LegacyV02UpgradeLockOwner
 
 export interface V02UpgradeLock {
   owner: V02UpgradeLockOwner
@@ -40,12 +46,12 @@ async function processIdentity(pid: number): Promise<ProcessIdentity | null> {
   }
 }
 
-async function readOwner(path: string): Promise<V02UpgradeLockOwner> {
+async function readOwner(path: string): Promise<ReadV02UpgradeLockOwner> {
   const metadata = await lstat(path)
   if (!metadata.isFile() || metadata.isSymbolicLink()) throw new Error(`upgrade lock is not a regular file: ${path}`)
-  const value = JSON.parse(await readFile(path, 'utf8')) as V02UpgradeLockOwner
+  const value = JSON.parse(await readFile(path, 'utf8')) as ReadV02UpgradeLockOwner
   if (
-    value.schemaVersion !== 1 ||
+    (value.schemaVersion !== 1 && value.schemaVersion !== 2) ||
     typeof value.token !== 'string' ||
     !Number.isSafeInteger(value.pid) ||
     typeof value.processStart !== 'string' ||
@@ -56,13 +62,16 @@ async function readOwner(path: string): Promise<V02UpgradeLockOwner> {
   return value
 }
 
-async function ownerIsStale(owner: V02UpgradeLockOwner): Promise<boolean> {
+async function ownerIsStale(owner: ReadV02UpgradeLockOwner): Promise<boolean> {
   try {
     process.kill(owner.pid, 0)
   } catch (reason) {
     if ((reason as NodeJS.ErrnoException).code === 'ESRCH') return true
     return false
   }
+  // v1 stored a locale/timezone-dependent ps string. A live v1 PID is therefore
+  // ambiguous and must remain owned; only v2 has a comparable UTC identity.
+  if (owner.schemaVersion === 1) return false
   const identity = await processIdentity(owner.pid)
   if (!identity) return false
   if (identity.state.startsWith('Z')) return true
@@ -71,7 +80,7 @@ async function ownerIsStale(owner: V02UpgradeLockOwner): Promise<boolean> {
 
 async function reclaimStaleLock(
   path: string,
-  owner: V02UpgradeLockOwner,
+  owner: ReadV02UpgradeLockOwner,
   callback?: V02UpgradeCheckpoint,
 ): Promise<boolean> {
   const claim = `${path}.stale-${process.pid}-${randomUUID()}`
@@ -100,7 +109,7 @@ export async function acquireV02UpgradeLock(
   const currentIdentity = await processIdentity(process.pid)
   if (!currentIdentity) throw new Error('cannot determine current process start identity')
   const owner: V02UpgradeLockOwner = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     token: randomUUID(),
     pid: process.pid,
     processStart: currentIdentity.start,

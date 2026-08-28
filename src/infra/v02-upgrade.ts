@@ -329,6 +329,9 @@ async function inspectBinding(
 export async function previewV02Upgrade(options: PreviewV02UpgradeOptions): Promise<V02UpgradePreview> {
   const now = options.now ?? new Date().toISOString()
   const nonce = options.nonce ?? randomUUID()
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(nonce)) {
+    throw new Error('v0.2 upgrade nonce must be a UUIDv4')
+  }
   const paths = upgradePaths(resolve(options.home), now, nonce)
   const recovery = await inspectV02UpgradeRecovery(paths)
   let expectedJournal: V02UpgradePlan['expectedJournal'] = 'absent'

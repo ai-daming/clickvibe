@@ -370,6 +370,7 @@ async function withRecoveryOwnership<T extends { status: string }>(
   )
   let fence: Awaited<ReturnType<V02UpgradeGenerationFence['acquire']>> | undefined
   let outcome: 'verified' | 'facts-changed' | 'failed' | 'rolled-back' = 'failed'
+  let result: T | { status: 'facts-changed' } | { status: 'failed'; error: string }
   try {
     fence = await options.fence.acquire(options.fingerprint)
     const observed = await reobserve(options.plan)
@@ -381,17 +382,19 @@ async function withRecoveryOwnership<T extends { status: string }>(
       observed.fingerprint !== options.fingerprint
     ) {
       outcome = 'facts-changed'
-      return { status: 'facts-changed' }
+      result = { status: 'facts-changed' }
+    } else {
+      result = await execute(structuredClone(options.plan.journal.value))
+      outcome = result.status === 'verified' ? 'verified' : 'rolled-back'
     }
-    const result = await execute(structuredClone(options.plan.journal.value))
-    outcome = result.status === 'verified' ? 'verified' : 'rolled-back'
-    return result
   } catch (reason) {
-    return { status: 'failed', error: errorMessage(reason) }
-  } finally {
-    if (fence) await fence.release(outcome)
-    await lock.release()
+    result = { status: 'failed', error: errorMessage(reason) }
   }
+  const failures: unknown[] = []
+  if (fence) await fence.release(outcome).catch((reason) => failures.push(reason))
+  await lock.release().catch((reason) => failures.push(reason))
+  if (failures.length > 0) throw new AggregateError(failures, 'failed to release v0.2 recovery ownership')
+  return result
 }
 
 export function resumeV02Upgrade(options: RecoveryOptions) {

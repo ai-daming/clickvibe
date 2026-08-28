@@ -25,6 +25,11 @@ import { previewV02Upgrade, type V02UpgradePlan, v02UpgradePlanFingerprint } fro
 
 const execFileAsync = promisify(execFile)
 
+function testNonce(label: string): string {
+  const hex = createHash('sha256').update(label).digest('hex')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`
+}
+
 async function git(cwd: string, ...args: string[]): Promise<string> {
   const result = await execFileAsync('git', ['-C', cwd, ...args], { encoding: 'utf8' })
   return result.stdout.trim()
@@ -50,7 +55,7 @@ async function fixture(name: string, statePresent = true) {
     home,
     baselineSha: '553a926405919bd3efc677fbd9bf0388f7c6a26d',
     now: '2026-08-27T16:30:00.000Z',
-    nonce: name,
+    nonce: testNonce(name),
     proposedRepositoryIds: { 'o/r': 'repo_22222222-2222-4222-8222-222222222222' },
     choices: { primaryRemotes: { 'o/r': 'origin' }, exclusions: {} },
     hostActivity: { liveTasks: [], liveJobs: [], oldPluginProcesses: [] },

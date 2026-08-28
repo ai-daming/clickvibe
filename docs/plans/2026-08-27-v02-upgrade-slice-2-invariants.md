@@ -43,10 +43,10 @@
 ## 对抗性验证
 
 - 每个 file write/fsync、publish/rename、directory fsync、journal replace 前后可确定性注入失败。
-- 双进程竞争 upgrade lock；owner token 保留进程启动标识用于审计，但 stale 回收只接受 `ESRCH` 明确死亡，活 PID 的启动字符串不匹配一律不抢。
+- 双进程竞争 upgrade lock；旧版 schema 1 owner 的启动字符串受 locale/timezone 影响，活 PID 一律不抢，只接受 `ESRCH` 明确死亡；schema 2 owner 才允许用固定 UTC 启动身份识别 PID 复用。
 - fence 建立前后同时尝试启动 ClickVibe task，均不得越过线性化点。
 - 当前 Slice 2 只允许显式声明宿主已停止且不会重启的离线 factory；在线 factory 在宿主 capability 接线前固定拒绝。调用方自造/no-op fence 在锁候选写入前拒绝，OS 进程枚举只作为离线边界的第二信号，不冒充对 DSH 进程内插件的证明。
-- 锁 owner 使用固定 `LANG/LC_ALL=C`、`TZ=UTC` 的启动身份；PID 对应 zombie 或启动身份变化才按 PID 复用回收，身份读取不明继续 fail closed。
+- schema 2 锁 owner 使用固定 `LANG/LC_ALL=C`、`TZ=UTC` 的启动身份；PID 对应 zombie 或启动身份变化才按 PID 复用回收，身份读取不明继续 fail closed。schema 1 保持 ESRCH-only，避免把旧时区字符串误判为 PID 复用。
 - cold backup 按原 inode、文件数、字节数和目录内容 hash 回读；旧进程长开 fd 污染 rename 后 backup 时不得写 `verified`。
 - preview/apply 之间修改 config/state/repository/worktree 任一输入，apply 必须回到 previewed 且零准备写入。
 - 成功、prepare 失败、cutover 失败、resume、rollback 后对 Git worktree/refs/dirty bytes 做前后快照比较。

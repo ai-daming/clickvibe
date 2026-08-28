@@ -12,6 +12,25 @@ import { previewV02Upgrade } from '../src/infra/v02-upgrade.ts'
 
 const execFileAsync = promisify(execFile)
 
+function testNonce(label: string): string {
+  const hex = createHash('sha256').update(label).digest('hex')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`
+}
+
+test('v0.2 preview rejects an injected nonce outside the UUIDv4 inventory contract', async () => {
+  await assert.rejects(
+    previewV02Upgrade({
+      home: '/unused',
+      baselineSha: '553a926405919bd3efc677fbd9bf0388f7c6a26d',
+      nonce: 'x',
+      proposedRepositoryIds: {},
+      choices: { primaryRemotes: {}, exclusions: {} },
+      hostActivity: { liveTasks: [], liveJobs: [], oldPluginProcesses: [] },
+    }),
+    /nonce.*UUIDv4/i,
+  )
+})
+
 async function git(cwd: string, ...args: string[]): Promise<string> {
   const result = await execFileAsync('git', ['-C', cwd, ...args], { encoding: 'utf8' })
   return result.stdout.trim()
@@ -74,7 +93,7 @@ test('v0.2 preview is zero-write and freezes exact config, state, repository and
       home,
       baselineSha: '553a926405919bd3efc677fbd9bf0388f7c6a26d',
       now: '2026-08-27T16:00:00.000Z',
-      nonce: 'preview-a',
+      nonce: testNonce('preview-a'),
       proposedRepositoryIds: { 'o/r': 'repo_11111111-1111-4111-8111-111111111111' },
       choices: { primaryRemotes: { 'o/r': 'origin' }, exclusions: {} },
       hostActivity: { liveTasks: [], liveJobs: [], oldPluginProcesses: [] },
@@ -90,10 +109,13 @@ test('v0.2 preview is zero-write and freezes exact config, state, repository and
     assert.match(preview.plan.worktrees[0].porcelain, /worktree /)
     assert.match(preview.fingerprint, /^[0-9a-f]{64}$/)
     assert.equal(preview.plan.paths.activeState, join(clickvibe, 'state'))
-    assert.equal(preview.plan.paths.stateBackup, join(clickvibe, 'state-v0.1-backup-20260827T160000000Z-preview-a'))
+    assert.equal(
+      preview.plan.paths.stateBackup,
+      join(clickvibe, `state-v0.1-backup-20260827T160000000Z-${testNonce('preview-a')}`),
+    )
     assert.equal(
       preview.plan.paths.configBackup,
-      join(clickvibe, 'config-v0.1-backup-20260827T160000000Z-preview-a.yaml'),
+      join(clickvibe, `config-v0.1-backup-20260827T160000000Z-${testNonce('preview-a')}.yaml`),
     )
 
     const parsed = parseClickVibeConfigV1(parseYaml(preview.plan.targetConfig.yaml))
@@ -116,7 +138,7 @@ test('preview fails closed for invalid inputs and binds explicit exclusions into
       home,
       baselineSha: 'baseline',
       now: '2026-08-27T16:00:00.000Z',
-      nonce: 'blocked',
+      nonce: testNonce('blocked'),
       choices: { primaryRemotes: {}, exclusions: {} },
       hostActivity: { liveTasks: [], liveJobs: [], oldPluginProcesses: [] },
     })
@@ -128,7 +150,7 @@ test('preview fails closed for invalid inputs and binds explicit exclusions into
       home,
       baselineSha: 'baseline',
       now: '2026-08-27T16:00:00.000Z',
-      nonce: 'excluded',
+      nonce: testNonce('excluded'),
       choices: {
         primaryRemotes: {},
         exclusions: { 'dead/repo': 'clone was intentionally removed' },
@@ -146,7 +168,7 @@ test('preview fails closed for invalid inputs and binds explicit exclusions into
       home,
       baselineSha: 'baseline',
       now: '2026-08-27T16:00:00.000Z',
-      nonce: 'excluded',
+      nonce: testNonce('excluded'),
       choices: { primaryRemotes: {}, exclusions: { 'dead/repo': 'different reason' } },
       hostActivity: { liveTasks: [], liveJobs: [], oldPluginProcesses: [] },
     })
@@ -168,7 +190,7 @@ test('an unfinished or corrupt journal takes precedence over a fresh preview', a
       home,
       baselineSha: 'baseline',
       now: '2026-08-27T16:00:00.000Z',
-      nonce: 'recovery',
+      nonce: testNonce('recovery'),
       choices: { primaryRemotes: {}, exclusions: {} },
       hostActivity: { liveTasks: [], liveJobs: [], oldPluginProcesses: [] },
     })
@@ -182,7 +204,7 @@ test('an unfinished or corrupt journal takes precedence over a fresh preview', a
       home,
       baselineSha: 'baseline',
       now: '2026-08-27T16:00:00.000Z',
-      nonce: 'missing-journal',
+      nonce: testNonce('missing-journal'),
       choices: { primaryRemotes: {}, exclusions: {} },
       hostActivity: { liveTasks: [], liveJobs: [], oldPluginProcesses: [] },
     })
@@ -196,7 +218,7 @@ test('an unfinished or corrupt journal takes precedence over a fresh preview', a
       home,
       baselineSha: 'baseline',
       now: '2026-08-27T16:00:00.000Z',
-      nonce: 'missing-journal',
+      nonce: testNonce('missing-journal'),
       choices: { primaryRemotes: {}, exclusions: {} },
       hostActivity: { liveTasks: [], liveJobs: [], oldPluginProcesses: [] },
     })
@@ -218,7 +240,7 @@ test('relative legacy repository paths resolve against the selected home, never 
     const preview = await previewV02Upgrade({
       home,
       baselineSha: 'baseline',
-      nonce: 'relative-path',
+      nonce: testNonce('relative-path'),
       proposedRepositoryIds: { 'o/r': 'repo_11111111-1111-4111-8111-111111111111' },
       choices: { primaryRemotes: { 'o/r': 'origin' }, exclusions: {} },
       hostActivity: { liveTasks: [], liveJobs: [], oldPluginProcesses: [] },
@@ -262,7 +284,7 @@ test('legacy config validation rejects ambiguous shapes instead of inventing def
         home,
         baselineSha: 'baseline',
         now: '2026-08-27T18:00:00.000Z',
-        nonce: `invalid-${index}`,
+        nonce: testNonce(`invalid-${index}`),
         choices: { primaryRemotes: {}, exclusions: {} },
         hostActivity: { liveTasks: [], liveJobs: [], oldPluginProcesses: [] },
       })
@@ -275,7 +297,7 @@ test('legacy config validation rejects ambiguous shapes instead of inventing def
       home,
       baselineSha: 'baseline',
       now: '2026-08-27T18:00:00.000Z',
-      nonce: 'valid-settings',
+      nonce: testNonce('valid-settings'),
       choices: { primaryRemotes: {}, exclusions: {} },
       hostActivity: { liveTasks: [], liveJobs: [], oldPluginProcesses: [] },
     })
@@ -289,7 +311,7 @@ test('legacy config validation rejects ambiguous shapes instead of inventing def
     const linked = await previewV02Upgrade({
       home,
       baselineSha: 'baseline',
-      nonce: 'linked-config',
+      nonce: testNonce('linked-config'),
       choices: { primaryRemotes: {}, exclusions: {} },
       hostActivity: { liveTasks: [], liveJobs: [], oldPluginProcesses: [] },
     })
@@ -309,7 +331,7 @@ test('state and all host activity axes block an otherwise valid preview', async 
     const stateBlocked = await previewV02Upgrade({
       home,
       baselineSha: 'baseline',
-      nonce: 'state-file',
+      nonce: testNonce('state-file'),
       choices: { primaryRemotes: {}, exclusions: {} },
       hostActivity: { liveTasks: [], liveJobs: [], oldPluginProcesses: [] },
     })
@@ -319,7 +341,7 @@ test('state and all host activity axes block an otherwise valid preview', async 
     const hostBlocked = await previewV02Upgrade({
       home,
       baselineSha: 'baseline',
-      nonce: 'host-activity',
+      nonce: testNonce('host-activity'),
       choices: { primaryRemotes: {}, exclusions: {} },
       hostActivity: { liveTasks: ['task-1'], liveJobs: ['job-1'], oldPluginProcesses: ['pid-1'] },
     })

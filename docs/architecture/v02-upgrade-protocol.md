@@ -34,7 +34,7 @@
 
 ### 3.1 两种机制缺一不可
 
-升级锁负责阻止两个 v0.2 upgrader 并发。实现复用 `src/infra/workflow-persistence.ts` 的 link 型跨进程锁模式：候选文件写入完整 owner token 后通过 hard link 争抢固定锁；只在确认 owner 进程已死亡后回收 stale lock。锁 token、PID、进程启动标识和 plan fingerprint 写入 journal，模糊存活状态一律不抢锁。
+升级锁负责阻止两个 v0.2 upgrader 并发。实现复用 `src/infra/workflow-persistence.ts` 的 link 型跨进程锁模式：候选文件写入完整 owner token 后通过 hard link 争抢固定锁。schema 1 旧 owner 的启动字符串受 locale/timezone 影响：PID 存活时一律不抢，只接受 `ESRCH` 明确死亡；schema 2 owner 使用固定 `LANG/LC_ALL=C`、`TZ=UTC` 的启动身份，PID 对应 zombie 或启动身份变化时才按 PID 复用回收。锁 token、PID、进程启动标识和 plan fingerprint 写入 journal，身份读取不明继续 fail closed。
 
 锁本身不能约束不认识它的 v0.1 二进制。因此 apply 还必须取得宿主提供的 generation fence：
 
@@ -53,7 +53,17 @@
 
 ### 3.2 临界区顺序
 
-apply 的顺序固定为：验证 fence 来自批准 factory → 取得升级锁 → 取得 generation fence → 临界区内活性检查 → 重算 fingerprint → 写 durable journal → prepare → cutover → read-back → `verified`/`rolled_back` → 释放 fence 和锁。任何失败都保持锁和 fence，直到进程退出或进入明确终态；新进程看到未完成 journal 时只能进入 recovery。
+apply 的顺序固定为：验证 fence 来自批准 factory → 取得升级锁 → 取得 generation fence → 临界区内活性检查 → 重算 fingerprint → 写 durable journal → prepare → cutover → read-back → `verified`/`rolled_back` → 释放 fence 和锁。失败时必须先把原始错误和当前阶段写入 journal，再尝试释放 fence 和锁；两个释放动作都必须执行，任一释放失败都向调用方报错。新进程看到未完成 journal 时只能进入 recovery。
+
+### 3.3 人工处理残留锁
+
+只有在自动 recovery 因 `upgrade-v0.2.lock` 残留而无法取得锁时才进入人工处置；journal、backup 和 staging 资产都不得随锁删除。
+
+1. 停止 DSH 宿主和所有 ClickVibe 升级命令，确认处置期间不会自动重启。
+2. 读取 `~/.clickvibe/upgrade-v0.2.lock`，记录 `schemaVersion`、`token`、`pid`、`acquiredAt` 和 `planFingerprint`；文件不是普通文件、JSON 损坏或字段不全时停止，不猜测 owner。
+3. 用操作系统进程查询同时验证该 PID 不存在；只有明确得到 `ESRCH`/“no such process”才可判定 owner 已死。PID 存活、权限不足或查询结果不明时禁止删锁；schema 1 的 `processStart` 不参与人工死亡判断。
+4. 删除前再次回读锁文件，确认 token 与第 2 步一致，避免删掉刚接管的新 owner。随后只删除精确路径 `~/.clickvibe/upgrade-v0.2.lock`，不得使用通配符或递归删除。
+5. 重新运行只读 recovery preview。存在未完成 journal 时只能按其精确 fingerprint 授权 resume/rollback，不能当成全新升级。
 
 ## 4. repositoryId 与 Binding 准备
 

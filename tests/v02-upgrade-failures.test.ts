@@ -70,7 +70,7 @@ test('generation fence rejects a competing holder and resets if host observation
   resetV02GenerationFenceForTest()
 })
 
-test('upgrade lock rejects malformed ownership and conservatively reclaims a proven dead owner', async () => {
+test('upgrade lock preserves live legacy owners and reclaims new-format reused PIDs or proven dead owners', async () => {
   const root = await mkdtemp(join(tmpdir(), 'clickvibe-v02-stale-lock-'))
   const path = join(root, 'upgrade-v0.2.lock')
   try {
@@ -80,6 +80,18 @@ test('upgrade lock rejects malformed ownership and conservatively reclaims a pro
       path,
       JSON.stringify({
         schemaVersion: 1,
+        token: 'legacy-live-owner',
+        pid: process.pid,
+        processStart: 'Mon Jan  1 00:00:00 1990',
+        acquiredAt: '2026-08-27T00:00:00.000Z',
+        planFingerprint: 'old-plan',
+      }),
+    )
+    await assert.rejects(acquireV02UpgradeLock(path, 'plan'), /already locked/)
+    await writeFile(
+      path,
+      JSON.stringify({
+        schemaVersion: 2,
         token: 'reused-pid-owner',
         pid: process.pid,
         processStart: 'Mon Jan  1 00:00:00 1990',

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -16,6 +17,11 @@ import { previewV02UpgradeRecovery, resumeV02Upgrade, rollbackV02Upgrade } from 
 import { previewV02Upgrade } from '../src/infra/v02-upgrade.ts'
 
 const execFileAsync = promisify(execFile)
+
+function testNonce(label: string): string {
+  const hex = createHash('sha256').update(label).digest('hex')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`
+}
 
 async function git(cwd: string, ...args: string[]): Promise<void> {
   await execFileAsync('git', ['-C', cwd, ...args])
@@ -39,7 +45,7 @@ async function fixture(name: string, statePresent = true) {
     home,
     baselineSha: '553a926405919bd3efc677fbd9bf0388f7c6a26d',
     now: '2026-08-27T17:00:00.000Z',
-    nonce: name,
+    nonce: testNonce(name),
     proposedRepositoryIds: { 'o/r': 'repo_33333333-3333-4333-8333-333333333333' },
     choices: { primaryRemotes: { 'o/r': 'origin' }, exclusions: {} },
     hostActivity: { liveTasks: [], liveJobs: [], oldPluginProcesses: [] },
@@ -124,7 +130,7 @@ test('authorized rollback restores the exact v0.1 config/state pair without dele
       home: item.home,
       baselineSha: item.preview.plan.baselineSha,
       now: '2026-08-27T17:10:00.000Z',
-      nonce: 'retry-after-rollback',
+      nonce: testNonce('retry-after-rollback'),
       choices: { primaryRemotes: { 'o/r': 'origin' }, exclusions: {} },
       hostActivity: { liveTasks: [], liveJobs: [], oldPluginProcesses: [] },
     })
@@ -343,6 +349,30 @@ test('online recovery refusal writes no lock and an offline retry succeeds immed
     })
     assert.equal(retried.status, 'verified', JSON.stringify(retried))
   } finally {
+    await rm(item.home, { recursive: true, force: true })
+  }
+})
+
+test('recovery still releases the cross-process lock when generation-fence release fails', async () => {
+  const item = await fixture('release-failure')
+  try {
+    await failBeforeConfigActivation(item)
+    const recovery = await previewV02UpgradeRecovery({ home: item.home })
+    assert.equal(recovery.status, 'recovery-previewed')
+    await assert.rejects(
+      resumeV02Upgrade({
+        plan: recovery.plan,
+        fingerprint: recovery.fingerprint,
+        fence: fence(),
+        checkpoint(name) {
+          if (name === 'after-terminal-journal:verified') resetV02GenerationFenceForTest()
+        },
+      }),
+      /failed to release v0\.2 recovery ownership/,
+    )
+    await assert.rejects(stat(item.preview.plan.paths.lock), { code: 'ENOENT' })
+  } finally {
+    resetV02GenerationFenceForTest()
     await rm(item.home, { recursive: true, force: true })
   }
 })

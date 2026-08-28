@@ -148,7 +148,7 @@ async function waitForOfflineQuiescence(options: V02OfflineGenerationFenceOption
     if (!hasActivity(last)) return last
     if (Date.now() >= deadline) {
       throw new Error(
-        `generation fence cannot prove quiescence; live tasks=${last.liveTasks.length}, live jobs=${last.liveJobs.length}, old ClickVibe processes=${last.oldPluginProcesses.length} still active`,
+        `generation fence cannot prove offline quiescence; old ClickVibe processes=${last.oldPluginProcesses.length} still active`,
       )
     }
     await new Promise<void>((resolve) => setTimeout(resolve, interval))
