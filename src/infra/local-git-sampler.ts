@@ -257,3 +257,62 @@ export async function sampleWorktreeFacts(ctx: Context, input: WorktreeSampleInp
   })
   return parseWorktreeSample(output)
 }
+
+/** One sampled observation of the configured repository checkout. */
+export interface RepositorySample {
+  defaultBranch: string
+  checkoutBranch: string | null
+  /** ahead/behind of local `main` versus origin/<defaultBranch>. */
+  main: { ahead: number; behind: number } | null
+  /** ahead/behind of the checked-out HEAD versus origin/<defaultBranch>. */
+  checkout: { ahead: number; behind: number } | null
+}
+
+export interface RepositorySampleInput {
+  /** Configured repository checkout directory (the command workdir). */
+  repoPath: string
+}
+
+export function buildRepositorySampleCommand(input: RepositorySampleInput): string {
+  void input.repoPath
+  const lines: string[] = []
+  const section = (key: string, rcExpr: string, valueExpr: string) =>
+    lines.push(`printf '${key}\\t%d\\t%s\\n' ${rcExpr} "$(__enc ${valueExpr})"`)
+  lines.push('set +e')
+  lines.push(`__enc() { printf %s "$1" | base64 | tr -d '\\n'; }`)
+  lines.push('d=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)')
+  section('REPO_DEFAULT', '$?', '"$d"')
+  lines.push(`if [ -n "$d" ]; then base="$d"`)
+  lines.push(`else base='origin/main'`)
+  lines.push('fi')
+  lines.push('b=$(git branch --show-current 2>/dev/null)')
+  section('REPO_BRANCH', '$?', '"$b"')
+  lines.push(`mc=$(git rev-list --left-right --count "$base"...${shellQuote('main')} 2>/dev/null)`)
+  section('REPO_MAIN_COUNT', '$?', '"$mc"')
+  lines.push('if [ -n "$b" ]; then')
+  lines.push(`  cc=$(git rev-list --left-right --count "$base"...'HEAD' 2>/dev/null)`)
+  section('REPO_HEAD_COUNT', '$?', '"$cc"')
+  lines.push('else')
+  lines.push(`  printf 'REPO_HEAD_COUNT\\t127\\t\\n'`)
+  lines.push('fi')
+  return lines.join('\n')
+}
+
+export function parseRepositorySample(output: string): RepositorySample {
+  const sections = decodeSections(output)
+  const defaultRef = optionalRef(sections.get('REPO_DEFAULT'))
+  const defaultBranch = (defaultRef ?? '').replace(/^origin\//, '') || 'main'
+  const checkoutBranch = optionalRef(sections.get('REPO_BRANCH'))
+  const main = compare(sections.get('REPO_MAIN_COUNT'))
+  const checkout = checkoutBranch === null ? null : compare(sections.get('REPO_HEAD_COUNT'))
+  return { defaultBranch, checkoutBranch, main, checkout }
+}
+
+export async function sampleRepositoryFacts(ctx: Context, input: RepositorySampleInput): Promise<RepositorySample> {
+  const output = await runCommand(ctx, buildRepositorySampleCommand(input), {
+    workdir: input.repoPath,
+    timeoutMs: 10000,
+    sandboxPolicy: { mode: 'read-only', workspaceRoot: input.repoPath },
+  })
+  return parseRepositorySample(output)
+}

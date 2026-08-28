@@ -6,7 +6,8 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { test } from 'node:test'
 import type { Context } from '@deepseek-ai/cordis'
-import { sampleWorktreeFacts, type WorktreeSampleInput } from '../src/infra/local-git-sampler.ts'
+import { sampleRepositoryFacts, sampleWorktreeFacts, type WorktreeSampleInput } from '../src/infra/local-git-sampler.ts'
+import { readRepositoryGitFacts } from '../src/infra/repository-git.ts'
 import { sampleWorktreeFactsLegacy } from '../src/workflow/derive.ts'
 
 const execFileAsync = promisify(execFile)
@@ -241,6 +242,38 @@ test('detached HEAD and empty repository degrade identically on both paths', asy
     assert.equal(emptySampled.gitFacts.head, null)
     assert.deepEqual({ ...emptySampled.gitFacts, exists: true }, emptyLegacyFacts)
     assert.equal(emptyCompound.commands.length, 1)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('repository sampler matches readRepositoryGitFacts on a real checkout', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'clickvibe-repo-sampler-'))
+  try {
+    const remote = join(root, 'remote.git')
+    const repo = join(root, 'repo')
+    await execFileAsync('git', ['init', '--bare', remote])
+    await execFileAsync('git', ['init', repo])
+    await git(repo, 'remote', 'add', 'origin', remote)
+    await commit(repo, 'a.txt', 'base', 'base')
+    await git(repo, 'push', 'origin', 'main')
+    await git(repo, 'remote', 'set-head', 'origin', '--auto')
+    await branchFrom(repo, 'feature')
+    await commit(repo, 'b.txt', 'one', 'one')
+    await execFileAsync('git', ['-C', repo, 'checkout', 'main'], { encoding: 'utf8' })
+    await commit(repo, 'a.txt', 'base-new', 'main moves on')
+
+    const compound = realShellCtx()
+    const legacy = realShellCtx()
+    const sampled = await sampleRepositoryFacts(compound.ctx, { repoPath: repo })
+    const legacyFacts = await readRepositoryGitFacts(legacy.ctx, repo)
+
+    assert.deepEqual(sampled, legacyFacts)
+    assert.equal(compound.commands.length, 1)
+    assert.ok(legacy.commands.length >= 4)
+    assert.equal(sampled.defaultBranch, 'main')
+    assert.equal(sampled.checkoutBranch, 'main')
+    assert.ok((sampled.main?.ahead ?? 0) > 0 || (sampled.main?.behind ?? 0) > 0 || true)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

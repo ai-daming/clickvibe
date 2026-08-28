@@ -12,7 +12,14 @@
 
 import { existsSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
-import { sampleWorktreeFacts, type WorktreeSample, type WorktreeSampleInput } from './local-git-sampler.ts'
+import {
+  sampleRepositoryFacts,
+  type RepositorySample,
+  type RepositorySampleInput,
+  sampleWorktreeFacts,
+  type WorktreeSample,
+  type WorktreeSampleInput,
+} from './local-git-sampler.ts'
 import { type ClickVibeConfig, expandHome } from './runtime.ts'
 import {
   registerSnapshotRegistry,
@@ -25,6 +32,7 @@ export { notifyLocalGitMutation, type LocalGitMutationScope } from './local-git-
 /** What consumers need from the snapshot plane (issue #122). */
 export interface LocalGitSnapshotReader {
   worktreeSample(ctx: Context, repoKey: string, input: WorktreeSampleInput): Promise<WorktreeSample>
+  repositorySample(ctx: Context, repoKey: string, input: RepositorySampleInput): Promise<RepositorySample>
 }
 
 /** Mirror readConfiguredBranchFacts' front gate: null when unconfigured or missing on disk. */
@@ -77,6 +85,11 @@ export class LocalGitSnapshotRegistry {
     }
   >()
   private inflight = new Map<string, Promise<WorktreeSample>>()
+  private repoScopes = new Map<
+    string,
+    { repoKey: string; generation: number; sample: RepositorySample | null; observedAt: number }
+  >()
+  private repoInflight = new Map<string, Promise<RepositorySample>>()
   private readonly sampler: (ctx: Context, repoKey: string, input: WorktreeSampleInput) => Promise<WorktreeSample>
 
   /** Injectable for tests; production uses the real compound sampler. */
@@ -137,12 +150,56 @@ export class LocalGitSnapshotRegistry {
     return sample
   }
 
+  /** Sample the configured repository checkout once per repo+generation. */
+  async repositorySample(ctx: Context, repoKey: string, input: RepositorySampleInput): Promise<RepositorySample> {
+    this.counters.logicalRequests++
+    const key = `repo:${repoKey}:${input.repoPath}`
+    let entry = this.repoScopes.get(key)
+    if (!entry) {
+      entry = { repoKey, generation: 0, sample: null, observedAt: 0 }
+      this.repoScopes.set(key, entry)
+    }
+    if (entry.sample) {
+      this.counters.cacheHits++
+      return entry.sample
+    }
+    const running = this.repoInflight.get(key)
+    if (running) {
+      this.counters.singleflightJoins++
+      return running
+    }
+    const requestedGeneration = entry.generation
+    const sample = (async () => {
+      try {
+        const result = await sampleRepositoryFacts(ctx, input)
+        this.counters.executions++
+        if (entry.generation === requestedGeneration) {
+          entry.sample = result
+          entry.observedAt = Date.now()
+        }
+        return result
+      } catch (error) {
+        this.counters.failures++
+        throw error
+      } finally {
+        this.repoInflight.delete(key)
+      }
+    })()
+    this.repoInflight.set(key, sample)
+    return sample
+  }
+
   /** Bump matching scope generations; the next consumer after this resamples. */
   invalidate(scope: LocalGitMutationScope, reason: string, trigger: string): void {
     const at = Date.now()
     for (const [key, entry] of this.scopes) {
       if (entry.repoKey !== scope.repoKey) continue
       if (scope.worktreePath && key !== worktreeScopeKey(scope.repoKey, scope.worktreePath)) continue
+      entry.generation++
+      entry.sample = null
+    }
+    for (const entry of this.repoScopes.values()) {
+      if (entry.repoKey !== scope.repoKey) continue
       entry.generation++
       entry.sample = null
     }

@@ -108,7 +108,13 @@ export async function stateWorkflows(
     const freshness = aggregateRepositoryFreshness(freshnesses)
     const onlyRepo = keyedFreshness.length === 1 ? keyedFreshness[0] : null
     const repoAdvance = onlyRepo
-      ? await readConfiguredRepositoryAdvance(ctx, config, onlyRepo.key, onlyRepo.freshness?.lastSuccessAt ?? null)
+      ? await readConfiguredRepositoryAdvance(
+          ctx,
+          config,
+          onlyRepo.key,
+          onlyRepo.freshness?.lastSuccessAt ?? null,
+          localGitSnapshots,
+        )
       : null
     return { status: 200, body: { ok: true, workflows: enriched, freshness, dependenciesRefreshDue, repoAdvance } }
   } catch (error) {

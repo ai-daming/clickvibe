@@ -2,7 +2,9 @@
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { notifyLocalGitMutation } from '../infra/local-git-snapshot.ts'
+import { notifyLocalGitMutation } from '../infra/local-git-invalidate.ts'
+import type { LocalGitSnapshotReader } from '../infra/local-git-snapshot.ts'
+import type { RepositoryGitFacts } from '../infra/repository-git.ts'
 import { hasMergeConflict, listConflictFiles } from '../infra/git.ts'
 import {
   forwardLocalMain,
@@ -63,10 +65,17 @@ export async function readConfiguredRepositoryAdvance(
   config: ClickVibeConfig,
   repoKey: string,
   fetchedAt: number | null,
+  observation?: LocalGitSnapshotReader,
 ): Promise<RepositoryAdvanceSignal | null> {
   const repoPath = configuredRepoPath(config, repoKey)
   if (!repoPath) return null
-  const facts = await readRepositoryGitFacts(ctx, repoPath)
+  let facts: RepositoryGitFacts
+  if (observation) {
+    const sample = await observation.repositorySample(ctx, repoKey, { repoPath }).catch(() => null)
+    facts = sample ?? (await readRepositoryGitFacts(ctx, repoPath))
+  } else {
+    facts = await readRepositoryGitFacts(ctx, repoPath)
+  }
   return { ...deriveRepositoryAdvance(facts), fetchedAt }
 }
 
