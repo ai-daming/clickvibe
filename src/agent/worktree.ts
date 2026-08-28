@@ -21,6 +21,7 @@
 import { existsSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import { notifyLocalGitMutation } from '../infra/local-git-snapshot.ts'
 import { buildWorktreeAddCommand, decideWorktreeRecovery, shellQuote } from '../infra/develop-core.ts'
 import { expandHome, loadConfig, runCommand } from '../infra/runtime.ts'
 import {
@@ -101,6 +102,7 @@ export async function ensureWorktree(
     sandboxPolicy: policy,
     timeoutMs: 60_000,
   })
+  notifyLocalGitMutation({ repoKey, worktreePath: worktree }, 'remote-fetch', 'ensureWorktree')
   let defaultRemoteBase = await runCommand(ctx, 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD', {
     workdir: expandedRepo,
     sandboxPolicy: policy,
@@ -265,6 +267,7 @@ export async function ensureWorktree(
       remoteBase: remoteBaseHash ?? remoteBase,
     })
     await runCommand(ctx, command, { workdir: expandedRepo, timeoutMs: 60000, sandboxPolicy: policy })
+    notifyLocalGitMutation({ repoKey, worktreePath: worktree }, 'worktree-mutation', 'ensureWorktree')
     await appendLog(workflow.key, 'dev', `[clickvibe] stale worktree 已重建`)
   } else {
     // add-new-branch / add-existing-branch:确保父目录存在后创建/复用
@@ -280,6 +283,7 @@ export async function ensureWorktree(
       remoteBase: remoteBaseHash ?? remoteBase,
     })
     await runCommand(ctx, command, { workdir: expandedRepo, timeoutMs: 60000, sandboxPolicy: policy })
+    notifyLocalGitMutation({ repoKey, worktreePath: worktree }, 'worktree-mutation', 'ensureWorktree')
     await appendLog(
       workflow.key,
       'dev',
@@ -325,6 +329,7 @@ export async function ensureWorktree(
         if (detachedHead) await rollback(`git switch --detach ${shellQuote(detachedHead)}`, normalizedTarget)
       }
       if (createdBranch) await rollback(`git branch -D ${shellQuote(branch)}`, expandedRepo)
+      notifyLocalGitMutation({ repoKey, worktreePath: worktree }, 'worktree-rollback', 'ensureWorktree')
       const detail = String(error instanceof Error ? error.message : error)
       const rollbackDetail = rollbackErrors.length > 0 ? `; worktree 回滚失败: ${rollbackErrors.join('; ')}` : ''
       return { ok: false, error: `无法定格开发基线: ${detail}${rollbackDetail}` }

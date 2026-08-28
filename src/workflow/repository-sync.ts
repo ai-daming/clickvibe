@@ -2,6 +2,7 @@
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import { notifyLocalGitMutation } from '../infra/local-git-snapshot.ts'
 import { hasMergeConflict, listConflictFiles } from '../infra/git.ts'
 import {
   forwardLocalMain,
@@ -85,6 +86,7 @@ export async function syncConfiguredRepository(
       sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: repoPath },
     })
   } catch (error) {
+    notifyLocalGitMutation({ repoKey }, 'repository-sync-failed', 'syncConfiguredRepository')
     return { ok: false, error: `同步失败:无法 fetch origin:${errorText(error)}` }
   }
 
@@ -160,5 +162,6 @@ export async function syncConfiguredRepository(
     main = { status: 'unchanged' }
   }
 
+  notifyLocalGitMutation({ repoKey }, 'repository-sync', 'syncConfiguredRepository')
   return { ok: true, branchHead, mainRefForwarded, conflict, refused, targets: { checkout, main } }
 }

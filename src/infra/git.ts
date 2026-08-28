@@ -21,7 +21,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { shellQuote } from './develop-core.ts'
 import { runCommand } from './runtime.ts'
 import { type IssueContractSnapshot } from './state.ts'
-import type { DeliveryStats } from './contracts.ts'
+import type { DeliveryStats, WorktreeGitFacts } from './contracts.ts'
 
 export interface GitCompare {
   behind: number
@@ -102,6 +102,8 @@ export interface DeriveOptions {
   defaultBranch?: string
   issueContract?: IssueContractSnapshot | null
   workflowCachePresent?: boolean
+  /** Pre-sampled local git facts (Local Git Snapshot, issue #122); skips per-fact git reads. */
+  gitFacts?: WorktreeGitFacts
 }
 
 /** Short hash of one ref inside the worktree's repo (null when unresolvable). */

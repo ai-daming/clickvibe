@@ -42,23 +42,40 @@ import { deriveWorkflowState, type WorkflowDerived } from './derive.ts'
 import { checkIssueContract } from './issue-contract.ts'
 import { fetchIssueContract } from './merge-gates.ts'
 import { workflowBaseBranch } from './state-view.ts'
+import { frozenBaseHash } from '../agent/baseline.ts'
+import { type LocalGitSnapshotReader, resolveConfiguredRepoPath } from '../infra/local-git-snapshot.ts'
 
 export async function enrichWorkflowStates(
   ctx: Context,
   workflows: IssueWorkflow[],
   configOverride?: ClickVibeConfig,
+  observation?: LocalGitSnapshotReader,
 ): Promise<Array<IssueWorkflow & { runStartedAt: number | null; derived: WorkflowDerived }>> {
   const config = configOverride ?? (await loadConfig())
   return Promise.all(
     workflows.map(async (workflow) => {
-      const [prLookup, branchFacts, currentIssue, liveIssueState] = await Promise.all([
+      const sample = observation
+        ? await observation
+            .worktreeSample(ctx, workflow.repoKey, {
+              worktree: workflow.worktree,
+              branch: workflow.branch,
+              baseBranch: workflowBaseBranch(workflow.baseRef),
+              baseBranchNeedsDefault: workflowBaseBranch(workflow.baseRef, '') === '',
+              frozenBase: frozenBaseHash(workflow.baseRef),
+              repoPath: resolveConfiguredRepoPath(config, workflow.repoKey),
+            })
+            .catch(() => null)
+        : null
+      const branchFacts = sample
+        ? sample.branchFacts
+        : await readConfiguredBranchFacts(
+            ctx,
+            config,
+            workflow,
+            workflow.baseRef ? workflowBaseBranch(workflow.baseRef) : undefined,
+          )
+      const [prLookup, currentIssue, liveIssueState] = await Promise.all([
         fetchGithubPrFact(ctx, workflow.repoKey, workflow.branch, workflow.prNumber),
-        readConfiguredBranchFacts(
-          ctx,
-          config,
-          workflow,
-          workflow.baseRef ? workflowBaseBranch(workflow.baseRef) : undefined,
-        ),
         fetchIssueContract(ctx, workflow.url).catch(() => null),
         fetchGithubIssueState(ctx, workflow.url),
       ])
@@ -76,6 +93,7 @@ export async function enrichWorkflowStates(
           pr: prLookup.pr,
           prStatusKnown: workflow.prNumber ? prLookup.known && prLookup.pr !== null : prLookup.known,
           issueContract: currentIssue?.contract ?? null,
+          gitFacts: sample?.gitFacts,
           ...branchFacts,
         },
       )

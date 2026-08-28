@@ -3,6 +3,7 @@ import { ensureWorktree } from '../agent/worktree.ts'
 import { fetchIssue, issueSnapshot, sameIssueContract } from '../github/issue.ts'
 import { githubRest } from '../github/rest.ts'
 import { type IssuePromptSnapshot } from '../infra/develop-core.ts'
+import { localGitSnapshots } from '../infra/local-git-snapshot.ts'
 import { liveTasks, parseUrl } from '../infra/runtime.ts'
 import {
   appendEvent,
@@ -173,7 +174,7 @@ async function reconcileOnce(ctx: Context, key: string, outcome?: AutoRunTaskOut
     await pauseAutoRun(key, 'budget-exhausted', undefined, ctx)
     return
   }
-  const [observed] = await enrichWorkflowStates(ctx, [workflow])
+  const [observed] = await enrichWorkflowStates(ctx, [workflow], undefined, localGitSnapshots)
   if (!observed) return
   const decision = decideAutoRun({
     autoRun: workflow.autoRun,
