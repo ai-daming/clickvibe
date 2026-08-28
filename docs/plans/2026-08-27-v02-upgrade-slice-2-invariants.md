@@ -45,8 +45,9 @@
 - 每个 file write/fsync、publish/rename、directory fsync、journal replace 前后可确定性注入失败。
 - 双进程竞争 upgrade lock；owner token 保留进程启动标识用于审计，但 stale 回收只接受 `ESRCH` 明确死亡，活 PID 的启动字符串不匹配一律不抢。
 - fence 建立前后同时尝试启动 ClickVibe task，均不得越过线性化点。
-- fence 必须由宿主关闭 legacy start entry、再次确认入口仍关闭，并独立枚举操作系统进程；无法证明时只允许离线升级。活 PID 即使启动时间字符串不匹配也不可抢锁。
+- 当前 Slice 2 只允许显式声明宿主已停止且不会重启的离线 factory；在线 factory 在宿主 capability 接线前固定拒绝。调用方自造/no-op fence 在锁候选写入前拒绝，OS 进程枚举只作为离线边界的第二信号，不冒充对 DSH 进程内插件的证明。
+- 锁 owner 使用固定 `LANG/LC_ALL=C`、`TZ=UTC` 的启动身份；PID 对应 zombie 或启动身份变化才按 PID 复用回收，身份读取不明继续 fail closed。
 - cold backup 按原 inode、文件数、字节数和目录内容 hash 回读；旧进程长开 fd 污染 rename 后 backup 时不得写 `verified`。
 - preview/apply 之间修改 config/state/repository/worktree 任一输入，apply 必须回到 previewed 且零准备写入。
 - 成功、prepare 失败、cutover 失败、resume、rollback 后对 Git worktree/refs/dirty bytes 做前后快照比较。
-- journal 缺失/损坏且出现 backup/staging/schema-1/v0.2 证据时进入 `manual-recovery-required` 只读 inventory；不得假装首次升级，也不得覆盖原始损坏 journal。
+- journal 缺失/损坏且出现升级器完整时间戳+UUID 格式的 backup/staging、schema-1 config 或 v0.2 marker 时进入 `manual-recovery-required` 只读 inventory；普通撞名前缀文件不是升级证据。

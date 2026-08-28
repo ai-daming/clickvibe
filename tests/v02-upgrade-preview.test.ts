@@ -177,7 +177,21 @@ test('an unfinished or corrupt journal takes precedence over a fresh preview', a
     assert.match(preview.recovery.assets.map((asset) => asset.path).join('\n'), /upgrade-v0\.2\.json/)
 
     await unlink(join(clickvibe, 'upgrade-v0.2.json'))
-    await writeFile(join(clickvibe, 'config-v0.1-backup-evidence.yaml'), 'repos: {}\n')
+    await writeFile(join(clickvibe, 'config-v0.1-backup-notes.txt'), 'not an upgrader artifact\n')
+    const notesOnly = await previewV02Upgrade({
+      home,
+      baselineSha: 'baseline',
+      now: '2026-08-27T16:00:00.000Z',
+      nonce: 'missing-journal',
+      choices: { primaryRemotes: {}, exclusions: {} },
+      hostActivity: { liveTasks: [], liveJobs: [], oldPluginProcesses: [] },
+    })
+    assert.equal(notesOnly.status, 'previewed')
+
+    await writeFile(
+      join(clickvibe, 'config-v0.1-backup-20260827T160000000Z-11111111-1111-4111-8111-111111111111.yaml'),
+      'repos: {}\n',
+    )
     const missing = await previewV02Upgrade({
       home,
       baselineSha: 'baseline',

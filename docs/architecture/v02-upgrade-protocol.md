@@ -45,13 +45,15 @@
 
 如果安装环境不能证明“旧入口已停用且不会在临界区重启”，apply 必须拒绝，要求关闭宿主后由离线升级入口执行。直接再次运行已被替换的 v0.1 二进制属于显式 downgrade：必须先走 rollback preview/authorization，不能把 v0.2 state 当作空 v0.1 state 打开。
 
-宿主集成必须提供三个动作：原子关闭 legacy start entry、独立确认该关闭仍生效、按升级终态恢复旧入口或完成新 bundle 接管。fence 在关闭入口后同时读取宿主 live task/job 与操作系统进程表，等待全部退出，并在进入 prepare 前再次确认入口仍关闭。只传入一份调用方声称为空的 activity 列表不构成 fence；缺少任一宿主动作时只能拒绝在线 apply。
+未来的在线宿主集成必须提供三个动作：原子关闭 legacy start entry、独立确认该关闭仍生效、按升级终态恢复旧入口或完成新 bundle 接管。fence 在关闭入口后同时读取宿主 live task/job 与操作系统进程表，等待全部退出，并在进入 prepare 前再次确认入口仍关闭。只传入一份调用方声称为空的 activity 列表不构成 fence；缺少任一宿主动作时只能拒绝在线 apply。
+
+当前 Slice 2 只开放离线 factory：操作者必须显式声明 DSH 宿主已经停止且升级期间不会重启；factory 同时枚举 argv 可识别的独立 legacy 进程作为第二信号。进程内插件无法由 `ps` 的 argv 证明，因此这份离线声明是操作边界，不得包装成在线证明。在线 factory 在宿主 capability 真正接线前固定拒绝；`apply`/`resume`/`rollback` 还会在创建锁候选文件前拒绝任何调用方自造的 fence 对象。
 
 旧进程长期持有已打开文件描述符是 cutover 的危险窗口：仅看路径名无法发现它仍可向 rename 后的 cold backup 写入。因此进程退出必须发生在 state rename 之前；最终 verify 还必须重新计算 cold backup 的 inode、文件数、字节数和内容 hash。任一项漂移都不得写 `verified`。内容校验是第二道伤害检测，不替代先停旧进程，因为已污染的 backup 可能无法自动 rollback。
 
 ### 3.2 临界区顺序
 
-apply 的顺序固定为：取得升级锁 → 取得 generation fence → 临界区内活性检查 → 重算 fingerprint → 写 durable journal → prepare → cutover → read-back → `verified`/`rolled_back` → 释放 fence 和锁。任何失败都保持锁和 fence，直到进程退出或进入明确终态；新进程看到未完成 journal 时只能进入 recovery。
+apply 的顺序固定为：验证 fence 来自批准 factory → 取得升级锁 → 取得 generation fence → 临界区内活性检查 → 重算 fingerprint → 写 durable journal → prepare → cutover → read-back → `verified`/`rolled_back` → 释放 fence 和锁。任何失败都保持锁和 fence，直到进程退出或进入明确终态；新进程看到未完成 journal 时只能进入 recovery。
 
 ## 4. repositoryId 与 Binding 准备
 
@@ -176,8 +178,8 @@ rollback 用 config backup 生成同目录 temp，再按 fsync + atomic replace 
 
 ## 11. 实现与测试门禁
 
-- 双 upgrader 竞争只能有一个锁赢家；stale recovery 不得删除新 owner 的锁。
-- 在临界区活性检查前后尝试启动 v0.1 job，generation fence 必须拒绝；无法取得 fence 时 apply 为零写入。
+- 双 upgrader 竞争只能有一个锁赢家；stale recovery 不得删除新 owner 的锁；PID 复用或 zombie 必须由固定 locale/TZ 的启动身份与进程状态识别，不能永久卡锁。
+- 调用方自造/no-op fence 必须在锁候选文件产生前拒绝；在线 factory 在宿主接线前固定拒绝；离线 factory 必须要求显式 host-stopped 声明并拒绝可枚举的 legacy 进程。
 - 在每次 file fsync、rename、directory fsync 和 journal replace 前后注入真实文件系统失败，证明状态可 resume 或 rollback。
 - repositoryId 在 temp write、fsync、link 和目录 fsync 各窗口崩溃后，最终文件只能是完整合法值或不存在；不得出现空/半写最终文件。
 - `cp -r` 复制 sidecar、相同 remote 的独立 clone、linked worktree、路径移动、bare repository 和 submodule 均有真实 Git 测试。

@@ -22,11 +22,19 @@ export interface V02UpgradeLock {
   release(): Promise<void>
 }
 
-async function processStart(pid: number): Promise<string | null> {
+interface ProcessIdentity {
+  start: string
+  state: string
+}
+
+async function processIdentity(pid: number): Promise<ProcessIdentity | null> {
   try {
-    const result = await execFileAsync('ps', ['-p', String(pid), '-o', 'lstart='], { encoding: 'utf8' })
-    const value = result.stdout.trim()
-    return value || null
+    const result = await execFileAsync('ps', ['-p', String(pid), '-o', 'lstart=', '-o', 'stat='], {
+      encoding: 'utf8',
+      env: { ...process.env, LANG: 'C', LC_ALL: 'C', TZ: 'UTC' },
+    })
+    const match = result.stdout.trim().match(/^(.*\d{4})\s+(\S+)$/)
+    return match ? { start: match[1], state: match[2] } : null
   } catch {
     return null
   }
@@ -55,10 +63,10 @@ async function ownerIsStale(owner: V02UpgradeLockOwner): Promise<boolean> {
     if ((reason as NodeJS.ErrnoException).code === 'ESRCH') return true
     return false
   }
-  // A live PID is never safe to steal from. `ps lstart` is locale/TZ-sensitive,
-  // and a mismatch can mean formatting drift rather than proven PID reuse.
-  // Conservatively wait for ESRCH instead of creating two lock owners.
-  return false
+  const identity = await processIdentity(owner.pid)
+  if (!identity) return false
+  if (identity.state.startsWith('Z')) return true
+  return identity.start !== owner.processStart
 }
 
 async function reclaimStaleLock(
@@ -89,13 +97,13 @@ export async function acquireV02UpgradeLock(
   planFingerprint: string,
   callback?: V02UpgradeCheckpoint,
 ): Promise<V02UpgradeLock> {
-  const currentStart = await processStart(process.pid)
-  if (!currentStart) throw new Error('cannot determine current process start identity')
+  const currentIdentity = await processIdentity(process.pid)
+  if (!currentIdentity) throw new Error('cannot determine current process start identity')
   const owner: V02UpgradeLockOwner = {
     schemaVersion: 1,
     token: randomUUID(),
     pid: process.pid,
-    processStart: currentStart,
+    processStart: currentIdentity.start,
     acquiredAt: new Date().toISOString(),
     planFingerprint,
   }

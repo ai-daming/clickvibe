@@ -3,25 +3,20 @@ import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { createV02GenerationFence, resetV02GenerationFenceForTest } from '../src/infra/v02-generation-fence.ts'
+import {
+  createOfflineV02GenerationFence,
+  resetV02GenerationFenceForTest,
+  V02_OFFLINE_HOST_DECLARATION,
+} from '../src/infra/v02-generation-fence.ts'
 import { durableRename, durableWriteExclusive, ensureDurableDirectory } from '../src/infra/v02-upgrade-durable.ts'
 import { type V02UpgradeGenerationFence } from '../src/infra/v02-upgrade-execution.ts'
 import { acquireV02UpgradeLock } from '../src/infra/v02-upgrade-lock.ts'
 import { previewV02UpgradeRecovery, rollbackV02Upgrade } from '../src/infra/v02-upgrade-recovery.ts'
 
-function integratedFence(
-  observeHostActivity: () => Promise<{
-    liveTasks: string[]
-    liveJobs: string[]
-    oldPluginProcesses: string[]
-  }> = async () => ({ liveTasks: [], liveJobs: [], oldPluginProcesses: [] }),
-) {
-  return createV02GenerationFence({
-    acquireLegacyEntryBlock: async () => {},
-    confirmLegacyEntryDisabled: async () => true,
-    settleLegacyEntryBlock: async () => {},
-    observeHostActivity,
-    enumerateOldPluginProcesses: async () => [],
+function offlineFence(enumerateOldPluginProcesses: () => Promise<string[]> = async () => []) {
+  return createOfflineV02GenerationFence({
+    declaration: V02_OFFLINE_HOST_DECLARATION,
+    enumerateOldPluginProcesses,
     waitForExitMs: 20,
     pollIntervalMs: 1,
   })
@@ -61,16 +56,16 @@ test('durable primitives reject collisions and clean an interrupted temporary pu
 
 test('generation fence rejects a competing holder and resets if host observation fails', async () => {
   resetV02GenerationFenceForTest()
-  const held = await integratedFence().acquire('first')
-  await assert.rejects(integratedFence().acquire('second'), /cannot acquire/)
+  const held = await offlineFence().acquire('first')
+  await assert.rejects(offlineFence().acquire('second'), /cannot acquire/)
   await held.release('facts-changed')
   await assert.rejects(
-    integratedFence(async () => {
+    offlineFence(async () => {
       throw new Error('host observation unavailable')
     }).acquire('third'),
     /host observation unavailable/,
   )
-  const recovered = await integratedFence().acquire('fourth')
+  const recovered = await offlineFence().acquire('fourth')
   await recovered.release('facts-changed')
   resetV02GenerationFenceForTest()
 })
@@ -85,14 +80,15 @@ test('upgrade lock rejects malformed ownership and conservatively reclaims a pro
       path,
       JSON.stringify({
         schemaVersion: 1,
-        token: 'live-owner-with-different-locale',
+        token: 'reused-pid-owner',
         pid: process.pid,
-        processStart: 'locale-dependent-mismatch',
+        processStart: 'Mon Jan  1 00:00:00 1990',
         acquiredAt: '2026-08-27T00:00:00.000Z',
         planFingerprint: 'old-plan',
       }),
     )
-    await assert.rejects(acquireV02UpgradeLock(path, 'plan'), /already locked/)
+    const reusedPidRecovered = await acquireV02UpgradeLock(path, 'plan')
+    await reusedPidRecovered.release()
     await writeFile(
       path,
       JSON.stringify({
@@ -117,7 +113,10 @@ test('corrupt recovery journal inventories every candidate and changed evidence 
   try {
     await mkdir(join(root, 'state'), { recursive: true })
     await writeFile(join(root, 'config.yaml'), 'repos: {}\n')
-    await writeFile(join(root, 'config-v0.1-backup-evidence.yaml'), 'legacy\n')
+    await writeFile(
+      join(root, 'config-v0.1-backup-20260827T000000000Z-11111111-1111-4111-8111-111111111111.yaml'),
+      'legacy\n',
+    )
     await writeFile(join(root, 'upgrade-v0.2.json'), '{broken')
     const corrupt = await previewV02UpgradeRecovery({ home })
     assert.equal(corrupt.status, 'recovery-blocked')
@@ -125,7 +124,12 @@ test('corrupt recovery journal inventories every candidate and changed evidence 
     assert.equal(corrupt.decision, 'manual-recovery-required')
     assert.deepEqual(
       corrupt.assets.map((asset) => asset.path.split('/').at(-1)),
-      ['config-v0.1-backup-evidence.yaml', 'config.yaml', 'state', 'upgrade-v0.2.json'],
+      [
+        'config-v0.1-backup-20260827T000000000Z-11111111-1111-4111-8111-111111111111.yaml',
+        'config.yaml',
+        'state',
+        'upgrade-v0.2.json',
+      ],
     )
 
     const journal = {

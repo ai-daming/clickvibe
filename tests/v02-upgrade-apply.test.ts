@@ -11,6 +11,12 @@ import { createProjectBinding, parseClickVibeConfigV1 } from '../src/infra/proje
 import { readRepositoryId } from '../src/infra/repository-identity.ts'
 import { loadConfigFromHome } from '../src/infra/runtime.ts'
 import {
+  createOfflineV02GenerationFence,
+  createOnlineV02GenerationFence,
+  resetV02GenerationFenceForTest,
+  V02_OFFLINE_HOST_DECLARATION,
+} from '../src/infra/v02-generation-fence.ts'
+import {
   applyV02Upgrade,
   type V02UpgradeGenerationFence,
   verifyV02UpgradeCutover,
@@ -53,22 +59,12 @@ async function fixture(name: string, statePresent = true) {
   return { home, repository, root, config, preview }
 }
 
-function recordingFence(
-  activity = { liveTasks: [] as string[], liveJobs: [] as string[], oldPluginProcesses: [] as string[] },
-) {
-  const events: string[] = []
-  const fence: V02UpgradeGenerationFence = {
-    async acquire() {
-      events.push('acquire')
-      return {
-        activity,
-        async release(outcome) {
-          events.push(`release:${outcome}`)
-        },
-      }
-    },
-  }
-  return { fence, events }
+function offlineFence() {
+  resetV02GenerationFenceForTest()
+  return createOfflineV02GenerationFence({
+    declaration: V02_OFFLINE_HOST_DECLARATION,
+    enumerateOldPluginProcesses: async () => [],
+  })
 }
 
 async function assertNoPreparedAssets(plan: V02UpgradePlan): Promise<void> {
@@ -84,9 +80,55 @@ async function assertNoPreparedAssets(plan: V02UpgradePlan): Promise<void> {
   await assert.rejects(readRepositoryId(plan.bindings[0].repository.localPath), /missing/)
 }
 
+test('apply rejects an unregistered caller-built fence before the first upgrade write', async () => {
+  const item = await fixture('unregistered-fence')
+  const unregistered: V02UpgradeGenerationFence = {
+    async acquire() {
+      return {
+        activity: { liveTasks: [], liveJobs: [], oldPluginProcesses: [] },
+        async release() {},
+      }
+    },
+  }
+  try {
+    await assert.rejects(
+      applyV02Upgrade({
+        plan: item.preview.plan,
+        fingerprint: item.preview.fingerprint,
+        fence: unregistered,
+      }),
+      /approved generation fence factory/i,
+    )
+    await assertNoPreparedAssets(item.preview.plan)
+  } finally {
+    await rm(item.home, { recursive: true, force: true })
+  }
+})
+
+test('online apply is disabled before host integration and leaves no prepared asset', async () => {
+  const item = await fixture('online-disabled')
+  try {
+    await assert.rejects(
+      applyV02Upgrade({
+        plan: item.preview.plan,
+        fingerprint: item.preview.fingerprint,
+        fence: createOnlineV02GenerationFence(),
+      }),
+      /online.*disabled.*host integration/i,
+    )
+    await assertNoPreparedAssets(item.preview.plan)
+    assert.equal(
+      (await readdir(item.root)).some((name) => name.startsWith('upgrade-v0.2.lock')),
+      false,
+    )
+  } finally {
+    await rm(item.home, { recursive: true, force: true })
+  }
+})
+
 test('authorized apply durably cold-backs up legacy assets and verifies the v0.2 pair', async () => {
   const item = await fixture('success')
-  const { fence, events } = recordingFence()
+  const fence = offlineFence()
   const beforeHead = await git(item.repository, 'rev-parse', 'HEAD')
   const beforeStatus = await git(item.repository, 'status', '--porcelain=v1', '--untracked-files=all')
   try {
@@ -96,7 +138,6 @@ test('authorized apply durably cold-backs up legacy assets and verifies the v0.2
       fence,
     })
     assert.equal(result.status, 'verified', JSON.stringify(result))
-    assert.deepEqual(events, ['acquire', 'release:verified'])
     assert.equal(await readFile(item.preview.plan.paths.configBackup, 'utf8'), item.config)
     assert.equal(
       await readFile(join(item.preview.plan.paths.stateBackup, 'o', 'r', 'issue-9', 'workflow.json'), 'utf8'),
@@ -122,7 +163,7 @@ test('authorized apply durably cold-backs up legacy assets and verifies the v0.2
 
 test('state initially absent is recorded and never fabricated as a legacy rename', async () => {
   const item = await fixture('absent', false)
-  const { fence } = recordingFence()
+  const fence = offlineFence()
   try {
     const result = await applyV02Upgrade({
       plan: item.preview.plan,
@@ -141,7 +182,7 @@ test('state initially absent is recorded and never fabricated as a legacy rename
 
 test('facts changed after authorization invalidates the plan before any prepared asset is written', async () => {
   const item = await fixture('changed')
-  const { fence, events } = recordingFence()
+  const fence = offlineFence()
   try {
     await writeFile(item.preview.plan.paths.activeConfig, `${item.config}# changed after preview\n`)
     const result = await applyV02Upgrade({
@@ -150,7 +191,6 @@ test('facts changed after authorization invalidates the plan before any prepared
       fence,
     })
     assert.equal(result.status, 'facts-changed')
-    assert.deepEqual(events, ['acquire', 'release:facts-changed'])
     await assertNoPreparedAssets(item.preview.plan)
     assert.equal(
       (await readdir(item.root)).some((name) => name.startsWith('upgrade-v0.2.lock')),
@@ -163,7 +203,7 @@ test('facts changed after authorization invalidates the plan before any prepared
 
 test('verified v0.2 config/state pair becomes the strict runtime repository view', async () => {
   const item = await fixture('runtime')
-  const { fence } = recordingFence()
+  const fence = offlineFence()
   try {
     const result = await applyV02Upgrade({
       plan: item.preview.plan,
@@ -190,7 +230,7 @@ test('runtime rejects every independently damaged member of the verified v0.2 pa
     const result = await applyV02Upgrade({
       plan: item.preview.plan,
       fingerprint: item.preview.fingerprint,
-      fence: recordingFence().fence,
+      fence: offlineFence(),
     })
     assert.equal(result.status, 'verified')
     const journalPath = item.preview.plan.paths.journal
@@ -292,7 +332,7 @@ test('a journal publication collision never overwrites the competing owner evide
     const result = await applyV02Upgrade({
       plan: item.preview.plan,
       fingerprint: item.preview.fingerprint,
-      fence: recordingFence().fence,
+      fence: offlineFence(),
       async checkpoint(current) {
         if (!injected && current === `before-file-write:${item.preview.plan.paths.journal}`) {
           injected = true
@@ -314,7 +354,7 @@ test('a late legacy write into the renamed cold backup prevents verified cutover
     const result = await applyV02Upgrade({
       plan: item.preview.plan,
       fingerprint: item.preview.fingerprint,
-      fence: recordingFence().fence,
+      fence: offlineFence(),
       async checkpoint(current) {
         if (
           !injected &&
@@ -337,7 +377,7 @@ test('authorization, plan-shape and durable journal failures release ownership w
   const wrong = await fixture('wrong-authorization')
   try {
     await assert.rejects(
-      applyV02Upgrade({ plan: wrong.preview.plan, fingerprint: 'wrong', fence: recordingFence().fence }),
+      applyV02Upgrade({ plan: wrong.preview.plan, fingerprint: 'wrong', fence: offlineFence() }),
       /authorization fingerprint/,
     )
   } finally {
@@ -348,11 +388,9 @@ test('authorization, plan-shape and durable journal failures release ownership w
   try {
     const plan = structuredClone(malformed.preview.plan)
     plan.bindings = []
-    const observed = recordingFence()
-    const result = await applyV02Upgrade({ plan, fingerprint: v02UpgradePlanFingerprint(plan), fence: observed.fence })
+    const result = await applyV02Upgrade({ plan, fingerprint: v02UpgradePlanFingerprint(plan), fence: offlineFence() })
     assert.equal(result.status, 'failed')
     assert.match(result.error, /no binding/)
-    assert.deepEqual(observed.events, ['acquire', 'release:failed'])
   } finally {
     await rm(malformed.home, { recursive: true, force: true })
   }
@@ -369,7 +407,7 @@ test('authorization, plan-shape and durable journal failures release ownership w
       const result = await applyV02Upgrade({
         plan: item.preview.plan,
         fingerprint: item.preview.fingerprint,
-        fence: recordingFence().fence,
+        fence: offlineFence(),
         checkpoint(current) {
           if (current !== selected) return
           if (name === 'raw-string') throw 'raw checkpoint failure'
@@ -390,7 +428,7 @@ test('verification rejects a fabricated cold state backup when legacy state was 
     const result = await applyV02Upgrade({
       plan: item.preview.plan,
       fingerprint: item.preview.fingerprint,
-      fence: recordingFence().fence,
+      fence: offlineFence(),
     })
     assert.equal(result.status, 'verified')
     await mkdir(item.preview.plan.paths.stateBackup)

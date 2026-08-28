@@ -8,26 +8,34 @@ import test from 'node:test'
 import {
   assertLegacyStateWriteAllowed,
   assertLegacyTaskStartAllowed,
-  createV02GenerationFence,
+  createOfflineV02GenerationFence,
+  createOnlineV02GenerationFence,
   enumerateLegacyClickVibeProcesses,
   resetV02GenerationFenceForTest,
+  V02_OFFLINE_HOST_DECLARATION,
 } from '../src/infra/v02-generation-fence.ts'
 
-const idleActivity = { liveTasks: [] as string[], liveJobs: [] as string[], oldPluginProcesses: [] as string[] }
+test('online upgrade stays disabled until the host registers a real generation capability', async () => {
+  resetV02GenerationFenceForTest()
+  await assert.rejects(createOnlineV02GenerationFence().acquire('sha256:plan'), /online.*disabled.*host integration/i)
+  assert.doesNotThrow(() => assertLegacyTaskStartAllowed())
+})
 
-function integratedFence(
-  overrides: {
-    legacyEntryDisabled?: boolean
-    observeHostActivity?: () => Promise<typeof idleActivity>
-    enumerateOldPluginProcesses?: () => Promise<string[]>
-  } = {},
-) {
-  return createV02GenerationFence({
-    acquireLegacyEntryBlock: async () => {},
-    confirmLegacyEntryDisabled: async () => overrides.legacyEntryDisabled ?? true,
-    settleLegacyEntryBlock: async () => {},
-    observeHostActivity: overrides.observeHostActivity ?? (async () => idleActivity),
-    enumerateOldPluginProcesses: overrides.enumerateOldPluginProcesses ?? (async () => []),
+test('offline upgrade requires an explicit host-stopped declaration', async () => {
+  assert.throws(
+    () =>
+      createOfflineV02GenerationFence({
+        declaration: 'not-confirmed' as never,
+        enumerateOldPluginProcesses: async () => [],
+      }),
+    /explicit.*host.*stopped/i,
+  )
+})
+
+function offlineFence(enumerateOldPluginProcesses: () => Promise<string[]> = async () => []) {
+  return createOfflineV02GenerationFence({
+    declaration: V02_OFFLINE_HOST_DECLARATION,
+    enumerateOldPluginProcesses,
     waitForExitMs: 20,
     pollIntervalMs: 1,
   })
@@ -35,7 +43,7 @@ function integratedFence(
 
 test('generation fence linearizes new legacy starts and remains closed after verified cutover', async () => {
   resetV02GenerationFenceForTest()
-  const fence = integratedFence()
+  const fence = offlineFence()
   const held = await fence.acquire('sha256:plan')
   assert.throws(() => assertLegacyTaskStartAllowed(), /generation fence/)
   await held.release('verified')
@@ -64,16 +72,10 @@ test('legacy state writers fail closed for active v0.2 state and unfinished or c
 test('facts-changed and failed-before-journal release reopen the in-process start gate', async () => {
   for (const outcome of ['facts-changed', 'failed'] as const) {
     resetV02GenerationFenceForTest()
-    const held = await integratedFence().acquire('sha256:plan')
+    const held = await offlineFence().acquire('sha256:plan')
     await held.release(outcome)
     assert.doesNotThrow(() => assertLegacyTaskStartAllowed())
   }
-})
-
-test('online fence refuses when the host cannot prove the legacy entry is disabled', async () => {
-  resetV02GenerationFenceForTest()
-  await assert.rejects(integratedFence({ legacyEntryDisabled: false }).acquire('sha256:plan'), /offline upgrade/)
-  assert.doesNotThrow(() => assertLegacyTaskStartAllowed())
 })
 
 test('process enumeration finds a real legacy ClickVibe process and fence waits fail closed', async () => {
@@ -92,7 +94,7 @@ test('process enumeration finds a real legacy ClickVibe process and fence waits 
       JSON.stringify(observed),
     )
     await assert.rejects(
-      integratedFence({ enumerateOldPluginProcesses: enumerateLegacyClickVibeProcesses }).acquire('sha256:plan'),
+      offlineFence(enumerateLegacyClickVibeProcesses).acquire('sha256:plan'),
       /old ClickVibe processes.*still active/,
     )
   } finally {

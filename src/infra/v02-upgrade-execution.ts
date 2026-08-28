@@ -13,6 +13,7 @@ import {
   type V02UpgradeCheckpoint,
 } from './v02-upgrade-durable.ts'
 import { acquireV02UpgradeLock, type V02UpgradeLockOwner } from './v02-upgrade-lock.ts'
+import { assertApprovedV02GenerationFence } from './v02-generation-fence.ts'
 import {
   previewV02Upgrade,
   inventoryV02StateDirectory,
@@ -261,6 +262,7 @@ export async function applyV02Upgrade(options: ApplyV02UpgradeOptions): Promise<
   const expectedFingerprint = v02UpgradePlanFingerprint(options.plan)
   if (options.fingerprint !== expectedFingerprint)
     throw new Error('authorization fingerprint does not match the supplied plan')
+  assertApprovedV02GenerationFence(options.fence)
   const lock = await acquireV02UpgradeLock(options.plan.paths.lock, options.fingerprint, options.checkpoint)
   let fence: Awaited<ReturnType<V02UpgradeGenerationFence['acquire']>> | undefined
   let journal: V02UpgradeJournal | undefined

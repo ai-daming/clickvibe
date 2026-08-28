@@ -5,8 +5,13 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
-import type { V02UpgradeGenerationFence } from '../src/infra/v02-upgrade-execution.ts'
 import { applyV02Upgrade } from '../src/infra/v02-upgrade-execution.ts'
+import {
+  createOfflineV02GenerationFence,
+  createOnlineV02GenerationFence,
+  resetV02GenerationFenceForTest,
+  V02_OFFLINE_HOST_DECLARATION,
+} from '../src/infra/v02-generation-fence.ts'
 import { previewV02UpgradeRecovery, resumeV02Upgrade, rollbackV02Upgrade } from '../src/infra/v02-upgrade-recovery.ts'
 import { previewV02Upgrade } from '../src/infra/v02-upgrade.ts'
 
@@ -43,15 +48,12 @@ async function fixture(name: string, statePresent = true) {
   return { home, root, config, preview }
 }
 
-function fence(): V02UpgradeGenerationFence {
-  return {
-    async acquire() {
-      return {
-        activity: { liveTasks: [], liveJobs: [], oldPluginProcesses: [] },
-        async release() {},
-      }
-    },
-  }
+function fence() {
+  resetV02GenerationFenceForTest()
+  return createOfflineV02GenerationFence({
+    declaration: V02_OFFLINE_HOST_DECLARATION,
+    enumerateOldPluginProcesses: async () => [],
+  })
 }
 
 async function failBeforeConfigActivation(item: Awaited<ReturnType<typeof fixture>>) {
@@ -304,24 +306,35 @@ test('rollback preserves an initially absent legacy state and rejects changed re
   }
 })
 
-test('recovery fence acquisition failure releases the cross-process lock for an immediate retry', async () => {
+test('online recovery refusal writes no lock and an offline retry succeeds immediately', async () => {
   const item = await fixture('fence-failure')
   try {
     await failBeforeConfigActivation(item)
     const recovery = await previewV02UpgradeRecovery({ home: item.home })
     assert.equal(recovery.status, 'recovery-previewed')
-    const unavailable: V02UpgradeGenerationFence = {
+    const unregistered = {
       async acquire() {
-        throw new Error('generation fence unavailable')
+        throw new Error('unregistered fence must never acquire')
       },
     }
-    const failed = await resumeV02Upgrade({
-      plan: recovery.plan,
-      fingerprint: recovery.fingerprint,
-      fence: unavailable,
-    })
-    assert.equal(failed.status, 'failed')
-    if (failed.status === 'failed') assert.match(failed.error, /generation fence unavailable/)
+    await assert.rejects(
+      resumeV02Upgrade({
+        plan: recovery.plan,
+        fingerprint: recovery.fingerprint,
+        fence: unregistered,
+      }),
+      /approved generation fence factory/i,
+    )
+    await assert.rejects(stat(item.preview.plan.paths.lock), { code: 'ENOENT' })
+    const unavailable = createOnlineV02GenerationFence()
+    await assert.rejects(
+      resumeV02Upgrade({
+        plan: recovery.plan,
+        fingerprint: recovery.fingerprint,
+        fence: unavailable,
+      }),
+      /online.*disabled.*host integration/i,
+    )
     await assert.rejects(stat(item.preview.plan.paths.lock), { code: 'ENOENT' })
     const retried = await resumeV02Upgrade({
       plan: recovery.plan,

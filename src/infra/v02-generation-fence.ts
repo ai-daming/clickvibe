@@ -26,6 +26,24 @@ export class V02GenerationViolationError extends Error {
   }
 }
 
+const approvedFences = new WeakSet<V02UpgradeGenerationFence>()
+const disabledOnlineFences = new WeakSet<V02UpgradeGenerationFence>()
+
+function approveFence(fence: V02UpgradeGenerationFence): V02UpgradeGenerationFence {
+  approvedFences.add(fence)
+  return fence
+}
+
+/** Reject caller-built no-op fences before the upgrader creates its lock candidate. */
+export function assertApprovedV02GenerationFence(fence: V02UpgradeGenerationFence): void {
+  if (!approvedFences.has(fence)) {
+    throw new Error('v0.2 apply requires a generation fence from an approved generation fence factory')
+  }
+  if (disabledOnlineFences.has(fence)) {
+    throw new Error('online v0.2 apply is disabled until DSH host integration registers a real generation capability')
+  }
+}
+
 export function isV02GenerationViolation(reason: unknown): reason is V02GenerationViolationError {
   return reason instanceof V02GenerationViolationError
 }
@@ -100,16 +118,12 @@ export async function enumerateLegacyClickVibeProcesses(): Promise<string[]> {
     .sort()
 }
 
-export interface V02GenerationFenceIntegration {
-  /** Host-owned linearization point that blocks every legacy plugin/task entry. */
-  acquireLegacyEntryBlock(): Promise<void>
-  /** Independent proof that the acquired host block still owns every entry. */
-  confirmLegacyEntryDisabled(): Promise<boolean>
-  /** Reopen legacy entries on abort, or finalize their replacement on success. */
-  settleLegacyEntryBlock(outcome: V02UpgradeOutcome): Promise<void>
-  /** Host-owned live task/job observation after its start entry is closed. */
-  observeHostActivity(): Promise<V02UpgradeHostActivity>
-  /** Injectable only so tests can deterministically exercise the OS observer. */
+export const V02_OFFLINE_HOST_DECLARATION = 'host-stopped-and-restart-disabled' as const
+
+export interface V02OfflineGenerationFenceOptions {
+  /** Explicit operator assertion that the embedding DSH host is stopped and cannot restart during apply. */
+  declaration: typeof V02_OFFLINE_HOST_DECLARATION
+  /** Secondary observation for standalone legacy processes whose argv exposes ClickVibe. */
   enumerateOldPluginProcesses?: () => Promise<string[]>
   waitForExitMs?: number
   pollIntervalMs?: number
@@ -119,17 +133,17 @@ function hasActivity(activity: V02UpgradeHostActivity): boolean {
   return activity.liveTasks.length > 0 || activity.liveJobs.length > 0 || activity.oldPluginProcesses.length > 0
 }
 
-async function waitForQuiescence(options: V02GenerationFenceIntegration): Promise<V02UpgradeHostActivity> {
+async function waitForOfflineQuiescence(options: V02OfflineGenerationFenceOptions): Promise<V02UpgradeHostActivity> {
   const enumerate = options.enumerateOldPluginProcesses ?? enumerateLegacyClickVibeProcesses
   const deadline = Date.now() + (options.waitForExitMs ?? 5_000)
   const interval = options.pollIntervalMs ?? 25
   let last: V02UpgradeHostActivity = { liveTasks: [], liveJobs: [], oldPluginProcesses: [] }
   while (true) {
-    const [host, processes] = await Promise.all([options.observeHostActivity(), enumerate()])
+    const processes = await enumerate()
     last = {
-      liveTasks: [...new Set(host.liveTasks)].sort(),
-      liveJobs: [...new Set(host.liveJobs)].sort(),
-      oldPluginProcesses: [...new Set([...host.oldPluginProcesses, ...processes])].sort(),
+      liveTasks: [],
+      liveJobs: [],
+      oldPluginProcesses: [...new Set(processes)].sort(),
     }
     if (!hasActivity(last)) return last
     if (Date.now() >= deadline) {
@@ -141,24 +155,34 @@ async function waitForQuiescence(options: V02GenerationFenceIntegration): Promis
   }
 }
 
-export function createV02GenerationFence(options: V02GenerationFenceIntegration): V02UpgradeGenerationFence {
-  return {
+/** Online apply has no product factory until the DSH host owns a real entry-block capability. */
+export function createOnlineV02GenerationFence(): V02UpgradeGenerationFence {
+  const fence = approveFence({
+    async acquire() {
+      throw new Error('online v0.2 apply is disabled until DSH host integration registers a real generation capability')
+    },
+  })
+  disabledOnlineFences.add(fence)
+  return fence
+}
+
+/**
+ * Offline apply is the only executable Slice 2 path. The declaration covers the
+ * in-process-plugin shape that cannot be proven from argv; OS enumeration remains
+ * a secondary guard for independently running legacy binaries.
+ */
+export function createOfflineV02GenerationFence(options: V02OfflineGenerationFenceOptions): V02UpgradeGenerationFence {
+  if (options.declaration !== V02_OFFLINE_HOST_DECLARATION) {
+    throw new Error('offline v0.2 apply requires an explicit declaration that the DSH host is stopped')
+  }
+  return approveFence({
     async acquire() {
       if (fenceState.mode !== 'legacy-open') throw new Error(`cannot acquire generation fence from ${fenceState.mode}`)
       const token = Symbol('v0.2-upgrade')
       fenceState.mode = 'upgrade-held'
       fenceState.token = token
-      let hostBlockAcquired = false
       try {
-        await options.acquireLegacyEntryBlock()
-        hostBlockAcquired = true
-        if (!(await options.confirmLegacyEntryDisabled())) {
-          throw new Error('host cannot disable every legacy entry; close the host and use the offline upgrade entry')
-        }
-        const activity = await waitForQuiescence(options)
-        if (!(await options.confirmLegacyEntryDisabled())) {
-          throw new Error('legacy entry reopened during fence acquisition; use the offline upgrade entry')
-        }
+        const activity = await waitForOfflineQuiescence(options)
         let released = false
         return {
           activity,
@@ -167,23 +191,12 @@ export function createV02GenerationFence(options: V02GenerationFenceIntegration)
             if (fenceState.token !== token || fenceState.mode !== 'upgrade-held') {
               throw new Error('v0.2 generation fence ownership changed before release')
             }
-            await options.settleLegacyEntryBlock(outcome)
             fenceState.mode = outcome === 'verified' ? 'v0.2-active' : 'legacy-open'
             fenceState.token = null
             released = true
           },
         }
       } catch (reason) {
-        if (hostBlockAcquired) {
-          try {
-            await options.settleLegacyEntryBlock('failed')
-          } catch (settleReason) {
-            throw new AggregateError(
-              [reason, settleReason],
-              'generation fence acquisition and host-block release failed',
-            )
-          }
-        }
         if (fenceState.token === token) {
           fenceState.mode = 'legacy-open'
           fenceState.token = null
@@ -191,7 +204,7 @@ export function createV02GenerationFence(options: V02GenerationFenceIntegration)
         throw reason
       }
     },
-  }
+  })
 }
 
 /** Test-only reset for the process-global fence singleton. */

@@ -18,6 +18,7 @@ import {
   verifyV02UpgradeCutover,
 } from './v02-upgrade-execution.ts'
 import { acquireV02UpgradeLock } from './v02-upgrade-lock.ts'
+import { assertApprovedV02GenerationFence } from './v02-generation-fence.ts'
 import { v02UpgradePlanFingerprint } from './v02-upgrade.ts'
 
 interface RecoveryAsset {
@@ -361,6 +362,7 @@ async function withRecoveryOwnership<T extends { status: string }>(
 ): Promise<T | { status: 'facts-changed' } | { status: 'failed'; error: string }> {
   if (recoveryFingerprint(options.plan) !== options.fingerprint)
     throw new Error('recovery authorization fingerprint is invalid')
+  assertApprovedV02GenerationFence(options.fence)
   const lock = await acquireV02UpgradeLock(
     options.plan.journal.value.plan.paths.lock,
     options.fingerprint,

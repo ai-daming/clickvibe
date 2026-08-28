@@ -54,14 +54,13 @@ async function hasJournalLessUpgradeEvidence(
   paths: V02UpgradePlan['paths'],
   assets: V02UpgradeRecoveryAsset[],
 ): Promise<boolean> {
-  if (
-    assets.some((asset) =>
-      /^(?:config-v0\.1-backup-|config-v0\.2-staging-|state-v0\.1-backup-|state-v0\.2-staging-)/.test(
-        basename(asset.path),
-      ),
-    )
+  const nonce = '[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}'
+  const stamp = '\\d{8}T\\d{9}Z'
+  const artifact = new RegExp(
+    `^(?:config-v0\\.1-backup-${stamp}-${nonce}\\.yaml|config-v0\\.2-staging-${nonce}\\.yaml|state-v0\\.1-backup-${stamp}-${nonce}|state-v0\\.2-staging-${nonce})$`,
+    'i',
   )
-    return true
+  if (assets.some((asset) => artifact.test(basename(asset.path)))) return true
   try {
     const parsed = parseDocument(await readFile(paths.activeConfig, 'utf8')).toJS() as {
       schemaVersion?: unknown
