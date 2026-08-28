@@ -2,12 +2,13 @@
 import { execFile } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { lstat, readFile, readdir, realpath } from 'node:fs/promises'
-import { basename, dirname, join, relative, resolve } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { parseDocument, stringify as stringifyYaml } from 'yaml'
 import type { ClickVibeConfigV1, ProjectBinding } from './contracts.ts'
 import { createProjectBinding, parseClickVibeConfigV1 } from './project-binding.ts'
 import { inspectRepositoryIdentityLocation, readRepositoryId } from './repository-identity.ts'
+import { inspectV02UpgradeRecovery } from './v02-upgrade-inventory.ts'
 
 const execFileAsync = promisify(execFile)
 const UPGRADE_VERSION = 'clickvibe-v02-upgrade-1'
@@ -88,7 +89,7 @@ export type V02UpgradePreview =
       status: 'recovery'
       recovery: {
         journal: {
-          status: 'complete' | 'corrupt' | 'unknown-schema'
+          status: 'complete' | 'corrupt' | 'unknown-schema' | 'missing'
           value?: unknown
           sha256?: string
           error?: string
@@ -122,12 +123,16 @@ function sha256(value: string | Buffer): string {
   return createHash('sha256').update(value).digest('hex')
 }
 
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0
+}
+
 function canonicalValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalValue)
   if (value && typeof value === 'object') {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
+        .sort(([left], [right]) => compareText(left, right))
         .map(([key, entry]) => [key, canonicalValue(entry)]),
     )
   }
@@ -167,12 +172,12 @@ function parseLegacyConfig(raw: string, home: string): LegacyConfig {
   }
   const repos: Record<string, string> = {}
   for (const [repoKey, path] of Object.entries((input.repos ?? {}) as Record<string, unknown>).sort(([a], [b]) =>
-    a.localeCompare(b),
+    compareText(a, b),
   )) {
     if (!/^[^/\s]+\/[^/\s]+$/.test(repoKey) || typeof path !== 'string' || path.length === 0) {
       throw new Error(`legacy config repos.${repoKey} is invalid`)
     }
-    repos[repoKey] = resolve(expandHome(path, home))
+    repos[repoKey] = resolve(home, expandHome(path, home))
   }
   const worktreeRootValue = input.worktreeRoot ?? join(home, '.clickvibe', 'worktrees')
   if (typeof worktreeRootValue !== 'string' || worktreeRootValue.length === 0) {
@@ -196,14 +201,14 @@ async function git(repositoryPath: string, ...args: string[]): Promise<string> {
   return result.stdout.trim()
 }
 
-async function inventoryState(path: string): Promise<V02UpgradeStateInventory> {
+export async function inventoryV02StateDirectory(path: string): Promise<V02UpgradeStateInventory> {
   try {
     const root = await lstat(path)
     if (root.isSymbolicLink() || !root.isDirectory()) throw new Error('active state must be a real directory')
     const entries: V02UpgradeStateInventory['entries'] = []
     async function visit(directory: string): Promise<void> {
       for (const entry of (await readdir(directory, { withFileTypes: true })).sort((a, b) =>
-        a.name.localeCompare(b.name),
+        compareText(a.name, b.name),
       )) {
         const child = join(directory, entry.name)
         if (entry.isSymbolicLink()) throw new Error(`state contains symlink: ${relative(path, child)}`)
@@ -215,7 +220,7 @@ async function inventoryState(path: string): Promise<V02UpgradeStateInventory> {
       }
     }
     await visit(path)
-    const sorted = entries.sort((a, b) => a.path.localeCompare(b.path))
+    const sorted = entries.sort((a, b) => compareText(a.path, b.path))
     return {
       status: 'present',
       realPath: await realpath(path),
@@ -273,68 +278,6 @@ function upgradePaths(home: string, now: string, nonce: string): V02UpgradePlan[
   }
 }
 
-async function recoveryAssets(root: string): Promise<V02UpgradeRecoveryAsset[]> {
-  const assets: V02UpgradeRecoveryAsset[] = []
-  for (const entry of await readdir(root, { withFileTypes: true })) {
-    if (!/^(config|state|upgrade-v0\.2)/.test(entry.name)) continue
-    const path = join(root, entry.name)
-    const metadata = await lstat(path)
-    const kind = entry.isSymbolicLink()
-      ? 'symlink'
-      : entry.isFile()
-        ? 'file'
-        : entry.isDirectory()
-          ? 'directory'
-          : 'other'
-    const bytes = entry.isFile() ? await readFile(path) : null
-    assets.push({
-      path,
-      kind,
-      bytes: bytes?.length ?? metadata.size,
-      ...(bytes ? { sha256: sha256(bytes) } : {}),
-      modifiedAt: metadata.mtime.toISOString(),
-    })
-  }
-  return assets.sort((a, b) => a.path.localeCompare(b.path))
-}
-
-async function inspectRecovery(paths: V02UpgradePlan['paths']): Promise<V02UpgradePreview | null> {
-  let raw: string
-  try {
-    raw = await readFile(paths.journal, 'utf8')
-  } catch (reason) {
-    if ((reason as NodeJS.ErrnoException).code === 'ENOENT') return null
-    return {
-      status: 'recovery',
-      recovery: {
-        journal: { status: 'corrupt', error: errorMessage(reason) },
-        assets: await recoveryAssets(paths.root),
-      },
-    }
-  }
-  try {
-    const value = JSON.parse(raw) as { schemaVersion?: unknown }
-    return {
-      status: 'recovery',
-      recovery: {
-        journal:
-          value.schemaVersion === 1
-            ? { status: 'complete', value, sha256: sha256(raw) }
-            : { status: 'unknown-schema', value, sha256: sha256(raw) },
-        assets: await recoveryAssets(paths.root),
-      },
-    }
-  } catch (reason) {
-    return {
-      status: 'recovery',
-      recovery: {
-        journal: { status: 'corrupt', error: errorMessage(reason) },
-        assets: await recoveryAssets(paths.root),
-      },
-    }
-  }
-}
-
 async function inspectBinding(
   repoKey: string,
   localPath: string,
@@ -387,7 +330,7 @@ export async function previewV02Upgrade(options: PreviewV02UpgradeOptions): Prom
   const now = options.now ?? new Date().toISOString()
   const nonce = options.nonce ?? randomUUID()
   const paths = upgradePaths(resolve(options.home), now, nonce)
-  const recovery = await inspectRecovery(paths)
+  const recovery = await inspectV02UpgradeRecovery(paths)
   let expectedJournal: V02UpgradePlan['expectedJournal'] = 'absent'
   if (recovery) {
     if (recovery.status !== 'recovery') return recovery
@@ -409,7 +352,7 @@ export async function previewV02Upgrade(options: PreviewV02UpgradeOptions): Prom
   } catch (reason) {
     return { status: 'blocked', blocked: [{ scope: 'config', key: paths.activeConfig, error: errorMessage(reason) }] }
   }
-  const state = await inventoryState(paths.activeState)
+  const state = await inventoryV02StateDirectory(paths.activeState)
   if (state.status === 'error')
     blocked.push({ scope: 'state', key: paths.activeState, error: state.error ?? 'unknown state error' })
   for (const task of options.hostActivity.liveTasks)
@@ -479,9 +422,9 @@ export async function previewV02Upgrade(options: PreviewV02UpgradeOptions): Prom
     paths,
     legacyConfig: { status: 'present', bytes: Buffer.byteLength(rawConfig), sha256: sha256(rawConfig) },
     legacyState: state,
-    bindings: bindings.sort((a, b) => a.container.id.localeCompare(b.container.id)),
-    exclusions: exclusions.sort((a, b) => a.repoKey.localeCompare(b.repoKey)),
-    worktrees: worktrees.sort((a, b) => a.repoKey.localeCompare(b.repoKey)),
+    bindings: bindings.sort((a, b) => compareText(a.container.id, b.container.id)),
+    exclusions: exclusions.sort((a, b) => compareText(a.repoKey, b.repoKey)),
+    worktrees: worktrees.sort((a, b) => compareText(a.repoKey, b.repoKey)),
     hostActivity: options.hostActivity,
     targetConfig: { yaml: targetYaml, sha256: sha256(targetYaml) },
   }

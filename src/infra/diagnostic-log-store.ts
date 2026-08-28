@@ -54,14 +54,18 @@ export function appendDiagnosticLine(
   assertLegacyStateWriteAllowed(root)
   const path = diagnosticLogPath(root, workflowKey)
   return enqueue(path, async () => {
+    assertLegacyStateWriteAllowed(root)
     const limit = configuredMaxBytes(await maxBytes)
     const record = `${line}\n`
     await mkdir(dirname(path), { recursive: true })
     const existingBytes = await fileSize(path)
     if (existingBytes > 0 && existingBytes + Buffer.byteLength(record, 'utf8') > limit) {
+      assertLegacyStateWriteAllowed(root)
       await rm(rotatedPath(path), { force: true })
+      assertLegacyStateWriteAllowed(root)
       await rename(path, rotatedPath(path))
     }
+    assertLegacyStateWriteAllowed(root)
     await appendFile(path, record, 'utf8')
   })
 }

@@ -9,6 +9,24 @@ import { type V02UpgradeGenerationFence } from '../src/infra/v02-upgrade-executi
 import { acquireV02UpgradeLock } from '../src/infra/v02-upgrade-lock.ts'
 import { previewV02UpgradeRecovery, rollbackV02Upgrade } from '../src/infra/v02-upgrade-recovery.ts'
 
+function integratedFence(
+  observeHostActivity: () => Promise<{
+    liveTasks: string[]
+    liveJobs: string[]
+    oldPluginProcesses: string[]
+  }> = async () => ({ liveTasks: [], liveJobs: [], oldPluginProcesses: [] }),
+) {
+  return createV02GenerationFence({
+    acquireLegacyEntryBlock: async () => {},
+    confirmLegacyEntryDisabled: async () => true,
+    settleLegacyEntryBlock: async () => {},
+    observeHostActivity,
+    enumerateOldPluginProcesses: async () => [],
+    waitForExitMs: 20,
+    pollIntervalMs: 1,
+  })
+}
+
 test('durable primitives reject collisions and clean an interrupted temporary publication', async () => {
   const root = await mkdtemp(join(tmpdir(), 'clickvibe-v02-durable-'))
   const firstDirectory = join(root, 'first')
@@ -43,27 +61,16 @@ test('durable primitives reject collisions and clean an interrupted temporary pu
 
 test('generation fence rejects a competing holder and resets if host observation fails', async () => {
   resetV02GenerationFenceForTest()
-  const held = await createV02GenerationFence(async () => ({
-    liveTasks: [],
-    liveJobs: [],
-    oldPluginProcesses: [],
-  })).acquire('first')
-  await assert.rejects(
-    createV02GenerationFence(async () => ({ liveTasks: [], liveJobs: [], oldPluginProcesses: [] })).acquire('second'),
-    /cannot acquire/,
-  )
+  const held = await integratedFence().acquire('first')
+  await assert.rejects(integratedFence().acquire('second'), /cannot acquire/)
   await held.release('facts-changed')
   await assert.rejects(
-    createV02GenerationFence(async () => {
+    integratedFence(async () => {
       throw new Error('host observation unavailable')
     }).acquire('third'),
     /host observation unavailable/,
   )
-  const recovered = await createV02GenerationFence(async () => ({
-    liveTasks: [],
-    liveJobs: [],
-    oldPluginProcesses: [],
-  })).acquire('fourth')
+  const recovered = await integratedFence().acquire('fourth')
   await recovered.release('facts-changed')
   resetV02GenerationFenceForTest()
 })
@@ -74,6 +81,18 @@ test('upgrade lock rejects malformed ownership and conservatively reclaims a pro
   try {
     await writeFile(path, '{}')
     await assert.rejects(acquireV02UpgradeLock(path, 'plan'), /invalid owner record/)
+    await writeFile(
+      path,
+      JSON.stringify({
+        schemaVersion: 1,
+        token: 'live-owner-with-different-locale',
+        pid: process.pid,
+        processStart: 'locale-dependent-mismatch',
+        acquiredAt: '2026-08-27T00:00:00.000Z',
+        planFingerprint: 'old-plan',
+      }),
+    )
+    await assert.rejects(acquireV02UpgradeLock(path, 'plan'), /already locked/)
     await writeFile(
       path,
       JSON.stringify({
@@ -102,6 +121,8 @@ test('corrupt recovery journal inventories every candidate and changed evidence 
     await writeFile(join(root, 'upgrade-v0.2.json'), '{broken')
     const corrupt = await previewV02UpgradeRecovery({ home })
     assert.equal(corrupt.status, 'recovery-blocked')
+    assert.equal(corrupt.journal.status, 'corrupt')
+    assert.equal(corrupt.decision, 'manual-recovery-required')
     assert.deepEqual(
       corrupt.assets.map((asset) => asset.path.split('/').at(-1)),
       ['config-v0.1-backup-evidence.yaml', 'config.yaml', 'state', 'upgrade-v0.2.json'],
@@ -116,6 +137,13 @@ test('corrupt recovery journal inventories every candidate and changed evidence 
     await writeFile(join(root, 'upgrade-v0.2.json'), JSON.stringify(journal))
     const invalid = await previewV02UpgradeRecovery({ home })
     assert.equal(invalid.status, 'recovery-blocked')
+
+    await rm(join(root, 'upgrade-v0.2.json'))
+    const missing = await previewV02UpgradeRecovery({ home })
+    assert.equal(missing.status, 'recovery-blocked')
+    assert.equal(missing.journal.status, 'missing')
+    assert.equal(missing.decision, 'manual-recovery-required')
+    assert.match(missing.assets.map((asset) => asset.path).join('\n'), /config-v0\.1-backup/)
   } finally {
     await rm(home, { recursive: true, force: true })
   }

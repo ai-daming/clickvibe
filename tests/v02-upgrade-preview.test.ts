@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdtemp, mkdir, readFile, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
@@ -175,6 +175,43 @@ test('an unfinished or corrupt journal takes precedence over a fresh preview', a
     assert.equal(preview.status, 'recovery')
     assert.equal(preview.recovery.journal.status, 'corrupt')
     assert.match(preview.recovery.assets.map((asset) => asset.path).join('\n'), /upgrade-v0\.2\.json/)
+
+    await unlink(join(clickvibe, 'upgrade-v0.2.json'))
+    await writeFile(join(clickvibe, 'config-v0.1-backup-evidence.yaml'), 'repos: {}\n')
+    const missing = await previewV02Upgrade({
+      home,
+      baselineSha: 'baseline',
+      now: '2026-08-27T16:00:00.000Z',
+      nonce: 'missing-journal',
+      choices: { primaryRemotes: {}, exclusions: {} },
+      hostActivity: { liveTasks: [], liveJobs: [], oldPluginProcesses: [] },
+    })
+    assert.equal(missing.status, 'recovery')
+    if (missing.status === 'recovery') assert.equal(missing.recovery.journal.status, 'missing')
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('relative legacy repository paths resolve against the selected home, never the process cwd', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'clickvibe-v02-relative-path-'))
+  const repository = join(home, 'relative-repo')
+  const root = join(home, '.clickvibe')
+  try {
+    await initRepository(repository)
+    await mkdir(root, { recursive: true })
+    await writeFile(join(root, 'config.yaml'), 'repos:\n  o/r: ./relative-repo\n')
+    const preview = await previewV02Upgrade({
+      home,
+      baselineSha: 'baseline',
+      nonce: 'relative-path',
+      proposedRepositoryIds: { 'o/r': 'repo_11111111-1111-4111-8111-111111111111' },
+      choices: { primaryRemotes: { 'o/r': 'origin' }, exclusions: {} },
+      hostActivity: { liveTasks: [], liveJobs: [], oldPluginProcesses: [] },
+    })
+    assert.equal(preview.status, 'previewed', JSON.stringify(preview))
+    if (preview.status === 'previewed')
+      assert.equal(preview.plan.bindings[0].repository.localPath, await realpath(repository))
   } finally {
     await rm(home, { recursive: true, force: true })
   }

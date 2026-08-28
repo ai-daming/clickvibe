@@ -31,7 +31,7 @@
 |---|---|---|
 | `~/.clickvibe/config.yaml` legacy `repos` | `src/infra/project-config.ts` | schema/journal generation gate；schema 1 拒绝 legacy mutation |
 | workflow JSON | `src/infra/workflow-persistence.ts` | cross-process workflow lock 内检查 active state generation |
-| legacy workflow 搬移 | `src/infra/state.ts::migrateLegacyState` | v0.2 marker 时禁止扫描和搬移 |
+| legacy workflow 搬移 | `src/infra/state.ts::migrateLegacyState` | 扫描前和每个 mkdir/link/rm 前检查 generation；generation violation 不得被 best-effort catch 吞掉 |
 | task JSONL | `src/infra/task-log-store.ts` 经 `state.ts` | state generation gate；不得吞掉 generation violation |
 | diagnostic JSONL | `src/infra/diagnostic-log-store.ts` 经 `task-diagnostics.ts` | state generation gate；升级错误写专用 journal，不回写 legacy state |
 | agent/host job 启动 | `createLiveTask` → `reserveHostTask` → `attachAgentProcess` | process generation fence + active marker 双检查 |
@@ -43,7 +43,10 @@
 ## 对抗性验证
 
 - 每个 file write/fsync、publish/rename、directory fsync、journal replace 前后可确定性注入失败。
-- 双进程竞争 upgrade lock；PID 复用通过进程启动标识而不是仅 `kill(pid, 0)` 判断。
+- 双进程竞争 upgrade lock；owner token 保留进程启动标识用于审计，但 stale 回收只接受 `ESRCH` 明确死亡，活 PID 的启动字符串不匹配一律不抢。
 - fence 建立前后同时尝试启动 ClickVibe task，均不得越过线性化点。
+- fence 必须由宿主关闭 legacy start entry、再次确认入口仍关闭，并独立枚举操作系统进程；无法证明时只允许离线升级。活 PID 即使启动时间字符串不匹配也不可抢锁。
+- cold backup 按原 inode、文件数、字节数和目录内容 hash 回读；旧进程长开 fd 污染 rename 后 backup 时不得写 `verified`。
 - preview/apply 之间修改 config/state/repository/worktree 任一输入，apply 必须回到 previewed 且零准备写入。
 - 成功、prepare 失败、cutover 失败、resume、rollback 后对 Git worktree/refs/dirty bytes 做前后快照比较。
+- journal 缺失/损坏且出现 backup/staging/schema-1/v0.2 证据时进入 `manual-recovery-required` 只读 inventory；不得假装首次升级，也不得覆盖原始损坏 journal。

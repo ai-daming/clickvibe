@@ -186,18 +186,9 @@ async function loadV02Config(home: string, raw: string, parsed: unknown): Promis
 /** Read config for an explicit home; schema-1 requires a verified config/state pair. */
 export async function loadConfigFromHome(home: string): Promise<ClickVibeConfig> {
   const path = join(home, '.clickvibe', 'config.yaml')
+  let raw: string
   try {
-    const raw = await readFile(path, 'utf8')
-    const parsed = parseYaml(raw) as (Partial<ClickVibeConfig> & { schemaVersion?: unknown }) | null
-    if (parsed?.schemaVersion === 1) return loadV02Config(home, raw, parsed)
-    if (parsed?.schemaVersion !== undefined)
-      throw new Error(`unsupported ClickVibe config schemaVersion: ${parsed.schemaVersion}`)
-    return {
-      repos: parsed?.repos ?? {},
-      worktreeRoot: parsed?.worktreeRoot ? expandHome(parsed.worktreeRoot) : join(home, '.clickvibe', 'worktrees'),
-      fetchTtlSeconds: parsed?.fetchTtlSeconds,
-      diagnosticsMaxBytes: parsed?.diagnosticsMaxBytes,
-    }
+    raw = await readFile(path, 'utf8')
   } catch (reason) {
     if ((reason as NodeJS.ErrnoException).code !== 'ENOENT') throw reason
     return {
@@ -205,6 +196,18 @@ export async function loadConfigFromHome(home: string): Promise<ClickVibeConfig>
       worktreeRoot: join(home, '.clickvibe', 'worktrees'),
       fetchTtlSeconds: DEFAULT_FETCH_TTL_SECONDS,
     }
+  }
+  const parsed = parseYaml(raw) as (Partial<ClickVibeConfig> & { schemaVersion?: unknown }) | null
+  // Only the config file's own ENOENT selects defaults. Any schema-1 pairing
+  // error (missing journal/marker included) is an explicit fail-closed error.
+  if (parsed?.schemaVersion === 1) return await loadV02Config(home, raw, parsed)
+  if (parsed?.schemaVersion !== undefined)
+    throw new Error(`unsupported ClickVibe config schemaVersion: ${parsed.schemaVersion}`)
+  return {
+    repos: parsed?.repos ?? {},
+    worktreeRoot: parsed?.worktreeRoot ? expandHome(parsed.worktreeRoot) : join(home, '.clickvibe', 'worktrees'),
+    fetchTtlSeconds: parsed?.fetchTtlSeconds,
+    diagnosticsMaxBytes: parsed?.diagnosticsMaxBytes,
   }
 }
 

@@ -122,8 +122,10 @@ export async function startTaskLog(
   assertLegacyStateWriteAllowed(root)
   const path = taskLogPath(root, workflow, kind, taskId)
   await enqueue(path, async () => {
+    assertLegacyStateWriteAllowed(root)
     await mkdir(dirname(path), { recursive: true })
     try {
+      assertLegacyStateWriteAllowed(root)
       await writeFile(path, '', { encoding: 'utf8', flag: 'wx' })
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
@@ -144,7 +146,9 @@ export async function appendTaskLog(
   const path = taskLogPath(root, workflow, kind, taskId)
   const record = taskRecord(taskId, sequence, encodedLine, options)
   await enqueue(path, async () => {
+    assertLegacyStateWriteAllowed(root)
     await mkdir(dirname(path), { recursive: true })
+    assertLegacyStateWriteAllowed(root)
     await appendFile(path, `${JSON.stringify(record)}\n`, 'utf8')
   })
 }
@@ -218,6 +222,7 @@ export async function appendTaskLogNext(
   assertLegacyStateWriteAllowed(root)
   const path = taskLogPath(root, workflow, kind, taskId)
   await enqueue(path, async () => {
+    assertLegacyStateWriteAllowed(root)
     await mkdir(dirname(path), { recursive: true })
     let sequence = 1
     try {
@@ -233,6 +238,7 @@ export async function appendTaskLogNext(
     } catch {
       // Missing task file is created by appendFile.
     }
+    assertLegacyStateWriteAllowed(root)
     await appendFile(path, `${JSON.stringify(taskRecord(taskId, sequence, encodedLine, options))}\n`, 'utf8')
   })
 }
@@ -252,10 +258,12 @@ export async function migrateLegacyLog(
   if (lines.at(-1) === '') lines.pop()
   const records = lines.map((line, index) => taskRecord(taskId, index + 1, line, { ts: timestamp }))
   const serialized = records.map((record) => JSON.stringify(record)).join('\n') + (records.length ? '\n' : '')
+  assertLegacyStateWriteAllowed(root)
   await mkdir(dirname(destination), { recursive: true })
   try {
     const existing = await readFile(destination, 'utf8')
     if (existing !== serialized) throw new Error('existing task log differs from legacy source')
+    assertLegacyStateWriteAllowed(root)
     await rm(legacyPath)
     await rmdir(join(legacyPath, '..')).catch(() => undefined)
     return
@@ -263,15 +271,19 @@ export async function migrateLegacyLog(
     // Destination is absent or incomplete; complete it through an exclusive link.
   }
   const temporary = `${destination}.migrating`
+  assertLegacyStateWriteAllowed(root)
   await writeFile(temporary, serialized, 'utf8')
   try {
+    assertLegacyStateWriteAllowed(root)
     await link(temporary, destination)
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
     const existing = await readFile(destination, 'utf8')
     if (existing !== (await readFile(temporary, 'utf8'))) throw error
   }
+  assertLegacyStateWriteAllowed(root)
   await rm(temporary, { force: true })
+  assertLegacyStateWriteAllowed(root)
   await rm(legacyPath)
   await rmdir(join(legacyPath, '..')).catch(() => undefined)
 }

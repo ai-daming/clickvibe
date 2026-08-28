@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
@@ -220,6 +220,9 @@ test('runtime rejects every independently damaged member of the verified v0.2 pa
     await mutateJournal((journal) => {
       journal.schemaVersion = 2
     }, /verified upgrade journal/)
+    await unlink(journalPath)
+    await assert.rejects(loadConfigFromHome(item.home), /ENOENT|upgrade-v0\.2\.json/)
+    await restore()
     const tamperedJournal = JSON.parse(originalJournal)
     tamperedJournal.planFingerprint = 'tampered'
     const tamperedMarker = JSON.parse(originalMarker)
@@ -246,6 +249,10 @@ test('runtime rejects every independently damaged member of the verified v0.2 pa
     await writeFile(item.preview.plan.paths.configBackup, 'damaged backup')
     await assert.rejects(verifyV02UpgradeCutover(result.journal), /config backup/)
     await writeFile(item.preview.plan.paths.configBackup, item.config)
+    const stragglerPath = join(item.preview.plan.paths.stateBackup, 'late-v0.1-write.json')
+    await writeFile(stragglerPath, '{"late":true}\n')
+    await assert.rejects(verifyV02UpgradeCutover(result.journal), /state backup.*authorized legacy state/)
+    await rm(stragglerPath)
     const badMarker = JSON.parse(originalMarker)
     badMarker.generation = 'v9'
     await writeFile(markerPath, JSON.stringify(badMarker))
@@ -272,6 +279,55 @@ test('runtime rejects every independently damaged member of the verified v0.2 pa
     await writeFile(journalPath, JSON.stringify(unsupportedJournal))
     await writeFile(markerPath, JSON.stringify(unsupportedMarker))
     await assert.rejects(loadConfigFromHome(item.home), /unsupported active ProjectBinding provider/)
+  } finally {
+    await rm(item.home, { recursive: true, force: true })
+  }
+})
+
+test('a journal publication collision never overwrites the competing owner evidence', async () => {
+  const item = await fixture('journal-collision')
+  const foreign = '{"owner":"other-upgrader"}\n'
+  try {
+    let injected = false
+    const result = await applyV02Upgrade({
+      plan: item.preview.plan,
+      fingerprint: item.preview.fingerprint,
+      fence: recordingFence().fence,
+      async checkpoint(current) {
+        if (!injected && current === `before-file-write:${item.preview.plan.paths.journal}`) {
+          injected = true
+          await writeFile(item.preview.plan.paths.journal, foreign)
+        }
+      },
+    })
+    assert.equal(result.status, 'failed')
+    assert.equal(await readFile(item.preview.plan.paths.journal, 'utf8'), foreign)
+  } finally {
+    await rm(item.home, { recursive: true, force: true })
+  }
+})
+
+test('a late legacy write into the renamed cold backup prevents verified cutover', async () => {
+  const item = await fixture('late-backup-write')
+  try {
+    let injected = false
+    const result = await applyV02Upgrade({
+      plan: item.preview.plan,
+      fingerprint: item.preview.fingerprint,
+      fence: recordingFence().fence,
+      async checkpoint(current) {
+        if (
+          !injected &&
+          current === `after-rename:${item.preview.plan.paths.activeState}->${item.preview.plan.paths.stateBackup}`
+        ) {
+          injected = true
+          await writeFile(join(item.preview.plan.paths.stateBackup, 'late-v0.1-write.json'), '{"late":true}\n')
+        }
+      },
+    })
+    assert.equal(result.status, 'failed')
+    if (result.status === 'failed') assert.match(result.error, /state backup.*authorized legacy state/)
+    assert.equal(JSON.parse(await readFile(item.preview.plan.paths.journal, 'utf8')).phase, 'failed')
   } finally {
     await rm(item.home, { recursive: true, force: true })
   }

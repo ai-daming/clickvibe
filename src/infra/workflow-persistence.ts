@@ -118,7 +118,12 @@ function enqueueWorkflowCommand<T>(workflow: WorkflowStorageIdentity, execute: (
   const key = workflowStatePath(workflow)
   assertLegacyStateWriteAllowed(join(homedir(), '.clickvibe', 'state'))
   const previous = workflowCommandQueues.get(key) ?? Promise.resolve()
-  const operation = previous.catch(() => undefined).then(execute)
+  const operation = previous
+    .catch(() => undefined)
+    .then(async () => {
+      assertLegacyStateWriteAllowed(join(homedir(), '.clickvibe', 'state'))
+      return execute()
+    })
   const tail = operation.then(
     () => undefined,
     () => undefined,
@@ -227,7 +232,9 @@ async function atomicWrite(path: string, workflow: IssueWorkflow): Promise<void>
   await mkdir(dirname(path), { recursive: true })
   const temporary = `${path}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`
   try {
+    assertLegacyStateWriteAllowed(join(homedir(), '.clickvibe', 'state'))
     await writeFile(temporary, JSON.stringify(workflow, null, 2), { encoding: 'utf8', mode: 0o600 })
+    assertLegacyStateWriteAllowed(join(homedir(), '.clickvibe', 'state'))
     await rename(temporary, path)
   } finally {
     await rm(temporary, { force: true }).catch(() => undefined)

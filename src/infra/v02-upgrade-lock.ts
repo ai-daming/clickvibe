@@ -55,8 +55,10 @@ async function ownerIsStale(owner: V02UpgradeLockOwner): Promise<boolean> {
     if ((reason as NodeJS.ErrnoException).code === 'ESRCH') return true
     return false
   }
-  const observedStart = await processStart(owner.pid)
-  return observedStart !== null && observedStart !== owner.processStart
+  // A live PID is never safe to steal from. `ps lstart` is locale/TZ-sensitive,
+  // and a mismatch can mean formatting drift rather than proven PID reuse.
+  // Conservatively wait for ESRCH instead of creating two lock owners.
+  return false
 }
 
 async function reclaimStaleLock(

@@ -1,6 +1,6 @@
 /** Authorized execution of the explicit v0.1 -> v0.2 upgrade transaction. */
 import { createHash } from 'node:crypto'
-import { lstat, readFile, stat } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { parse as parseYaml } from 'yaml'
 import { parseClickVibeConfigV1 } from './project-binding.ts'
@@ -15,6 +15,7 @@ import {
 import { acquireV02UpgradeLock, type V02UpgradeLockOwner } from './v02-upgrade-lock.ts'
 import {
   previewV02Upgrade,
+  inventoryV02StateDirectory,
   v02UpgradePlanFingerprint,
   type V02UpgradeHostActivity,
   type V02UpgradePlan,
@@ -223,8 +224,17 @@ export async function verifyV02UpgradeCutover(journal: V02UpgradeJournal): Promi
     throw new Error('config backup no longer matches the legacy config')
   }
   if (journal.initialState === 'present') {
-    const backup = await lstat(plan.paths.stateBackup)
-    if (!backup.isDirectory() || backup.isSymbolicLink()) throw new Error('legacy state backup is not a real directory')
+    const backup = await inventoryV02StateDirectory(plan.paths.stateBackup)
+    if (
+      backup.status !== 'present' ||
+      backup.sha256 !== plan.legacyState.sha256 ||
+      backup.fileCount !== plan.legacyState.fileCount ||
+      backup.byteCount !== plan.legacyState.byteCount ||
+      backup.device !== plan.legacyState.device ||
+      backup.inode !== plan.legacyState.inode
+    ) {
+      throw new Error('legacy state backup no longer matches the authorized legacy state')
+    }
   } else if (await exists(plan.paths.stateBackup)) {
     throw new Error('legacy state backup was fabricated although the source was initially absent')
   }
@@ -254,6 +264,7 @@ export async function applyV02Upgrade(options: ApplyV02UpgradeOptions): Promise<
   const lock = await acquireV02UpgradeLock(options.plan.paths.lock, options.fingerprint, options.checkpoint)
   let fence: Awaited<ReturnType<V02UpgradeGenerationFence['acquire']>> | undefined
   let journal: V02UpgradeJournal | undefined
+  let journalPublished = false
   let outcome: V02UpgradeOutcome = 'failed'
   let result: V02UpgradeApplyResult
   try {
@@ -265,17 +276,20 @@ export async function applyV02Upgrade(options: ApplyV02UpgradeOptions): Promise<
     } else {
       journal = initialJournal(options.plan, options.fingerprint, lock.owner)
       await publishJournal(journal, options.plan.expectedJournal === 'absent', options.checkpoint)
+      journalPublished = true
       await prepareAssets(journal, options.checkpoint)
       await cutOver(journal, options.checkpoint)
       await verifyV02UpgradeCutover(journal)
       journal.phase = 'verified'
+      await options.checkpoint?.('before-terminal-journal:verified')
       await publishJournal(journal, false, options.checkpoint)
+      await options.checkpoint?.('after-terminal-journal:verified')
       outcome = 'verified'
       result = { status: 'verified', journal }
     }
   } catch (reason) {
     const message = errorMessage(reason)
-    if (journal) {
+    if (journal && journalPublished) {
       journal.phase = 'failed'
       journal.errors.push({ at: new Date().toISOString(), action: 'apply', message })
       try {

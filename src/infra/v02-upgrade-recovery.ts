@@ -10,6 +10,7 @@ import {
   durableWriteExclusive,
   durableWriteReplace,
   ensureDurableDirectory,
+  type V02UpgradeCheckpoint,
 } from './v02-upgrade-durable.ts'
 import {
   type V02UpgradeGenerationFence,
@@ -39,12 +40,19 @@ export interface V02UpgradeRecoveryPlan {
 
 export type V02UpgradeRecoveryPreview =
   | { status: 'recovery-previewed'; fingerprint: string; plan: V02UpgradeRecoveryPlan }
-  | { status: 'recovery-blocked'; error: string; assets: RecoveryAsset[] }
+  | {
+      status: 'recovery-blocked'
+      error: string
+      journal: { path: string; status: 'missing' | 'corrupt' | 'unknown-schema'; sha256?: string }
+      decision: 'manual-recovery-required'
+      assets: RecoveryAsset[]
+    }
 
 interface RecoveryOptions {
   plan: V02UpgradeRecoveryPlan
   fingerprint: string
   fence: V02UpgradeGenerationFence
+  checkpoint?: V02UpgradeCheckpoint
 }
 
 function sha256(value: string | Buffer): string {
@@ -55,12 +63,16 @@ function errorMessage(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason)
 }
 
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0
+}
+
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical)
   if (value && typeof value === 'object') {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
+        .sort(([left], [right]) => compareText(left, right))
         .map(([key, entry]) => [key, canonical(entry)]),
     )
   }
@@ -75,7 +87,7 @@ async function directoryDigest(root: string): Promise<{ bytes: number; sha256: s
   const entries: Array<{ path: string; bytes: number; sha256: string }> = []
   async function visit(directory: string): Promise<void> {
     for (const entry of (await readdir(directory, { withFileTypes: true })).sort((a, b) =>
-      a.name.localeCompare(b.name),
+      compareText(a.name, b.name),
     )) {
       const path = join(directory, entry.name)
       if (entry.isSymbolicLink()) throw new Error(`recovery directory contains symlink: ${relative(root, path)}`)
@@ -168,9 +180,7 @@ function recoveryPaths(journal: V02UpgradeJournal): string[] {
 
 async function candidateAssets(root: string): Promise<RecoveryAsset[]> {
   try {
-    const names = (await readdir(root))
-      .filter((name) => /^(?:config|state|upgrade-v0\.2)/.test(name))
-      .sort((left, right) => left.localeCompare(right))
+    const names = (await readdir(root)).filter((name) => /^(?:config|state|upgrade-v0\.2)/.test(name)).sort(compareText)
     return Promise.all(names.map((name) => observeAsset(join(root, name))))
   } catch (reason) {
     if ((reason as NodeJS.ErrnoException).code === 'ENOENT') return []
@@ -198,13 +208,30 @@ export async function previewV02UpgradeRecovery(options: {
   try {
     raw = await readFile(path, 'utf8')
   } catch (reason) {
-    return { status: 'recovery-blocked', error: errorMessage(reason), assets: [] }
+    const status = (reason as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'corrupt'
+    return {
+      status: 'recovery-blocked',
+      error: errorMessage(reason),
+      journal: { path, status },
+      decision: 'manual-recovery-required',
+      assets: await candidateAssets(root),
+    }
   }
   let journal: V02UpgradeJournal
   try {
     journal = parseJournal(raw)
   } catch (reason) {
-    return { status: 'recovery-blocked', error: errorMessage(reason), assets: await candidateAssets(root) }
+    return {
+      status: 'recovery-blocked',
+      error: errorMessage(reason),
+      journal: {
+        path,
+        status: errorMessage(reason).includes('schema is unknown') ? 'unknown-schema' : 'corrupt',
+        sha256: sha256(raw),
+      },
+      decision: 'manual-recovery-required',
+      assets: await candidateAssets(root),
+    }
   }
   const assets = await Promise.all(recoveryPaths(journal).map(observeAsset))
   const plan: V02UpgradeRecoveryPlan = {
@@ -220,9 +247,9 @@ async function reobserve(plan: V02UpgradeRecoveryPlan): Promise<V02UpgradeRecove
   return previewV02UpgradeRecovery({ home: dirname(dirname(plan.journal.path)), now: plan.createdAt })
 }
 
-async function publishJournal(journal: V02UpgradeJournal): Promise<void> {
+async function publishJournal(journal: V02UpgradeJournal, checkpoint?: V02UpgradeCheckpoint): Promise<void> {
   journal.updatedAt = new Date().toISOString()
-  await durableWriteReplace(journal.plan.paths.journal, `${JSON.stringify(journal, null, 2)}\n`)
+  await durableWriteReplace(journal.plan.paths.journal, `${JSON.stringify(journal, null, 2)}\n`, checkpoint)
 }
 
 async function fileHash(path: string): Promise<string | null> {
@@ -251,13 +278,13 @@ async function stateKind(path: string, journal: V02UpgradeJournal): Promise<'abs
   return asset.sha256 === journal.plan.legacyState.sha256 ? 'legacy' : 'unknown'
 }
 
-async function ensurePrepared(journal: V02UpgradeJournal): Promise<void> {
+async function ensurePrepared(journal: V02UpgradeJournal, checkpoint?: V02UpgradeCheckpoint): Promise<void> {
   const { plan } = journal
   const activeConfigHash = await fileHash(plan.paths.activeConfig)
   const backupHash = await fileHash(plan.paths.configBackup)
   if (backupHash === null) {
     if (activeConfigHash !== plan.legacyConfig.sha256) throw new Error('cannot reconstruct missing config backup')
-    await durableWriteExclusive(plan.paths.configBackup, await readFile(plan.paths.activeConfig))
+    await durableWriteExclusive(plan.paths.configBackup, await readFile(plan.paths.activeConfig), checkpoint)
   } else if (backupHash !== plan.legacyConfig.sha256)
     throw new Error('config backup does not match the authorized legacy bytes')
   journal.actions.configBackup = 'verified'
@@ -267,7 +294,7 @@ async function ensurePrepared(journal: V02UpgradeJournal): Promise<void> {
 
   if (activeConfigHash !== plan.targetConfig.sha256) {
     const stagedHash = await fileHash(plan.paths.stagedConfig)
-    if (stagedHash === null) await durableWriteExclusive(plan.paths.stagedConfig, plan.targetConfig.yaml)
+    if (stagedHash === null) await durableWriteExclusive(plan.paths.stagedConfig, plan.targetConfig.yaml, checkpoint)
     else if (stagedHash !== plan.targetConfig.sha256)
       throw new Error('staged config does not match the authorized target')
     parseClickVibeConfigV1(parseYaml(await readFile(plan.paths.stagedConfig, 'utf8')))
@@ -277,27 +304,28 @@ async function ensurePrepared(journal: V02UpgradeJournal): Promise<void> {
   if ((await stateKind(plan.paths.activeState, journal)) !== 'v0.2') {
     const staged = await stateKind(plan.paths.stagedState, journal)
     if (staged === 'absent') {
-      await ensureDurableDirectory(plan.paths.stagedState)
+      await ensureDurableDirectory(plan.paths.stagedState, checkpoint)
       await durableWriteExclusive(
         join(plan.paths.stagedState, '.clickvibe-state.json'),
         `${JSON.stringify({ schemaVersion: 1, generation: 'v0.2', planFingerprint: journal.planFingerprint, createdAt: plan.createdAt })}\n`,
+        checkpoint,
       )
     } else if (staged !== 'v0.2') throw new Error('staged state is not the authorized v0.2 generation')
   }
   journal.actions.stagedState = 'verified'
   journal.phase = 'prepared'
-  await publishJournal(journal)
+  await publishJournal(journal, checkpoint)
 }
 
-async function resumeCutover(journal: V02UpgradeJournal): Promise<void> {
+async function resumeCutover(journal: V02UpgradeJournal, checkpoint?: V02UpgradeCheckpoint): Promise<void> {
   const { plan } = journal
   const activeState = await stateKind(plan.paths.activeState, journal)
   const backupState = await stateKind(plan.paths.stateBackup, journal)
   if (journal.initialState === 'present') {
     if (activeState === 'legacy' && backupState === 'absent') {
       journal.actions.stateBackup = 'intent'
-      await publishJournal(journal)
-      await durableRename(plan.paths.activeState, plan.paths.stateBackup)
+      await publishJournal(journal, checkpoint)
+      await durableRename(plan.paths.activeState, plan.paths.stateBackup, checkpoint)
       journal.actions.stateBackup = 'verified'
     } else if (!(['absent', 'v0.2'] as const).includes(activeState as 'absent' | 'v0.2') || backupState !== 'legacy') {
       throw new Error(`cannot resume state cutover from active=${activeState}, backup=${backupState}`)
@@ -305,24 +333,26 @@ async function resumeCutover(journal: V02UpgradeJournal): Promise<void> {
   } else journal.actions.stateBackup = 'initially-absent'
   if ((await stateKind(plan.paths.activeState, journal)) === 'absent') {
     journal.actions.stateActivation = 'intent'
-    await publishJournal(journal)
-    await durableRename(plan.paths.stagedState, plan.paths.activeState)
+    await publishJournal(journal, checkpoint)
+    await durableRename(plan.paths.stagedState, plan.paths.activeState, checkpoint)
   }
   if ((await stateKind(plan.paths.activeState, journal)) !== 'v0.2') throw new Error('v0.2 state activation failed')
   journal.actions.stateActivation = 'verified'
-  await publishJournal(journal)
+  await publishJournal(journal, checkpoint)
 
   const activeConfigHash = await fileHash(plan.paths.activeConfig)
   if (activeConfigHash === plan.legacyConfig.sha256) {
     journal.actions.configActivation = 'intent'
-    await publishJournal(journal)
-    await durableRename(plan.paths.stagedConfig, plan.paths.activeConfig)
+    await publishJournal(journal, checkpoint)
+    await durableRename(plan.paths.stagedConfig, plan.paths.activeConfig, checkpoint)
   } else if (activeConfigHash !== plan.targetConfig.sha256)
     throw new Error('active config is neither authorized generation')
   journal.actions.configActivation = 'verified'
   await verifyV02UpgradeCutover(journal)
   journal.phase = 'verified'
-  await publishJournal(journal)
+  await checkpoint?.('before-terminal-journal:verified')
+  await publishJournal(journal, checkpoint)
+  await checkpoint?.('after-terminal-journal:verified')
 }
 
 async function withRecoveryOwnership<T extends { status: string }>(
@@ -331,7 +361,11 @@ async function withRecoveryOwnership<T extends { status: string }>(
 ): Promise<T | { status: 'facts-changed' } | { status: 'failed'; error: string }> {
   if (recoveryFingerprint(options.plan) !== options.fingerprint)
     throw new Error('recovery authorization fingerprint is invalid')
-  const lock = await acquireV02UpgradeLock(options.plan.journal.value.plan.paths.lock, options.fingerprint)
+  const lock = await acquireV02UpgradeLock(
+    options.plan.journal.value.plan.paths.lock,
+    options.fingerprint,
+    options.checkpoint,
+  )
   let fence: Awaited<ReturnType<V02UpgradeGenerationFence['acquire']>> | undefined
   let outcome: 'verified' | 'facts-changed' | 'failed' | 'rolled-back' = 'failed'
   try {
@@ -360,8 +394,15 @@ async function withRecoveryOwnership<T extends { status: string }>(
 
 export function resumeV02Upgrade(options: RecoveryOptions) {
   return withRecoveryOwnership(options, async (journal) => {
-    await ensurePrepared(journal)
-    await resumeCutover(journal)
+    if (journal.phase === 'rolled_back') {
+      throw new Error('cannot resume rolled_back journal; start a new upgrade preview and authorization')
+    }
+    if (journal.phase === 'verified') throw new Error('cannot resume verified terminal journal')
+    if (!['preparing', 'prepared', 'cutting-over', 'failed'].includes(journal.phase)) {
+      throw new Error(`cannot resume journal from phase ${journal.phase}`)
+    }
+    await ensurePrepared(journal, options.checkpoint)
+    await resumeCutover(journal, options.checkpoint)
     return { status: 'verified' as const, journal }
   })
 }
@@ -374,26 +415,28 @@ export function rollbackV02Upgrade(options: RecoveryOptions) {
       if (active === 'v0.2') {
         if ((await stateKind(plan.paths.stagedState, journal)) !== 'absent')
           throw new Error('cannot quarantine v0.2 state over existing staging')
-        await durableRename(plan.paths.activeState, plan.paths.stagedState)
+        await durableRename(plan.paths.activeState, plan.paths.stagedState, options.checkpoint)
       } else if (active !== 'absent' && active !== 'legacy')
         throw new Error(`cannot rollback unknown active state (${active})`)
       if ((await stateKind(plan.paths.activeState, journal)) === 'absent') {
         if ((await stateKind(plan.paths.stateBackup, journal)) !== 'legacy')
           throw new Error('legacy cold backup is unavailable')
-        await durableRename(plan.paths.stateBackup, plan.paths.activeState)
+        await durableRename(plan.paths.stateBackup, plan.paths.activeState, options.checkpoint)
       }
     } else if (active === 'v0.2') {
       if ((await stateKind(plan.paths.stagedState, journal)) !== 'absent')
         throw new Error('cannot quarantine v0.2 state over existing staging')
-      await durableRename(plan.paths.activeState, plan.paths.stagedState)
+      await durableRename(plan.paths.activeState, plan.paths.stagedState, options.checkpoint)
     } else if (active !== 'absent') throw new Error(`cannot restore initially absent state from ${active}`)
     if ((await fileHash(plan.paths.configBackup)) !== plan.legacyConfig.sha256)
       throw new Error('legacy config backup is unavailable')
-    await durableWriteReplace(plan.paths.activeConfig, await readFile(plan.paths.configBackup))
+    await durableWriteReplace(plan.paths.activeConfig, await readFile(plan.paths.configBackup), options.checkpoint)
     if ((await fileHash(plan.paths.activeConfig)) !== plan.legacyConfig.sha256)
       throw new Error('legacy config restore failed')
     journal.phase = 'rolled_back'
-    await publishJournal(journal)
+    await options.checkpoint?.('before-terminal-journal:rolled_back')
+    await publishJournal(journal, options.checkpoint)
+    await options.checkpoint?.('after-terminal-journal:rolled_back')
     return { status: 'rolled-back' as const, journal }
   })
 }

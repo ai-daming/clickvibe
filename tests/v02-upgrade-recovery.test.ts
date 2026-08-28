@@ -108,6 +108,16 @@ test('authorized rollback restores the exact v0.1 config/state pair without dele
     assert.equal((await stat(item.root)).isDirectory(), true)
     assert.equal(JSON.parse(await readFile(item.preview.plan.paths.journal, 'utf8')).phase, 'rolled_back')
 
+    const terminal = await previewV02UpgradeRecovery({ home: item.home })
+    assert.equal(terminal.status, 'recovery-previewed')
+    const invalidResume = await resumeV02Upgrade({
+      plan: terminal.plan,
+      fingerprint: terminal.fingerprint,
+      fence: fence(),
+    })
+    assert.equal(invalidResume.status, 'failed')
+    if (invalidResume.status === 'failed') assert.match(invalidResume.error, /rolled_back.*new upgrade preview/)
+
     const retry = await previewV02Upgrade({
       home: item.home,
       baselineSha: item.preview.plan.baselineSha,
@@ -120,6 +130,111 @@ test('authorized rollback restores the exact v0.1 config/state pair without dele
     assert.notEqual(retry.plan.expectedJournal, 'absent')
     const reapplied = await applyV02Upgrade({ plan: retry.plan, fingerprint: retry.fingerprint, fence: fence() })
     assert.equal(reapplied.status, 'verified', JSON.stringify(reapplied))
+  } finally {
+    await rm(item.home, { recursive: true, force: true })
+  }
+})
+
+test('resume rejects a verified terminal journal instead of re-entering cutover', async () => {
+  const item = await fixture('verified-terminal')
+  try {
+    const applied = await applyV02Upgrade({
+      plan: item.preview.plan,
+      fingerprint: item.preview.fingerprint,
+      fence: fence(),
+    })
+    assert.equal(applied.status, 'verified')
+    const recovery = await previewV02UpgradeRecovery({ home: item.home })
+    assert.equal(recovery.status, 'recovery-previewed')
+    const resumed = await resumeV02Upgrade({ plan: recovery.plan, fingerprint: recovery.fingerprint, fence: fence() })
+    assert.equal(resumed.status, 'failed')
+    if (resumed.status === 'failed') assert.match(resumed.error, /verified.*terminal/)
+  } finally {
+    await rm(item.home, { recursive: true, force: true })
+  }
+})
+
+test('recovery checkpoints preserve resumability across unresolved rename and terminal journal windows', async () => {
+  const item = await fixture('recovery-checkpoints')
+  try {
+    const first = await applyV02Upgrade({
+      plan: item.preview.plan,
+      fingerprint: item.preview.fingerprint,
+      fence: fence(),
+      checkpoint(current) {
+        if (current === `after-rename:${item.preview.plan.paths.activeState}->${item.preview.plan.paths.stateBackup}`) {
+          throw new Error('crash after legacy state rename')
+        }
+      },
+    })
+    assert.equal(first.status, 'failed')
+    const recovery = await previewV02UpgradeRecovery({ home: item.home })
+    assert.equal(recovery.status, 'recovery-previewed')
+    const interrupted = await resumeV02Upgrade({
+      plan: recovery.plan,
+      fingerprint: recovery.fingerprint,
+      fence: fence(),
+      checkpoint(current) {
+        if (
+          current === `before-rename:${item.preview.plan.paths.stagedState}->${item.preview.plan.paths.activeState}`
+        ) {
+          throw new Error('recovery state activation crash')
+        }
+      },
+    })
+    assert.equal(interrupted.status, 'failed')
+    const retry = await previewV02UpgradeRecovery({ home: item.home })
+    assert.equal(retry.status, 'recovery-previewed')
+    const resumed = await resumeV02Upgrade({ plan: retry.plan, fingerprint: retry.fingerprint, fence: fence() })
+    assert.equal(resumed.status, 'verified', JSON.stringify(resumed))
+  } finally {
+    await rm(item.home, { recursive: true, force: true })
+  }
+})
+
+test('apply exposes a terminal verification checkpoint and never claims verified before its durable journal', async () => {
+  const item = await fixture('terminal-checkpoint')
+  try {
+    const failed = await applyV02Upgrade({
+      plan: item.preview.plan,
+      fingerprint: item.preview.fingerprint,
+      fence: fence(),
+      checkpoint(current) {
+        if (current === 'before-terminal-journal:verified') throw new Error('terminal journal unavailable')
+      },
+    })
+    assert.equal(failed.status, 'failed')
+    const recovery = await previewV02UpgradeRecovery({ home: item.home })
+    assert.equal(recovery.status, 'recovery-previewed')
+    const resumed = await resumeV02Upgrade({ plan: recovery.plan, fingerprint: recovery.fingerprint, fence: fence() })
+    assert.equal(resumed.status, 'verified', JSON.stringify(resumed))
+  } finally {
+    await rm(item.home, { recursive: true, force: true })
+  }
+})
+
+test('rollback checkpoints preserve enough journal evidence for an exact retry', async () => {
+  const item = await fixture('rollback-checkpoint')
+  try {
+    await failBeforeConfigActivation(item)
+    const recovery = await previewV02UpgradeRecovery({ home: item.home })
+    assert.equal(recovery.status, 'recovery-previewed')
+    const interrupted = await rollbackV02Upgrade({
+      plan: recovery.plan,
+      fingerprint: recovery.fingerprint,
+      fence: fence(),
+      checkpoint(current) {
+        if (current === `after-rename:${item.preview.plan.paths.activeState}->${item.preview.plan.paths.stagedState}`) {
+          throw new Error('rollback quarantine crash')
+        }
+      },
+    })
+    assert.equal(interrupted.status, 'failed')
+    const retry = await previewV02UpgradeRecovery({ home: item.home })
+    assert.equal(retry.status, 'recovery-previewed')
+    const rolledBack = await rollbackV02Upgrade({ plan: retry.plan, fingerprint: retry.fingerprint, fence: fence() })
+    assert.equal(rolledBack.status, 'rolled-back', JSON.stringify(rolledBack))
+    assert.equal(await readFile(item.preview.plan.paths.activeConfig, 'utf8'), item.config)
   } finally {
     await rm(item.home, { recursive: true, force: true })
   }

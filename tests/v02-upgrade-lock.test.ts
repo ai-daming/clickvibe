@@ -34,3 +34,24 @@ test('a real second Node process cannot acquire the fixed upgrade lock', async (
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('two simultaneous acquirers produce exactly one owner', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'clickvibe-v02-lock-race-'))
+  const lockPath = join(root, 'upgrade-v0.2.lock')
+  try {
+    const attempts = await Promise.allSettled([
+      acquireV02UpgradeLock(lockPath, 'first-plan'),
+      acquireV02UpgradeLock(lockPath, 'second-plan'),
+    ])
+    const winners = attempts.filter(
+      (result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof acquireV02UpgradeLock>>> =>
+        result.status === 'fulfilled',
+    )
+    const losers = attempts.filter((result) => result.status === 'rejected')
+    assert.equal(winners.length, 1)
+    assert.equal(losers.length, 1)
+    await winners[0].value.release()
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

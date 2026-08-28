@@ -45,6 +45,10 @@
 
 如果安装环境不能证明“旧入口已停用且不会在临界区重启”，apply 必须拒绝，要求关闭宿主后由离线升级入口执行。直接再次运行已被替换的 v0.1 二进制属于显式 downgrade：必须先走 rollback preview/authorization，不能把 v0.2 state 当作空 v0.1 state 打开。
 
+宿主集成必须提供三个动作：原子关闭 legacy start entry、独立确认该关闭仍生效、按升级终态恢复旧入口或完成新 bundle 接管。fence 在关闭入口后同时读取宿主 live task/job 与操作系统进程表，等待全部退出，并在进入 prepare 前再次确认入口仍关闭。只传入一份调用方声称为空的 activity 列表不构成 fence；缺少任一宿主动作时只能拒绝在线 apply。
+
+旧进程长期持有已打开文件描述符是 cutover 的危险窗口：仅看路径名无法发现它仍可向 rename 后的 cold backup 写入。因此进程退出必须发生在 state rename 之前；最终 verify 还必须重新计算 cold backup 的 inode、文件数、字节数和内容 hash。任一项漂移都不得写 `verified`。内容校验是第二道伤害检测，不替代先停旧进程，因为已污染的 backup 可能无法自动 rollback。
+
 ### 3.2 临界区顺序
 
 apply 的顺序固定为：取得升级锁 → 取得 generation fence → 临界区内活性检查 → 重算 fingerprint → 写 durable journal → prepare → cutover → read-back → `verified`/`rolled_back` → 释放 fence 和锁。任何失败都保持锁和 fence，直到进程退出或进入明确终态；新进程看到未完成 journal 时只能进入 recovery。
@@ -167,6 +171,8 @@ prepare 任一步失败时，v0.1 config/state 仍保持原配对；只需保留
 rollback 用 config backup 生成同目录 temp，再按 fsync + atomic replace + parent fsync 恢复；state rollback 只移动 journal 精确证明的本次 v0.2 active/staging 目录，再把 cold backup 恢复到 active path。不得递归删除不明目录。已经成功创建且格式正确的 repositoryId sidecar 保留；任何清理都只针对 journal 证明为本次创建且未承载业务数据的 staging。
 
 损坏或缺失 journal 时，recovery inventory 必须展示所有候选 config/state/backup/staging 的 inode、schema、hash、mtime 和配对判断，零写入。重建 journal 与 rollback 都需要新的精确 preview/authorization，原始损坏 journal 不得覆盖。
+
+当前 Slice 2 对“journal 缺失/损坏且存在升级证据”作显式降级：返回 `manual-recovery-required` 与完整只读 inventory，不提供自动重建或无 journal rollback。原因是缺失 journal 时无法从文件名反推出原 plan、排除项和 identity 绑定，自动猜测会制造第二个阶段事实源。后续若实现 journal reconstruction，必须另做 L3 设计并授权精确 inode/path/hash；在此之前普通 preview、apply 和 runtime 一律 fail-closed。没有 journal 且不存在 backup/staging/schema-1 config/v0.2 marker 等升级证据时，才允许视为从未 apply。
 
 ## 11. 实现与测试门禁
 
