@@ -1,6 +1,7 @@
 /** Thin HTTP method dispatcher for workflow use cases. */
 import type { IncomingMessage } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
+import { localGitSnapshots } from '../infra/local-git-snapshot.ts'
 import { fetchIssue } from '../github/issue.ts'
 import { type AgentAuthorization, isLoopbackAddress, parseAgent } from '../infra/develop-core.ts'
 import { consumeAuthorization, githubAwareStatus, privilegedRequestError } from '../infra/runtime.ts'
@@ -33,7 +34,7 @@ export async function handleApiPost(
     return { status: 200, body: await listProjects() }
   }
   if (method === 'repo/issues') {
-    const result = await fetchRepositoryIssues(ctx, payload)
+    const result = await fetchRepositoryIssues(ctx, payload, { observation: localGitSnapshots })
     return { status: githubAwareStatus(result), body: result }
   }
   if (method === 'state')

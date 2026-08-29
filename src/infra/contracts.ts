@@ -1,6 +1,24 @@
 /** Plain-data contracts shared by adapters and upper-layer workflows. */
 export type AgentKind = 'codex' | 'claude'
 
+/** One sampled observation of a worktree's local git state (absent refs = null). */
+export interface WorktreeGitFacts {
+  exists: boolean
+  head: string | null
+  branch: string | null
+  hasUncommittedChanges: boolean
+  mainHead: string | null
+  aheadOfMain: number
+  behindMain: number
+  originMainHead: string | null
+  aheadOfBase: number
+  behindBase: number
+  upstreamHead: string | null
+  aheadOfUpstream: number | null
+  behindUpstream: number | null
+  mergeConflict: boolean
+}
+
 /** Provider-neutral identity of one external work item. */
 export interface WorkItemIdentity {
   provider: string

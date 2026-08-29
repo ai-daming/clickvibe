@@ -9,6 +9,7 @@
 import type { DeriveOptions } from '../infra/git.ts'
 import type { TaskOwnership } from '../infra/task-ownership.ts'
 import { type IssueContractSnapshot, type IssueWorkflow } from '../infra/state.ts'
+import { type WorktreeGitFacts } from '../infra/contracts.ts'
 import { latestDevelopmentHash } from './delivery-audit.ts'
 import { deriveFreshSessionAvailability, type FreshSessionAvailability } from './fresh-session.ts'
 import {
@@ -66,23 +67,7 @@ export interface WorkflowDerived {
   freshSession: FreshSessionAvailability
 }
 
-/** One sampled observation of a worktree's local git state (absent refs = null). */
-export interface WorktreeGitFacts {
-  exists: boolean
-  head: string | null
-  branch: string | null
-  hasUncommittedChanges: boolean
-  mainHead: string | null
-  aheadOfMain: number
-  behindMain: number
-  originMainHead: string | null
-  aheadOfBase: number
-  behindBase: number
-  upstreamHead: string | null
-  aheadOfUpstream: number | null
-  behindUpstream: number | null
-  mergeConflict: boolean
-}
+export type { WorktreeGitFacts } from '../infra/contracts.ts'
 
 /**
  * Derive the authoritative state of a workflow from git facts + event history

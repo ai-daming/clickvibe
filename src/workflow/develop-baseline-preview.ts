@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs'
 import { basename, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import { notifyLocalGitMutation } from '../infra/local-git-snapshot.ts'
 import { fetchGithubIssueState } from '../github/facts.ts'
 import { fetchOriginBranches } from '../infra/git.ts'
 import { expandHome, loadConfig, parseUrl } from '../infra/runtime.ts'
@@ -57,6 +58,7 @@ export async function developBaselinePreview(
   let branches: Awaited<ReturnType<typeof fetchOriginBranches>>
   try {
     branches = await fetchOriginBranches(ctx, repoPath)
+    notifyLocalGitMutation({ repoKey }, 'remote-fetch', 'developBaselinePreview')
   } catch (error) {
     if (selected !== 'origin/HEAD') throw error
     return {
