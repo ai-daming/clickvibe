@@ -18,6 +18,47 @@ interface CachedValue<T> {
   expiresAt: number
 }
 
+/**
+ * Gateway access metrics in the frozen #133 units (issue #131 slice A):
+ * every logical request lands in exactly one of hit / join / execution /
+ * failure; upstream children, rate-limit budget snapshots, invalidations
+ * and queue waits are recorded alongside as evidence.
+ */
+export interface GithubAccessCounters {
+  logicalRequests: number
+  cacheHits: number
+  singleflightJoins: number
+  executions: number
+  failures: number
+  upstreamRequests: number
+  invalidations: number
+  waitCount: number
+  waitMsTotal: number
+  /** Last observed account budget from response headers. */
+  rateLimit: { resource: string; limit: number | null; remaining: number | null; reset: number | null } | null
+  failureRecords: Array<{ operation: string; message: string }>
+  invalidationRecords: string[]
+}
+
+const MAX_GATEWAY_EVIDENCE_RECORDS = 200
+
+function emptyCounters(): GithubAccessCounters {
+  return {
+    logicalRequests: 0,
+    cacheHits: 0,
+    singleflightJoins: 0,
+    executions: 0,
+    failures: 0,
+    upstreamRequests: 0,
+    invalidations: 0,
+    waitCount: 0,
+    waitMsTotal: 0,
+    rateLimit: null,
+    failureRecords: [],
+    invalidationRecords: [],
+  }
+}
+
 interface GithubReviewRest {
   id?: number
   user?: { login?: string } | null
@@ -163,6 +204,10 @@ export function deriveReviewDecision(reviews: GithubReviewRest[]): 'APPROVED' | 
 export class GithubRestReader {
   private readonly ctx: ShellContext
   private readonly minimumIntervalMs: number
+  private readonly now: () => number
+  readonly counters: GithubAccessCounters = emptyCounters()
+  /** >0 while a cached loader composes upstream calls for one already-counted intent. */
+  private loaderDepth = 0
   private readonly resources = new Map<string, CachedValue<unknown>>()
   private readonly aggregates = new Map<string, CachedValue<unknown>>()
   private readonly inFlight = new Map<string, Promise<unknown>>()
@@ -172,9 +217,32 @@ export class GithubRestReader {
   private circuitUntil = 0
   private circuitKind: GithubRateLimitKind = 'unknown'
 
-  constructor(ctx: ShellContext, options: { minimumIntervalMs?: number } = {}) {
+  constructor(ctx: ShellContext, options: { minimumIntervalMs?: number; now?: () => number } = {}) {
     this.ctx = ctx
     this.minimumIntervalMs = Math.max(0, options.minimumIntervalMs ?? HOST_GITHUB_MINIMUM_INTERVAL_MS)
+    this.now = options.now ?? Date.now
+  }
+
+  private recordFailure(operation: string, error: unknown): void {
+    this.counters.failures++
+    this.counters.failureRecords.push({
+      operation,
+      message: error instanceof Error ? error.message : String(error),
+    })
+    if (this.counters.failureRecords.length > MAX_GATEWAY_EVIDENCE_RECORDS) {
+      this.counters.failureRecords.splice(0, this.counters.failureRecords.length - MAX_GATEWAY_EVIDENCE_RECORDS)
+    }
+  }
+
+  private withLoaderDepth<T>(loader: () => Promise<T>): () => Promise<T> {
+    return async () => {
+      this.loaderDepth++
+      try {
+        return await loader()
+      } finally {
+        this.loaderDepth--
+      }
+    }
   }
 
   rateLimitError(now = Date.now()): GithubRateLimitError | null {
@@ -190,6 +258,14 @@ export class GithubRestReader {
   }
 
   invalidate(prefix: string): void {
+    this.counters.invalidations++
+    this.counters.invalidationRecords.push(prefix)
+    if (this.counters.invalidationRecords.length > MAX_GATEWAY_EVIDENCE_RECORDS) {
+      this.counters.invalidationRecords.splice(
+        0,
+        this.counters.invalidationRecords.length - MAX_GATEWAY_EVIDENCE_RECORDS,
+      )
+    }
     for (const key of this.resources.keys()) {
       if (key === prefix || key.startsWith(`${prefix}/`)) this.resources.delete(key)
     }
@@ -221,15 +297,37 @@ export class GithubRestReader {
     return stdout.text
   }
 
+  private recordBudgetSnapshot(headers: Map<string, string>): void {
+    const remainingRaw = headers.get('x-ratelimit-remaining')
+    if (remainingRaw === undefined) return
+    const resetSeconds = Number(headers.get('x-ratelimit-reset'))
+    const limitRaw = Number(headers.get('x-ratelimit-limit'))
+    this.counters.rateLimit = {
+      resource: headers.get('x-ratelimit-resource') ?? 'core',
+      limit: Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : null,
+      remaining: Number.isFinite(Number(remainingRaw)) ? Number(remainingRaw) : null,
+      reset: Number.isFinite(resetSeconds) && resetSeconds > 0 ? resetSeconds * 1000 : null,
+    }
+  }
+
   private async request(
     path: string,
     accept?: string,
     timeoutMs = 30_000,
     mutation?: { method: 'POST' | 'PATCH'; body: unknown },
   ): Promise<IncludedResponse> {
+    const enteredAt = this.now()
     return serializeGithubRequest(this.minimumIntervalMs, async () => {
       // A request queued before another resource trips the circuit must not hit GitHub afterwards.
       this.assertCircuitOpen()
+      // Queue wait (#133): access entry → physical dispatch. Service time
+      // after dispatch is not queue wait and is not accumulated here.
+      const waitMs = this.now() - enteredAt
+      if (waitMs > 0) {
+        this.counters.waitCount++
+        this.counters.waitMsTotal += waitMs
+      }
+      this.counters.upstreamRequests++
       const command = [
         'gh api --include',
         shellQuote(path),
@@ -264,6 +362,7 @@ export class GithubRestReader {
         if (result.exitCode !== 0) throw new Error(detail || `gh api 执行失败(exit ${result.exitCode})`)
         throw parseError
       }
+      this.recordBudgetSnapshot(response.headers)
       const detail = [result.stderr?.text, response.body].filter(Boolean).join('\n')
       if (isRateLimited(response, detail)) {
         this.circuitUntil = resetFrom(response.headers, Date.now())
@@ -295,31 +394,62 @@ export class GithubRestReader {
   }
 
   async json<T = unknown>(path: string, accept?: string, timeoutMs?: number): Promise<T> {
-    const response = await this.request(path, accept, timeoutMs)
+    const direct = this.loaderDepth === 0
+    if (direct) this.counters.logicalRequests++
     try {
-      return JSON.parse(response.body || 'null') as T
-    } catch {
-      throw new Error(`GitHub REST 返回了无效 JSON: ${path}`)
+      const response = await this.request(path, accept, timeoutMs)
+      try {
+        const parsed = JSON.parse(response.body || 'null') as T
+        if (direct) this.counters.executions++
+        return parsed
+      } catch {
+        throw new Error(`GitHub REST 返回了无效 JSON: ${path}`)
+      }
+    } catch (error) {
+      if (direct) this.recordFailure(`GET ${path}`, error)
+      throw error
     }
   }
 
   async mutate<T = unknown>(path: string, method: 'POST' | 'PATCH', body: unknown, timeoutMs?: number): Promise<T> {
-    const response = await this.request(path, undefined, timeoutMs, { method, body })
+    const direct = this.loaderDepth === 0
+    if (direct) this.counters.logicalRequests++
     try {
-      return JSON.parse(response.body || 'null') as T
-    } catch {
-      throw new Error(`GitHub REST 返回了无效 JSON: ${path}`)
+      const response = await this.request(path, undefined, timeoutMs, { method, body })
+      try {
+        const parsed = JSON.parse(response.body || 'null') as T
+        if (direct) this.counters.executions++
+        return parsed
+      } catch {
+        throw new Error(`GitHub REST 返回了无效 JSON: ${path}`)
+      }
+    } catch (error) {
+      if (direct) this.recordFailure(`${method} ${path}`, error)
+      throw error
     }
   }
 
   async paginate<T>(path: string, accept?: string, timeoutMs?: number): Promise<T[]> {
-    const values: T[] = []
-    for (let page = 1; ; page++) {
-      const separator = path.includes('?') ? '&' : '?'
-      const batch = await this.json<T[]>(`${path}${separator}per_page=100&page=${page}`, accept, timeoutMs)
-      if (!Array.isArray(batch)) throw new Error('GitHub REST 分页返回格式无效')
-      values.push(...batch)
-      if (batch.length < 100) return values
+    const direct = this.loaderDepth === 0
+    if (direct) this.counters.logicalRequests++
+    this.loaderDepth++
+    try {
+      const values: T[] = []
+      for (let page = 1; ; page++) {
+        const separator = path.includes('?') ? '&' : '?'
+        const batch = await this.json<T[]>(`${path}${separator}per_page=100&page=${page}`, accept, timeoutMs)
+        if (!Array.isArray(batch)) throw new Error('GitHub REST 分页返回格式无效')
+        values.push(...batch)
+        if (batch.length < 100) {
+          if (direct) this.counters.executions++
+          return values
+        }
+      }
+    } catch (error) {
+      if (direct) this.recordFailure(`GET ${path} (paginate)`, error)
+      throw error
+    } finally {
+      this.loaderDepth--
     }
   }
 
@@ -329,9 +459,18 @@ export class GithubRestReader {
     loader: () => Promise<T>,
     options: { ttlMs?: number; force?: boolean; versionOf?: (value: T) => string | null | undefined } = {},
   ): Promise<T> {
-    this.assertCircuitOpen()
+    this.counters.logicalRequests++
+    try {
+      this.assertCircuitOpen()
+    } catch (error) {
+      this.recordFailure(`access ${key}`, error)
+      throw error
+    }
     const forcedPending = this.forcedResources.get(key) as Promise<T> | undefined
-    if (!options.force && forcedPending) return forcedPending
+    if (!options.force && forcedPending) {
+      this.counters.singleflightJoins++
+      return forcedPending
+    }
     const knownVersion = version || null
     const cached = this.resources.get(key) as CachedValue<T> | undefined
     const now = Date.now()
@@ -340,9 +479,11 @@ export class GithubRestReader {
       cached &&
       cached.expiresAt > now &&
       (knownVersion === null || cached.version === knownVersion)
-    )
+    ) {
+      this.counters.cacheHits++
       return cached.value
-    const load = async () => {
+    }
+    const load = this.withLoaderDepth(async () => {
       const sequence = (this.resourceLoadSequence.get(key) ?? 0) + 1
       this.resourceLoadSequence.set(key, sequence)
       const value = await loader()
@@ -358,12 +499,12 @@ export class GithubRestReader {
         if (loadedVersion) this.versions.set(key, loadedVersion)
       }
       return value
-    }
+    })
     if (!options.force) return this.deduplicate(`resource:ordinary:${key}`, load)
 
     // `force` means fresh from this invocation point. It must not coalesce
     // with an earlier force call whose GitHub fact may already be obsolete.
-    const forced = load()
+    const forced = this.withOutcome(`access ${key}`, load())
     this.forcedResources.set(key, forced)
     const clear = () => {
       if (this.forcedResources.get(key) === forced) this.forcedResources.delete(key)
@@ -373,11 +514,20 @@ export class GithubRestReader {
   }
 
   async cachedAggregate<T>(key: string, ttlMs: number, force: boolean, loader: () => Promise<T>): Promise<T> {
-    this.assertCircuitOpen()
+    this.counters.logicalRequests++
+    try {
+      this.assertCircuitOpen()
+    } catch (error) {
+      this.recordFailure(`access ${key}`, error)
+      throw error
+    }
     const cached = this.aggregates.get(key) as CachedValue<T> | undefined
-    if (!force && cached && cached.expiresAt > Date.now()) return cached.value
+    if (!force && cached && cached.expiresAt > Date.now()) {
+      this.counters.cacheHits++
+      return cached.value
+    }
     return this.deduplicate(`aggregate:${key}`, async () => {
-      const value = await loader()
+      const value = await this.withLoaderDepth(loader)()
       this.aggregates.set(key, { value, version: null, expiresAt: Date.now() + ttlMs })
       return value
     })
@@ -385,10 +535,25 @@ export class GithubRestReader {
 
   private async deduplicate<T>(key: string, loader: () => Promise<T>): Promise<T> {
     const pending = this.inFlight.get(key) as Promise<T> | undefined
-    if (pending) return pending
-    const created = loader().finally(() => this.inFlight.delete(key))
+    if (pending) {
+      this.counters.singleflightJoins++
+      return pending
+    }
+    const created = this.withOutcome(`access ${key}`, loader()).finally(() => this.inFlight.delete(key))
     this.inFlight.set(key, created)
     return created
+  }
+
+  /** Leader outcome lands in exactly one bucket; joiners are already counted. */
+  private async withOutcome<T>(operation: string, promise: Promise<T>): Promise<T> {
+    try {
+      const value = await promise
+      this.counters.executions++
+      return value
+    } catch (error) {
+      this.recordFailure(operation, error)
+      throw error
+    }
   }
 }
 

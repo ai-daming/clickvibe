@@ -29,5 +29,10 @@
     "path": "tests/local-git-sampler-equivalence.test.ts",
     "reason": "Issue #122 real-git equivalence, the final-behavior matrix (review round 4/5) and the deleted-base/non-git regressions share one fixture builder; splitting the matrix from equivalence is deferred.",
     "issueRef": "#122"
+  },
+  {
+    "path": "src/github/rest.ts",
+    "reason": "Issue #131 keeps the REST transport (lane, circuit, parsing), the read caches and the access-metric instrumentation in one reader module so the #133 units are measured at the exact decision points they describe; splitting is deferred until the Gateway mechanism (slice B) settles its final shape.",
+    "issueRef": "#131"
   }
 ]
