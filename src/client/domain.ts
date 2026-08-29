@@ -77,9 +77,7 @@ export interface Workflow {
   }
   updatedAt: number
   events?: WorkflowEvent[]
-  observation?:
-    | { freshness: 'unknown'; error: string }
-    | { freshness: 'current'; scope: string; generation: number; observedAt: number; sourceRevision: string | null }
+  observation?: { freshness: 'unknown'; error: string }
   derived?: {
     taskRef: { kind: 'dev' | 'review'; taskId: string } | null
     head: string | null

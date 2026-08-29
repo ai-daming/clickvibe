@@ -432,7 +432,7 @@ test('behavior matrix: default branch, base availability and failures decide the
   // main default, base present, ahead → create-pr (no PR yet, commits exist)
   const healthy = await setup({ defaultBranch: 'main', pushBase: true, frozenBaseRef: true, ahead: true })
   assert.equal(healthy.derived?.nextAction.kind, 'create-pr')
-  assert.equal(healthy.observation?.freshness, 'current')
+  assert.equal(healthy.observation, undefined, 'healthy rows carry no observation mirror')
 
   // deleted remote base, frozen SHA live, ahead → restore-base (NOT unknown)
   const deletedBase = await setup({ defaultBranch: 'main', pushBase: false, frozenBaseRef: true, ahead: true })

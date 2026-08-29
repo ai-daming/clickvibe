@@ -2,11 +2,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { Context } from '@deepseek-ai/cordis'
-import {
-  buildRepositoryEnumerationCommand,
-  parseRepositoryEnumeration,
-  REPOSITORY_ENUMERATION_SECTION_CONTRACT,
-} from '../src/infra/local-git-sampler.ts'
+import { buildRepositoryEnumerationCommand, parseRepositoryEnumeration } from '../src/infra/local-git-sampler.ts'
 import { LocalGitSnapshotRegistry } from '../src/infra/local-git-snapshot.ts'
 
 function section(key: string, rc: number, value: string | null): string {
@@ -75,18 +71,6 @@ test('repository enumeration: builder/contract/parser agree and counts stay stri
     section('ENUM_COUNTS', 0, 'clickvibe-issue-122\t0\t1.5'),
   ].join('\n')
   assert.ok(parseRepositoryEnumeration(fractional).requiredFailures.length > 0)
-
-  // static enumeration: builder sections ↔ contract table
-  const emitted = new Set([...command.matchAll(/'(ENUM_[A-Z_]+)\\t/g)].map((match) => match[1]))
-  const contracted = new Set(REPOSITORY_ENUMERATION_SECTION_CONTRACT.map((entry) => entry.section))
-  assert.deepEqual(
-    [...emitted].filter((name) => !contracted.has(name)),
-    [],
-  )
-  assert.deepEqual(
-    [...contracted].filter((name) => !emitted.has(name)),
-    [],
-  )
 })
 
 test('enumeration envelopes are deeply immutable and carry the checkout HEAD', async () => {

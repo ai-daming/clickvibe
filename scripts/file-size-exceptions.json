@@ -22,12 +22,7 @@
   },
   {
     "path": "src/infra/local-git-sampler.ts",
-    "reason": "Issue #122 keeps the worktree/repository/enumeration compound builders and parsers in one module so builder output and parsing stay co-reviewable; the classification tables live in local-git-contract.ts; further splitting is deferred from the L3 snapshot plane.",
-    "issueRef": "#122"
-  },
-  {
-    "path": "tests/local-git-sampler.test.ts",
-    "reason": "Issue #122 sampler semantics suite (builder shapes, per-section failure parsing, equivalence fixtures); the contract-driven harness and enumeration suites are split into local-git-contract.test.ts / local-git-enumeration.test.ts.",
+    "reason": "Issue #122 keeps the compound builders and parsers (worktree, repository, enumeration) in one module so shell output and its parsing stay co-reviewable; further splitting is deferred from the L3 snapshot plane.",
     "issueRef": "#122"
   },
   {

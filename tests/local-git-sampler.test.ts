@@ -8,10 +8,7 @@ import {
   parseRepositoryEnumeration,
   parseRepositorySample,
   parseWorktreeSample,
-  REPOSITORY_ENUMERATION_SECTION_CONTRACT,
-  REPOSITORY_SECTION_CONTRACT,
   sampleWorktreeFacts,
-  WORKTREE_SECTION_CONTRACT,
 } from '../src/infra/local-git-sampler.ts'
 
 function section(key: string, rc: number, value: string | null): string {
@@ -22,11 +19,7 @@ function section(key: string, rc: number, value: string | null): string {
 function fullSampleOutput(): string {
   return [
     section('WT_GITDIR', 0, '/wt/.git'),
-    section('EB_NAMED', 0, 'origin/main'),
-    section('EB_COMPARE', 0, 'origin/main'),
-    section('EB_SOURCE', 0, 'named-ref'),
-    section('EB_AVAILABLE', 0, '1'),
-    section('WT_BASE_REF', 0, 'origin/main'),
+    section('EFFECTIVE_BASE', 0, 'origin/main'),
     section('WT_HEAD', 0, 'abc1234'),
     section('WT_BRANCH', 0, 'clickvibe-issue-122'),
     section('WT_STATUS', 0, ' M src/a.ts\n?? src/b.ts'),
@@ -38,7 +31,6 @@ function fullSampleOutput(): string {
     section('WT_UP_COUNT', 0, '0 0'),
     section('WT_MERGE_HEAD', 1, ''),
     section('BR_REF', 0, 'clickvibe-issue-122'),
-    section('BR_GITDIR', 0, '/repo/.git'),
     section('BR_REF_ERROR', 0, ''),
     section('BR_DEFAULT', 0, 'origin/main'),
     section('BR_COMMIT_COUNT', 0, '3'),
@@ -123,17 +115,12 @@ test('missing local branch suppresses upstream facts only', () => {
 test('a failed required read (git status) is flagged, never rendered as clean', () => {
   const output = [
     section('WT_GITDIR', 0, '/wt/.git'),
-    section('EB_NAMED', 0, 'origin/main'),
-    section('EB_COMPARE', 0, 'origin/main'),
-    section('EB_SOURCE', 0, 'named-ref'),
-    section('EB_AVAILABLE', 0, '1'),
-    section('WT_BASE_REF', 0, 'origin/main'),
+    section('EFFECTIVE_BASE', 0, 'origin/main'),
     section('WT_HEAD', 0, 'abc1234'),
     section('WT_BRANCH', 0, 'feature'),
     section('WT_STATUS', 1, 'fatal: unable to read tree'),
     section('WT_MAIN', 1, ''),
     section('WT_MAIN_COUNT', 1, ''),
-    section('WT_BASE_REF', 0, 'origin/main'),
     section('WT_BASE', 0, 'bbb0000'),
     section('WT_BASE_COUNT', 1, ''),
     section('WT_UPSTREAM', 0, 'abc1234'),
@@ -159,11 +146,7 @@ test('a failed required read (git status) is flagged, never rendered as clean', 
 test('canary failure marks the whole worktree plane unobservable', () => {
   const output = [
     section('WT_GITDIR', 128, 'fatal: not a git repository: /wt/broken'),
-    section('EB_NAMED', 0, 'origin/main'),
-    section('EB_COMPARE', 0, 'origin/main'),
-    section('EB_SOURCE', 0, 'named-ref'),
-    section('EB_AVAILABLE', 0, '1'),
-    section('WT_BASE_REF', 0, 'origin/main'),
+    section('EFFECTIVE_BASE', 0, 'origin/main'),
     section('WT_HEAD', 128, ''),
     section('WT_BRANCH', 128, 'fatal: not a git repository'),
     section('WT_STATUS', 128, 'fatal: not a git repository'),
@@ -186,11 +169,7 @@ test('canary failure marks the whole worktree plane unobservable', () => {
 test('sampleWorktreeFacts rejects with the raw operation/rc/error when a required read fails', async () => {
   const output = [
     section('WT_GITDIR', 0, '/wt/issue-122/.git'),
-    section('EB_NAMED', 0, 'origin/main'),
-    section('EB_COMPARE', 0, 'origin/main'),
-    section('EB_SOURCE', 0, 'named-ref'),
-    section('EB_AVAILABLE', 0, '1'),
-    section('WT_BASE_REF', 0, 'origin/main'),
+    section('EFFECTIVE_BASE', 0, 'origin/main'),
     section('WT_HEAD', 0, 'abc1234'),
     section('WT_BRANCH', 0, 'clickvibe-issue-122'),
     section('WT_STATUS', 1, 'fatal: unable to read tree'),
@@ -259,7 +238,6 @@ test('empty or absent branch-fact sections keep the empty branch facts envelope'
     section('WT_UP_COUNT', 127, ''),
     section('WT_MERGE_HEAD', 1, ''),
     section('BR_REF', 1, ''),
-    section('BR_GITDIR', 0, '/repo/.git'),
     section('BR_REF_ERROR', 0, ''),
     section('BR_DEFAULT', 0, ''),
     section('BR_COMMIT_COUNT', 127, ''),
@@ -285,11 +263,7 @@ test('empty or absent branch-fact sections keep the empty branch facts envelope'
 test('local branch probe failure keeps branchExists false while default branch still resolves', () => {
   const output = [
     section('WT_GITDIR', 0, '/wt/.git'),
-    section('EB_NAMED', 0, 'origin/main'),
-    section('EB_COMPARE', 0, 'origin/main'),
-    section('EB_SOURCE', 0, 'named-ref'),
-    section('EB_AVAILABLE', 0, '1'),
-    section('WT_BASE_REF', 0, 'origin/main'),
+    section('EFFECTIVE_BASE', 0, 'origin/main'),
     section('WT_HEAD', 0, 'abc1234'),
     section('WT_BRANCH', 0, 'feature'),
     section('WT_STATUS', 0, ''),
@@ -301,7 +275,6 @@ test('local branch probe failure keeps branchExists false while default branch s
     section('WT_UP_COUNT', 127, ''),
     section('WT_MERGE_HEAD', 1, ''),
     section('BR_REF', 0, 'origin/feature'),
-    section('BR_GITDIR', 0, '/repo/.git'),
     section('BR_REF_ERROR', 0, ''),
     section('BR_DEFAULT', 1, ''),
     section('BR_COMMIT_COUNT', 0, '0'),
@@ -329,9 +302,9 @@ test('command builder pins the compound sample shape', () => {
   assert.match(command, /printf 'WT_GITDIR\\t%d\\t%s\\n'/)
   assert.match(command, /git rev-parse --short 'main' 2>\/dev\/null/)
   assert.match(command, /git rev-list --left-right --count "\$ebc"\.\.\.'HEAD' 2>&1/, 'compare stderr is captured')
-  assert.match(command, /printf 'EB_COMPARE\\t%d\\t%s\\n' 0/, 'the single effective base is published')
+  assert.match(command, /printf 'EFFECTIVE_BASE\\t%d\\t%s\\n' 0/, 'the single effective base is published')
   assert.match(command, /elif \[ -n "\$frozen" \]; then/, 'frozen SHA is part of the single resolution')
-  assert.match(command, /eb='origin\/main'; ebsrc=named-ref/)
+  assert.match(command, /else eb='origin\/main'$/m, 'the effective base resolves once')
   assert.match(command, /if \[ 0 -eq 1 \]; then/, 'base resolution must fall through to the baseRef branch')
   assert.match(command, /frozen='abc1'/)
   assert.match(command, /u="origin\/\$b"/)
@@ -362,11 +335,7 @@ test('command builder omits branch-fact sections when the repo checkout is unava
 test('a failed main compare (rc=128) is a required failure, never published as 0/0', () => {
   const output = [
     section('WT_GITDIR', 0, '/wt/.git'),
-    section('EB_NAMED', 0, 'origin/main'),
-    section('EB_COMPARE', 0, 'origin/main'),
-    section('EB_SOURCE', 0, 'named-ref'),
-    section('EB_AVAILABLE', 0, '1'),
-    section('WT_BASE_REF', 0, 'origin/main'),
+    section('EFFECTIVE_BASE', 0, 'origin/main'),
     section('WT_HEAD', 0, 'abc1234'),
     section('WT_BRANCH', 0, 'feature'),
     section('WT_STATUS', 0, ''),
@@ -389,11 +358,7 @@ test('a failed main compare (rc=128) is a required failure, never published as 0
 test('a failed base or upstream compare is a required failure when its ref resolved', () => {
   const output = [
     section('WT_GITDIR', 0, '/wt/.git'),
-    section('EB_NAMED', 0, 'origin/base'),
-    section('EB_COMPARE', 0, 'origin/base'),
-    section('EB_SOURCE', 0, 'named-ref'),
-    section('EB_AVAILABLE', 0, '1'),
-    section('WT_BASE_REF', 0, 'origin/base'),
+    section('EFFECTIVE_BASE', 0, 'origin/base'),
     section('WT_HEAD', 0, 'abc1234'),
     section('WT_BRANCH', 0, 'feature'),
     section('WT_STATUS', 0, ''),
@@ -415,11 +380,7 @@ test('a failed base or upstream compare is a required failure when its ref resol
 test('a missing always-present section is a required failure', () => {
   const output = [
     section('WT_GITDIR', 0, '/wt/.git'),
-    section('EB_NAMED', 0, 'origin/main'),
-    section('EB_COMPARE', 0, 'origin/main'),
-    section('EB_SOURCE', 0, 'named-ref'),
-    section('EB_AVAILABLE', 0, '1'),
-    section('WT_BASE_REF', 0, 'origin/main'),
+    section('EFFECTIVE_BASE', 0, 'origin/main'),
     section('WT_HEAD', 0, 'abc1234'),
     section('WT_BRANCH', 0, 'feature'),
     // WT_STATUS missing entirely
@@ -441,20 +402,13 @@ test('a missing always-present section is a required failure', () => {
 test('an unparseable main count with a resolved main ref is a required failure', () => {
   const output = [
     section('WT_GITDIR', 0, '/wt/.git'),
-    section('EB_NAMED', 0, 'origin/main'),
-    section('EB_COMPARE', 0, 'origin/main'),
-    section('EB_SOURCE', 0, 'named-ref'),
-    section('EB_AVAILABLE', 0, '1'),
-    section('WT_BASE_REF', 0, 'origin/main'),
+    section('EFFECTIVE_BASE', 0, 'origin/main'),
     section('WT_HEAD', 0, 'abc1234'),
     section('WT_BRANCH', 0, 'feature'),
     section('WT_STATUS', 0, ''),
     section('WT_MAIN', 0, 'aaa0000'),
     section('WT_MAIN_COUNT', 0, 'not numbers'),
-    section('EB_NAMED', 0, 'origin/main'),
-    section('EB_COMPARE', 0, ''),
-    section('EB_SOURCE', 0, 'none'),
-    section('EB_AVAILABLE', 0, '0'),
+    section('EFFECTIVE_BASE', 0, ''),
     section('WT_BASE', 1, ''),
     section('WT_BASE_COUNT', 0, ''),
     section('WT_UPSTREAM', 127, ''),
@@ -493,87 +447,23 @@ test('repo sampler flags failed compares and missing sections instead of publish
   assert.ok(missingSample.requiredFailures.length > 0, 'missing sections must be reported')
 })
 
-test('every builder section is explicitly classified in the section contract (static enumeration)', () => {
-  const emittedSections = (command: string) =>
-    new Set([...command.matchAll(/'(WT_[A-Z_]+|BR_[A-Z_]+|REPO_[A-Z_]+|EB_[A-Z_]+)\\t/g)].map((match) => match[1]))
-
-  const worktreeFull = buildWorktreeSampleCommand({
-    worktree: '/wt/issue-122',
-    branch: 'clickvibe-issue-122',
-    baseBranch: 'main',
-    baseBranchNeedsDefault: false,
-    frozenBase: 'abc1',
-    repoPath: '/repo/main',
-  })
-  const worktreeBare = buildWorktreeSampleCommand({
-    worktree: '/wt/issue-122',
-    branch: 'clickvibe-issue-122',
-    baseBranch: 'main',
-    baseBranchNeedsDefault: false,
-    frozenBase: null,
-    repoPath: null,
-  })
-  const repoCommand = buildRepositorySampleCommand({ repoPath: '/repo/main' })
-
-  const worktreeSections = new Set([...emittedSections(worktreeFull), ...emittedSections(worktreeBare)])
-  const contractSections = new Set(WORKTREE_SECTION_CONTRACT.map((entry) => entry.section))
-  assert.deepEqual(
-    [...worktreeSections].filter((section) => !contractSections.has(section)).sort(),
-    [],
-    'builder emits sections missing from WORKTREE_SECTION_CONTRACT',
-  )
-  assert.deepEqual(
-    [...contractSections].filter((section) => !worktreeSections.has(section)).sort(),
-    [],
-    'contract classifies sections the builder never emits',
-  )
-
-  const repoSections = emittedSections(repoCommand)
-  const repoContract = new Set(REPOSITORY_SECTION_CONTRACT.map((entry) => entry.section))
-  assert.deepEqual(
-    [...repoSections].filter((section) => !repoContract.has(section)).sort(),
-    [],
-    'repo builder emits sections missing from REPOSITORY_SECTION_CONTRACT',
-  )
-  assert.deepEqual(
-    [...repoContract].filter((section) => !repoSections.has(section)).sort(),
-    [],
-    'repo contract classifies sections the builder never emits',
-  )
-
-  // Every contract entry must name its producer, absence meaning and consumer.
-  for (const entry of [...WORKTREE_SECTION_CONTRACT, ...REPOSITORY_SECTION_CONTRACT]) {
-    assert.ok(entry.producer.length > 0, `${entry.section} producer`)
-    assert.ok(entry.expectedAbsence.length > 0, `${entry.section} expectedAbsence`)
-    assert.ok(entry.consumer.length > 0, `${entry.section} consumer`)
-    assert.ok(['always', 'conditional', 'never'].includes(entry.required))
-  }
-})
-
 test('a failed branch count is a required failure carrying the effective base ref', () => {
   const output = [
     section('WT_GITDIR', 0, '/wt/.git'),
-    section('EB_NAMED', 0, 'origin/main'),
-    section('EB_COMPARE', 0, 'origin/main'),
-    section('EB_SOURCE', 0, 'named-ref'),
-    section('EB_AVAILABLE', 0, '1'),
-    section('WT_BASE_REF', 0, 'origin/main'),
+    section('EFFECTIVE_BASE', 0, 'origin/main'),
     section('WT_HEAD', 0, 'abc1234'),
     section('WT_BRANCH', 0, 'clickvibe-issue-122'),
     section('WT_STATUS', 0, ''),
     section('WT_MAIN', 1, ''),
     section('WT_MAIN_COUNT', 1, ''),
-    section('WT_BASE_REF', 0, 'origin/main'),
     section('WT_BASE', 1, ''),
     section('WT_BASE_COUNT', 0, '0 1'),
     section('WT_UPSTREAM', 127, ''),
     section('WT_UP_COUNT', 127, ''),
     section('WT_MERGE_HEAD', 1, ''),
-    section('BR_GITDIR', 0, '/repo/.git'),
     section('BR_REF_ERROR', 0, ''),
     section('BR_DEFAULT', 0, 'origin/main'),
     section('BR_REF', 0, 'clickvibe-issue-122'),
-    section('BR_BASE_REF', 0, 'origin/main'),
     section('BR_COMMIT_COUNT', 128, "fatal: bad revision 'origin/main..clickvibe-issue-122'"),
   ].join('\n')
   const sample = parseWorktreeSample(output)

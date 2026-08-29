@@ -12,12 +12,13 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { type WorktreeGitFacts } from './contracts.ts'
 import { shellQuote } from './develop-core.ts'
-import {
-  REPOSITORY_SECTION_CONTRACT,
-  type RequiredReadFailure,
-  type SectionContract,
-  WORKTREE_SECTION_CONTRACT,
-} from './local-git-contract.ts'
+
+/** One required read that failed operationally (issue #122: no clean degradation). */
+export interface RequiredReadFailure {
+  operation: string
+  rc: number
+  error: string
+}
 import { runCommand } from './runtime.ts'
 
 export interface SampledBranchFacts {
@@ -67,10 +68,6 @@ export function buildWorktreeSampleCommand(input: WorktreeSampleInput): string {
   lines.push('d=""')
   if (input.repoPath !== null) {
     const repo = shellQuote(input.repoPath)
-    // Configured-checkout canary (review round 5): a path that exists but is
-    // not a Git repository must fail unknown, not fold into "branch missing".
-    lines.push(`g2=$(git -C ${repo} rev-parse --git-dir 2>&1)`)
-    section('BR_GITDIR', '$?', '"$g2"')
     lines.push(`d=$(git -C ${repo} symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>&1)`)
     section('BR_DEFAULT', '$?', '"$d"')
   }
@@ -78,23 +75,20 @@ export function buildWorktreeSampleCommand(input: WorktreeSampleInput): string {
   // worktree compare AND the branch count — named ref (or the fetched default
   // when the workflow froze none), falling back to the frozen SHA, else none.
   lines.push('if [ ' + (input.baseBranchNeedsDefault ? '1' : '0') + ' -eq 1 ]; then')
-  lines.push('  if [ -n "$d" ]; then eb="$d"; ebsrc=default-ref')
-  lines.push(`  else eb=${shellQuote('origin/main')}; ebsrc=main-fallback`)
+  lines.push('  if [ -n "$d" ]; then eb="$d"')
+  lines.push(`  else eb=${shellQuote('origin/main')}`)
   lines.push('  fi')
-  lines.push(`else eb=${shellQuote(`origin/${input.baseBranch}`)}; ebsrc=named-ref`)
+  lines.push(`else eb=${shellQuote(`origin/${input.baseBranch}`)}`)
   lines.push('fi')
-  section('EB_NAMED', '0', '"$eb"')
   lines.push(`frozen=${shellQuote(input.frozenBase ?? '')}`)
   lines.push('if git rev-parse --short "$eb" >/dev/null 2>&1; then')
-  lines.push('  ebc="$eb"; avail=1')
+  lines.push('  ebc="$eb"')
   lines.push('elif [ -n "$frozen" ]; then')
-  lines.push('  ebc="$frozen"; ebsrc=frozen; avail=0')
+  lines.push('  ebc="$frozen"')
   lines.push('else')
-  lines.push("  ebc=''; ebsrc=none; avail=0")
+  lines.push("  ebc=''")
   lines.push('fi')
-  section('EB_COMPARE', '0', '"$ebc"')
-  section('EB_SOURCE', '0', '"$ebsrc"')
-  section('EB_AVAILABLE', '0', '"$avail"')
+  section('EFFECTIVE_BASE', '0', '"$ebc"')
 
   lines.push('h=$(git rev-parse --short HEAD 2>/dev/null)')
   section('WT_HEAD', '$?', '"$h"')
@@ -108,7 +102,6 @@ export function buildWorktreeSampleCommand(input: WorktreeSampleInput): string {
   lines.push(`mc=$(git rev-list --left-right --count ${shellQuote('main')}...${shellQuote('HEAD')} 2>&1)`)
   section('WT_MAIN_COUNT', '$?', '"$mc"')
 
-  section('WT_BASE_REF', '0', '"$ebc"')
   // WT_BASE probes the NAMED ref: its absence is the formal baseRefAvailable
   // fact even when the frozen SHA still answers the compare.
   lines.push('ob=$(git rev-parse --short "$eb" 2>/dev/null)')
@@ -159,7 +152,6 @@ export function buildWorktreeSampleCommand(input: WorktreeSampleInput): string {
     lines.push('  if [ -n "$ebc" ]; then')
     // The branch count shares the EffectiveBase (review round 4): a deleted
     // remote base with a live frozen SHA stays answerable instead of failing.
-    section('BR_BASE_REF', '0', '"$ebc"')
     lines.push('    n=$(git -C ' + repo + ' rev-list --count "$ebc..$br" 2>&1)')
     section('BR_COMMIT_COUNT', '$?', '"$n"')
     lines.push('  else')
@@ -246,9 +238,7 @@ export function parseWorktreeSample(output: string): WorktreeSample & { required
   if (!branchSection || branchSection.rc !== 0) fail('git branch --show-current', branchSection, !branchSection)
   const headSection = sections.get('WT_HEAD')
   if (!headSection) fail('git rev-parse --short HEAD', headSection, true)
-  for (const label of ['EB_NAMED', 'EB_COMPARE', 'EB_SOURCE', 'EB_AVAILABLE', 'WT_BASE_REF']) {
-    if (!sections.has(label)) fail(`effective-base ${label}`, undefined, true)
-  }
+  if (!sections.has('EFFECTIVE_BASE')) fail('effective-base EFFECTIVE_BASE', undefined, true)
 
   const head = optionalRef(headSection)
   const branch = optionalRef(sections.get('WT_BRANCH'))
@@ -283,7 +273,7 @@ export function parseWorktreeSample(output: string): WorktreeSample & { required
     // ref — named/default ref, or the frozen SHA when the named one is gone.
     // A non-empty EB_COMPARE means the compare was required; empty means no
     // base exists at all and the zero counts are expected absence.
-    const effectiveBase = sections.get('EB_COMPARE')?.value.trim() ?? ''
+    const effectiveBase = sections.get('EFFECTIVE_BASE')?.value.trim() ?? ''
     if (effectiveBase !== '') {
       const baseCountSection = sections.get('WT_BASE_COUNT')
       const baseCount = compare(baseCountSection)
@@ -315,10 +305,6 @@ export function parseWorktreeSample(output: string): WorktreeSample & { required
   const branchRefSection = sections.get('BR_REF')
   const branchFacts: SampledBranchFacts = {}
   if (branchRefSection !== undefined) {
-    const repoCanary = sections.get('BR_GITDIR')
-    if (!repoCanary || repoCanary.rc !== 0) {
-      fail(`git -C <repo> rev-parse --git-dir`, repoCanary, !repoCanary)
-    }
     const defaultSection = sections.get('BR_DEFAULT')
     if (defaultSection && defaultSection.rc > 1) {
       fail('git -C <repo> symbolic-ref refs/remotes/origin/HEAD', defaultSection, false)
@@ -342,12 +328,11 @@ export function parseWorktreeSample(output: string): WorktreeSample & { required
       const branchRef = branchRefSection.value.trim()
       branchFacts.branchExists = true
       branchFacts.defaultBranch = defaultBranch || undefined
-      const effectiveBase = sections.get('EB_COMPARE')?.value.trim() ?? ''
+      const effectiveBase = sections.get('EFFECTIVE_BASE')?.value.trim() ?? ''
       if (effectiveBase === '') {
         // No base exists at all (named gone, no frozen SHA): the count is
         // skipped as expected absence and hasCommits stays unanswered.
       } else {
-        if (!sections.has('BR_BASE_REF')) fail('effective-base BR_BASE_REF', undefined, true)
         const count = sections.get('BR_COMMIT_COUNT')
         const parsedCount = commitCount(count)
         if (parsedCount !== null) {
@@ -636,11 +621,3 @@ export async function sampleRepositoryEnumeration(
   }
   return parsed
 }
-
-export {
-  REPOSITORY_ENUMERATION_SECTION_CONTRACT,
-  REPOSITORY_SECTION_CONTRACT,
-  type RequiredReadFailure,
-  type SectionContract,
-  WORKTREE_SECTION_CONTRACT,
-} from './local-git-contract.ts'

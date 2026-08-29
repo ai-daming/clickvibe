@@ -308,22 +308,24 @@ test('counters.invalidations counts every invalidate call', async () => {
   assert.equal(registry.counters.invalidations, 2)
 })
 
-test('enriched rows carry a healthy observation with snapshot metadata', async () => {
+test('healthy rows carry no observation field; provenance lives in the envelope', async () => {
+  // Occam pass: the snapshot envelope already carries scope/generation/
+  // observedAt/sourceRevision (issue AC); rows only surface an observation
+  // when the scene is unknown.
   const { registry } = countingRegistry()
-  const repoDir = mkdtempSync(join(tmpdir(), 'clickvibe-obs-meta-'))
+  const repoDir = mkdtempSync(join(tmpdir(), 'clickvibe-obs-razor-'))
   try {
     execFileSync('git', ['init', '--initial-branch=main', repoDir])
     writeFileSync(join(repoDir, 'a.txt'), 'x')
     execFileSync('git', ['-C', repoDir, 'add', 'a.txt'])
     execFileSync('git', ['-C', repoDir, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-m', 'base'])
-
     const workflow = {
       key: 'ai-daming/clickvibe#122',
       url: 'https://github.com/ai-daming/clickvibe/issues/122',
       repoKey: 'ai-daming/clickvibe',
       worktree: repoDir,
       branch: 'main',
-      stage: 'idle' as const,
+      stage: 'idle',
       devAgent: null,
       devTaskId: null,
       devSessionId: null,
@@ -335,7 +337,7 @@ test('enriched rows carry a healthy observation with snapshot metadata', async (
       reviewSessionAgent: null,
       reviewResult: null,
       prNumber: null,
-      issueState: 'OPEN' as const,
+      issueState: 'OPEN',
       baseRef: 'main',
       updatedAt: Date.now(),
       events: [],
@@ -344,21 +346,11 @@ test('enriched rows carry a healthy observation with snapshot metadata', async (
     const [row] = await enrichWorkflowStates(
       ctx as never,
       [workflow],
-      {
-        repos: { 'ai-daming/clickvibe': repoDir },
-        worktreeRoot: repoDir,
-      },
+      { repos: { 'ai-daming/clickvibe': repoDir }, worktreeRoot: repoDir },
       registry,
     )
-    assert.ok(row.observation, 'registry-backed rows must expose observation metadata')
-    assert.equal(row.observation.freshness, 'current')
-    assert.ok(row.observation.scope.startsWith('worktree:ai-daming/clickvibe:'))
-    assert.equal(row.observation.generation, 0)
-    assert.ok(row.observation.observedAt > 0)
-    // The injected registry's fake sampler defines the revision; the derived
-    // row must consume the same snapshot's head.
-    assert.ok('derived' in row && row.derived, 'healthy rows must still carry derived state')
-    assert.equal(row.observation.sourceRevision, row.derived.head)
+    assert.ok(row.derived, 'healthy rows still derive')
+    assert.equal('observation' in row && row.observation !== undefined, false, 'no healthy-row observation mirror')
   } finally {
     rmSync(repoDir, { recursive: true, force: true })
   }

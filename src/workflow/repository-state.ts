@@ -52,17 +52,7 @@ import {
   type LocalGitSnapshotReader,
   type ObservationAttemptEvidence,
   resolveConfiguredRepoPath,
-  worktreeScopeKey,
 } from '../infra/local-git-snapshot.ts'
-
-/** Metadata of the healthy snapshot a row was derived from (issue #122 AC). */
-export interface HealthyObservation {
-  freshness: 'current'
-  scope: string
-  generation: number
-  observedAt: number
-  sourceRevision: string | null
-}
 
 /** Derive the observation outcome for one workflow's worktree (issue #122). */
 async function observeWorktreeFor(
@@ -70,10 +60,7 @@ async function observeWorktreeFor(
   observation: LocalGitSnapshotReader,
   config: ClickVibeConfig,
   workflow: IssueWorkflow,
-): Promise<
-  | { ok: true; sample: WorktreeSample; meta: HealthyObservation }
-  | { ok: false; attempts: ObservationAttemptEvidence[]; error: Error }
-> {
+): Promise<{ ok: true; sample: WorktreeSample } | { ok: false; attempts: ObservationAttemptEvidence[]; error: Error }> {
   // Mirror the legacy existsSync gate: a missing worktree yields the all-null
   // facts without invoking git at all, and branch facts still come from the
   // configured checkout.
@@ -105,13 +92,6 @@ async function observeWorktreeFor(
         },
         branchFacts,
       },
-      meta: {
-        freshness: 'current' as const,
-        scope: worktreeScopeKey(workflow.repoKey, workflow.worktree),
-        generation: 0,
-        observedAt: Date.now(),
-        sourceRevision: null,
-      },
     }
   }
   const outcome = await observation.observeWorktree(ctx, workflow.repoKey, {
@@ -126,13 +106,6 @@ async function observeWorktreeFor(
   return {
     ok: true,
     sample: outcome.envelope.sample,
-    meta: {
-      freshness: 'current' as const,
-      scope: outcome.envelope.scope,
-      generation: outcome.envelope.generation,
-      observedAt: outcome.envelope.observedAt,
-      sourceRevision: outcome.envelope.sourceRevision,
-    },
   }
 }
 
@@ -146,7 +119,6 @@ export async function enrichWorkflowStates(
     | (IssueWorkflow & {
         runStartedAt: number | null
         derived: WorkflowDerived
-        observation?: HealthyObservation
       })
     | (IssueWorkflow & {
         runStartedAt: null
@@ -203,7 +175,6 @@ export async function enrichWorkflowStates(
         return row
       }
       const sample = attempt && attempt.ok ? attempt.sample : null
-      const healthyObservation: HealthyObservation | undefined = attempt && attempt.ok ? attempt.meta : undefined
       const branchFacts = sample
         ? sample.branchFacts
         : await readConfiguredBranchFacts(
@@ -235,7 +206,7 @@ export async function enrichWorkflowStates(
           ...branchFacts,
         },
       )
-      return healthyObservation ? { ...enriched, observation: healthyObservation } : enriched
+      return enriched
     }),
   )
 }
