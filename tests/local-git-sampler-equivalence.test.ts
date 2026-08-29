@@ -90,8 +90,8 @@ test('compound sampler matches legacy per-fact sampling on a real synced reposit
   try {
     const remote = join(root, 'remote.git')
     const repo = join(root, 'repo')
-    await execFileAsync('git', ['init', '--bare', remote])
-    await execFileAsync('git', ['init', repo])
+    await execFileAsync('git', ['init', '--bare', '--initial-branch=main', remote])
+    await execFileAsync('git', ['init', '--initial-branch=main', repo])
     await git(repo, 'remote', 'add', 'origin', remote)
     await commit(repo, 'a.txt', 'base', 'base')
     await git(repo, 'push', 'origin', 'main')
@@ -119,8 +119,8 @@ test('dirty worktree and missing upstream produce identical facts on both paths'
   try {
     const remote = join(root, 'remote.git')
     const repo = join(root, 'repo')
-    await execFileAsync('git', ['init', '--bare', remote])
-    await execFileAsync('git', ['init', repo])
+    await execFileAsync('git', ['init', '--bare', '--initial-branch=main', remote])
+    await execFileAsync('git', ['init', '--initial-branch=main', repo])
     await git(repo, 'remote', 'add', 'origin', remote)
     await commit(repo, 'a.txt', 'base', 'base')
     await git(repo, 'push', 'origin', 'main')
@@ -148,7 +148,7 @@ test('frozen-base fallback path matches when the origin base ref is absent', asy
   const root = await mkdtemp(join(tmpdir(), 'clickvibe-sampler-frozen-'))
   try {
     const repo = join(root, 'repo')
-    await execFileAsync('git', ['init', repo])
+    await execFileAsync('git', ['init', '--initial-branch=main', repo])
     await commit(repo, 'a.txt', 'base', 'base')
     await commit(repo, 'b.txt', 'two', 'two')
     const frozenBase = await git(repo, 'rev-parse', 'HEAD~1')
@@ -171,7 +171,7 @@ test('unresolved merge (MERGE_HEAD) reports conflict identically', async () => {
   const root = await mkdtemp(join(tmpdir(), 'clickvibe-sampler-conflict-'))
   try {
     const repo = join(root, 'repo')
-    await execFileAsync('git', ['init', repo])
+    await execFileAsync('git', ['init', '--initial-branch=main', repo])
     await commit(repo, 'f.txt', 'base', 'base')
     await branchFrom(repo, 'side')
     await commit(repo, 'f.txt', 'side', 'side')
@@ -206,7 +206,7 @@ test('detached HEAD and empty repository degrade identically on both paths', asy
   const root = await mkdtemp(join(tmpdir(), 'clickvibe-sampler-edge-'))
   try {
     const repo = join(root, 'repo')
-    await execFileAsync('git', ['init', repo])
+    await execFileAsync('git', ['init', '--initial-branch=main', repo])
     await commit(repo, 'a.txt', 'base', 'base')
     await git(repo, 'checkout', '--detach')
 
@@ -227,7 +227,7 @@ test('detached HEAD and empty repository degrade identically on both paths', asy
     assert.deepEqual(sampled.branchFacts, { branchExists: true, hasCommits: false, defaultBranch: undefined })
 
     const empty = join(root, 'empty')
-    await execFileAsync('git', ['init', empty])
+    await execFileAsync('git', ['init', '--initial-branch=main', empty])
     const emptyCompound = realShellCtx()
     const emptyLegacy = realShellCtx()
     const emptySampled = await sampleWorktreeFacts(emptyCompound.ctx, {
@@ -252,8 +252,8 @@ test('repository sampler matches readRepositoryGitFacts on a real checkout', asy
   try {
     const remote = join(root, 'remote.git')
     const repo = join(root, 'repo')
-    await execFileAsync('git', ['init', '--bare', remote])
-    await execFileAsync('git', ['init', repo])
+    await execFileAsync('git', ['init', '--bare', '--initial-branch=main', remote])
+    await execFileAsync('git', ['init', '--initial-branch=main', repo])
     await git(repo, 'remote', 'add', 'origin', remote)
     await commit(repo, 'a.txt', 'base', 'base')
     await git(repo, 'push', 'origin', 'main')

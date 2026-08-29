@@ -64,8 +64,8 @@ function localGitCount(commands: { command: string; exitCode: number }[], from: 
 async function buildRepositoryWithWorkItems(root: string, workItemNumbers: number[]): Promise<string> {
   const remote = join(root, 'remote.git')
   const repo = join(root, 'repo')
-  await execFileAsync('git', ['init', '--bare', remote])
-  await execFileAsync('git', ['init', repo])
+  await execFileAsync('git', ['init', '--bare', '--initial-branch=main', remote])
+  await execFileAsync('git', ['init', '--initial-branch=main', repo])
   await execFileAsync('git', ['-C', repo, 'remote', 'add', 'origin', remote])
   writeFileSync(join(repo, 'a.txt'), 'base\n')
   await execFileAsync('git', ['-C', repo, 'add', 'a.txt'])
