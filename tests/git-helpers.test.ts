@@ -61,7 +61,7 @@ test('origin branch enumeration falls back to main and rejects repositories with
     if (command.includes('for-each-ref')) return { exitCode: 0, stdout: 'origin/main\n\norigin/release\n' }
     return { exitCode: 0 }
   })
-  assert.deepEqual(await fetchOriginBranches(fallback as never, '/repo'), {
+  assert.deepEqual(await fetchOriginBranches(fallback as never, 'o/r', '/repo'), {
     defaultRemoteBase: 'origin/main',
     refs: ['origin/main', 'origin/release'],
   })
@@ -70,5 +70,5 @@ test('origin branch enumeration falls back to main and rejects repositories with
       ? { exitCode: 1 }
       : { exitCode: 0, stdout: command.includes('show-ref') ? '1' : '' },
   )
-  await assert.rejects(fetchOriginBranches(missing as never, '/repo'), /无法确定 origin 默认分支/)
+  await assert.rejects(fetchOriginBranches(missing as never, 'o/r', '/repo'), /无法确定 origin 默认分支/)
 })

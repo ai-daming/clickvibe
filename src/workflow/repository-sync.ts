@@ -100,6 +100,7 @@ export async function syncConfiguredRepository(
 
   try {
     await remoteFetch(ctx, {
+      repoKey,
       workdir: repoPath,
       timeoutMs: 60_000,
       sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: repoPath },

@@ -83,6 +83,7 @@ async function syncWorktreeLocked(ctx: Context, key: string): Promise<SyncResult
     }
     await appendLog(workflow.key, 'dev', '[clickvibe] 同步:git fetch origin…')
     await remoteFetch(ctx, {
+      repoKey: workflow.repoKey,
       workdir: workflow.worktree,
       timeoutMs: 60_000,
       sandboxPolicy: policy,
@@ -175,6 +176,7 @@ async function syncWorktreeLocked(ctx: Context, key: string): Promise<SyncResult
     const head = await readWorktreeHead(ctx, workflow.worktree)
     await appendLog(workflow.key, 'dev', `[clickvibe] 同步:推送 ${workflow.branch} 到 origin…`)
     await remotePush(ctx, {
+      repoKey: workflow.repoKey,
       workdir: workflow.worktree,
       timeoutMs: 60_000,
       sandboxPolicy: policy,

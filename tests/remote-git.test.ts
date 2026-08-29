@@ -20,6 +20,7 @@ function recordingShell(exitCode = 0) {
 test('remoteFetch builds the exact legacy command strings and forwards options', async () => {
   const pruned = recordingShell()
   await remoteFetch(pruned.ctx, {
+    repoKey: 'ai-daming/clickvibe',
     workdir: '/repo',
     timeoutMs: 60_000,
     sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: '/repo' },
@@ -29,17 +30,28 @@ test('remoteFetch builds the exact legacy command strings and forwards options',
   assert.equal(pruned.commands[0].timeoutMs, 60_000)
 
   const plain = recordingShell()
-  await remoteFetch(plain.ctx, { workdir: '/repo', timeoutMs: 30_000, prune: false })
+  await remoteFetch(plain.ctx, {
+    repoKey: 'ai-daming/clickvibe',
+    workdir: '/repo',
+    timeoutMs: 30_000,
+    prune: false,
+  })
   assert.equal(plain.commands[0].command, 'git fetch origin')
 })
 
 test('remotePush builds the exact legacy push forms', async () => {
   const push = recordingShell()
-  await remotePush(push.ctx, { workdir: '/wt', timeoutMs: 60_000, refspec: "'clickvibe-issue-5'" })
+  await remotePush(push.ctx, {
+    repoKey: 'ai-daming/clickvibe',
+    workdir: '/wt',
+    timeoutMs: 60_000,
+    refspec: "'clickvibe-issue-5'",
+  })
   assert.equal(push.commands[0].command, "git push origin 'clickvibe-issue-5'")
 
   const upstream = recordingShell()
   await remotePush(upstream.ctx, {
+    repoKey: 'ai-daming/clickvibe',
     workdir: '/wt',
     timeoutMs: 120_000,
     refspec: "'feature'",
@@ -51,4 +63,23 @@ test('remotePush builds the exact legacy push forms', async () => {
 test('non-zero exits reject through the shared runCommand semantics', async () => {
   const failing = recordingShell(128)
   await assert.rejects(remoteFetch(failing.ctx, { workdir: '/repo', timeoutMs: 30_000 }), /命令退出码 128/)
+})
+
+test('coordination identity is carried, never leaked into the command', async () => {
+  const recording = recordingShell()
+  await remoteFetch(recording.ctx, {
+    repoKey: 'ai-daming/clickvibe',
+    repositoryId: 'future-binding-id',
+    workdir: '/repo',
+    timeoutMs: 30_000,
+  })
+  assert.equal(recording.commands[0].command, 'git fetch origin --prune')
+  assert.equal(recording.commands[0].workdir, '/repo')
+  assert.equal(recording.commands[0].timeoutMs, 30_000)
+
+  const customRemote = recordingShell()
+  await remoteFetch(customRemote.ctx, { repoKey: 'o/r', remote: 'upstream', workdir: '/repo' })
+  assert.equal(customRemote.commands[0].command, 'git fetch upstream --prune')
+  await remotePush(customRemote.ctx, { repoKey: 'o/r', remote: 'upstream', workdir: '/repo', refspec: "'x'" })
+  assert.equal(customRemote.commands[1].command, "git push upstream 'x'")
 })

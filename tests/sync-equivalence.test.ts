@@ -106,11 +106,11 @@ test('pure sync merge of R with origin/main is sync-equivalent (issue #48)', asy
     const head = await scene.remoteBranchHead()
     assert.notEqual(head, scene.reviewedFull)
 
-    assert.equal(await isSyncEquivalentMerge(ctx, scene.worktree, scene.reviewedShort, head), true)
+    assert.equal(await isSyncEquivalentMerge(ctx, 'owner/repo', scene.worktree, scene.reviewedShort, head), true)
     // 全量哈希与短哈希均可判定
-    assert.equal(await isSyncEquivalentMerge(ctx, scene.worktree, scene.reviewedFull, head), true)
+    assert.equal(await isSyncEquivalentMerge(ctx, 'owner/repo', scene.worktree, scene.reviewedFull, head), true)
     // 门禁:H 为纯同步合并时放行
-    await assert.doesNotReject(assertReviewHeadMatchesPr(ctx, scene.worktree, scene.reviewedShort, head))
+    await assert.doesNotReject(assertReviewHeadMatchesPr(ctx, 'owner/repo', scene.worktree, scene.reviewedShort, head))
   } finally {
     await rm(scene.root, { recursive: true, force: true })
   }
@@ -128,8 +128,13 @@ test('pure sync merge follows a custom frozen baseline', async () => {
     const releaseHead = (await scene.wt('rev-parse', 'origin/release/2.0')).stdout.trim()
     assert.equal(parents.includes(reviewed), true)
     assert.equal(parents.includes(releaseHead), true)
-    assert.equal(await isSyncEquivalentMerge(ctx, scene.worktree, scene.reviewedShort, head, 'release/2.0'), true)
-    await assert.doesNotReject(assertReviewHeadMatchesPr(ctx, scene.worktree, scene.reviewedShort, head, 'release/2.0'))
+    assert.equal(
+      await isSyncEquivalentMerge(ctx, 'owner/repo', scene.worktree, scene.reviewedShort, head, 'release/2.0'),
+      true,
+    )
+    await assert.doesNotReject(
+      assertReviewHeadMatchesPr(ctx, 'owner/repo', scene.worktree, scene.reviewedShort, head, 'release/2.0'),
+    )
   } finally {
     await rm(scene.root, { recursive: true, force: true })
   }
@@ -172,7 +177,9 @@ test('pure sync merge accepts the exact advanced PR base without a review-base f
 
 test('identical hashes pass the gate without any git access (regression, issue #48)', async () => {
   // worktree 指向不存在的路径,证明哈希相等时完全短路、不触发 git
-  await assert.doesNotReject(assertReviewHeadMatchesPr(ctx, '/nonexistent/worktree', 'abc1234', 'abc1234def5678'))
+  await assert.doesNotReject(
+    assertReviewHeadMatchesPr(ctx, 'owner/repo', '/nonexistent/worktree', 'abc1234', 'abc1234def5678'),
+  )
 })
 
 test('manual conflict resolution in the sync merge breaks equivalence (issue #48)', async () => {
@@ -186,8 +193,11 @@ test('manual conflict resolution in the sync merge breaks equivalence (issue #48
     await scene.wt('push', 'origin', scene.branch)
     const head = await scene.remoteBranchHead()
 
-    assert.equal(await isSyncEquivalentMerge(ctx, scene.worktree, scene.reviewedShort, head), false)
-    await assert.rejects(assertReviewHeadMatchesPr(ctx, scene.worktree, scene.reviewedShort, head), /合并门禁拒绝/)
+    assert.equal(await isSyncEquivalentMerge(ctx, 'owner/repo', scene.worktree, scene.reviewedShort, head), false)
+    await assert.rejects(
+      assertReviewHeadMatchesPr(ctx, 'owner/repo', scene.worktree, scene.reviewedShort, head),
+      /合并门禁拒绝/,
+    )
   } finally {
     await rm(scene.root, { recursive: true, force: true })
   }
@@ -204,8 +214,11 @@ test('branch-side commit after the sync merge is rejected (issue #48)', async ()
     await scene.wt('push', 'origin', scene.branch)
     const head = await scene.remoteBranchHead()
 
-    assert.equal(await isSyncEquivalentMerge(ctx, scene.worktree, scene.reviewedShort, head), false)
-    await assert.rejects(assertReviewHeadMatchesPr(ctx, scene.worktree, scene.reviewedShort, head), /合并门禁拒绝/)
+    assert.equal(await isSyncEquivalentMerge(ctx, 'owner/repo', scene.worktree, scene.reviewedShort, head), false)
+    await assert.rejects(
+      assertReviewHeadMatchesPr(ctx, 'owner/repo', scene.worktree, scene.reviewedShort, head),
+      /合并门禁拒绝/,
+    )
   } finally {
     await rm(scene.root, { recursive: true, force: true })
   }
@@ -219,7 +232,7 @@ test('PR head older than R (force-push fork) is rejected (issue #48)', async () 
     await scene.git('push', '-f', 'origin', `${parent}:refs/heads/${scene.branch}`)
     const head = await scene.remoteBranchHead()
 
-    assert.equal(await isSyncEquivalentMerge(ctx, scene.worktree, scene.reviewedShort, head), false)
+    assert.equal(await isSyncEquivalentMerge(ctx, 'owner/repo', scene.worktree, scene.reviewedShort, head), false)
   } finally {
     await rm(scene.root, { recursive: true, force: true })
   }
@@ -239,7 +252,7 @@ test('merging a non-main branch into R is not sync-equivalent (issue #48)', asyn
     await scene.wt('push', 'origin', scene.branch)
     const head = await scene.remoteBranchHead()
 
-    assert.equal(await isSyncEquivalentMerge(ctx, scene.worktree, scene.reviewedShort, head), false)
+    assert.equal(await isSyncEquivalentMerge(ctx, 'owner/repo', scene.worktree, scene.reviewedShort, head), false)
   } finally {
     await rm(scene.root, { recursive: true, force: true })
   }
@@ -251,7 +264,7 @@ test('missing reviewed commit locally fails closed (issue #48)', async () => {
     // R 在本地不存在(如对象被回收):无法核实即不满足
     const head = await scene.remoteBranchHead()
     assert.equal(
-      await isSyncEquivalentMerge(ctx, scene.worktree, '0123456789abcdef0123456789abcdef01234567', head),
+      await isSyncEquivalentMerge(ctx, 'owner/repo', scene.worktree, '0123456789abcdef0123456789abcdef01234567', head),
       false,
     )
   } finally {

@@ -52,6 +52,7 @@ export async function ensurePullRequest(
   })
   if (dirty !== '') throw new Error('worktree 有未提交改动,拒绝创建 PR')
   await remotePush(ctx, {
+    repoKey: input.repoKey,
     workdir: input.worktree,
     timeoutMs: 120_000,
     sandboxPolicy: policy,

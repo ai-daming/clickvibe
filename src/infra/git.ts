@@ -198,10 +198,11 @@ export function conflictFileSuffix(files: string[]): string {
 /** Fetch and enumerate origin remote branches for a first-development preview. */
 export async function fetchOriginBranches(
   ctx: Context,
+  repoKey: string,
   repoPath: string,
 ): Promise<{ defaultRemoteBase: string; refs: string[] }> {
   const policy = { mode: 'danger-full-access' as const, workspaceRoot: repoPath }
-  await remoteFetch(ctx, { workdir: repoPath, timeoutMs: 60_000, sandboxPolicy: policy })
+  await remoteFetch(ctx, { repoKey, workdir: repoPath, timeoutMs: 60_000, sandboxPolicy: policy })
   let defaultRemoteBase = await runCommand(ctx, 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD', {
     workdir: repoPath,
     timeoutMs: 10_000,

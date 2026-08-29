@@ -155,6 +155,7 @@ export async function startReview(
   }
   try {
     await remoteFetch(ctx, {
+      repoKey: workflow.repoKey,
       workdir: workflow.worktree,
       timeoutMs: 60_000,
       sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: workflow.worktree },

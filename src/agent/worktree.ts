@@ -99,6 +99,7 @@ export async function ensureWorktree(
   // 新分支只能从 fetch 后的远端默认分支创建,不能继承配置仓库碰巧停留的 HEAD。
   const policy = { mode: 'danger-full-access' as const, workspaceRoot: expandedRepo }
   await remoteFetch(ctx, {
+    repoKey,
     workdir: expandedRepo,
     sandboxPolicy: policy,
     timeoutMs: 60_000,

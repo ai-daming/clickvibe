@@ -86,6 +86,7 @@ export interface MergeGateFailure {
  */
 export async function isSyncEquivalentMerge(
   ctx: Context,
+  repoKey: string,
   worktree: string,
   reviewedHash: string,
   prHead: string,
@@ -117,7 +118,7 @@ export async function isSyncEquivalentMerge(
   const remoteBase = `origin/${baseBranch}`
   // 先同步远端:被检的 H(远端分支 HEAD)与最新冻结基线对象必须在本地可解析
   if (
-    !(await remoteFetch(ctx, { workdir: worktree, timeoutMs: 60_000, sandboxPolicy: policy })
+    !(await remoteFetch(ctx, { repoKey, workdir: worktree, timeoutMs: 60_000, sandboxPolicy: policy })
       .then(() => true)
       .catch(() => false))
   )
@@ -148,6 +149,7 @@ export async function isSyncEquivalentMerge(
  */
 export async function assertReviewHeadMatchesPr(
   ctx: Context,
+  repoKey: string,
   worktree: string,
   reviewedHash: string | null,
   prHead: string | null | undefined,
@@ -155,7 +157,7 @@ export async function assertReviewHeadMatchesPr(
 ): Promise<void> {
   if (prHead && reviewedHash) {
     if (sameCommitHash(reviewedHash, prHead)) return
-    if (await isSyncEquivalentMerge(ctx, worktree, reviewedHash, prHead, baseBranch)) return
+    if (await isSyncEquivalentMerge(ctx, repoKey, worktree, reviewedHash, prHead, baseBranch)) return
   }
   throw new Error('合并门禁拒绝:实时 PR HEAD 与最近一次通过的 review 结论哈希不一致,且不满足同步等价,需重新 Review')
 }
@@ -183,6 +185,7 @@ export async function collectMergeGateFailures(
     !!reviewedHash &&
     (await isSyncEquivalentMerge(
       ctx,
+      workflow.repoKey,
       workflow.worktree,
       reviewedHash,
       prHead,

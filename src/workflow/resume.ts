@@ -120,6 +120,7 @@ export async function resumeDevelop(
   // 续会话前也同步远端(并行开发时 base 会变化)
   try {
     await remoteFetch(ctx, {
+      repoKey: workflow.repoKey,
       workdir: workflow.worktree,
       timeoutMs: 30000,
       prune: false,

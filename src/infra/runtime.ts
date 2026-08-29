@@ -364,6 +364,7 @@ export async function ensureConfiguredRepoFresh(
     async () => {
       try {
         await remoteFetch(ctx, {
+          repoKey,
           workdir: repoPath,
           timeoutMs: 30_000,
           sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: repoPath },

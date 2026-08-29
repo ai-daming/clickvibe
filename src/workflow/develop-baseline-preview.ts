@@ -57,7 +57,7 @@ export async function developBaselinePreview(
   const repoPath = resolve(expandHome(configuredPath))
   let branches: Awaited<ReturnType<typeof fetchOriginBranches>>
   try {
-    branches = await fetchOriginBranches(ctx, repoPath)
+    branches = await fetchOriginBranches(ctx, repoKey, repoPath)
     notifyLocalGitMutation({ repoKey }, 'remote-fetch', 'developBaselinePreview')
   } catch (error) {
     if (selected !== 'origin/HEAD') throw error
