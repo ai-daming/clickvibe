@@ -268,7 +268,17 @@ test('repository sampler matches readRepositoryGitFacts on a real checkout', asy
     const sampled = await sampleRepositoryFacts(compound.ctx, { repoPath: repo })
     const legacyFacts = await readRepositoryGitFacts(legacy.ctx, repo)
 
-    assert.deepEqual(sampled, legacyFacts)
+    assert.deepEqual(
+      {
+        defaultBranch: sampled.defaultBranch,
+        checkoutBranch: sampled.checkoutBranch,
+        main: sampled.main,
+        checkout: sampled.checkout,
+      },
+      legacyFacts,
+    )
+    assert.equal(sampled.head, await git(repo, 'rev-parse', '--short', 'HEAD'))
+    assert.deepEqual(sampled.requiredFailures, [])
     assert.equal(compound.commands.length, 1)
     assert.ok(legacy.commands.length >= 4)
     assert.equal(sampled.defaultBranch, 'main')

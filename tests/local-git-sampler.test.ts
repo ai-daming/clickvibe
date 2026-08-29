@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { Context } from '@deepseek-ai/cordis'
-import { buildWorktreeSampleCommand, parseWorktreeSample, sampleWorktreeFacts } from '../src/infra/local-git-sampler.ts'
+import {
+  buildRepositorySampleCommand,
+  buildWorktreeSampleCommand,
+  parseRepositorySample,
+  parseWorktreeSample,
+  sampleWorktreeFacts,
+} from '../src/infra/local-git-sampler.ts'
 
 function section(key: string, rc: number, value: string | null): string {
   const encoded = value === null ? '' : Buffer.from(value, 'utf8').toString('base64')
@@ -102,11 +108,13 @@ test('missing local branch suppresses upstream facts only', () => {
 
 test('a failed required read (git status) is flagged, never rendered as clean', () => {
   const output = [
+    section('WT_GITDIR', 0, '/wt/.git'),
     section('WT_HEAD', 0, 'abc1234'),
     section('WT_BRANCH', 0, 'feature'),
     section('WT_STATUS', 1, 'fatal: unable to read tree'),
     section('WT_MAIN', 1, ''),
     section('WT_MAIN_COUNT', 1, ''),
+    section('WT_BASE_REF', 0, 'origin/main'),
     section('WT_BASE', 0, 'bbb0000'),
     section('WT_BASE_COUNT', 1, ''),
     section('WT_UPSTREAM', 0, 'abc1234'),
@@ -121,7 +129,10 @@ test('a failed required read (git status) is flagged, never rendered as clean', 
   assert.equal(sample.gitFacts.behindUpstream, 1)
   assert.deepEqual(
     sample.requiredFailures.map((failure) => [failure.operation, failure.rc]),
-    [['git status --porcelain', 1]],
+    [
+      ['git status --porcelain', 1],
+      ['git rev-list --left-right --count origin/main...HEAD', 1],
+    ],
   )
   assert.match(sample.requiredFailures[0].error, /fatal:/)
 })
@@ -199,6 +210,7 @@ test('unparseable or missing base count keeps zero counts', () => {
   const garbage = parseWorktreeSample([...base, section('WT_BASE_COUNT', 0, 'not numbers')].join('\n'))
   assert.equal(garbage.gitFacts.behindBase, 0)
   assert.equal(garbage.gitFacts.aheadOfBase, 0)
+  assert.ok(garbage.requiredFailures.length > 0, 'an attempted-but-unparseable base count must be flagged')
 
   const absent = parseWorktreeSample([...base, section('WT_BASE_COUNT', 0, '')].join('\n'))
   assert.equal(absent.gitFacts.behindBase, 0)
@@ -301,4 +313,115 @@ test('command builder omits branch-fact sections when the repo checkout is unava
   // still exist but never invoke rev-list against an empty ref.
   assert.match(command, /WT_BASE_COUNT/)
   assert.match(command, /bc=''/)
+})
+
+test('a failed main compare (rc=128) is a required failure, never published as 0/0', () => {
+  const output = [
+    section('WT_GITDIR', 0, '/wt/.git'),
+    section('WT_HEAD', 0, 'abc1234'),
+    section('WT_BRANCH', 0, 'feature'),
+    section('WT_STATUS', 0, ''),
+    section('WT_MAIN', 0, 'aaa0000'),
+    section('WT_MAIN_COUNT', 128, 'fatal: bad object aaa0000'),
+    section('WT_BASE', 0, 'bbb0000'),
+    section('WT_BASE_COUNT', 0, '0 0'),
+    section('WT_UPSTREAM', 127, ''),
+    section('WT_UP_COUNT', 127, ''),
+    section('WT_MERGE_HEAD', 1, ''),
+  ].join('\n')
+  const sample = parseWorktreeSample(output)
+  assert.deepEqual(
+    sample.requiredFailures.map((failure) => failure.operation),
+    ['git rev-list --left-right --count main...HEAD'],
+  )
+  assert.match(sample.requiredFailures[0].error, /fatal: bad object/)
+})
+
+test('a failed base or upstream compare is a required failure when its ref resolved', () => {
+  const output = [
+    section('WT_GITDIR', 0, '/wt/.git'),
+    section('WT_HEAD', 0, 'abc1234'),
+    section('WT_BRANCH', 0, 'feature'),
+    section('WT_STATUS', 0, ''),
+    section('WT_MAIN', 1, ''),
+    section('WT_MAIN_COUNT', 1, ''),
+    section('WT_BASE_REF', 0, 'origin/base'),
+    section('WT_BASE', 0, 'bbb0000'),
+    section('WT_BASE_COUNT', 128, 'fatal: unable to read bbb0000'),
+    section('WT_UPSTREAM', 0, 'ccc0000'),
+    section('WT_UP_COUNT', 128, 'fatal: object file corrupt'),
+    section('WT_MERGE_HEAD', 1, ''),
+  ].join('\n')
+  const sample = parseWorktreeSample(output)
+  assert.deepEqual(
+    sample.requiredFailures.map((failure) => failure.operation),
+    ['git rev-list --left-right --count origin/base...HEAD', 'git rev-list --left-right --count origin/feature...HEAD'],
+  )
+})
+
+test('a missing always-present section is a required failure', () => {
+  const output = [
+    section('WT_GITDIR', 0, '/wt/.git'),
+    section('WT_HEAD', 0, 'abc1234'),
+    section('WT_BRANCH', 0, 'feature'),
+    // WT_STATUS missing entirely
+    section('WT_MAIN', 1, ''),
+    section('WT_MAIN_COUNT', 1, ''),
+    section('WT_BASE', 1, ''),
+    section('WT_BASE_COUNT', 0, ''),
+    section('WT_UPSTREAM', 127, ''),
+    section('WT_UP_COUNT', 127, ''),
+    section('WT_MERGE_HEAD', 1, ''),
+  ].join('\n')
+  const sample = parseWorktreeSample(output)
+  assert.ok(
+    sample.requiredFailures.some((failure) => failure.operation === 'git status --porcelain'),
+    'a missing required section must be reported',
+  )
+})
+
+test('an unparseable main count with a resolved main ref is a required failure', () => {
+  const output = [
+    section('WT_GITDIR', 0, '/wt/.git'),
+    section('WT_HEAD', 0, 'abc1234'),
+    section('WT_BRANCH', 0, 'feature'),
+    section('WT_STATUS', 0, ''),
+    section('WT_MAIN', 0, 'aaa0000'),
+    section('WT_MAIN_COUNT', 0, 'not numbers'),
+    section('WT_BASE', 1, ''),
+    section('WT_BASE_COUNT', 0, ''),
+    section('WT_UPSTREAM', 127, ''),
+    section('WT_UP_COUNT', 127, ''),
+    section('WT_MERGE_HEAD', 1, ''),
+  ].join('\n')
+  const sample = parseWorktreeSample(output)
+  assert.deepEqual(
+    sample.requiredFailures.map((failure) => failure.operation),
+    ['git rev-list --left-right --count main...HEAD'],
+  )
+})
+
+test('repo sampler flags failed compares and missing sections instead of publishing null', () => {
+  const output = [
+    section('REPO_DEFAULT', 0, 'origin/main'),
+    section('REPO_BRANCH', 0, 'main'),
+    section('REPO_HEAD', 0, 'abc1234'),
+    section('REPO_MAIN_COUNT', 128, 'fatal: bad object'),
+    section('REPO_HEAD_COUNT', 0, '0 0'),
+  ].join('\n')
+  const sample = parseRepositorySample(output)
+  assert.deepEqual(
+    sample.requiredFailures.map((failure) => failure.operation),
+    ['git rev-list --left-right --count <base>...main'],
+  )
+  assert.match(sample.requiredFailures[0].error, /fatal: bad object/)
+
+  const missing = [
+    section('REPO_DEFAULT', 0, 'origin/main'),
+    section('REPO_BRANCH', 0, 'main'),
+    // REPO_HEAD and REPO_MAIN_COUNT missing
+    section('REPO_HEAD_COUNT', 0, '0 0'),
+  ].join('\n')
+  const missingSample = parseRepositorySample(missing)
+  assert.ok(missingSample.requiredFailures.length > 0, 'missing sections must be reported')
 })

@@ -86,6 +86,17 @@ export function worktreeScopeKey(repoKey: string, worktreePath: string): string 
 
 const MAX_INVALIDATION_RECORDS = 200
 
+/** Samples are shared immutable observations; nested mutation must not poison cache hits. */
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === 'object') {
+    for (const property of Object.keys(value)) {
+      deepFreeze((value as Record<string, unknown>)[property])
+    }
+    Object.freeze(value)
+  }
+  return value
+}
+
 export class LocalGitSnapshotRegistry {
   readonly invalidations: LocalGitInvalidation[] = []
   counters: LocalGitCounters = {
@@ -108,7 +119,7 @@ export class LocalGitSnapshotRegistry {
       envelope: ObservationEnvelope<WorktreeSample> | null
     }
   >()
-  private inflight = new Map<string, { generation: number; promise: Promise<WorktreeSample> }>()
+  private inflight = new Map<string, { generation: number; promise: Promise<ObservationEnvelope<WorktreeSample>> }>()
   private repoScopes = new Map<
     string,
     {
@@ -119,7 +130,10 @@ export class LocalGitSnapshotRegistry {
       envelope: ObservationEnvelope<RepositorySample> | null
     }
   >()
-  private repoInflight = new Map<string, { generation: number; promise: Promise<RepositorySample> }>()
+  private repoInflight = new Map<
+    string,
+    { generation: number; promise: Promise<ObservationEnvelope<RepositorySample>> }
+  >()
   private readonly sampler: (ctx: Context, repoKey: string, input: WorktreeSampleInput) => Promise<WorktreeSample>
   private readonly repositorySampler: (
     ctx: Context,
@@ -172,16 +186,11 @@ export class LocalGitSnapshotRegistry {
     // generation, even while that old promise is still in flight.
     if (running && running.generation === entry.generation) {
       this.counters.singleflightJoins++
-      const result = await running.promise
-      if (entry.envelope && entry.generation === running.generation) return entry.envelope
-      return {
-        scope: key,
-        generation: running.generation,
-        observedAt: entry.observedAt,
-        sourceRevision: entry.sourceRevision,
-        sample: result,
-      }
+      return running.promise
     }
+    // Each execution builds its own complete envelope from its own sample
+    // (review round 2): a late-finishing stale generation never reads shared
+    // entry metadata that a newer generation already replaced.
     const requestedGeneration = entry.generation
     const sample = (async () => {
       try {
@@ -189,19 +198,20 @@ export class LocalGitSnapshotRegistry {
         // Counted on success only, so the frozen identity
         // logical = hit + join + execution + failure partitions requests.
         this.counters.executions++
+        const envelope = deepFreeze({
+          scope: key,
+          generation: requestedGeneration,
+          observedAt: Date.now(),
+          sourceRevision: result.gitFacts.head,
+          sample: result,
+        }) as ObservationEnvelope<WorktreeSample>
         if (entry.generation === requestedGeneration) {
           entry.sample = result
-          entry.observedAt = Date.now()
-          entry.sourceRevision = result.gitFacts.head
-          entry.envelope = {
-            scope: key,
-            generation: requestedGeneration,
-            observedAt: entry.observedAt,
-            sourceRevision: entry.sourceRevision,
-            sample: result,
-          }
+          entry.observedAt = envelope.observedAt
+          entry.sourceRevision = envelope.sourceRevision
+          entry.envelope = envelope
         }
-        return result
+        return envelope
       } catch (error) {
         this.counters.failures++
         throw error
@@ -210,18 +220,7 @@ export class LocalGitSnapshotRegistry {
       }
     })()
     this.inflight.set(key, { generation: requestedGeneration, promise: sample })
-    const result = await sample
-    // Published consumers share the cached immutable envelope; a caller whose
-    // generation was invalidated mid-flight still gets its result, described
-    // by the generation it was bound to.
-    if (entry.envelope && entry.generation === requestedGeneration) return entry.envelope
-    return {
-      scope: key,
-      generation: requestedGeneration,
-      observedAt: entry.observedAt,
-      sourceRevision: entry.sourceRevision,
-      sample: result,
-    }
+    return sample
   }
 
   /** Sample the configured repository checkout once per repo+generation. */
@@ -245,33 +244,28 @@ export class LocalGitSnapshotRegistry {
     // Generation-bound join, same rule as worktree samples (review finding).
     if (running && running.generation === entry.generation) {
       this.counters.singleflightJoins++
-      const result = await running.promise
-      if (entry.envelope && entry.generation === running.generation) return entry.envelope
-      return {
-        scope: key,
-        generation: running.generation,
-        observedAt: entry.observedAt,
-        sourceRevision: null,
-        sample: result,
-      }
+      return running.promise
     }
+    // Per-execution envelope (review round 2) — the repo source revision is
+    // the sampled checkout HEAD.
     const requestedGeneration = entry.generation
     const sample = (async () => {
       try {
         const result = await this.repositorySampler(ctx, repoKey, input)
         this.counters.executions++
+        const envelope = deepFreeze({
+          scope: key,
+          generation: requestedGeneration,
+          observedAt: Date.now(),
+          sourceRevision: result.head,
+          sample: result,
+        }) as ObservationEnvelope<RepositorySample>
         if (entry.generation === requestedGeneration) {
           entry.sample = result
-          entry.observedAt = Date.now()
-          entry.envelope = {
-            scope: key,
-            generation: requestedGeneration,
-            observedAt: entry.observedAt,
-            sourceRevision: null,
-            sample: result,
-          }
+          entry.observedAt = envelope.observedAt
+          entry.envelope = envelope
         }
-        return result
+        return envelope
       } catch (error) {
         this.counters.failures++
         throw error
@@ -280,15 +274,7 @@ export class LocalGitSnapshotRegistry {
       }
     })()
     this.repoInflight.set(key, { generation: requestedGeneration, promise: sample })
-    const result = await sample
-    if (entry.envelope && entry.generation === requestedGeneration) return entry.envelope
-    return {
-      scope: key,
-      generation: requestedGeneration,
-      observedAt: entry.observedAt,
-      sourceRevision: null,
-      sample: result,
-    }
+    return sample
   }
 
   /** Bump matching scope generations; the next consumer after this resamples. */

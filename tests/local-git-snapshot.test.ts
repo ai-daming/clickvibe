@@ -356,3 +356,107 @@ test('enriched rows carry a healthy observation with snapshot metadata', async (
     rmSync(repoDir, { recursive: true, force: true })
   }
 })
+
+test('reverse completion: gen0 finishing after gen1 published keeps its own envelope metadata', async () => {
+  // Review round 2: gen0 starts → invalidate → gen1 samples, publishes →
+  // gen0 completes last. gen0's envelope must describe gen0's own sample.
+  let releaseOld!: (sample: WorktreeSample) => void
+  const oldGate = new Promise<WorktreeSample>((resolve) => {
+    releaseOld = resolve
+  })
+  let calls = 0
+  const registry = new LocalGitSnapshotRegistry(async () => {
+    calls += 1
+    return calls === 1 ? oldGate : Promise.resolve(makeSample('head-old'))
+  })
+  const gen0 = registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
+  registry.invalidate({ repoKey: 'ai-daming/clickvibe', worktreePath: INPUT.worktree }, 'worktree-sync', 'syncWorktree')
+
+  const gen1 = await registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
+  assert.equal(gen1.generation, 1)
+  releaseOld(makeSample('head-old'))
+
+  const late = await gen0
+  assert.equal(late.generation, 0, 'gen0 keeps its own generation')
+  assert.equal(late.sample.gitFacts.head, 'head-old')
+  assert.equal(late.sourceRevision, 'head-old', 'gen0 metadata must not leak gen1 values')
+  assert.ok(Number.isFinite(late.observedAt))
+
+  // Cached gen1 hit must equal the published gen1 envelope exactly.
+  const cached = await registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
+  assert.equal(cached, gen1)
+})
+
+test('reverse completion with distinct samplers keeps envelopes field-isolated', async () => {
+  let releaseOld!: (sample: WorktreeSample) => void
+  const oldGate = new Promise<WorktreeSample>((resolve) => {
+    releaseOld = resolve
+  })
+  let calls = 0
+  const registry = new LocalGitSnapshotRegistry(async () => {
+    calls += 1
+    return calls === 1 ? oldGate : Promise.resolve(makeSample('head-new'))
+  })
+  const gen0 = registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
+  registry.invalidate({ repoKey: 'ai-daming/clickvibe', worktreePath: INPUT.worktree }, 'agent-task-end', 'finishTask')
+  const gen1 = await registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
+  releaseOld(makeSample('head-old'))
+  const late = await gen0
+
+  assert.equal(gen1.generation, 1)
+  assert.equal(gen1.sample.gitFacts.head, 'head-new')
+  assert.equal(gen1.sourceRevision, 'head-new')
+  assert.equal(late.generation, 0)
+  assert.equal(late.sample.gitFacts.head, 'head-old')
+  assert.equal(late.sourceRevision, 'head-old', 'no cross-generation metadata mixing')
+})
+
+test('repo reverse completion keeps envelope field-isolated and reports checkout HEAD', async () => {
+  let releaseOld!: (sample: RepositorySample) => void
+  const oldGate = new Promise<RepositorySample>((resolve) => {
+    releaseOld = resolve
+  })
+  let calls = 0
+  const registry = new LocalGitSnapshotRegistry(
+    async () => {
+      throw new Error('worktree sampler unused')
+    },
+    async () => {
+      calls += 1
+      return calls === 1 ? oldGate : Promise.resolve(repoSample('head-new'))
+    },
+  )
+  const gen0 = registry.repositorySample(CTX, 'ai-daming/clickvibe', { repoPath: '/repo/main' })
+  registry.invalidate({ repoKey: 'ai-daming/clickvibe' }, 'remote-fetch', 'ensureConfiguredRepoFresh')
+  const gen1 = await registry.repositorySample(CTX, 'ai-daming/clickvibe', { repoPath: '/repo/main' })
+  releaseOld(repoSample('head-old'))
+  const late = await gen0
+
+  assert.equal(gen1.generation, 1)
+  assert.equal(gen1.sourceRevision, 'head-new', 'repo envelope must carry checkout HEAD')
+  assert.equal(late.generation, 0)
+  assert.equal(late.sourceRevision, 'head-old')
+})
+
+test('published envelopes and samples are deeply immutable', async () => {
+  const { registry } = countingRegistry()
+  const first = await registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
+  assert.throws(() => {
+    first.sample.gitFacts.head = 'tampered'
+  }, /Cannot assign to read only|not extensible|readonly/i)
+  assert.throws(() => {
+    ;(first as { generation: number }).generation = 99
+  }, /Cannot assign to read only|not extensible|readonly/i)
+  const cached = await registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
+  assert.equal(cached.sample.gitFacts.head, first.sample.gitFacts.head)
+})
+
+function repoSample(head: string): RepositorySample {
+  return {
+    defaultBranch: 'main',
+    checkoutBranch: 'main',
+    main: { ahead: 0, behind: 0 },
+    checkout: { ahead: 0, behind: 0 },
+    head,
+  }
+}

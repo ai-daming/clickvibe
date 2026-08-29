@@ -2,6 +2,7 @@
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
 import { notifyLocalGitMutation } from '../infra/local-git-invalidate.ts'
 import type { LocalGitSnapshotReader } from '../infra/local-git-snapshot.ts'
 import type { RepositoryGitFacts } from '../infra/repository-git.ts'
@@ -69,13 +70,20 @@ export async function readConfiguredRepositoryAdvance(
 ): Promise<RepositoryAdvanceSignal | null> {
   const repoPath = configuredRepoPath(config, repoKey)
   if (!repoPath) return null
-  let facts: RepositoryGitFacts
   if (observation) {
-    const envelope = await observation.repositorySample(ctx, repoKey, { repoPath }).catch(() => null)
-    facts = envelope ? envelope.sample : await readRepositoryGitFacts(ctx, repoPath)
-  } else {
-    facts = await readRepositoryGitFacts(ctx, repoPath)
+    // Retry once, then report unknown with diagnostics — never fall back to
+    // the error-swallowing legacy reader (issue #122 failure mode, review r2).
+    let envelope = await observation.repositorySample(ctx, repoKey, { repoPath }).catch(() => null)
+    if (envelope === null) {
+      envelope = await observation.repositorySample(ctx, repoKey, { repoPath }).catch(() => null)
+    }
+    if (envelope === null) {
+      logTaskDiagnostic('local-git-repo-sample-failed', { repoKey, repoPath })
+      return null
+    }
+    return { ...deriveRepositoryAdvance(envelope.sample), fetchedAt }
   }
+  const facts = await readRepositoryGitFacts(ctx, repoPath)
   return { ...deriveRepositoryAdvance(facts), fetchedAt }
 }
 

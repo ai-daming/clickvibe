@@ -90,6 +90,7 @@ export function buildWorktreeSampleCommand(input: WorktreeSampleInput): string {
   lines.push(`mc=$(git rev-list --left-right --count ${shellQuote('main')}...${shellQuote('HEAD')} 2>/dev/null)`)
   section('WT_MAIN_COUNT', '$?', '"$mc"')
 
+  section('WT_BASE_REF', '0', '"$base"')
   lines.push('ob=$(git rev-parse --short "$base" 2>/dev/null)')
   section('WT_BASE', '$?', '"$ob"')
   lines.push('if git rev-parse --short "$base" >/dev/null 2>&1; then')
@@ -180,31 +181,27 @@ export function parseWorktreeSample(output: string): WorktreeSample & { required
   const sections = decodeSections(output)
 
   const requiredFailures: RequiredReadFailure[] = []
-  // Absent refs and unborn HEADs are expected absence; these reads must
-  // succeed in any observable worktree, so their failure is operational and
-  // the sample must not be published as facts (issue #122 failure-mode rule).
+  const fail = (operation: string, section: { rc: number; value: string } | undefined, missing: boolean) => {
+    requiredFailures.push({
+      operation,
+      rc: section?.rc ?? -1,
+      error: missing ? '(section missing from sample output)' : (section?.value ?? '').trim(),
+    })
+  }
+  // Expected absence (unborn HEAD, missing refs) stays a null fact. Everything
+  // the legacy derivation actually consumed must be present and successful,
+  // otherwise the sample is operational garbage and must fail unknown
+  // (issue #122 failure-mode rule; review round 2).
   const gitdir = sections.get('WT_GITDIR')
-  if (gitdir && gitdir.rc !== 0) {
-    requiredFailures.push({ operation: 'git rev-parse --git-dir', rc: gitdir.rc, error: gitdir.value.trim() })
-  }
+  if (!gitdir || gitdir.rc !== 0) fail('git rev-parse --git-dir', gitdir, !gitdir)
   const statusSection = sections.get('WT_STATUS')
-  if (statusSection && statusSection.rc !== 0) {
-    requiredFailures.push({
-      operation: 'git status --porcelain',
-      rc: statusSection.rc,
-      error: statusSection.value.trim(),
-    })
-  }
+  if (!statusSection || statusSection.rc !== 0) fail('git status --porcelain', statusSection, !statusSection)
   const branchSection = sections.get('WT_BRANCH')
-  if (branchSection && branchSection.rc !== 0) {
-    requiredFailures.push({
-      operation: 'git branch --show-current',
-      rc: branchSection.rc,
-      error: branchSection.value.trim(),
-    })
-  }
+  if (!branchSection || branchSection.rc !== 0) fail('git branch --show-current', branchSection, !branchSection)
+  const headSection = sections.get('WT_HEAD')
+  if (!headSection) fail('git rev-parse --short HEAD', headSection, true)
 
-  const head = optionalRef(sections.get('WT_HEAD'))
+  const head = optionalRef(headSection)
   const branch = optionalRef(sections.get('WT_BRANCH'))
   const status = sections.get('WT_STATUS')
   const hasUncommittedChanges = status ? (status.rc === 0 ? status.value !== '' : false) : false
@@ -222,28 +219,45 @@ export function parseWorktreeSample(output: string): WorktreeSample & { required
   if (head !== null) {
     mainHead = optionalRef(sections.get('WT_MAIN'))
     if (mainHead) {
-      const mainCompare = compare(sections.get('WT_MAIN_COUNT'))
+      const mainCount = sections.get('WT_MAIN_COUNT')
+      const mainCompare = compare(mainCount)
       if (mainCompare) {
         behindMain = mainCompare.behind
         aheadOfMain = mainCompare.ahead
+      } else {
+        fail('git rev-list --left-right --count main...HEAD', mainCount, !mainCount)
       }
     }
     originMainHead = optionalRef(sections.get('WT_BASE'))
     // The shell resolves the applicable compare (origin base when present,
-    // frozen hash otherwise, nothing when both absent) and a failed/empty
-    // compare parses to null here, which keeps the legacy zero counts.
-    const baseCount = compare(sections.get('WT_BASE_COUNT'))
+    // frozen hash otherwise, nothing when both absent). A skipped compare is
+    // rc=0 with empty output and no resolvable base; anything else that does
+    // not parse is an attempted read that failed (review round 2).
+    const baseCountSection = sections.get('WT_BASE_COUNT')
+    const baseCount = compare(baseCountSection)
     if (baseCount) {
       behindBase = baseCount.behind
       aheadOfBase = baseCount.ahead
+    } else {
+      const attempted =
+        (baseCountSection !== undefined && baseCountSection.rc !== 0) ||
+        (baseCountSection !== undefined && baseCountSection.value.trim() !== '') ||
+        originMainHead !== null
+      if (attempted) {
+        const baseRef = sections.get('WT_BASE_REF')?.value.trim() || '<base>'
+        fail(`git rev-list --left-right --count ${baseRef}...HEAD`, baseCountSection, !baseCountSection)
+      }
     }
     if (branch) {
       upstreamHead = optionalRef(sections.get('WT_UPSTREAM'))
       if (upstreamHead) {
-        const upstreamCompare = compare(sections.get('WT_UP_COUNT'))
+        const upstreamCount = sections.get('WT_UP_COUNT')
+        const upstreamCompare = compare(upstreamCount)
         if (upstreamCompare) {
           behindUpstream = upstreamCompare.behind
           aheadOfUpstream = upstreamCompare.ahead
+        } else {
+          fail(`git rev-list --left-right --count origin/${branch}...HEAD`, upstreamCount, !upstreamCount)
         }
       }
     }
@@ -313,6 +327,8 @@ export interface RepositorySample {
   main: { ahead: number; behind: number } | null
   /** ahead/behind of the checked-out HEAD versus origin/<defaultBranch>. */
   checkout: { ahead: number; behind: number } | null
+  /** Short HEAD of the checkout; the repo envelope's source revision. */
+  head: string | null
 }
 
 export interface RepositorySampleInput {
@@ -332,12 +348,14 @@ export function buildRepositorySampleCommand(input: RepositorySampleInput): stri
   lines.push(`if [ -n "$d" ]; then base="$d"`)
   lines.push(`else base='origin/main'`)
   lines.push('fi')
-  lines.push('b=$(git branch --show-current 2>/dev/null)')
+  lines.push('b=$(git branch --show-current 2>&1)')
   section('REPO_BRANCH', '$?', '"$b"')
-  lines.push(`mc=$(git rev-list --left-right --count "$base"...${shellQuote('main')} 2>/dev/null)`)
+  lines.push('r=$(git rev-parse --short HEAD 2>/dev/null)')
+  section('REPO_HEAD', '$?', '"$r"')
+  lines.push(`mc=$(git rev-list --left-right --count "$base"...${shellQuote('main')} 2>&1)`)
   section('REPO_MAIN_COUNT', '$?', '"$mc"')
   lines.push('if [ -n "$b" ]; then')
-  lines.push(`  cc=$(git rev-list --left-right --count "$base"...'HEAD' 2>/dev/null)`)
+  lines.push(`  cc=$(git rev-list --left-right --count "$base"...'HEAD' 2>&1)`)
   section('REPO_HEAD_COUNT', '$?', '"$cc"')
   lines.push('else')
   lines.push(`  printf 'REPO_HEAD_COUNT\\t127\\t\\n'`)
@@ -345,14 +363,41 @@ export function buildRepositorySampleCommand(input: RepositorySampleInput): stri
   return lines.join('\n')
 }
 
-export function parseRepositorySample(output: string): RepositorySample {
+export function parseRepositorySample(output: string): RepositorySample & { requiredFailures: RequiredReadFailure[] } {
   const sections = decodeSections(output)
+  const requiredFailures: RequiredReadFailure[] = []
+  const fail = (operation: string, section: { rc: number; value: string } | undefined, missing: boolean) => {
+    requiredFailures.push({
+      operation,
+      rc: section?.rc ?? -1,
+      error: missing ? '(section missing from sample output)' : (section?.value ?? '').trim(),
+    })
+  }
+  // REPO_DEFAULT is deliberately not required: an unset origin/HEAD is a
+  // legitimate repository state and legacy falls back to main (issue #122).
+  const branchSection = sections.get('REPO_BRANCH')
+  if (!branchSection || branchSection.rc !== 0) fail('git branch --show-current', branchSection, !branchSection)
+  const headSection = sections.get('REPO_HEAD')
+  if (!headSection) fail('git rev-parse --short HEAD', headSection, true)
   const defaultRef = optionalRef(sections.get('REPO_DEFAULT'))
   const defaultBranch = (defaultRef ?? '').replace(/^origin\//, '') || 'main'
-  const checkoutBranch = optionalRef(sections.get('REPO_BRANCH'))
-  const main = compare(sections.get('REPO_MAIN_COUNT'))
-  const checkout = checkoutBranch === null ? null : compare(sections.get('REPO_HEAD_COUNT'))
-  return { defaultBranch, checkoutBranch, main, checkout }
+  const checkoutBranch = optionalRef(branchSection)
+  const mainCount = sections.get('REPO_MAIN_COUNT')
+  const main = compare(mainCount)
+  if (!main) fail('git rev-list --left-right --count <base>...main', mainCount, !mainCount)
+  const checkoutCount = sections.get('REPO_HEAD_COUNT')
+  const checkout = checkoutBranch === null ? null : compare(checkoutCount)
+  if (checkoutBranch !== null && checkout === null) {
+    fail('git rev-list --left-right --count <base>...HEAD', checkoutCount, !checkoutCount)
+  }
+  return {
+    defaultBranch,
+    checkoutBranch,
+    main,
+    checkout,
+    head: optionalRef(headSection),
+    requiredFailures,
+  }
 }
 
 export async function sampleRepositoryFacts(ctx: Context, input: RepositorySampleInput): Promise<RepositorySample> {
@@ -361,5 +406,12 @@ export async function sampleRepositoryFacts(ctx: Context, input: RepositorySampl
     timeoutMs: 10000,
     sandboxPolicy: { mode: 'read-only', workspaceRoot: input.repoPath },
   })
-  return parseRepositorySample(output)
+  const parsed = parseRepositorySample(output)
+  if (parsed.requiredFailures.length > 0) {
+    const detail = parsed.requiredFailures
+      .map((failure) => `${failure.operation} rc=${failure.rc}: ${failure.error || '(no stderr)'}`)
+      .join('; ')
+    throw new Error(`本地 Git 仓库必需读取失败: ${detail}`)
+  }
+  return parsed
 }
