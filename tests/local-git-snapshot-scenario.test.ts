@@ -32,6 +32,12 @@ function realRecordingContext() {
         return spec
       },
       async run(spec: { command: string; workdir?: string }) {
+        // Count-only frozen scenarios: gh is intercepted so live-GitHub
+        // latency cannot leak into the measured rounds (review round 5).
+        if (/^gh\b|\sgh\b/.test(spec.command)) {
+          commands.push({ command: spec.command, exitCode: 1 })
+          return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'offline scenario' } }
+        }
         try {
           const out = await execFileAsync('/bin/sh', ['-c', spec.command], {
             cwd: spec.workdir,

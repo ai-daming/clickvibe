@@ -28,5 +28,10 @@
     "path": "tests/local-git-sampler.test.ts",
     "reason": "Issue #122 section-contract enumeration, per-section failure semantics and sampler equivalence live in one suite mirroring the sampler module; splitting the contract coverage is deferred.",
     "issueRef": "#122"
+  },
+  {
+    "path": "tests/local-git-sampler-equivalence.test.ts",
+    "reason": "Issue #122 real-git equivalence, the final-behavior matrix (review round 4/5) and the deleted-base/non-git regressions share one fixture builder; splitting the matrix from equivalence is deferred.",
+    "issueRef": "#122"
   }
 ]

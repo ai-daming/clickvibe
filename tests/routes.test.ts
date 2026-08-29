@@ -1719,6 +1719,23 @@ test('/state and repo/issues share one repository fetch TTL while manual refresh
       if (command.startsWith('git for-each-ref') || command.startsWith('git symbolic-ref')) {
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       }
+      if (command.startsWith('set +e') && command.includes('ENUM_GITDIR')) {
+        const enc = (value: string) => Buffer.from(value, 'utf8').toString('base64')
+        const line = (key: string, rc: number, value: string) => `${key}\t${rc}\t${enc(value)}`
+        return {
+          exitCode: 0,
+          stdout: {
+            text: [
+              line('ENUM_GITDIR', 0, '.'),
+              line('ENUM_DEFAULT', 0, 'origin/main'),
+              line('ENUM_REFS', 0, ''),
+              line('ENUM_BASE_AVAILABLE', 0, '0'),
+              line('ENUM_COUNTS', 0, ''),
+            ].join('\n'),
+          },
+          stderr: { text: '' },
+        }
+      }
       throw new Error(`unexpected command: ${command}`)
     })
 

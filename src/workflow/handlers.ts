@@ -265,7 +265,7 @@ export async function handleCommand(
   if (command.action === 'issues') {
     const resolved = await resolveCommandRepoKey(command.repoKey)
     if ('error' in resolved) return { status: 400, body: { ok: false, action: 'issues', error: resolved.error } }
-    const result = await fetchRepositoryIssues(ctx, { repoKey: resolved.repoKey })
+    const result = await fetchRepositoryIssues(ctx, { repoKey: resolved.repoKey }, { observation: localGitSnapshots })
     if (!result.ok) return { status: 400, body: { ok: false, action: 'issues', error: result.error } }
     return {
       status: 200,

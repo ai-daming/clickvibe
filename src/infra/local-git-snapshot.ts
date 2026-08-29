@@ -13,6 +13,9 @@
 import { existsSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import {
+  sampleRepositoryEnumeration,
+  type RepositoryEnumerationInput,
+  type RepositoryEnumerationSample,
   sampleRepositoryFacts,
   type RepositorySample,
   type RepositorySampleInput,
@@ -41,6 +44,11 @@ export interface LocalGitSnapshotReader {
     repoKey: string,
     input: RepositorySampleInput,
   ): Promise<ObservationEnvelope<RepositorySample>>
+  enumerationSample(
+    ctx: Context,
+    repoKey: string,
+    input: RepositoryEnumerationInput,
+  ): Promise<ObservationEnvelope<RepositoryEnumerationSample>>
 }
 
 /** Mirror readConfiguredBranchFacts' front gate: null when unconfigured or missing on disk. */
@@ -134,12 +142,31 @@ export class LocalGitSnapshotRegistry {
     string,
     { generation: number; promise: Promise<ObservationEnvelope<RepositorySample>> }
   >()
+  private enumScopes = new Map<
+    string,
+    {
+      repoKey: string
+      generation: number
+      sample: RepositoryEnumerationSample | null
+      observedAt: number
+      envelope: ObservationEnvelope<RepositoryEnumerationSample> | null
+    }
+  >()
+  private enumInflight = new Map<
+    string,
+    { generation: number; promise: Promise<ObservationEnvelope<RepositoryEnumerationSample>> }
+  >()
   private readonly sampler: (ctx: Context, repoKey: string, input: WorktreeSampleInput) => Promise<WorktreeSample>
   private readonly repositorySampler: (
     ctx: Context,
     repoKey: string,
     input: RepositorySampleInput,
   ) => Promise<RepositorySample>
+  private readonly enumerationSampler: (
+    ctx: Context,
+    repoKey: string,
+    input: RepositoryEnumerationInput,
+  ) => Promise<RepositoryEnumerationSample>
 
   /** Injectable for tests; production uses the real compound samplers. */
   constructor(
@@ -153,9 +180,15 @@ export class LocalGitSnapshotRegistry {
       _repoKey,
       input,
     ) => sampleRepositoryFacts(ctx, input),
+    enumerationSampler: (
+      ctx: Context,
+      repoKey: string,
+      input: RepositoryEnumerationInput,
+    ) => Promise<RepositoryEnumerationSample> = (ctx, _repoKey, input) => sampleRepositoryEnumeration(ctx, input),
   ) {
     this.sampler = sampler
     this.repositorySampler = repositorySampler
+    this.enumerationSampler = enumerationSampler
     registerSnapshotRegistry(this)
   }
 
@@ -277,6 +310,57 @@ export class LocalGitSnapshotRegistry {
     return sample
   }
 
+  /** Enumerate the configured checkout once per repo+generation (issue #122 Q3). */
+  async enumerationSample(
+    ctx: Context,
+    repoKey: string,
+    input: RepositoryEnumerationInput,
+  ): Promise<ObservationEnvelope<RepositoryEnumerationSample>> {
+    this.counters.logicalRequests++
+    const key = `enum:${repoKey}:${input.repoPath}`
+    let entry = this.enumScopes.get(key)
+    if (!entry) {
+      entry = { repoKey, generation: 0, sample: null, observedAt: 0, envelope: null }
+      this.enumScopes.set(key, entry)
+    }
+    if (entry.sample && entry.envelope) {
+      this.counters.cacheHits++
+      return entry.envelope
+    }
+    const running = this.enumInflight.get(key)
+    if (running && running.generation === entry.generation) {
+      this.counters.singleflightJoins++
+      return running.promise
+    }
+    const requestedGeneration = entry.generation
+    const sample = (async () => {
+      try {
+        const result = await this.enumerationSampler(ctx, repoKey, input)
+        this.counters.executions++
+        const envelope = deepFreeze({
+          scope: key,
+          generation: requestedGeneration,
+          observedAt: Date.now(),
+          sourceRevision: null,
+          sample: result,
+        }) as ObservationEnvelope<RepositoryEnumerationSample>
+        if (entry.generation === requestedGeneration) {
+          entry.sample = result
+          entry.observedAt = envelope.observedAt
+          entry.envelope = envelope
+        }
+        return envelope
+      } catch (error) {
+        this.counters.failures++
+        throw error
+      } finally {
+        if (this.enumInflight.get(key)?.generation === requestedGeneration) this.enumInflight.delete(key)
+      }
+    })()
+    this.enumInflight.set(key, { generation: requestedGeneration, promise: sample })
+    return sample
+  }
+
   /** Bump matching scope generations; the next consumer after this resamples. */
   invalidate(scope: LocalGitMutationScope, reason: string, trigger: string): void {
     const at = Date.now()
@@ -288,6 +372,12 @@ export class LocalGitSnapshotRegistry {
       entry.envelope = null
     }
     for (const entry of this.repoScopes.values()) {
+      if (entry.repoKey !== scope.repoKey) continue
+      entry.generation++
+      entry.sample = null
+      entry.envelope = null
+    }
+    for (const entry of this.enumScopes.values()) {
       if (entry.repoKey !== scope.repoKey) continue
       entry.generation++
       entry.sample = null

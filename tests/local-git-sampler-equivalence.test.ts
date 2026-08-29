@@ -453,6 +453,64 @@ test('behavior matrix: default branch, base availability and failures decide the
   const notAhead = await setup({ defaultBranch: 'main', pushBase: true, frozenBaseRef: true, ahead: false })
   assert.equal(notAhead.derived?.nextAction.kind, 'develop')
 
+  // configured checkout exists but is not a git repository → unknown, never
+  // "branch missing / start developing" (review round 5)
+  const nonGitRepo = await (async () => {
+    const root = await mkdtemp(join(tmpdir(), 'clickvibe-matrix-nongit-'))
+    const repo = join(root, 'repo')
+    const worktree = join(root, 'wt')
+    await execFileAsync('git', ['init', '--initial-branch=main', worktree])
+    const fs = await import('node:fs/promises')
+    await fs.mkdir(repo, { recursive: true })
+    await fs.writeFile(join(repo, 'placeholder.txt'), 'not a git repo\n')
+    const workflow = {
+      key: 'ai-daming/clickvibe#122',
+      url: 'https://github.com/ai-daming/clickvibe/issues/122',
+      repoKey: 'ai-daming/clickvibe',
+      worktree,
+      branch: 'clickvibe-issue-122',
+      stage: 'idle',
+      devAgent: null,
+      devTaskId: null,
+      devSessionId: null,
+      devSessionAgent: null,
+      devInterrupted: false,
+      reviewAgent: null,
+      reviewTaskId: null,
+      reviewSessionId: null,
+      reviewSessionAgent: null,
+      reviewResult: null,
+      prNumber: null,
+      issueState: 'OPEN',
+      baseRef: 'main',
+      updatedAt: Date.now(),
+      events: [],
+    }
+    const recording = realShellCtx()
+    const ctx = {
+      shell: {
+        resolve: (spec: unknown) => spec,
+        run: async (spec: { command: string; workdir?: string }) => {
+          if (/^gh\b|\sgh\b/.test(spec.command)) {
+            return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'offline matrix' } }
+          }
+          return recording.ctx.shell.run(spec)
+        },
+      },
+    }
+    const { LocalGitSnapshotRegistry } = await import('../src/infra/local-git-snapshot.ts')
+    const [row] = await enrichWorkflowStates(
+      ctx as never,
+      [workflow],
+      { repos: { 'ai-daming/clickvibe': repo }, worktreeRoot: root },
+      new LocalGitSnapshotRegistry(),
+    )
+    await rm(root, { recursive: true, force: true })
+    return row as { derived: unknown; observation?: { freshness: string } }
+  })()
+  assert.equal(nonGitRepo.derived, null)
+  assert.equal(nonGitRepo.observation?.freshness, 'unknown')
+
   // operational failure (broken worktree) → explicit unknown, no derived action
   const broken = await setup({
     defaultBranch: 'main',
