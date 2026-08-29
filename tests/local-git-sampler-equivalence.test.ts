@@ -163,7 +163,7 @@ test('dirty worktree and missing upstream produce identical facts on both paths'
   }
 })
 
-test('deleted remote base: branch-count failure fails unknown instead of folding hasCommits:false', async () => {
+test('deleted remote base: the shared EffectiveBase keeps branch facts answerable', async () => {
   const root = await mkdtemp(join(tmpdir(), 'clickvibe-sampler-frozen-'))
   try {
     const repo = join(root, 'repo')
@@ -172,10 +172,9 @@ test('deleted remote base: branch-count failure fails unknown instead of folding
     await commit(repo, 'b.txt', 'two', 'two')
     const frozenBase = await git(repo, 'rev-parse', 'HEAD~1')
 
-    // Review round 3 (CRITICAL): with no remote, the branch count
-    // (origin/main..main) fails operationally while the frozen worktree
-    // compare still resolves aheadOfBase=1. The sample must fail unknown,
-    // never publish hasCommits:false over a correct aheadOfBase.
+    // Review round 4: the frozen SHA resolves once as the EffectiveBase and
+    // serves BOTH the worktree compare and the branch count. The sample stays
+    // publishable; hasCommits defers to the worktree answer (aheadOfBase=1).
     const compound = realShellCtx()
     const legacy = realShellCtx()
     const input = {
@@ -186,19 +185,14 @@ test('deleted remote base: branch-count failure fails unknown instead of folding
       frozenBase,
       repoPath: repo,
     }
-    await assert.rejects(sampleWorktreeFacts(compound.ctx, input), (error: Error) => {
-      assert.match(error.message, /本地 Git 必需读取失败/)
-      assert.match(error.message, /git rev-list --count origin\/main\.\.main/)
-      return true
-    })
-    assert.equal(compound.commands.length, 1, 'the rejected sample itself costs one subprocess')
-    // The worktree-level facts that did parse still match legacy sampling.
-    const raw = await runCommandThrough(compound.ctx, input)
-    const parsed = parseWorktreeSample(raw)
+    const sampled = await sampleWorktreeFacts(compound.ctx, input)
     const legacyFacts = await sampleWorktreeFactsLegacy(legacy.ctx, repo, 'main', frozenBase)
-    assert.equal(parsed.gitFacts.aheadOfBase, 1)
-    assert.deepEqual({ ...parsed.gitFacts, exists: true }, legacyFacts)
-    assert.ok(parsed.requiredFailures.length > 0)
+    assert.deepEqual(sampled.requiredFailures, [])
+    assert.equal(sampled.gitFacts.aheadOfBase, 1)
+    assert.equal(sampled.gitFacts.originMainHead, null, 'the named base is formally gone')
+    assert.deepEqual({ ...sampled.gitFacts, exists: true }, legacyFacts)
+    assert.deepEqual(sampled.branchFacts, { branchExists: true, defaultBranch: undefined })
+    assert.equal(compound.commands.length, 1)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -271,7 +265,9 @@ test('detached HEAD and empty repository degrade identically on both paths', asy
     assert.equal(sampled.gitFacts.branch, null)
     assert.equal(sampled.gitFacts.head, legacyFacts.head)
     assert.deepEqual({ ...sampled.gitFacts, exists: true }, legacyFacts)
-    assert.deepEqual(sampled.branchFacts, { branchExists: true, hasCommits: false, defaultBranch: 'main' })
+    // Single hasCommits answer source (review round 4): the worktree compare
+    // answered (detached HEAD still resolves), so the branch count defers.
+    assert.deepEqual(sampled.branchFacts, { branchExists: true, defaultBranch: 'main' })
 
     const empty = join(root, 'empty')
     await execFileAsync('git', ['init', '--initial-branch=main', empty])
@@ -336,22 +332,52 @@ test('repository sampler matches readRepositoryGitFacts on a real checkout', asy
   }
 })
 
-test('deleted remote base fails the enriched row closed instead of flipping to develop', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'clickvibe-deleted-base-'))
-  try {
-    const repo = join(root, 'repo')
-    await execFileAsync('git', ['init', '--initial-branch=main', repo])
-    await commit(repo, 'a.txt', 'base', 'base')
-    const frozenBase = await git(repo, 'rev-parse', 'HEAD')
-    const worktree = join(root, 'wt')
-    await execFileAsync('git', ['-C', repo, 'worktree', 'add', '-b', 'clickvibe-issue-122', worktree, 'main'])
-    await execFileAsync('git', ['-C', worktree, 'commit', '--allow-empty', '-m', 'work'])
-    // No remote exists: origin/main is gone while the frozen base still resolves.
+/**
+ * Final-behavior equivalence matrix (review round 4): the snapshot plane must
+ * not just produce equal intermediate facts — the derived nextAction (or the
+ * explicit unknown observation) has to match the formal semantics across
+ * default main/trunk, base present/deleted, frozen available, ahead or not,
+ * and operational failure.
+ */
+test('behavior matrix: default branch, base availability and failures decide the final action', async () => {
+  const { enrichWorkflowStates } = await import('../src/workflow/repository-state.ts')
+  const { LocalGitSnapshotRegistry } = await import('../src/infra/local-git-snapshot.ts')
 
-    const { enrichWorkflowStates } = await import('../src/workflow/repository-state.ts')
-    const { LocalGitSnapshotRegistry } = await import('../src/infra/local-git-snapshot.ts')
-    const { ctx } = realShellCtx()
-    const registry = new LocalGitSnapshotRegistry()
+  const setup = async (options: {
+    defaultBranch: 'main' | 'trunk'
+    pushBase: boolean
+    frozenBaseRef: boolean
+    ahead: boolean
+    breakWorktree?: boolean
+  }) => {
+    const root = await mkdtemp(join(tmpdir(), 'clickvibe-matrix-'))
+    const remote = join(root, 'remote.git')
+    const repo = join(root, 'repo')
+    const worktree = join(root, 'wt')
+    await execFileAsync('git', ['init', '--bare', '--initial-branch=main', remote])
+    await execFileAsync('git', ['init', '--initial-branch=main', repo])
+    await git(repo, 'remote', 'add', 'origin', remote)
+    await commit(repo, 'a.txt', 'base', 'base')
+    const baseHash = await git(repo, 'rev-parse', 'HEAD')
+    if (options.pushBase) {
+      await git(repo, 'push', 'origin', `main:refs/heads/${options.defaultBranch}`)
+      // The bare remote's own HEAD still points at its init branch; pin
+      // origin/HEAD to the scenario's default explicitly.
+      await git(repo, 'remote', 'set-head', 'origin', options.defaultBranch)
+    }
+    await execFileAsync('git', ['-C', repo, 'worktree', 'add', '-b', 'clickvibe-issue-122', worktree, 'HEAD'])
+    if (options.ahead) {
+      const { writeFile } = await import('node:fs/promises')
+      await writeFile(join(worktree, 'n.txt'), 'work\n')
+      await git(worktree, 'add', '.')
+      await execFileAsync('git', ['-C', worktree, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-m', 'work'])
+    }
+    if (options.breakWorktree) {
+      const { rm } = await import('node:fs/promises')
+      await rm(join(worktree, '.git'), { recursive: true, force: true })
+      await (await import('node:fs/promises')).writeFile(join(worktree, '.git'), 'broken\n')
+    }
+    const baseRef = options.frozenBaseRef ? `${options.defaultBranch} @ ${baseHash}` : null
     const workflow = {
       key: 'ai-daming/clickvibe#122',
       url: 'https://github.com/ai-daming/clickvibe/issues/122',
@@ -371,24 +397,71 @@ test('deleted remote base fails the enriched row closed instead of flipping to d
       reviewResult: null,
       prNumber: null,
       issueState: 'OPEN',
-      baseRef: `main @ ${frozenBase}`,
+      baseRef,
       updatedAt: Date.now(),
       events: [],
     }
+    // Local-git matrix: intercept gh so live-GitHub PR state (a real closed PR
+    // on a same-named head branch) cannot contaminate the derived action.
+    const recording = realShellCtx()
+    const ctx = {
+      shell: {
+        resolve: (spec: unknown) => spec,
+        run: async (spec: { command: string; workdir?: string }) => {
+          if (/^gh\b|\sgh\b/.test(spec.command)) {
+            return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'offline matrix' } }
+          }
+          return recording.ctx.shell.run(spec)
+        },
+      },
+    }
+    const registry = new LocalGitSnapshotRegistry()
     const [row] = await enrichWorkflowStates(
       ctx as never,
       [workflow],
       { repos: { 'ai-daming/clickvibe': repo }, worktreeRoot: root },
       registry,
     )
-    // Review round 3: the wrong outcome was hasCommits:false overriding
-    // aheadOfBase=1 and deriving nextAction 'develop'. The row must fail
-    // closed with an explicit unknown observation instead.
-    assert.equal(row.derived, null)
-    assert.equal(row.observation?.freshness, 'unknown')
-    assert.match(row.observation?.error ?? '', /本地 Git 快照采样失败/)
-    assert.match(row.observation?.error ?? '', /rev-list --count origin\/main\.\.clickvibe-issue-122/)
-  } finally {
     await rm(root, { recursive: true, force: true })
+    return row as {
+      derived: { nextAction: { kind: string }; baseRefAvailable: boolean; hasCommits: boolean } | null
+      observation?: { freshness: string; error?: string }
+    }
   }
+
+  // main default, base present, ahead → create-pr (no PR yet, commits exist)
+  const healthy = await setup({ defaultBranch: 'main', pushBase: true, frozenBaseRef: true, ahead: true })
+  assert.equal(healthy.derived?.nextAction.kind, 'create-pr')
+  assert.equal(healthy.observation?.freshness, 'current')
+
+  // deleted remote base, frozen SHA live, ahead → restore-base (NOT unknown)
+  const deletedBase = await setup({ defaultBranch: 'main', pushBase: false, frozenBaseRef: true, ahead: true })
+  assert.equal(deletedBase.derived?.baseRefAvailable, false)
+  assert.equal(deletedBase.derived?.hasCommits, true, 'the frozen EffectiveBase keeps hasCommits truthful')
+  assert.equal(deletedBase.derived?.nextAction.kind, 'restore-base')
+
+  // trunk default, no frozen base, base present, ahead → create-pr (shared default resolution)
+  const trunk = await setup({ defaultBranch: 'trunk', pushBase: true, frozenBaseRef: false, ahead: true })
+  assert.equal(trunk.derived?.nextAction.kind, 'create-pr', 'non-main default must derive, not go unknown')
+
+  // base gone and nothing frozen → no commits claim, plain develop
+  const noBase = await setup({ defaultBranch: 'main', pushBase: false, frozenBaseRef: false, ahead: true })
+  assert.equal(noBase.derived?.hasCommits, false)
+  assert.equal(noBase.derived?.nextAction.kind, 'develop')
+
+  // healthy but not ahead → develop
+  const notAhead = await setup({ defaultBranch: 'main', pushBase: true, frozenBaseRef: true, ahead: false })
+  assert.equal(notAhead.derived?.nextAction.kind, 'develop')
+
+  // operational failure (broken worktree) → explicit unknown, no derived action
+  const broken = await setup({
+    defaultBranch: 'main',
+    pushBase: true,
+    frozenBaseRef: true,
+    ahead: true,
+    breakWorktree: true,
+  })
+  assert.equal(broken.derived, null)
+  assert.equal(broken.observation?.freshness, 'unknown')
+  assert.match(broken.observation?.error ?? '', /本地 Git 快照采样失败/)
 })
