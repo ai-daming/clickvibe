@@ -11,6 +11,7 @@
 
 import { existsSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
+import { remoteFetch } from '../infra/remote-git.ts'
 import { notifyLocalGitMutation } from '../infra/local-git-snapshot.ts'
 import { type AgentKind } from '../agent/agent-stream.ts'
 import {
@@ -153,7 +154,8 @@ export async function startReview(
     },
   }
   try {
-    await runCommand(ctx, 'git fetch origin --prune', {
+    await remoteFetch(ctx, {
+      repoKey: workflow.repoKey,
       workdir: workflow.worktree,
       timeoutMs: 60_000,
       sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: workflow.worktree },

@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
+import { remotePush } from '../infra/remote-git.ts'
 import { notifyLocalGitMutation } from '../infra/local-git-snapshot.ts'
 import { shellQuote } from '../infra/develop-core.ts'
 import { runCommand } from '../infra/runtime.ts'
@@ -50,10 +51,13 @@ export async function ensurePullRequest(
     sandboxPolicy: { mode: 'read-only', workspaceRoot: input.worktree },
   })
   if (dirty !== '') throw new Error('worktree 有未提交改动,拒绝创建 PR')
-  await runCommand(ctx, `git push --set-upstream origin ${shellQuote(input.branch)}`, {
+  await remotePush(ctx, {
+    repoKey: input.repoKey,
     workdir: input.worktree,
     timeoutMs: 120_000,
     sandboxPolicy: policy,
+    refspec: shellQuote(input.branch),
+    setUpstream: true,
   })
   notifyLocalGitMutation(
     { repoKey: input.repoKey, worktreePath: input.worktree },

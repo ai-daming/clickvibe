@@ -21,6 +21,7 @@
 import { existsSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import { remoteFetch } from '../infra/remote-git.ts'
 import { notifyLocalGitMutation } from '../infra/local-git-snapshot.ts'
 import { buildWorktreeAddCommand, decideWorktreeRecovery, shellQuote } from '../infra/develop-core.ts'
 import { expandHome, loadConfig, runCommand } from '../infra/runtime.ts'
@@ -97,7 +98,8 @@ export async function ensureWorktree(
 
   // 新分支只能从 fetch 后的远端默认分支创建,不能继承配置仓库碰巧停留的 HEAD。
   const policy = { mode: 'danger-full-access' as const, workspaceRoot: expandedRepo }
-  await runCommand(ctx, 'git fetch origin --prune', {
+  await remoteFetch(ctx, {
+    repoKey,
     workdir: expandedRepo,
     sandboxPolicy: policy,
     timeoutMs: 60_000,

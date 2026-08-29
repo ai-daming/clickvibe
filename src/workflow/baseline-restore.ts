@@ -72,7 +72,7 @@ export async function restoreBaseBranch(
       if (target.baseBranch !== authorizedTarget.baseBranch || target.baseHash !== authorizedTarget.baseHash) {
         throw new Error('恢复基线目标已变化,请刷新预览并重新确认')
       }
-      await restoreMissingOriginBranch(ctx, expandHome(configured), target.baseBranch, target.baseHash)
+      await restoreMissingOriginBranch(ctx, repoKey, expandHome(configured), target.baseBranch, target.baseHash)
       notifyLocalGitMutation({ repoKey }, 'baseline-restore', 'restoreBaseBranch')
       return { ok: true as const, ...target }
     })

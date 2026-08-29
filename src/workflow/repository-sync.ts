@@ -2,6 +2,7 @@
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import { remoteFetch } from '../infra/remote-git.ts'
 import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
 import { notifyLocalGitMutation } from '../infra/local-git-invalidate.ts'
 import type { LocalGitSnapshotReader } from '../infra/local-git-snapshot.ts'
@@ -98,7 +99,8 @@ export async function syncConfiguredRepository(
   if (!repoKey || !repoPath) return { ok: false, error: `未配置或无法访问项目 ${repoKey || '(空)'}` }
 
   try {
-    await runCommand(ctx, 'git fetch origin --prune', {
+    await remoteFetch(ctx, {
+      repoKey,
       workdir: repoPath,
       timeoutMs: 60_000,
       sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: repoPath },

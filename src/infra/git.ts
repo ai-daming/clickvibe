@@ -18,6 +18,7 @@
  *                      └── rework ────────┘
  */
 import type { Context } from '@deepseek-ai/cordis'
+import { remoteFetch } from './remote-git.ts'
 import { shellQuote } from './develop-core.ts'
 import { runCommand } from './runtime.ts'
 import { type IssueContractSnapshot } from './state.ts'
@@ -197,10 +198,11 @@ export function conflictFileSuffix(files: string[]): string {
 /** Fetch and enumerate origin remote branches for a first-development preview. */
 export async function fetchOriginBranches(
   ctx: Context,
+  repoKey: string,
   repoPath: string,
 ): Promise<{ defaultRemoteBase: string; refs: string[] }> {
   const policy = { mode: 'danger-full-access' as const, workspaceRoot: repoPath }
-  await runCommand(ctx, 'git fetch origin --prune', { workdir: repoPath, timeoutMs: 60_000, sandboxPolicy: policy })
+  await remoteFetch(ctx, { repoKey, workdir: repoPath, timeoutMs: 60_000, sandboxPolicy: policy })
   let defaultRemoteBase = await runCommand(ctx, 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD', {
     workdir: repoPath,
     timeoutMs: 10_000,
