@@ -160,11 +160,11 @@ export function parseReviewMetaVerdict(text: string): ReviewMetaVerdict | null {
 export function reworkRoundDirective(feedbackText: string | null): string | null {
   if (!feedbackText || !feedbackText.includes('== Review Meta ==')) return null
   if (feedbackText.includes('下一轮指令')) {
-    return 'Review 意见末尾附有「下一轮指令」段:以该段为准执行,修法按其唯一指定,不留选择空间。'
+    return 'Review 意见末尾附有「下一轮指令」段:以该段为准执行其中已证明的契约锚点与关闭条件;Review 评论不构成架构授权,未经 Accepted baseline 或维护者确认不得照单实现新类型/协议/层。'
   }
   const meta = parseReviewMetaVerdict(feedbackText)
   if (meta?.verdict === 'stop-and-redesign' || meta?.next === 'stop-and-redesign') {
-    return '本轮 review 判定为 stop-and-redesign:按 docs/fix-discipline.md〈重设计轮〉模板执行——先产出不变量文档,再实现机制级方案,交付静态枚举表;禁止在现有模型上继续调用点级补丁。'
+    return '本轮 review 判定为 stop-and-redesign:按 docs/fix-discipline.md〈重设计轮〉模板只产出待确认设计——不变量、消费者枚举、奥卡姆减法、非目标和验收证据;未经确认不得实现,禁止在现有模型上继续补丁或新增框架。'
   }
-  return '本轮为修复轮:按 docs/fix-discipline.md〈修复轮〉模板执行——先对每个 finding 判母题,历史复发母题禁止逐条修(按原则 8 上报需要重设计轮);本轮 diff 应净减少或持平。'
+  return '本轮为修复轮:按 docs/fix-discipline.md〈修复轮〉模板执行——先核验每个 finding 的契约锚点、复现与最小关闭条件;Review 评论若要求新增架构但没有 Accepted baseline,停止实现并请求确认。历史复发母题禁止逐条修;本轮 diff 应净减少或持平。'
 }
