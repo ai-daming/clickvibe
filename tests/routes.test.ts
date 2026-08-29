@@ -1727,6 +1727,7 @@ test('/state and repo/issues share one repository fetch TTL while manual refresh
           stdout: {
             text: [
               line('ENUM_GITDIR', 0, '.'),
+              line('ENUM_HEAD', 0, 'abc1234'),
               line('ENUM_DEFAULT', 0, 'origin/main'),
               line('ENUM_REFS', 0, ''),
               line('ENUM_BASE_AVAILABLE', 0, '0'),

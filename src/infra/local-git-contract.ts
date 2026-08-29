@@ -292,6 +292,15 @@ export const REPOSITORY_ENUMERATION_SECTION_CONTRACT: SectionContract[] = [
     negative: { missing: 'fail', rcNonZero: 'fail', garbage: 'skip' },
   },
   {
+    section: 'ENUM_HEAD',
+    producer: 'git -C <repo> rev-parse --short HEAD',
+    required: 'always',
+    condition: 'presence; rc≠0 (unborn) is expected absence, a missing section is not',
+    expectedAbsence: 'unborn repository → head:null',
+    consumer: 'enumeration envelope sourceRevision',
+    negative: { missing: 'fail', rcNonZero: 'ok', garbage: 'skip' },
+  },
+  {
     section: 'ENUM_DEFAULT',
     producer: 'git -C <repo> symbolic-ref refs/remotes/origin/HEAD',
     required: 'always',

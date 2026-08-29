@@ -61,7 +61,7 @@ function configuredRepoPath(config: ClickVibeConfig, repoKey: string): string | 
   return existsSync(repoPath) ? repoPath : null
 }
 
-function describeSampleError(error: unknown): { name: string; message: string; stack: string | null } {
+export function describeSampleError(error: unknown): { name: string; message: string; stack: string | null } {
   return {
     name: error instanceof Error ? error.name : typeof error,
     message: error instanceof Error ? error.message : String(error),

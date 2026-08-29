@@ -1,8 +1,9 @@
 [
   {
     "path": "tests/routes.test.ts",
-    "reason": "Existing route-contract suite is intentionally unchanged during issue #61's production-code-only split.",
-    "issueRef": "#61"
+    "reason": "Legacy route-contract suite from the pre-split monolith (#61); >800 hard-limit legacy debt tracked for a dedicated test-only split (issue below), out of scope for feature PRs.",
+    "issueRef": "#145",
+    "over800Legacy": true
   },
   {
     "path": "src/workflow/merge.ts",
@@ -21,12 +22,12 @@
   },
   {
     "path": "src/infra/local-git-sampler.ts",
-    "reason": "Issue #122 keeps the compound sampler, its complete WT_*/BR_*/REPO_* section contract table (fix-discipline static enumeration) and both parsers in one module so builder output and required-read classification cannot drift apart; splitting is deferred from the L3 snapshot plane.",
+    "reason": "Issue #122 keeps the worktree/repository/enumeration compound builders and parsers in one module so builder output and parsing stay co-reviewable; the classification tables live in local-git-contract.ts; further splitting is deferred from the L3 snapshot plane.",
     "issueRef": "#122"
   },
   {
     "path": "tests/local-git-sampler.test.ts",
-    "reason": "Issue #122 section-contract enumeration, per-section failure semantics and sampler equivalence live in one suite mirroring the sampler module; splitting the contract coverage is deferred.",
+    "reason": "Issue #122 sampler semantics suite (builder shapes, per-section failure parsing, equivalence fixtures); the contract-driven harness and enumeration suites are split into local-git-contract.test.ts / local-git-enumeration.test.ts.",
     "issueRef": "#122"
   },
   {

@@ -341,7 +341,7 @@ export class LocalGitSnapshotRegistry {
           scope: key,
           generation: requestedGeneration,
           observedAt: Date.now(),
-          sourceRevision: null,
+          sourceRevision: result.head,
           sample: result,
         }) as ObservationEnvelope<RepositoryEnumerationSample>
         if (entry.generation === requestedGeneration) {

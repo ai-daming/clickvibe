@@ -38,6 +38,7 @@ import {
 } from '../infra/runtime.ts'
 import type { LocalGitSnapshotReader } from '../infra/local-git-snapshot.ts'
 import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
+import { describeSampleError } from './repository-sync.ts'
 import { type IssueWorkflow, issueBodyHash, issueKey, loadAllWorkflows } from '../infra/state.ts'
 import { deriveAutoDevelopment } from './auto-development.ts'
 import { deriveWorkflowState } from './derive.ts'
@@ -122,7 +123,7 @@ export async function fetchRepositoryIssues(
     const project = basename(repoPath)
     let refs = new Set<string>()
     let defaultBranch = 'main'
-    let counts: Map<string, number> | null = null
+    let counts: Record<string, number> | null = null
     if (existsSync(repoPath) && overrides.observation) {
       // Issue #122 Q3: enumeration runs on the snapshot plane — one compound
       // subprocess per repo per generation, no error-swallowed per-branch reads.
@@ -131,11 +132,18 @@ export async function fetchRepositoryIssues(
           .observation!.enumerationSample(ctx, repoKey, { repoPath })
           .then((result) => ({ ok: true as const, result }))
           .catch((error: unknown) => ({ ok: false as const, error }))
-      let attempt = await sample()
-      if (!attempt.ok) attempt = await sample()
+      const first = await sample()
+      const attempt = first.ok ? first : await sample()
       if (!attempt.ok) {
+        // Both attempts' raw evidence is preserved (review round 6).
+        logTaskDiagnostic('local-git-enumeration-sample-failed', {
+          repoKey,
+          repoPath,
+          attempts: [first, attempt]
+            .filter((candidate) => !candidate.ok)
+            .map((candidate) => describeSampleError((candidate as { error: unknown }).error)),
+        })
         const message = attempt.error instanceof Error ? attempt.error.message : String(attempt.error)
-        logTaskDiagnostic('local-git-enumeration-sample-failed', { repoKey, repoPath, error: message })
         throw new Error(`本地 Git 枚举不可用(已重试一次): ${message}`)
       }
       refs = new Set(attempt.result.sample.refs)
@@ -209,7 +217,7 @@ export async function fetchRepositoryIssues(
         if (counts !== null) {
           // Snapshot plane: the enumeration already counted every local head
           // against the same default base; a missing entry is expected absence.
-          hasCommits = branchExists && (counts.get(branch) ?? 0) > 0
+          hasCommits = branchExists && (counts[branch] ?? 0) > 0
         } else if (branchExists && existsSync(repoPath)) {
           hasCommits = await runCommand(
             ctx,

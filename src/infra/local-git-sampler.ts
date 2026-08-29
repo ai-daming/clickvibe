@@ -507,7 +507,9 @@ export interface RepositoryEnumerationSample {
   /** Whether origin/<defaultBranch> resolves (count base availability). */
   baseAvailable: boolean
   /** rev-list counts origin/<defaultBranch>..<local branch> for local heads. */
-  counts: Map<string, number>
+  counts: Record<string, number>
+  /** Short HEAD of the checkout; the enumeration envelope's source revision. */
+  head: string | null
 }
 
 export interface RepositoryEnumerationInput {
@@ -523,6 +525,8 @@ export function buildRepositoryEnumerationCommand(input: RepositoryEnumerationIn
   lines.push(`__enc() { printf %s "$1" | base64 | tr -d '\\n'; }`)
   lines.push(`g=$(git -C ${repo} rev-parse --git-dir 2>&1)`)
   section('ENUM_GITDIR', '$?', '"$g"')
+  lines.push(`h=$(git -C ${repo} rev-parse --short HEAD 2>/dev/null)`)
+  section('ENUM_HEAD', '$?', '"$h"')
   lines.push(`d=$(git -C ${repo} symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>&1)`)
   section('ENUM_DEFAULT', '$?', '"$d"')
   lines.push('if [ -n "$d" ]; then db="$d"; else db=' + shellQuote('origin/main') + '; fi')
@@ -556,6 +560,8 @@ export function parseRepositoryEnumeration(
     })
   }
   const gitdir = sections.get('ENUM_GITDIR')
+  const headSection = sections.get('ENUM_HEAD')
+  if (!headSection) fail('git -C <repo> rev-parse --short HEAD', headSection, true)
   if (!gitdir || gitdir.rc !== 0) fail('git -C <repo> rev-parse --git-dir', gitdir, !gitdir)
   const defaultSection = sections.get('ENUM_DEFAULT')
   if (!defaultSection || defaultSection.rc > 1) {
@@ -571,10 +577,17 @@ export function parseRepositoryEnumeration(
     .filter(Boolean)
 
   const availSection = sections.get('ENUM_BASE_AVAILABLE')
+  if (!availSection) fail('effective-base ENUM_BASE_AVAILABLE', availSection, true)
   const baseAvailable = availSection?.value.trim() === '1'
-  const counts = new Map<string, number>()
-  const countsRaw = sections.get('ENUM_COUNTS')?.value ?? ''
+  const counts: Record<string, number> = {}
+  const countsSection = sections.get('ENUM_COUNTS')
+  const countsRaw = countsSection?.value ?? ''
   if (baseAvailable) {
+    // Presence and outer rc of the counts section are required whenever the
+    // base is available (review round 6): no silent empty-parse fallback.
+    if (!countsSection || countsSection.rc !== 0) {
+      fail('git -C <repo> rev-list --count <base>..<branch> (loop)', countsSection, !countsSection)
+    }
     for (const line of countsRaw.split('\n')) {
       if (line.trim() === '') continue
       const [branch, rcRaw, count] = line.split('\t')
@@ -591,11 +604,18 @@ export function parseRepositoryEnumeration(
         })
         continue
       }
-      counts.set(branch, Number(count))
+      counts[branch] = Number(count)
     }
   }
   const defaultBranch = (defaultRef ?? '').replace(/^origin\//, '') || 'main'
-  return { refs, defaultBranch, baseAvailable, counts, requiredFailures }
+  return {
+    refs,
+    defaultBranch,
+    baseAvailable,
+    counts,
+    head: optionalRef(headSection),
+    requiredFailures,
+  }
 }
 
 export async function sampleRepositoryEnumeration(
