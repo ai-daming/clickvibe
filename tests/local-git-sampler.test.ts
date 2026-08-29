@@ -6,7 +6,9 @@ import {
   buildWorktreeSampleCommand,
   parseRepositorySample,
   parseWorktreeSample,
+  REPOSITORY_SECTION_CONTRACT,
   sampleWorktreeFacts,
+  WORKTREE_SECTION_CONTRACT,
 } from '../src/infra/local-git-sampler.ts'
 
 function section(key: string, rc: number, value: string | null): string {
@@ -286,7 +288,7 @@ test('command builder pins the compound sample shape', () => {
   assert.match(command, /git status --porcelain 2>&1/, 'required read captures stderr')
   assert.match(command, /printf 'WT_GITDIR\\t%d\\t%s\\n'/)
   assert.match(command, /git rev-parse --short 'main' 2>\/dev\/null/)
-  assert.match(command, /git rev-list --left-right --count "\$base"\.\.\.'HEAD' 2>\/dev\/null/)
+  assert.match(command, /git rev-list --left-right --count "\$base"\.\.\.'HEAD' 2>&1/, 'compare stderr is captured')
   assert.match(command, /base='origin\/main'/)
   assert.match(command, /if \[ 0 -eq 1 \]; then/, 'base resolution must fall through to the baseRef branch')
   assert.match(command, /\[ -n 'abc1' \]/)
@@ -424,4 +426,91 @@ test('repo sampler flags failed compares and missing sections instead of publish
   ].join('\n')
   const missingSample = parseRepositorySample(missing)
   assert.ok(missingSample.requiredFailures.length > 0, 'missing sections must be reported')
+})
+
+test('every builder section is explicitly classified in the section contract (static enumeration)', () => {
+  const emittedSections = (command: string) =>
+    new Set([...command.matchAll(/'(WT_[A-Z_]+|BR_[A-Z_]+|REPO_[A-Z_]+)\\t/g)].map((match) => match[1]))
+
+  const worktreeFull = buildWorktreeSampleCommand({
+    worktree: '/wt/issue-122',
+    branch: 'clickvibe-issue-122',
+    baseBranch: 'main',
+    baseBranchNeedsDefault: false,
+    frozenBase: 'abc1',
+    repoPath: '/repo/main',
+  })
+  const worktreeBare = buildWorktreeSampleCommand({
+    worktree: '/wt/issue-122',
+    branch: 'clickvibe-issue-122',
+    baseBranch: 'main',
+    baseBranchNeedsDefault: false,
+    frozenBase: null,
+    repoPath: null,
+  })
+  const repoCommand = buildRepositorySampleCommand({ repoPath: '/repo/main' })
+
+  const worktreeSections = new Set([...emittedSections(worktreeFull), ...emittedSections(worktreeBare)])
+  const contractSections = new Set(WORKTREE_SECTION_CONTRACT.map((entry) => entry.section))
+  assert.deepEqual(
+    [...worktreeSections].filter((section) => !contractSections.has(section)).sort(),
+    [],
+    'builder emits sections missing from WORKTREE_SECTION_CONTRACT',
+  )
+  assert.deepEqual(
+    [...contractSections].filter((section) => !worktreeSections.has(section)).sort(),
+    [],
+    'contract classifies sections the builder never emits',
+  )
+
+  const repoSections = emittedSections(repoCommand)
+  const repoContract = new Set(REPOSITORY_SECTION_CONTRACT.map((entry) => entry.section))
+  assert.deepEqual(
+    [...repoSections].filter((section) => !repoContract.has(section)).sort(),
+    [],
+    'repo builder emits sections missing from REPOSITORY_SECTION_CONTRACT',
+  )
+  assert.deepEqual(
+    [...repoContract].filter((section) => !repoSections.has(section)).sort(),
+    [],
+    'repo contract classifies sections the builder never emits',
+  )
+
+  // Every contract entry must name its producer, absence meaning and consumer.
+  for (const entry of [...WORKTREE_SECTION_CONTRACT, ...REPOSITORY_SECTION_CONTRACT]) {
+    assert.ok(entry.producer.length > 0, `${entry.section} producer`)
+    assert.ok(entry.expectedAbsence.length > 0, `${entry.section} expectedAbsence`)
+    assert.ok(entry.consumer.length > 0, `${entry.section} consumer`)
+    assert.ok(['always', 'conditional', 'never'].includes(entry.required))
+  }
+})
+
+test('a failed branch count is a required failure carrying the effective base ref', () => {
+  const output = [
+    section('WT_GITDIR', 0, '/wt/.git'),
+    section('WT_HEAD', 0, 'abc1234'),
+    section('WT_BRANCH', 0, 'clickvibe-issue-122'),
+    section('WT_STATUS', 0, ''),
+    section('WT_MAIN', 1, ''),
+    section('WT_MAIN_COUNT', 1, ''),
+    section('WT_BASE_REF', 0, 'origin/main'),
+    section('WT_BASE', 1, ''),
+    section('WT_BASE_COUNT', 0, '0 1'),
+    section('WT_UPSTREAM', 127, ''),
+    section('WT_UP_COUNT', 127, ''),
+    section('WT_MERGE_HEAD', 1, ''),
+    section('BR_DEFAULT', 0, 'origin/main'),
+    section('BR_REF', 0, 'clickvibe-issue-122'),
+    section('BR_BASE_REF', 0, 'origin/main'),
+    section('BR_COMMIT_COUNT', 128, "fatal: bad revision 'origin/main..clickvibe-issue-122'"),
+  ].join('\n')
+  const sample = parseWorktreeSample(output)
+  assert.equal(sample.gitFacts.aheadOfBase, 1, 'the frozen worktree compare still resolved')
+  assert.equal(sample.branchFacts.branchExists, true)
+  assert.equal(sample.branchFacts.hasCommits, undefined, 'a failed count must not claim hasCommits at all')
+  assert.deepEqual(
+    sample.requiredFailures.map((failure) => failure.operation),
+    ['git rev-list --count origin/main..clickvibe-issue-122'],
+  )
+  assert.match(sample.requiredFailures[0].error, /fatal: bad revision/)
 })

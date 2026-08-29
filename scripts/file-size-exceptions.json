@@ -18,5 +18,15 @@
     "path": "tests/sync-conflict.test.ts",
     "reason": "Issue #127 adds merge-metadata replay coverage to the existing real-git sync-conflict suite; splitting the integration fixture is deferred from the release gate repair.",
     "issueRef": "#127"
+  },
+  {
+    "path": "src/infra/local-git-sampler.ts",
+    "reason": "Issue #122 keeps the compound sampler, its complete WT_*/BR_*/REPO_* section contract table (fix-discipline static enumeration) and both parsers in one module so builder output and required-read classification cannot drift apart; splitting is deferred from the L3 snapshot plane.",
+    "issueRef": "#122"
+  },
+  {
+    "path": "tests/local-git-sampler.test.ts",
+    "reason": "Issue #122 section-contract enumeration, per-section failure semantics and sampler equivalence live in one suite mirroring the sampler module; splitting the contract coverage is deferred.",
+    "issueRef": "#122"
   }
 ]

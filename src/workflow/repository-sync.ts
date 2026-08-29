@@ -61,6 +61,14 @@ function configuredRepoPath(config: ClickVibeConfig, repoKey: string): string | 
   return existsSync(repoPath) ? repoPath : null
 }
 
+function describeSampleError(error: unknown): { name: string; message: string; stack: string | null } {
+  return {
+    name: error instanceof Error ? error.name : typeof error,
+    message: error instanceof Error ? error.message : String(error),
+    stack: error instanceof Error ? (error.stack ?? null) : null,
+  }
+}
+
 export async function readConfiguredRepositoryAdvance(
   ctx: Context,
   config: ClickVibeConfig,
@@ -73,15 +81,26 @@ export async function readConfiguredRepositoryAdvance(
   if (observation) {
     // Retry once, then report unknown with diagnostics — never fall back to
     // the error-swallowing legacy reader (issue #122 failure mode, review r2).
-    let envelope = await observation.repositorySample(ctx, repoKey, { repoPath }).catch(() => null)
-    if (envelope === null) {
-      envelope = await observation.repositorySample(ctx, repoKey, { repoPath }).catch(() => null)
+    // Both attempts' raw errors are preserved in the diagnostic (review r3).
+    const attempt = () =>
+      observation
+        .repositorySample(ctx, repoKey, { repoPath })
+        .then((envelope) => ({ ok: true as const, envelope }))
+        .catch((error: unknown) => ({ ok: false as const, error }))
+    let result = await attempt()
+    if (!result.ok) {
+      const second = await attempt()
+      if (!second.ok) {
+        logTaskDiagnostic('local-git-repo-sample-failed', {
+          repoKey,
+          repoPath,
+          attempts: [describeSampleError(result.error), describeSampleError(second.error)],
+        })
+        return null
+      }
+      result = second
     }
-    if (envelope === null) {
-      logTaskDiagnostic('local-git-repo-sample-failed', { repoKey, repoPath })
-      return null
-    }
-    return { ...deriveRepositoryAdvance(envelope.sample), fetchedAt }
+    return { ...deriveRepositoryAdvance(result.envelope.sample), fetchedAt }
   }
   const facts = await readRepositoryGitFacts(ctx, repoPath)
   return { ...deriveRepositoryAdvance(facts), fetchedAt }

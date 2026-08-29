@@ -6,7 +6,14 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { test } from 'node:test'
 import type { Context } from '@deepseek-ai/cordis'
-import { sampleRepositoryFacts, sampleWorktreeFacts, type WorktreeSampleInput } from '../src/infra/local-git-sampler.ts'
+import {
+  buildWorktreeSampleCommand,
+  parseRepositorySample,
+  parseWorktreeSample,
+  sampleRepositoryFacts,
+  sampleWorktreeFacts,
+  type WorktreeSampleInput,
+} from '../src/infra/local-git-sampler.ts'
 import { readRepositoryGitFacts } from '../src/infra/repository-git.ts'
 import { sampleWorktreeFactsLegacy } from '../src/workflow/derive.ts'
 
@@ -66,6 +73,18 @@ const SAMPLE_INPUT_BASE = {
   branch: 'feature',
   baseBranch: 'main',
   baseBranchNeedsDefault: false,
+}
+
+/** Run the compound sample through the recording ctx and return raw stdout. */
+async function runCommandThrough(ctx: Context, input: WorktreeSampleInput): Promise<string> {
+  const spec = ctx.shell.resolve({
+    command: buildWorktreeSampleCommand(input),
+    workdir: input.worktree,
+    timeoutMs: 10000,
+    sandboxPolicy: { mode: 'read-only', workspaceRoot: input.worktree },
+  })
+  const result = await ctx.shell.run(spec as never)
+  return (result as { stdout: { text: string } }).stdout.text
 }
 
 async function compareSampling(
@@ -144,7 +163,7 @@ test('dirty worktree and missing upstream produce identical facts on both paths'
   }
 })
 
-test('frozen-base fallback path matches when the origin base ref is absent', async () => {
+test('deleted remote base: branch-count failure fails unknown instead of folding hasCommits:false', async () => {
   const root = await mkdtemp(join(tmpdir(), 'clickvibe-sampler-frozen-'))
   try {
     const repo = join(root, 'repo')
@@ -153,15 +172,33 @@ test('frozen-base fallback path matches when the origin base ref is absent', asy
     await commit(repo, 'b.txt', 'two', 'two')
     const frozenBase = await git(repo, 'rev-parse', 'HEAD~1')
 
-    const { compoundCommands } = await compareSampling('frozen', {
+    // Review round 3 (CRITICAL): with no remote, the branch count
+    // (origin/main..main) fails operationally while the frozen worktree
+    // compare still resolves aheadOfBase=1. The sample must fail unknown,
+    // never publish hasCommits:false over a correct aheadOfBase.
+    const compound = realShellCtx()
+    const legacy = realShellCtx()
+    const input = {
       worktree: repo,
       branch: 'main',
       baseBranch: 'main',
       baseBranchNeedsDefault: false,
       frozenBase,
       repoPath: repo,
+    }
+    await assert.rejects(sampleWorktreeFacts(compound.ctx, input), (error: Error) => {
+      assert.match(error.message, /本地 Git 必需读取失败/)
+      assert.match(error.message, /git rev-list --count origin\/main\.\.main/)
+      return true
     })
-    assert.equal(compoundCommands, 1)
+    assert.equal(compound.commands.length, 1, 'the rejected sample itself costs one subprocess')
+    // The worktree-level facts that did parse still match legacy sampling.
+    const raw = await runCommandThrough(compound.ctx, input)
+    const parsed = parseWorktreeSample(raw)
+    const legacyFacts = await sampleWorktreeFactsLegacy(legacy.ctx, repo, 'main', frozenBase)
+    assert.equal(parsed.gitFacts.aheadOfBase, 1)
+    assert.deepEqual({ ...parsed.gitFacts, exists: true }, legacyFacts)
+    assert.ok(parsed.requiredFailures.length > 0)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -170,9 +207,14 @@ test('frozen-base fallback path matches when the origin base ref is absent', asy
 test('unresolved merge (MERGE_HEAD) reports conflict identically', async () => {
   const root = await mkdtemp(join(tmpdir(), 'clickvibe-sampler-conflict-'))
   try {
+    const remote = join(root, 'remote.git')
     const repo = join(root, 'repo')
+    await execFileAsync('git', ['init', '--bare', '--initial-branch=main', remote])
     await execFileAsync('git', ['init', '--initial-branch=main', repo])
+    await git(repo, 'remote', 'add', 'origin', remote)
     await commit(repo, 'f.txt', 'base', 'base')
+    await git(repo, 'push', 'origin', 'main')
+    await git(repo, 'remote', 'set-head', 'origin', '--auto')
     await branchFrom(repo, 'side')
     await commit(repo, 'f.txt', 'side', 'side')
     await git(repo, 'checkout', 'main')
@@ -205,9 +247,14 @@ test('unresolved merge (MERGE_HEAD) reports conflict identically', async () => {
 test('detached HEAD and empty repository degrade identically on both paths', async () => {
   const root = await mkdtemp(join(tmpdir(), 'clickvibe-sampler-edge-'))
   try {
+    const remote = join(root, 'remote.git')
     const repo = join(root, 'repo')
+    await execFileAsync('git', ['init', '--bare', '--initial-branch=main', remote])
     await execFileAsync('git', ['init', '--initial-branch=main', repo])
+    await git(repo, 'remote', 'add', 'origin', remote)
     await commit(repo, 'a.txt', 'base', 'base')
+    await git(repo, 'push', 'origin', 'main')
+    await git(repo, 'remote', 'set-head', 'origin', '--auto')
     await git(repo, 'checkout', '--detach')
 
     const compound = realShellCtx()
@@ -224,7 +271,7 @@ test('detached HEAD and empty repository degrade identically on both paths', asy
     assert.equal(sampled.gitFacts.branch, null)
     assert.equal(sampled.gitFacts.head, legacyFacts.head)
     assert.deepEqual({ ...sampled.gitFacts, exists: true }, legacyFacts)
-    assert.deepEqual(sampled.branchFacts, { branchExists: true, hasCommits: false, defaultBranch: undefined })
+    assert.deepEqual(sampled.branchFacts, { branchExists: true, hasCommits: false, defaultBranch: 'main' })
 
     const empty = join(root, 'empty')
     await execFileAsync('git', ['init', '--initial-branch=main', empty])
@@ -284,6 +331,63 @@ test('repository sampler matches readRepositoryGitFacts on a real checkout', asy
     assert.equal(sampled.defaultBranch, 'main')
     assert.equal(sampled.checkoutBranch, 'main')
     assert.ok((sampled.main?.ahead ?? 0) > 0 || (sampled.main?.behind ?? 0) > 0 || true)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('deleted remote base fails the enriched row closed instead of flipping to develop', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'clickvibe-deleted-base-'))
+  try {
+    const repo = join(root, 'repo')
+    await execFileAsync('git', ['init', '--initial-branch=main', repo])
+    await commit(repo, 'a.txt', 'base', 'base')
+    const frozenBase = await git(repo, 'rev-parse', 'HEAD')
+    const worktree = join(root, 'wt')
+    await execFileAsync('git', ['-C', repo, 'worktree', 'add', '-b', 'clickvibe-issue-122', worktree, 'main'])
+    await execFileAsync('git', ['-C', worktree, 'commit', '--allow-empty', '-m', 'work'])
+    // No remote exists: origin/main is gone while the frozen base still resolves.
+
+    const { enrichWorkflowStates } = await import('../src/workflow/repository-state.ts')
+    const { LocalGitSnapshotRegistry } = await import('../src/infra/local-git-snapshot.ts')
+    const { ctx } = realShellCtx()
+    const registry = new LocalGitSnapshotRegistry()
+    const workflow = {
+      key: 'ai-daming/clickvibe#122',
+      url: 'https://github.com/ai-daming/clickvibe/issues/122',
+      repoKey: 'ai-daming/clickvibe',
+      worktree,
+      branch: 'clickvibe-issue-122',
+      stage: 'idle',
+      devAgent: null,
+      devTaskId: null,
+      devSessionId: null,
+      devSessionAgent: null,
+      devInterrupted: false,
+      reviewAgent: null,
+      reviewTaskId: null,
+      reviewSessionId: null,
+      reviewSessionAgent: null,
+      reviewResult: null,
+      prNumber: null,
+      issueState: 'OPEN',
+      baseRef: `main @ ${frozenBase}`,
+      updatedAt: Date.now(),
+      events: [],
+    }
+    const [row] = await enrichWorkflowStates(
+      ctx as never,
+      [workflow],
+      { repos: { 'ai-daming/clickvibe': repo }, worktreeRoot: root },
+      registry,
+    )
+    // Review round 3: the wrong outcome was hasCommits:false overriding
+    // aheadOfBase=1 and deriving nextAction 'develop'. The row must fail
+    // closed with an explicit unknown observation instead.
+    assert.equal(row.derived, null)
+    assert.equal(row.observation?.freshness, 'unknown')
+    assert.match(row.observation?.error ?? '', /本地 Git 快照采样失败/)
+    assert.match(row.observation?.error ?? '', /rev-list --count origin\/main\.\.clickvibe-issue-122/)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

@@ -32,6 +32,198 @@ export interface RequiredReadFailure {
   error: string
 }
 
+/**
+ * Complete classification of every compound-sample section (fix-discipline:
+ * enumerate before fixing, so no required read is discovered one review round
+ * at a time). `required` says when a missing/failed/unparseable section is an
+ * operational failure that must fail the whole sample unknown:
+ * - always: the section must exist and its command must succeed every time
+ * - conditional: required exactly under `condition`
+ * - never: absence is a legitimate fact (null/false), never a failure
+ */
+export interface SectionContract {
+  section: string
+  producer: string
+  required: 'always' | 'conditional' | 'never'
+  condition: string
+  expectedAbsence: string
+  consumer: string
+}
+
+export const WORKTREE_SECTION_CONTRACT: SectionContract[] = [
+  {
+    section: 'WT_GITDIR',
+    producer: 'git rev-parse --git-dir',
+    required: 'always',
+    condition: 'unconditional canary',
+    expectedAbsence: 'none — failure means the worktree plane is unobservable',
+    consumer: 'requiredFailures gate',
+  },
+  {
+    section: 'WT_HEAD',
+    producer: 'git rev-parse --short HEAD',
+    required: 'always',
+    condition: 'presence; rc≠0 (unborn HEAD) is expected absence, a missing section is not',
+    expectedAbsence: 'unborn HEAD → head:null',
+    consumer: 'gitFacts.head and every dependent fact',
+  },
+  {
+    section: 'WT_BRANCH',
+    producer: 'git branch --show-current',
+    required: 'always',
+    condition: 'unconditional',
+    expectedAbsence: 'empty output (detached) → branch:null',
+    consumer: 'gitFacts.branch, worktreeValid, upstream lookup',
+  },
+  {
+    section: 'WT_STATUS',
+    producer: 'git status --porcelain',
+    required: 'always',
+    condition: 'unconditional',
+    expectedAbsence: 'empty output → hasUncommittedChanges:false',
+    consumer: 'gitFacts.hasUncommittedChanges',
+  },
+  {
+    section: 'WT_MAIN',
+    producer: "git rev-parse --short 'main'",
+    required: 'never',
+    condition: '—',
+    expectedAbsence: 'missing local main → mainHead:null',
+    consumer: 'gitFacts.mainHead',
+  },
+  {
+    section: 'WT_MAIN_COUNT',
+    producer: "git rev-list --left-right --count 'main'...'HEAD'",
+    required: 'conditional',
+    condition: 'required iff WT_MAIN resolved',
+    expectedAbsence: 'WT_MAIN absent → counts stay 0',
+    consumer: 'aheadOfMain/behindMain',
+  },
+  {
+    section: 'WT_BASE_REF',
+    producer: 'echo of the effective compare ref ($base)',
+    required: 'always',
+    condition: 'unconditional label source',
+    expectedAbsence: 'none',
+    consumer: 'base failure operation label',
+  },
+  {
+    section: 'WT_BASE',
+    producer: 'git rev-parse --short "$base"',
+    required: 'never',
+    condition: '—',
+    expectedAbsence: 'deleted remote base → originMainHead:null, baseRefAvailable:false',
+    consumer: 'gitFacts.originMainHead, baseRefAvailable',
+  },
+  {
+    section: 'WT_BASE_COUNT',
+    producer: 'git rev-list --left-right --count "$base"...HEAD (frozen SHA fallback)',
+    required: 'conditional',
+    condition: 'required iff the base ref resolved or a frozen fallback was attempted',
+    expectedAbsence: 'no base at all → counts stay 0',
+    consumer: 'aheadOfBase/behindBase, needsSync',
+  },
+  {
+    section: 'WT_UPSTREAM',
+    producer: 'git rev-parse --short "origin/$branch"',
+    required: 'never',
+    condition: '—',
+    expectedAbsence: 'unpushed branch → upstreamHead:null',
+    consumer: 'gitFacts.upstreamHead',
+  },
+  {
+    section: 'WT_UP_COUNT',
+    producer: 'git rev-list --left-right --count "origin/$branch"...HEAD',
+    required: 'conditional',
+    condition: 'required iff WT_UPSTREAM resolved',
+    expectedAbsence: 'upstream absent → ahead/behindUpstream:null',
+    consumer: 'aheadOfUpstream/behindUpstream, needsSync',
+  },
+  {
+    section: 'WT_MERGE_HEAD',
+    producer: "git rev-parse --short 'MERGE_HEAD'",
+    required: 'never',
+    condition: '—',
+    expectedAbsence: 'no merge in progress → mergeConflict:false',
+    consumer: 'gitFacts.mergeConflict',
+  },
+  {
+    section: 'BR_DEFAULT',
+    producer: 'git -C <repo> symbolic-ref refs/remotes/origin/HEAD',
+    required: 'never',
+    condition: 'emitted only with a configured checkout',
+    expectedAbsence: 'unset origin/HEAD → defaultBranch falls back',
+    consumer: 'branchFacts.defaultBranch, base resolution',
+  },
+  {
+    section: 'BR_REF',
+    producer: 'git -C <repo> show-ref probe of the workflow branch',
+    required: 'never',
+    condition: 'emitted only with a configured checkout',
+    expectedAbsence: 'branch nowhere → branchExists:false',
+    consumer: 'branchFacts.branchExists',
+  },
+  {
+    section: 'BR_BASE_REF',
+    producer: 'echo of the effective branch-count base ($cb)',
+    required: 'conditional',
+    condition: 'emitted iff BR_REF resolved; label source',
+    expectedAbsence: 'none',
+    consumer: 'branch-count failure operation label',
+  },
+  {
+    section: 'BR_COMMIT_COUNT',
+    producer: 'git -C <repo> rev-list --count "$cb..$br"',
+    required: 'conditional',
+    condition: 'required iff BR_REF resolved to a branch',
+    expectedAbsence: 'branch missing → no branchFacts.hasCommits claim at all',
+    consumer: 'branchFacts.hasCommits (overrides aheadOfBase in derive)',
+  },
+]
+
+export const REPOSITORY_SECTION_CONTRACT: SectionContract[] = [
+  {
+    section: 'REPO_DEFAULT',
+    producer: 'git symbolic-ref refs/remotes/origin/HEAD',
+    required: 'never',
+    condition: '—',
+    expectedAbsence: 'unset origin/HEAD → defaultBranch main fallback (legacy parity)',
+    consumer: 'RepositorySample.defaultBranch',
+  },
+  {
+    section: 'REPO_BRANCH',
+    producer: 'git branch --show-current',
+    required: 'always',
+    condition: 'unconditional',
+    expectedAbsence: 'empty output (detached) → checkoutBranch:null',
+    consumer: 'RepositorySample.checkoutBranch',
+  },
+  {
+    section: 'REPO_HEAD',
+    producer: 'git rev-parse --short HEAD',
+    required: 'always',
+    condition: 'presence; rc≠0 (unborn) is expected absence, a missing section is not',
+    expectedAbsence: 'unborn repository → head:null',
+    consumer: 'envelope sourceRevision',
+  },
+  {
+    section: 'REPO_MAIN_COUNT',
+    producer: 'git rev-list --left-right --count "$base"...main',
+    required: 'always',
+    condition: 'unconditional (legacy always attempts it)',
+    expectedAbsence: 'none — failure is operational',
+    consumer: 'RepositorySample.main',
+  },
+  {
+    section: 'REPO_HEAD_COUNT',
+    producer: 'git rev-list --left-right --count "$base"...HEAD',
+    required: 'conditional',
+    condition: 'required iff REPO_BRANCH resolved',
+    expectedAbsence: 'detached checkout → checkout:null',
+    consumer: 'RepositorySample.checkout',
+  },
+]
+
 export interface WorktreeSampleInput {
   /** Worktree directory: the compound command's workdir. */
   worktree: string
@@ -87,17 +279,17 @@ export function buildWorktreeSampleCommand(input: WorktreeSampleInput): string {
 
   lines.push(`m=$(git rev-parse --short ${shellQuote('main')} 2>/dev/null)`)
   section('WT_MAIN', '$?', '"$m"')
-  lines.push(`mc=$(git rev-list --left-right --count ${shellQuote('main')}...${shellQuote('HEAD')} 2>/dev/null)`)
+  lines.push(`mc=$(git rev-list --left-right --count ${shellQuote('main')}...${shellQuote('HEAD')} 2>&1)`)
   section('WT_MAIN_COUNT', '$?', '"$mc"')
 
   section('WT_BASE_REF', '0', '"$base"')
   lines.push('ob=$(git rev-parse --short "$base" 2>/dev/null)')
   section('WT_BASE', '$?', '"$ob"')
   lines.push('if git rev-parse --short "$base" >/dev/null 2>&1; then')
-  lines.push(`  bc=$(git rev-list --left-right --count "$base"...${shellQuote('HEAD')} 2>/dev/null)`)
+  lines.push(`  bc=$(git rev-list --left-right --count "$base"...${shellQuote('HEAD')} 2>&1)`)
   lines.push(`elif [ -n ${shellQuote(input.frozenBase ?? '')} ]; then`)
   lines.push(
-    `  bc=$(git rev-list --left-right --count ${shellQuote(input.frozenBase ?? '')}...${shellQuote('HEAD')} 2>/dev/null)`,
+    `  bc=$(git rev-list --left-right --count ${shellQuote(input.frozenBase ?? '')}...${shellQuote('HEAD')} 2>&1)`,
   )
   lines.push(`else`)
   lines.push(`  bc=''`)
@@ -108,7 +300,7 @@ export function buildWorktreeSampleCommand(input: WorktreeSampleInput): string {
   lines.push('  u="origin/$b"')
   lines.push('  uo=$(git rev-parse --short "$u" 2>/dev/null)')
   section('WT_UPSTREAM', '$?', '"$uo"')
-  lines.push('  uc=$(git rev-list --left-right --count "$u...HEAD" 2>/dev/null)')
+  lines.push('  uc=$(git rev-list --left-right --count "$u...HEAD" 2>&1)')
   section('WT_UP_COUNT', '$?', '"$uc"')
   lines.push('else')
   lines.push(`  printf 'WT_UPSTREAM\\t127\\t\\n'`)
@@ -129,7 +321,8 @@ export function buildWorktreeSampleCommand(input: WorktreeSampleInput): string {
     lines.push('  elif [ -n "$d" ]; then cb="$d"')
     lines.push(`  else cb=${shellQuote('origin/main')}`)
     lines.push('  fi')
-    lines.push('  n=$(git -C ' + repo + ' rev-list --count "$cb..$br" 2>/dev/null)')
+    section('BR_BASE_REF', '0', '"$cb"')
+    lines.push('  n=$(git -C ' + repo + ' rev-list --count "$cb..$br" 2>&1)')
     section('BR_COMMIT_COUNT', '$?', '"$n"')
     lines.push('else')
     lines.push(`  printf 'BR_COMMIT_COUNT\\t127\\t\\n'`)
@@ -274,10 +467,21 @@ export function parseWorktreeSample(output: string): WorktreeSample & { required
       branchFacts.branchExists = false
       branchFacts.defaultBranch = defaultBranch || undefined
     } else {
+      const branchRef = branchRefSection.value.trim()
       const count = sections.get('BR_COMMIT_COUNT')
+      const parsedCount = count && count.rc === 0 ? Number(count.value.trim()) : Number.NaN
       branchFacts.branchExists = true
-      branchFacts.hasCommits = !!count && count.rc === 0 && Number(count.value.trim()) > 0
       branchFacts.defaultBranch = defaultBranch || undefined
+      if (count && count.rc === 0 && Number.isFinite(parsedCount)) {
+        branchFacts.hasCommits = parsedCount > 0
+      } else {
+        // Review round 3 (CRITICAL): a failed branch-count read used to fold
+        // into hasCommits:false and override a correct aheadOfBase>0 in
+        // derive, flipping deleted-base recovery into "start developing".
+        // It is a required read whenever the branch exists — fail unknown.
+        const countBase = sections.get('BR_BASE_REF')?.value.trim() || '<base>'
+        fail(`git rev-list --count ${countBase}..${branchRef}`, count, !count)
+      }
     }
   }
 
