@@ -293,11 +293,16 @@ export async function handleAutoRunControllerFailure(
     const baseDelay = Math.max(0, baseRetryAt - now)
     const retryAt = baseRetryAt + (baseDelay > 30_000 ? Math.floor(Math.random() * RATE_RETRY_JITTER_MS) : 0)
     const pendingRetryAt = Date.parse(workflow.autoRun.controllerRecovery?.retryAt ?? '')
+    // Same-window dedup must be deterministic: comparing against a freshly
+    // jittered retryAt races (issue #122 — snapshot failures make reconciles
+    // faster, so independent rounds land in one circuit window). A pending
+    // wake inside the current window's [base, base+jitter] band is enough.
     if (
       workflow.autoRun.controllerRecovery?.kind === 'rate-limit' &&
       autoRunWakePending(key) &&
       Number.isFinite(pendingRetryAt) &&
-      pendingRetryAt <= retryAt
+      pendingRetryAt >= baseRetryAt &&
+      pendingRetryAt <= baseRetryAt + RATE_RETRY_JITTER_MS
     ) {
       return
     }

@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { notifyLocalGitMutation } from './local-git-invalidate.ts'
 /**
  * clickvibe host half — routes:
  * - `/clickvibe/api/fetch`          — fetch GitHub issue/PR data via gh
@@ -360,11 +361,15 @@ export async function ensureConfiguredRepoFresh(
     repoPath,
     fetchTtlMs(config),
     async () => {
-      await runCommand(ctx, 'git fetch origin --prune', {
-        workdir: repoPath,
-        timeoutMs: 30_000,
-        sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: repoPath },
-      })
+      try {
+        await runCommand(ctx, 'git fetch origin --prune', {
+          workdir: repoPath,
+          timeoutMs: 30_000,
+          sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: repoPath },
+        })
+      } finally {
+        notifyLocalGitMutation({ repoKey }, 'remote-fetch', 'ensureConfiguredRepoFresh')
+      }
     },
     READ_FETCH_WAIT_MS,
     force,

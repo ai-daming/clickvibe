@@ -58,6 +58,7 @@ import { fetchRepositoryIssues } from './repository-issues.ts'
 import { enrichWorkflowStates } from './repository-state.ts'
 import { readConfiguredRepositoryAdvance } from './repository-sync.ts'
 import { pauseOrphanedAutoRuns } from './auto-run.ts'
+import { localGitSnapshots } from '../infra/local-git-snapshot.ts'
 
 /** `/state` implementation, shared by the route and the `status` command (issue #13). */
 export async function stateWorkflows(
@@ -85,23 +86,35 @@ export async function stateWorkflows(
   try {
     const circuitError = githubRest(ctx).rateLimitError()
     if (circuitError) throw circuitError
+    const force = filter?.forceRefresh === true
+    if (force) {
+      // forceRefresh is the panel's escape hatch: it must observe fresh local
+      // git facts, not a snapshot taken before the caller noticed staleness.
+      for (const key of repoKeys) localGitSnapshots.invalidate({ repoKey: key }, 'force-refresh', 'stateWorkflows')
+    }
     const keyedFreshness = await Promise.all(
       [...repoKeys].map(async (key) => ({
         key,
-        freshness: await ensureConfiguredRepoFresh(ctx, config, key, filter?.forceRefresh === true),
+        freshness: await ensureConfiguredRepoFresh(ctx, config, key, force),
       })),
     )
     const freshnesses = keyedFreshness
       .map((item) => item.freshness)
       .filter((value): value is RepositoryFreshness => value !== null)
     const dependenciesRefreshDue = [...repoKeys]
-      .map((key) => dependencyRefreshClock.take(key, fetchTtlMs(config), filter?.forceRefresh === true))
+      .map((key) => dependencyRefreshClock.take(key, fetchTtlMs(config), force))
       .some(Boolean)
-    const enriched = await enrichWorkflowStates(ctx, workflows, config)
+    const enriched = await enrichWorkflowStates(ctx, workflows, config, localGitSnapshots)
     const freshness = aggregateRepositoryFreshness(freshnesses)
     const onlyRepo = keyedFreshness.length === 1 ? keyedFreshness[0] : null
     const repoAdvance = onlyRepo
-      ? await readConfiguredRepositoryAdvance(ctx, config, onlyRepo.key, onlyRepo.freshness?.lastSuccessAt ?? null)
+      ? await readConfiguredRepositoryAdvance(
+          ctx,
+          config,
+          onlyRepo.key,
+          onlyRepo.freshness?.lastSuccessAt ?? null,
+          localGitSnapshots,
+        )
       : null
     return { status: 200, body: { ok: true, workflows: enriched, freshness, dependenciesRefreshDue, repoAdvance } }
   } catch (error) {
@@ -252,7 +265,7 @@ export async function handleCommand(
   if (command.action === 'issues') {
     const resolved = await resolveCommandRepoKey(command.repoKey)
     if ('error' in resolved) return { status: 400, body: { ok: false, action: 'issues', error: resolved.error } }
-    const result = await fetchRepositoryIssues(ctx, { repoKey: resolved.repoKey })
+    const result = await fetchRepositoryIssues(ctx, { repoKey: resolved.repoKey }, { observation: localGitSnapshots })
     if (!result.ok) return { status: 400, body: { ok: false, action: 'issues', error: result.error } }
     return {
       status: 200,

@@ -28,7 +28,10 @@ import {
   readConfiguredBranchFacts,
 } from '../github/facts.ts'
 import { githubErrorMessage, githubRest } from '../github/rest.ts'
+import { existsSync } from 'node:fs'
 import { type ClickVibeConfig, loadConfig } from '../infra/runtime.ts'
+import { observeTaskOwnership, type TaskOwnershipContext } from '../infra/task-ownership.ts'
+import type { WorktreeSample } from '../infra/local-git-sampler.ts'
 import { type IssueWorkflow } from '../infra/state.ts'
 import {
   buildDependencyUnlockComment,
@@ -42,27 +45,155 @@ import { deriveWorkflowState, type WorkflowDerived } from './derive.ts'
 import { checkIssueContract } from './issue-contract.ts'
 import { fetchIssueContract } from './merge-gates.ts'
 import { workflowBaseBranch } from './state-view.ts'
+import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
+import type { ClickVibeConfigV1 } from '../infra/contracts.ts'
+import { frozenBaseHash } from '../agent/baseline.ts'
+import {
+  type LocalGitSnapshotReader,
+  type ObservationAttemptEvidence,
+  resolveConfiguredRepoPath,
+} from '../infra/local-git-snapshot.ts'
+
+/** Derive the observation outcome for one workflow's worktree (issue #122). */
+async function observeWorktreeFor(
+  ctx: Context,
+  observation: LocalGitSnapshotReader,
+  config: ClickVibeConfig,
+  workflow: IssueWorkflow,
+): Promise<
+  | { ok: true; sample: WorktreeSample; observedAt: number }
+  | { ok: false; attempts: ObservationAttemptEvidence[]; error: Error }
+> {
+  // Mirror the legacy existsSync gate: a missing worktree yields the all-null
+  // facts without invoking git at all, and branch facts still come from the
+  // configured checkout.
+  if (!existsSync(workflow.worktree)) {
+    const branchFacts = await readConfiguredBranchFacts(
+      ctx,
+      config,
+      workflow,
+      workflow.baseRef ? workflowBaseBranch(workflow.baseRef) : undefined,
+    )
+    return {
+      ok: true,
+      sample: {
+        gitFacts: {
+          exists: false,
+          head: null,
+          branch: null,
+          hasUncommittedChanges: false,
+          mainHead: null,
+          aheadOfMain: 0,
+          behindMain: 0,
+          originMainHead: null,
+          aheadOfBase: 0,
+          behindBase: 0,
+          upstreamHead: null,
+          aheadOfUpstream: null,
+          behindUpstream: null,
+          mergeConflict: false,
+        },
+        branchFacts,
+      },
+      observedAt: Date.now(),
+    }
+  }
+  const outcome = await observation.observeWorktree(ctx, workflow.repoKey, {
+    worktree: workflow.worktree,
+    branch: workflow.branch,
+    baseBranch: workflowBaseBranch(workflow.baseRef),
+    baseBranchNeedsDefault: workflowBaseBranch(workflow.baseRef, '') === '',
+    frozenBase: frozenBaseHash(workflow.baseRef),
+    repoPath: resolveConfiguredRepoPath(config, workflow.repoKey),
+  })
+  if (!outcome.ok) return outcome
+  return {
+    ok: true,
+    sample: outcome.envelope.sample,
+    observedAt: outcome.envelope.observedAt,
+  }
+}
 
 export async function enrichWorkflowStates(
   ctx: Context,
   workflows: IssueWorkflow[],
   configOverride?: ClickVibeConfig,
-): Promise<Array<IssueWorkflow & { runStartedAt: number | null; derived: WorkflowDerived }>> {
+  observation?: LocalGitSnapshotReader,
+): Promise<
+  Array<
+    | (IssueWorkflow & {
+        runStartedAt: number | null
+        derived: WorkflowDerived
+      })
+    | (IssueWorkflow & {
+        runStartedAt: null
+        derived: null
+        observation: { freshness: 'unknown'; error: string }
+      })
+  >
+> {
   const config = configOverride ?? (await loadConfig())
   return Promise.all(
     workflows.map(async (workflow) => {
-      const [prLookup, branchFacts, currentIssue, liveIssueState] = await Promise.all([
-        fetchGithubPrFact(ctx, workflow.repoKey, workflow.branch, workflow.prNumber),
-        readConfiguredBranchFacts(
-          ctx,
-          config,
+      const attempt = observation ? await observeWorktreeFor(ctx, observation, config, workflow) : null
+      if (attempt !== null && !attempt.ok) {
+        // Legacy parity: GitHub-side failures — notably rate limits — surface
+        // even when the local snapshot is unavailable, so callers (auto-run
+        // reconcile) keep their rate-limit deferral semantics. Task ownership
+        // (ctx.jobs) is part of that observation surface.
+        observeTaskOwnership(
+          ctx as unknown as TaskOwnershipContext,
           workflow,
-          workflow.baseRef ? workflowBaseBranch(workflow.baseRef) : undefined,
-        ),
+          () => false,
+          () => null,
+        )
+        await Promise.all([
+          fetchGithubPrFact(ctx, workflow.repoKey, workflow.branch, workflow.prNumber),
+          fetchGithubIssueState(ctx, workflow.url),
+        ])
+        // issue #122 Q2: a failed snapshot must not degrade into legacy
+        // per-fact reads that render "clean" from a failure. Fail closed:
+        // no derived state, an explicit unknown observation, raw diagnostics.
+        const reason = `本地 Git 快照采样失败（已重试一次）: ${attempt.error.message}`
+        logTaskDiagnostic('local-git-snapshot-sample-failed', {
+          workflowKey: workflow.key,
+          repoKey: workflow.repoKey,
+          worktree: workflow.worktree,
+          attempts: attempt.attempts,
+        })
+        const row: IssueWorkflow & {
+          runStartedAt: null
+          derived: null
+          observation: { freshness: 'unknown'; error: string }
+        } = {
+          ...workflow,
+          runStartedAt: null,
+          derived: null,
+          observation: { freshness: 'unknown' as const, error: reason },
+        }
+        // Keep the original failure reachable (错误不埋葬): auto-run reconcile
+        // rethrows it so controller-failure fingerprints stay stable.
+        Object.defineProperty(row, 'localGitSampleCause', {
+          value: attempt.error,
+          enumerable: false,
+        })
+        return row
+      }
+      const sample = attempt && attempt.ok ? attempt.sample : null
+      const branchFacts = sample
+        ? sample.branchFacts
+        : await readConfiguredBranchFacts(
+            ctx,
+            config,
+            workflow,
+            workflow.baseRef ? workflowBaseBranch(workflow.baseRef) : undefined,
+          )
+      const [prLookup, currentIssue, liveIssueState] = await Promise.all([
+        fetchGithubPrFact(ctx, workflow.repoKey, workflow.branch, workflow.prNumber),
         fetchIssueContract(ctx, workflow.url).catch(() => null),
         fetchGithubIssueState(ctx, workflow.url),
       ])
-      return deriveWorkflowState(
+      const enriched = await deriveWorkflowState(
         ctx,
         {
           ...workflow,
@@ -76,9 +207,11 @@ export async function enrichWorkflowStates(
           pr: prLookup.pr,
           prStatusKnown: workflow.prNumber ? prLookup.known && prLookup.pr !== null : prLookup.known,
           issueContract: currentIssue?.contract ?? null,
+          gitFacts: sample?.gitFacts,
           ...branchFacts,
         },
       )
+      return { ...enriched, observedAt: attempt && attempt.ok ? attempt.observedAt : 0 }
     }),
   )
 }

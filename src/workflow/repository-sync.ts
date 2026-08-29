@@ -2,6 +2,10 @@
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
+import { notifyLocalGitMutation } from '../infra/local-git-invalidate.ts'
+import type { LocalGitSnapshotReader } from '../infra/local-git-snapshot.ts'
+import type { RepositoryGitFacts } from '../infra/repository-git.ts'
 import { hasMergeConflict, listConflictFiles } from '../infra/git.ts'
 import {
   forwardLocalMain,
@@ -62,9 +66,24 @@ export async function readConfiguredRepositoryAdvance(
   config: ClickVibeConfig,
   repoKey: string,
   fetchedAt: number | null,
+  // Required so callers cannot silently fall back to the error-swallowing
+  // legacy reads (issue #122 Q3, review round 8).
+  observation: LocalGitSnapshotReader,
 ): Promise<RepositoryAdvanceSignal | null> {
   const repoPath = configuredRepoPath(config, repoKey)
   if (!repoPath) return null
+  if (observation) {
+    // Single observation primitive (Runtime Observer round 7): the registry
+    // owns sampling, validation and the retry-once evidence; this consumer
+    // only branches and persists. Never fall back to the error-swallowing
+    // legacy reader (issue #122 failure mode).
+    const outcome = await observation.observeRepository(ctx, repoKey, { repoPath })
+    if (!outcome.ok) {
+      logTaskDiagnostic('local-git-repo-sample-failed', { repoKey, repoPath, attempts: outcome.attempts })
+      return null
+    }
+    return { ...deriveRepositoryAdvance(outcome.envelope.sample), fetchedAt }
+  }
   const facts = await readRepositoryGitFacts(ctx, repoPath)
   return { ...deriveRepositoryAdvance(facts), fetchedAt }
 }
@@ -85,6 +104,7 @@ export async function syncConfiguredRepository(
       sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: repoPath },
     })
   } catch (error) {
+    notifyLocalGitMutation({ repoKey }, 'repository-sync-failed', 'syncConfiguredRepository')
     return { ok: false, error: `同步失败:无法 fetch origin:${errorText(error)}` }
   }
 
@@ -160,5 +180,6 @@ export async function syncConfiguredRepository(
     main = { status: 'unchanged' }
   }
 
+  notifyLocalGitMutation({ repoKey }, 'repository-sync', 'syncConfiguredRepository')
   return { ok: true, branchHead, mainRefForwarded, conflict, refused, targets: { checkout, main } }
 }

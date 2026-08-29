@@ -3,6 +3,7 @@ import { ensureWorktree } from '../agent/worktree.ts'
 import { fetchIssue, issueSnapshot, sameIssueContract } from '../github/issue.ts'
 import { githubRest } from '../github/rest.ts'
 import { type IssuePromptSnapshot } from '../infra/develop-core.ts'
+import { localGitSnapshots } from '../infra/local-git-snapshot.ts'
 import { liveTasks, parseUrl } from '../infra/runtime.ts'
 import {
   appendEvent,
@@ -173,8 +174,19 @@ async function reconcileOnce(ctx: Context, key: string, outcome?: AutoRunTaskOut
     await pauseAutoRun(key, 'budget-exhausted', undefined, ctx)
     return
   }
-  const [observed] = await enrichWorkflowStates(ctx, [workflow])
+  const [observed] = await enrichWorkflowStates(ctx, [workflow], undefined, localGitSnapshots)
   if (!observed) return
+  if (!observed.derived) {
+    // issue #122 Q2: an unobservable local-git scene must not decide. Surface
+    // it as a transient controller failure so the retry/watchdog machinery
+    // runs; the original sample failure is rethrown so fingerprints stay stable.
+    const cause = (observed as { localGitSampleCause?: unknown }).localGitSampleCause
+    if (cause instanceof Error) throw cause
+    throw new AutoRunControllerError(
+      'reconcile',
+      `本地 Git 快照不可用,自动推进暂缓: ${observed.observation?.error ?? 'unknown'}`,
+    )
+  }
   const decision = decideAutoRun({
     autoRun: workflow.autoRun,
     nextAction: observed.derived.nextAction,

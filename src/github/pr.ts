@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
+import { notifyLocalGitMutation } from '../infra/local-git-snapshot.ts'
 import { shellQuote } from '../infra/develop-core.ts'
 import { runCommand } from '../infra/runtime.ts'
 import { githubRest } from './rest.ts'
@@ -54,6 +55,11 @@ export async function ensurePullRequest(
     timeoutMs: 120_000,
     sandboxPolicy: policy,
   })
+  notifyLocalGitMutation(
+    { repoKey: input.repoKey, worktreePath: input.worktree },
+    'pr-create-push',
+    'ensurePullRequest',
+  )
   const created = await githubRest(ctx).mutate<{ number?: number }>(`repos/${input.repoKey}/pulls`, 'POST', {
     title: input.title,
     head: input.branch,

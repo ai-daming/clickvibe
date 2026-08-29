@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
+import { notifyLocalGitMutation } from '../infra/local-git-snapshot.ts'
 import { frozenBaseHash, frozenRemoteBase } from '../agent/baseline.ts'
 import { isValidGitBranchName } from '../infra/authorization-target.ts'
 import {
@@ -72,6 +73,7 @@ export async function restoreBaseBranch(
         throw new Error('恢复基线目标已变化,请刷新预览并重新确认')
       }
       await restoreMissingOriginBranch(ctx, expandHome(configured), target.baseBranch, target.baseHash)
+      notifyLocalGitMutation({ repoKey }, 'baseline-restore', 'restoreBaseBranch')
       return { ok: true as const, ...target }
     })
   } catch (error) {

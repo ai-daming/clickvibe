@@ -11,6 +11,7 @@
 
 import { existsSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
+import { notifyLocalGitMutation } from '../infra/local-git-snapshot.ts'
 import { type AgentKind } from '../agent/agent-stream.ts'
 import {
   buildReviewPrompt,
@@ -164,6 +165,7 @@ export async function startReview(
       `[clickvibe] review 前 git fetch 失败(继续): ${String(error instanceof Error ? error.message : error)}`,
     )
   }
+  notifyLocalGitMutation({ repoKey: workflow.repoKey, worktreePath: workflow.worktree }, 'remote-fetch', 'startReview')
   if (reviewIssue.state !== 'OPEN') {
     finishTask(live, 'failed', 1)
     return { ok: false, error: '只有 OPEN Issue 可以启动 review' }

@@ -20,6 +20,7 @@
 
 import { existsSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
+import { notifyLocalGitMutation } from '../infra/local-git-snapshot.ts'
 import { updateBaseTip } from '../agent/baseline.ts'
 import { shellQuote } from '../infra/develop-core.ts'
 import { conflictFileSuffix, hasMergeConflict, listConflictFiles } from '../infra/git.ts'
@@ -127,6 +128,11 @@ async function syncWorktreeLocked(ctx: Context, key: string): Promise<SyncResult
             workflowRevision(reloaded) ?? 0,
           )
         }
+        notifyLocalGitMutation(
+          { repoKey: workflow.repoKey, worktreePath: workflow.worktree },
+          'worktree-sync-conflict',
+          'syncWorktree',
+        )
         return {
           ok: false,
           conflict: true,
@@ -187,9 +193,19 @@ async function syncWorktreeLocked(ctx: Context, key: string): Promise<SyncResult
         workflowRevision(reloaded) ?? 0,
       )
     }
+    notifyLocalGitMutation(
+      { repoKey: workflow.repoKey, worktreePath: workflow.worktree },
+      'worktree-sync',
+      'syncWorktree',
+    )
     return { ok: true, worktree: workflow.worktree, branch: workflow.branch, head }
   } catch (error) {
     const message = String(error instanceof Error ? error.message : error)
+    notifyLocalGitMutation(
+      { repoKey: workflow.repoKey, worktreePath: workflow.worktree },
+      'worktree-sync-failed',
+      'syncWorktree',
+    )
     await appendLog(workflow.key, 'dev', `[clickvibe] 同步失败: ${message}`)
     return { ok: false, error: `同步失败: ${message}` }
   }
