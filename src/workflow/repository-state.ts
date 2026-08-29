@@ -60,7 +60,10 @@ async function observeWorktreeFor(
   observation: LocalGitSnapshotReader,
   config: ClickVibeConfig,
   workflow: IssueWorkflow,
-): Promise<{ ok: true; sample: WorktreeSample } | { ok: false; attempts: ObservationAttemptEvidence[]; error: Error }> {
+): Promise<
+  | { ok: true; sample: WorktreeSample; observedAt: number }
+  | { ok: false; attempts: ObservationAttemptEvidence[]; error: Error }
+> {
   // Mirror the legacy existsSync gate: a missing worktree yields the all-null
   // facts without invoking git at all, and branch facts still come from the
   // configured checkout.
@@ -92,6 +95,7 @@ async function observeWorktreeFor(
         },
         branchFacts,
       },
+      observedAt: Date.now(),
     }
   }
   const outcome = await observation.observeWorktree(ctx, workflow.repoKey, {
@@ -106,6 +110,7 @@ async function observeWorktreeFor(
   return {
     ok: true,
     sample: outcome.envelope.sample,
+    observedAt: outcome.envelope.observedAt,
   }
 }
 
@@ -206,7 +211,7 @@ export async function enrichWorkflowStates(
           ...branchFacts,
         },
       )
-      return enriched
+      return { ...enriched, observedAt: attempt && attempt.ok ? attempt.observedAt : 0 }
     }),
   )
 }

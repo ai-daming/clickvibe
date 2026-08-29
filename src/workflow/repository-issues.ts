@@ -36,7 +36,7 @@ import {
   parseUrl,
   runCommand,
 } from '../infra/runtime.ts'
-import type { LocalGitSnapshotReader } from '../infra/local-git-snapshot.ts'
+import { localGitSnapshots, type LocalGitSnapshotReader } from '../infra/local-git-snapshot.ts'
 import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
 import { type IssueWorkflow, issueBodyHash, issueKey, loadAllWorkflows } from '../infra/state.ts'
 import { deriveAutoDevelopment } from './auto-development.ts'
@@ -75,7 +75,13 @@ export async function fetchRepositoryIssues(
     const [githubSnapshot, allWorkflows, repoAdvance] = await Promise.all([
       fetchGithubRepoSnapshot(ctx, repoKey, fetchTtlMs(config), forceRefresh),
       overrides.workflows ? Promise.resolve(overrides.workflows) : loadAllWorkflows(),
-      readConfiguredRepositoryAdvance(ctx, config, repoKey, freshness?.lastSuccessAt ?? null),
+      readConfiguredRepositoryAdvance(
+        ctx,
+        config,
+        repoKey,
+        freshness?.lastSuccessAt ?? null,
+        overrides.observation ?? localGitSnapshots,
+      ),
     ])
     const allIssues = githubSnapshot.issues
       .filter((issue) => issue.pull_request === undefined)

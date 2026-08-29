@@ -351,6 +351,10 @@ test('healthy rows carry no observation field; provenance lives in the envelope'
     )
     assert.ok(row.derived, 'healthy rows still derive')
     assert.equal('observation' in row && row.observation !== undefined, false, 'no healthy-row observation mirror')
+    assert.ok(
+      typeof (row as { observedAt?: number }).observedAt === 'number' && (row as { observedAt: number }).observedAt > 0,
+      'the ledger-confirmed minimal observedAt stays exposed (review round 8)',
+    )
   } finally {
     rmSync(repoDir, { recursive: true, force: true })
   }

@@ -66,7 +66,9 @@ export async function readConfiguredRepositoryAdvance(
   config: ClickVibeConfig,
   repoKey: string,
   fetchedAt: number | null,
-  observation?: LocalGitSnapshotReader,
+  // Required so callers cannot silently fall back to the error-swallowing
+  // legacy reads (issue #122 Q3, review round 8).
+  observation: LocalGitSnapshotReader,
 ): Promise<RepositoryAdvanceSignal | null> {
   const repoPath = configuredRepoPath(config, repoKey)
   if (!repoPath) return null
