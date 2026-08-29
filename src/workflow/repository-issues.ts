@@ -38,7 +38,6 @@ import {
 } from '../infra/runtime.ts'
 import type { LocalGitSnapshotReader } from '../infra/local-git-snapshot.ts'
 import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
-import { describeSampleError } from './repository-sync.ts'
 import { type IssueWorkflow, issueBodyHash, issueKey, loadAllWorkflows } from '../infra/state.ts'
 import { deriveAutoDevelopment } from './auto-development.ts'
 import { deriveWorkflowState } from './derive.ts'
@@ -125,30 +124,21 @@ export async function fetchRepositoryIssues(
     let defaultBranch = 'main'
     let counts: Record<string, number> | null = null
     if (existsSync(repoPath) && overrides.observation) {
-      // Issue #122 Q3: enumeration runs on the snapshot plane — one compound
-      // subprocess per repo per generation, no error-swallowed per-branch reads.
-      const sample = () =>
-        overrides
-          .observation!.enumerationSample(ctx, repoKey, { repoPath })
-          .then((result) => ({ ok: true as const, result }))
-          .catch((error: unknown) => ({ ok: false as const, error }))
-      const first = await sample()
-      const attempt = first.ok ? first : await sample()
-      if (!attempt.ok) {
-        // Both attempts' raw evidence is preserved (review round 6).
+      // Issue #122 Q3: enumeration runs on the single observation primitive —
+      // one compound subprocess per repo per generation, retry-once and both
+      // attempts' evidence owned by the registry (Runtime Observer round 7).
+      const outcome = await overrides.observation.observeEnumeration(ctx, repoKey, { repoPath })
+      if (!outcome.ok) {
         logTaskDiagnostic('local-git-enumeration-sample-failed', {
           repoKey,
           repoPath,
-          attempts: [first, attempt]
-            .filter((candidate) => !candidate.ok)
-            .map((candidate) => describeSampleError((candidate as { error: unknown }).error)),
+          attempts: outcome.attempts,
         })
-        const message = attempt.error instanceof Error ? attempt.error.message : String(attempt.error)
-        throw new Error(`本地 Git 枚举不可用(已重试一次): ${message}`)
+        throw new Error(`本地 Git 枚举不可用(已重试一次): ${outcome.error.message}`)
       }
-      refs = new Set(attempt.result.sample.refs)
-      defaultBranch = attempt.result.sample.defaultBranch || defaultBranch
-      counts = attempt.result.sample.counts
+      refs = new Set(outcome.envelope.sample.refs)
+      defaultBranch = outcome.envelope.sample.defaultBranch || defaultBranch
+      counts = outcome.envelope.sample.counts
     } else if (existsSync(repoPath)) {
       const policy = { mode: 'read-only' as const, workspaceRoot: repoPath }
       const [refOutput, defaultRef] = await Promise.all([

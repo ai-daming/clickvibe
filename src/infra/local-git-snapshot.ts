@@ -32,23 +32,48 @@ import {
 
 export { notifyLocalGitMutation, type LocalGitMutationScope } from './local-git-invalidate.ts'
 
+/** Raw evidence of one failed observation attempt. */
+export interface ObservationAttemptEvidence {
+  name: string
+  message: string
+  stack: string | null
+}
+
+/**
+ * The single production observation outcome (Runtime Observer, review round
+ * 7): one primitive owns sampling, singleflight, generation CAS, validation,
+ * deep-freeze immutability, provenance and the retry-once error evidence.
+ * Consumers branch on this result and persist diagnostics — nothing else.
+ */
+export type ObservationOutcome<T> =
+  | { ok: true; envelope: ObservationEnvelope<T> }
+  | { ok: false; attempts: ObservationAttemptEvidence[]; error: Error }
+
+export function describeObservationError(error: unknown): ObservationAttemptEvidence {
+  return {
+    name: error instanceof Error ? error.name : typeof error,
+    message: error instanceof Error ? error.message : String(error),
+    stack: error instanceof Error ? (error.stack ?? null) : null,
+  }
+}
+
 /** What consumers need from the snapshot plane (issue #122). */
 export interface LocalGitSnapshotReader {
-  worktreeSample(
+  observeWorktree(
     ctx: Context,
     repoKey: string,
     input: WorktreeSampleInput,
-  ): Promise<ObservationEnvelope<WorktreeSample>>
-  repositorySample(
+  ): Promise<ObservationOutcome<WorktreeSample>>
+  observeRepository(
     ctx: Context,
     repoKey: string,
     input: RepositorySampleInput,
-  ): Promise<ObservationEnvelope<RepositorySample>>
-  enumerationSample(
+  ): Promise<ObservationOutcome<RepositorySample>>
+  observeEnumeration(
     ctx: Context,
     repoKey: string,
     input: RepositoryEnumerationInput,
-  ): Promise<ObservationEnvelope<RepositoryEnumerationSample>>
+  ): Promise<ObservationOutcome<RepositoryEnumerationSample>>
 }
 
 /** Mirror readConfiguredBranchFacts' front gate: null when unconfigured or missing on disk. */
@@ -197,7 +222,7 @@ export class LocalGitSnapshotRegistry {
     unregisterSnapshotRegistry(this)
   }
 
-  async worktreeSample(
+  private async worktreeSample(
     ctx: Context,
     repoKey: string,
     input: WorktreeSampleInput,
@@ -257,7 +282,7 @@ export class LocalGitSnapshotRegistry {
   }
 
   /** Sample the configured repository checkout once per repo+generation. */
-  async repositorySample(
+  private async repositorySample(
     ctx: Context,
     repoKey: string,
     input: RepositorySampleInput,
@@ -311,7 +336,7 @@ export class LocalGitSnapshotRegistry {
   }
 
   /** Enumerate the configured checkout once per repo+generation (issue #122 Q3). */
-  async enumerationSample(
+  private async enumerationSample(
     ctx: Context,
     repoKey: string,
     input: RepositoryEnumerationInput,
@@ -359,6 +384,50 @@ export class LocalGitSnapshotRegistry {
     })()
     this.enumInflight.set(key, { generation: requestedGeneration, promise: sample })
     return sample
+  }
+
+  /**
+   * One logical observation with retry-once and preserved evidence for both
+   * attempts (Runtime Observer round 7): the only retry loop in the plane.
+   */
+  private async observeWithRetry<T>(sample: () => Promise<ObservationEnvelope<T>>): Promise<ObservationOutcome<T>> {
+    try {
+      return { ok: true, envelope: await sample() }
+    } catch (firstError) {
+      try {
+        return { ok: true, envelope: await sample() }
+      } catch (secondError) {
+        return {
+          ok: false,
+          attempts: [describeObservationError(firstError), describeObservationError(secondError)],
+          error: secondError instanceof Error ? secondError : new Error(String(secondError)),
+        }
+      }
+    }
+  }
+
+  async observeWorktree(
+    ctx: Context,
+    repoKey: string,
+    input: WorktreeSampleInput,
+  ): Promise<ObservationOutcome<WorktreeSample>> {
+    return this.observeWithRetry(() => this.worktreeSample(ctx, repoKey, input))
+  }
+
+  async observeRepository(
+    ctx: Context,
+    repoKey: string,
+    input: RepositorySampleInput,
+  ): Promise<ObservationOutcome<RepositorySample>> {
+    return this.observeWithRetry(() => this.repositorySample(ctx, repoKey, input))
+  }
+
+  async observeEnumeration(
+    ctx: Context,
+    repoKey: string,
+    input: RepositoryEnumerationInput,
+  ): Promise<ObservationOutcome<RepositoryEnumerationSample>> {
+    return this.observeWithRetry(() => this.enumerationSample(ctx, repoKey, input))
   }
 
   /** Bump matching scope generations; the next consumer after this resamples. */

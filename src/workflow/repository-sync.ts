@@ -61,14 +61,6 @@ function configuredRepoPath(config: ClickVibeConfig, repoKey: string): string | 
   return existsSync(repoPath) ? repoPath : null
 }
 
-export function describeSampleError(error: unknown): { name: string; message: string; stack: string | null } {
-  return {
-    name: error instanceof Error ? error.name : typeof error,
-    message: error instanceof Error ? error.message : String(error),
-    stack: error instanceof Error ? (error.stack ?? null) : null,
-  }
-}
-
 export async function readConfiguredRepositoryAdvance(
   ctx: Context,
   config: ClickVibeConfig,
@@ -79,28 +71,16 @@ export async function readConfiguredRepositoryAdvance(
   const repoPath = configuredRepoPath(config, repoKey)
   if (!repoPath) return null
   if (observation) {
-    // Retry once, then report unknown with diagnostics — never fall back to
-    // the error-swallowing legacy reader (issue #122 failure mode, review r2).
-    // Both attempts' raw errors are preserved in the diagnostic (review r3).
-    const attempt = () =>
-      observation
-        .repositorySample(ctx, repoKey, { repoPath })
-        .then((envelope) => ({ ok: true as const, envelope }))
-        .catch((error: unknown) => ({ ok: false as const, error }))
-    let result = await attempt()
-    if (!result.ok) {
-      const second = await attempt()
-      if (!second.ok) {
-        logTaskDiagnostic('local-git-repo-sample-failed', {
-          repoKey,
-          repoPath,
-          attempts: [describeSampleError(result.error), describeSampleError(second.error)],
-        })
-        return null
-      }
-      result = second
+    // Single observation primitive (Runtime Observer round 7): the registry
+    // owns sampling, validation and the retry-once evidence; this consumer
+    // only branches and persists. Never fall back to the error-swallowing
+    // legacy reader (issue #122 failure mode).
+    const outcome = await observation.observeRepository(ctx, repoKey, { repoPath })
+    if (!outcome.ok) {
+      logTaskDiagnostic('local-git-repo-sample-failed', { repoKey, repoPath, attempts: outcome.attempts })
+      return null
     }
-    return { ...deriveRepositoryAdvance(result.envelope.sample), fetchedAt }
+    return { ...deriveRepositoryAdvance(outcome.envelope.sample), fetchedAt }
   }
   const facts = await readRepositoryGitFacts(ctx, repoPath)
   return { ...deriveRepositoryAdvance(facts), fetchedAt }

@@ -58,8 +58,8 @@ function countingRegistry() {
 
 test('one sample per generation: second consumer is a cache hit on the same immutable object', async () => {
   const { registry, executions } = countingRegistry()
-  const first = await registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
-  const second = await registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
+  const first = (await registry.observeWorktree(CTX, 'ai-daming/clickvibe', INPUT)).envelope
+  const second = (await registry.observeWorktree(CTX, 'ai-daming/clickvibe', INPUT)).envelope
   assert.equal(first, second, 'the snapshot is one immutable observation envelope')
   assert.deepEqual(executions, ['ai-daming/clickvibe:/wt/issue-122'])
   assert.equal(registry.counters.logicalRequests, 2)
@@ -74,8 +74,8 @@ test('concurrent consumers join one in-flight sample', async () => {
     resolveSample = resolve
   })
   const registry = new LocalGitSnapshotRegistry(async () => gate)
-  const first = registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
-  const second = registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
+  const first = registry.observeWorktree(CTX, 'ai-daming/clickvibe', INPUT).then((outcome) => outcome.envelope)
+  const second = registry.observeWorktree(CTX, 'ai-daming/clickvibe', INPUT).then((outcome) => outcome.envelope)
   resolveSample(makeSample('abc1234'))
   assert.equal(await first, await second)
   assert.equal(registry.counters.singleflightJoins, 1)
@@ -85,7 +85,7 @@ test('concurrent consumers join one in-flight sample', async () => {
 
 test('invalidation bumps the generation and the next consumer resamples', async () => {
   const { registry, executions } = countingRegistry()
-  const first = await registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
+  const first = (await registry.observeWorktree(CTX, 'ai-daming/clickvibe', INPUT)).envelope
   assert.equal(first.sample.gitFacts.head, 'head-ai-daming/clickvibe:/wt/issue-122-g1')
 
   registry.invalidate({ repoKey: 'ai-daming/clickvibe', worktreePath: INPUT.worktree }, 'worktree-sync', 'syncWorktree')
@@ -93,7 +93,7 @@ test('invalidation bumps the generation and the next consumer resamples', async 
   assert.equal(registry.invalidations[0].scope, worktreeScopeKey('ai-daming/clickvibe', INPUT.worktree))
   assert.equal(registry.invalidations[0].reason, 'worktree-sync')
 
-  const second = await registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
+  const second = (await registry.observeWorktree(CTX, 'ai-daming/clickvibe', INPUT)).envelope
   assert.equal(second.sample.gitFacts.head, 'head-ai-daming/clickvibe:/wt/issue-122-g2')
   assert.deepEqual(executions, ['ai-daming/clickvibe:/wt/issue-122', 'ai-daming/clickvibe:/wt/issue-122'])
   assert.equal(registry.counters.executions, 2)
@@ -113,13 +113,13 @@ test('invalidation during an in-flight sample returns it to the caller but does 
     return makeSample('head-g2')
   })
 
-  const inflight = registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
+  const inflight = registry.observeWorktree(CTX, 'ai-daming/clickvibe', INPUT).then((outcome) => outcome.envelope)
   registry.invalidate({ repoKey: 'ai-daming/clickvibe', worktreePath: INPUT.worktree }, 'agent-task-end', 'task-close')
   resolveSample(makeSample('head-stale'))
   const stale = await inflight
   assert.equal(stale.sample.gitFacts.head, 'head-stale', 'the requesting consumer still gets its sample')
 
-  const fresh = await registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
+  const fresh = (await registry.observeWorktree(CTX, 'ai-daming/clickvibe', INPUT)).envelope
   assert.equal(fresh.sample.gitFacts.head, 'head-g2')
   assert.equal(registry.counters.executions, 2, 'the stale sample must not satisfy the next generation')
 })
@@ -127,9 +127,9 @@ test('invalidation during an in-flight sample returns it to the caller but does 
 test('repo-wide invalidation clears every worktree scope of that repo only', async () => {
   const otherInput = { ...INPUT, worktree: '/wt/issue-7' }
   const { registry, executions } = countingRegistry()
-  const first = await registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
-  const other = await registry.worktreeSample(CTX, 'ai-daming/clickvibe', otherInput)
-  const foreign = await registry.worktreeSample(CTX, 'other/repo', INPUT)
+  const first = (await registry.observeWorktree(CTX, 'ai-daming/clickvibe', INPUT)).envelope
+  const other = (await registry.observeWorktree(CTX, 'ai-daming/clickvibe', otherInput)).envelope
+  const foreign = (await registry.observeWorktree(CTX, 'other/repo', INPUT)).envelope
   assert.deepEqual(executions, [
     'ai-daming/clickvibe:/wt/issue-122',
     'ai-daming/clickvibe:/wt/issue-7',
@@ -139,9 +139,9 @@ test('repo-wide invalidation clears every worktree scope of that repo only', asy
   registry.invalidate({ repoKey: 'ai-daming/clickvibe' }, 'remote-fetch', 'ensureConfiguredRepoFresh')
   assert.equal(registry.invalidations[0].scope, 'repo:ai-daming/clickvibe')
 
-  const resampled = await registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
-  const resampledOther = await registry.worktreeSample(CTX, 'ai-daming/clickvibe', otherInput)
-  const cachedForeign = await registry.worktreeSample(CTX, 'other/repo', INPUT)
+  const resampled = (await registry.observeWorktree(CTX, 'ai-daming/clickvibe', INPUT)).envelope
+  const resampledOther = (await registry.observeWorktree(CTX, 'ai-daming/clickvibe', otherInput)).envelope
+  const cachedForeign = (await registry.observeWorktree(CTX, 'other/repo', INPUT)).envelope
   assert.equal(
     resampled.sample.gitFacts.head,
     'head-ai-daming/clickvibe:/wt/issue-122-g2',
@@ -166,8 +166,8 @@ test('repo-wide invalidation clears every worktree scope of that repo only', asy
 test('notifyLocalGitMutation broadcasts to every live registry', async () => {
   const a = countingRegistry()
   const b = countingRegistry()
-  const firstA = await a.registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
-  const firstB = await b.registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
+  const firstA = await a.registry.observeWorktree(CTX, 'ai-daming/clickvibe', INPUT)
+  const firstB = await b.registry.observeWorktree(CTX, 'ai-daming/clickvibe', INPUT)
   void firstA
   void firstB
 
@@ -176,7 +176,7 @@ test('notifyLocalGitMutation broadcasts to every live registry', async () => {
   assert.equal(a.registry.invalidations.length, 1)
   assert.equal(b.registry.invalidations.length, 1)
 
-  const secondA = await a.registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
+  const secondA = (await a.registry.observeWorktree(CTX, 'ai-daming/clickvibe', INPUT)).envelope
   assert.equal(secondA.sample.gitFacts.head, 'head-ai-daming/clickvibe:/wt/issue-122-g2')
   assert.equal(a.registry.counters.executions, 2)
 })
@@ -185,11 +185,14 @@ test('counters satisfy the frozen identity logical = hit + join + execution + fa
   const failing = new LocalGitSnapshotRegistry(async () => {
     throw new Error('boom')
   })
-  await failing.worktreeSample(CTX, 'r', INPUT).then(
-    () => assert.fail('must fail'),
-    () => {},
-  )
-  assert.equal(failing.counters.failures, 1)
+  // The observation primitive never rejects: the outcome carries both raw
+  // attempts (Runtime Observer round 7).
+  const outcome = await failing.observeWorktree(CTX, 'r', INPUT)
+  assert.equal(outcome.ok, false)
+  assert.equal(outcome.attempts.length, 2)
+  assert.equal(outcome.attempts[0].message, 'boom')
+  assert.equal(outcome.attempts[1].name, 'Error')
+  assert.equal(failing.counters.failures, 2)
   assert.equal(
     failing.counters.logicalRequests,
     failing.counters.cacheHits +
@@ -199,8 +202,8 @@ test('counters satisfy the frozen identity logical = hit + join + execution + fa
   )
 
   const { registry } = countingRegistry()
-  await registry.worktreeSample(CTX, 'r', INPUT)
-  await registry.worktreeSample(CTX, 'r', INPUT)
+  await registry.observeWorktree(CTX, 'r', INPUT)
+  await registry.observeWorktree(CTX, 'r', INPUT)
   const { logicalRequests, cacheHits, singleflightJoins, executions, failures } = registry.counters
   assert.equal(logicalRequests, cacheHits + singleflightJoins + executions + failures)
 })
@@ -220,9 +223,9 @@ test('a consumer arriving after invalidation does not join a pre-invalidation in
     return makeSample('head-new')
   })
 
-  const oldCaller = registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
+  const oldCaller = registry.observeWorktree(CTX, 'ai-daming/clickvibe', INPUT).then((outcome) => outcome.envelope)
   registry.invalidate({ repoKey: 'ai-daming/clickvibe', worktreePath: INPUT.worktree }, 'worktree-sync', 'syncWorktree')
-  const newCaller = registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
+  const newCaller = registry.observeWorktree(CTX, 'ai-daming/clickvibe', INPUT).then((outcome) => outcome.envelope)
   releaseOld(makeSample('head-old'))
 
   const oldResult = await oldCaller
@@ -260,9 +263,13 @@ test('repository sample: post-invalidation consumer does not join the stale in-f
   )
 
   const repoPath = '/repo/main'
-  const oldCaller = registry.repositorySample(CTX, 'ai-daming/clickvibe', { repoPath })
+  const oldCaller = registry
+    .observeRepository(CTX, 'ai-daming/clickvibe', { repoPath })
+    .then((outcome) => outcome.envelope)
   registry.invalidate({ repoKey: 'ai-daming/clickvibe' }, 'remote-fetch', 'ensureConfiguredRepoFresh')
-  const newCaller = registry.repositorySample(CTX, 'ai-daming/clickvibe', { repoPath })
+  const newCaller = registry
+    .observeRepository(CTX, 'ai-daming/clickvibe', { repoPath })
+    .then((outcome) => outcome.envelope)
   releaseOld({ defaultBranch: 'old', checkoutBranch: 'main', main: null, checkout: null })
 
   const oldResult = await oldCaller
@@ -275,18 +282,18 @@ test('repository sample: post-invalidation consumer does not join the stale in-f
 
 test('observation envelopes carry scope, generation, observedAt and source revision', async () => {
   const { registry } = countingRegistry()
-  const first = await registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
+  const first = (await registry.observeWorktree(CTX, 'ai-daming/clickvibe', INPUT)).envelope
   assert.equal(first.scope, worktreeScopeKey('ai-daming/clickvibe', INPUT.worktree))
   assert.equal(first.generation, 0)
   assert.ok(first.observedAt > 0, 'observedAt must be set on publish')
   assert.equal(first.sourceRevision, 'head-ai-daming/clickvibe:/wt/issue-122-g1')
 
-  const cached = await registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
+  const cached = (await registry.observeWorktree(CTX, 'ai-daming/clickvibe', INPUT)).envelope
   assert.equal(cached, first, 'cache hits return the same immutable envelope')
   assert.equal(cached.observedAt, first.observedAt, 'observedAt is publish-time stable')
 
   registry.invalidate({ repoKey: 'ai-daming/clickvibe', worktreePath: INPUT.worktree }, 'worktree-sync', 'syncWorktree')
-  const second = await registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
+  const second = (await registry.observeWorktree(CTX, 'ai-daming/clickvibe', INPUT)).envelope
   assert.equal(second.generation, 1)
   assert.ok(second.observedAt >= first.observedAt)
   assert.notEqual(second, first)
@@ -294,7 +301,7 @@ test('observation envelopes carry scope, generation, observedAt and source revis
 
 test('counters.invalidations counts every invalidate call', async () => {
   const { registry } = countingRegistry()
-  await registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
+  await registry.observeWorktree(CTX, 'ai-daming/clickvibe', INPUT)
   assert.equal(registry.counters.invalidations, 0)
   registry.invalidate({ repoKey: 'ai-daming/clickvibe', worktreePath: INPUT.worktree }, 'worktree-sync', 'syncWorktree')
   registry.invalidate({ repoKey: 'ai-daming/clickvibe' }, 'remote-fetch', 'ensureConfiguredRepoFresh')
@@ -369,10 +376,10 @@ test('reverse completion: gen0 finishing after gen1 published keeps its own enve
     calls += 1
     return calls === 1 ? oldGate : Promise.resolve(makeSample('head-old'))
   })
-  const gen0 = registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
+  const gen0 = registry.observeWorktree(CTX, 'ai-daming/clickvibe', INPUT).then((outcome) => outcome.envelope)
   registry.invalidate({ repoKey: 'ai-daming/clickvibe', worktreePath: INPUT.worktree }, 'worktree-sync', 'syncWorktree')
 
-  const gen1 = await registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
+  const gen1 = (await registry.observeWorktree(CTX, 'ai-daming/clickvibe', INPUT)).envelope
   assert.equal(gen1.generation, 1)
   releaseOld(makeSample('head-old'))
 
@@ -383,7 +390,7 @@ test('reverse completion: gen0 finishing after gen1 published keeps its own enve
   assert.ok(Number.isFinite(late.observedAt))
 
   // Cached gen1 hit must equal the published gen1 envelope exactly.
-  const cached = await registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
+  const cached = (await registry.observeWorktree(CTX, 'ai-daming/clickvibe', INPUT)).envelope
   assert.equal(cached, gen1)
 })
 
@@ -397,9 +404,9 @@ test('reverse completion with distinct samplers keeps envelopes field-isolated',
     calls += 1
     return calls === 1 ? oldGate : Promise.resolve(makeSample('head-new'))
   })
-  const gen0 = registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
+  const gen0 = registry.observeWorktree(CTX, 'ai-daming/clickvibe', INPUT).then((outcome) => outcome.envelope)
   registry.invalidate({ repoKey: 'ai-daming/clickvibe', worktreePath: INPUT.worktree }, 'agent-task-end', 'finishTask')
-  const gen1 = await registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
+  const gen1 = (await registry.observeWorktree(CTX, 'ai-daming/clickvibe', INPUT)).envelope
   releaseOld(makeSample('head-old'))
   const late = await gen0
 
@@ -426,9 +433,11 @@ test('repo reverse completion keeps envelope field-isolated and reports checkout
       return calls === 1 ? oldGate : Promise.resolve(repoSample('head-new'))
     },
   )
-  const gen0 = registry.repositorySample(CTX, 'ai-daming/clickvibe', { repoPath: '/repo/main' })
+  const gen0 = registry
+    .observeRepository(CTX, 'ai-daming/clickvibe', { repoPath: '/repo/main' })
+    .then((outcome) => outcome.envelope)
   registry.invalidate({ repoKey: 'ai-daming/clickvibe' }, 'remote-fetch', 'ensureConfiguredRepoFresh')
-  const gen1 = await registry.repositorySample(CTX, 'ai-daming/clickvibe', { repoPath: '/repo/main' })
+  const gen1 = (await registry.observeRepository(CTX, 'ai-daming/clickvibe', { repoPath: '/repo/main' })).envelope
   releaseOld(repoSample('head-old'))
   const late = await gen0
 
@@ -440,14 +449,14 @@ test('repo reverse completion keeps envelope field-isolated and reports checkout
 
 test('published envelopes and samples are deeply immutable', async () => {
   const { registry } = countingRegistry()
-  const first = await registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
+  const first = (await registry.observeWorktree(CTX, 'ai-daming/clickvibe', INPUT)).envelope
   assert.throws(() => {
     first.sample.gitFacts.head = 'tampered'
   }, /Cannot assign to read only|not extensible|readonly/i)
   assert.throws(() => {
     ;(first as { generation: number }).generation = 99
   }, /Cannot assign to read only|not extensible|readonly/i)
-  const cached = await registry.worktreeSample(CTX, 'ai-daming/clickvibe', INPUT)
+  const cached = (await registry.observeWorktree(CTX, 'ai-daming/clickvibe', INPUT)).envelope
   assert.equal(cached.sample.gitFacts.head, first.sample.gitFacts.head)
 })
 

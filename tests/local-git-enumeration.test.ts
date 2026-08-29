@@ -105,12 +105,12 @@ test('enumeration envelopes are deeply immutable and carry the checkout HEAD', a
     },
   } as unknown as Context
   const registry = new LocalGitSnapshotRegistry()
-  const envelope = await registry.enumerationSample(ctx, 'ai-daming/clickvibe', { repoPath: '/repo/main' })
+  const envelope = (await registry.observeEnumeration(ctx, 'ai-daming/clickvibe', { repoPath: '/repo/main' })).envelope
   assert.equal(envelope.sourceRevision, 'abc1234')
   assert.throws(() => {
     envelope.sample.counts['clickvibe-issue-122'] = 99
   }, /Cannot assign to read only|not extensible|readonly/i)
-  const cached = await registry.enumerationSample(ctx, 'ai-daming/clickvibe', { repoPath: '/repo/main' })
+  const cached = (await registry.observeEnumeration(ctx, 'ai-daming/clickvibe', { repoPath: '/repo/main' })).envelope
   assert.equal(cached, envelope)
   assert.equal(cached.sample.counts['clickvibe-issue-122'], 2, 'cache hits must read the frozen value')
 })

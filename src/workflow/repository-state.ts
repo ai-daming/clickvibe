@@ -50,6 +50,7 @@ import type { ClickVibeConfigV1 } from '../infra/contracts.ts'
 import { frozenBaseHash } from '../agent/baseline.ts'
 import {
   type LocalGitSnapshotReader,
+  type ObservationAttemptEvidence,
   resolveConfiguredRepoPath,
   worktreeScopeKey,
 } from '../infra/local-git-snapshot.ts'
@@ -63,24 +64,26 @@ export interface HealthyObservation {
   sourceRevision: string | null
 }
 
-/** Sample once per generation; a failed sample retries exactly once (issue #122 Q2). */
-async function sampleWorktreeWithRetry(
+/** Derive the observation outcome for one workflow's worktree (issue #122). */
+async function observeWorktreeFor(
   ctx: Context,
   observation: LocalGitSnapshotReader,
   config: ClickVibeConfig,
   workflow: IssueWorkflow,
 ): Promise<
-  | {
-      ok: true
-      sample: WorktreeSample
-      meta: { scope: string; generation: number; observedAt: number; sourceRevision: string | null }
-    }
-  | { ok: false; error: string; cause: unknown }
+  | { ok: true; sample: WorktreeSample; meta: HealthyObservation }
+  | { ok: false; attempts: ObservationAttemptEvidence[]; error: Error }
 > {
   // Mirror the legacy existsSync gate: a missing worktree yields the all-null
   // facts without invoking git at all, and branch facts still come from the
   // configured checkout.
   if (!existsSync(workflow.worktree)) {
+    const branchFacts = await readConfiguredBranchFacts(
+      ctx,
+      config,
+      workflow,
+      workflow.baseRef ? workflowBaseBranch(workflow.baseRef) : undefined,
+    )
     return {
       ok: true,
       sample: {
@@ -100,14 +103,10 @@ async function sampleWorktreeWithRetry(
           behindUpstream: null,
           mergeConflict: false,
         },
-        branchFacts: await readConfiguredBranchFacts(
-          ctx,
-          config,
-          workflow,
-          workflow.baseRef ? workflowBaseBranch(workflow.baseRef) : undefined,
-        ),
+        branchFacts,
       },
       meta: {
+        freshness: 'current' as const,
         scope: worktreeScopeKey(workflow.repoKey, workflow.worktree),
         generation: 0,
         observedAt: Date.now(),
@@ -115,47 +114,25 @@ async function sampleWorktreeWithRetry(
       },
     }
   }
-  const input = {
+  const outcome = await observation.observeWorktree(ctx, workflow.repoKey, {
     worktree: workflow.worktree,
     branch: workflow.branch,
     baseBranch: workflowBaseBranch(workflow.baseRef),
     baseBranchNeedsDefault: workflowBaseBranch(workflow.baseRef, '') === '',
     frozenBase: frozenBaseHash(workflow.baseRef),
     repoPath: resolveConfiguredRepoPath(config, workflow.repoKey),
-  }
-  try {
-    const envelope = await observation.worktreeSample(ctx, workflow.repoKey, input)
-    return {
-      ok: true,
-      sample: envelope.sample,
-      meta: {
-        scope: envelope.scope,
-        generation: envelope.generation,
-        observedAt: envelope.observedAt,
-        sourceRevision: envelope.sourceRevision,
-      },
-    }
-  } catch (firstError) {
-    try {
-      const envelope = await observation.worktreeSample(ctx, workflow.repoKey, input)
-      return {
-        ok: true,
-        sample: envelope.sample,
-        meta: {
-          scope: envelope.scope,
-          generation: envelope.generation,
-          observedAt: envelope.observedAt,
-          sourceRevision: envelope.sourceRevision,
-        },
-      }
-    } catch (secondError) {
-      const message = String(secondError instanceof Error ? secondError.message : secondError)
-      console.warn(
-        `[clickvibe] local git snapshot sample failed twice for ${workflow.key}: ${message}`,
-        firstError instanceof Error ? firstError.message : firstError,
-      )
-      return { ok: false, error: message, cause: secondError }
-    }
+  })
+  if (!outcome.ok) return outcome
+  return {
+    ok: true,
+    sample: outcome.envelope.sample,
+    meta: {
+      freshness: 'current' as const,
+      scope: outcome.envelope.scope,
+      generation: outcome.envelope.generation,
+      observedAt: outcome.envelope.observedAt,
+      sourceRevision: outcome.envelope.sourceRevision,
+    },
   }
 }
 
@@ -181,7 +158,7 @@ export async function enrichWorkflowStates(
   const config = configOverride ?? (await loadConfig())
   return Promise.all(
     workflows.map(async (workflow) => {
-      const attempt = observation ? await sampleWorktreeWithRetry(ctx, observation, config, workflow) : null
+      const attempt = observation ? await observeWorktreeFor(ctx, observation, config, workflow) : null
       if (attempt !== null && !attempt.ok) {
         // Legacy parity: GitHub-side failures — notably rate limits — surface
         // even when the local snapshot is unavailable, so callers (auto-run
@@ -200,12 +177,12 @@ export async function enrichWorkflowStates(
         // issue #122 Q2: a failed snapshot must not degrade into legacy
         // per-fact reads that render "clean" from a failure. Fail closed:
         // no derived state, an explicit unknown observation, raw diagnostics.
-        const reason = `本地 Git 快照采样失败（已重试一次）: ${attempt.error}`
+        const reason = `本地 Git 快照采样失败（已重试一次）: ${attempt.error.message}`
         logTaskDiagnostic('local-git-snapshot-sample-failed', {
           workflowKey: workflow.key,
           repoKey: workflow.repoKey,
           worktree: workflow.worktree,
-          error: attempt.error,
+          attempts: attempt.attempts,
         })
         const row: IssueWorkflow & {
           runStartedAt: null
@@ -220,14 +197,13 @@ export async function enrichWorkflowStates(
         // Keep the original failure reachable (错误不埋葬): auto-run reconcile
         // rethrows it so controller-failure fingerprints stay stable.
         Object.defineProperty(row, 'localGitSampleCause', {
-          value: attempt.cause,
+          value: attempt.error,
           enumerable: false,
         })
         return row
       }
       const sample = attempt && attempt.ok ? attempt.sample : null
-      const healthyObservation: HealthyObservation | undefined =
-        attempt && attempt.ok ? { freshness: 'current' as const, ...attempt.meta } : undefined
+      const healthyObservation: HealthyObservation | undefined = attempt && attempt.ok ? attempt.meta : undefined
       const branchFacts = sample
         ? sample.branchFacts
         : await readConfiguredBranchFacts(
