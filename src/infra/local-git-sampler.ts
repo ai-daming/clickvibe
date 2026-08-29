@@ -25,6 +25,13 @@ export interface WorktreeSample {
   branchFacts: SampledBranchFacts
 }
 
+/** One required read that failed operationally (issue #122: no clean degradation). */
+export interface RequiredReadFailure {
+  operation: string
+  rc: number
+  error: string
+}
+
 export interface WorktreeSampleInput {
   /** Worktree directory: the compound command's workdir. */
   worktree: string
@@ -50,6 +57,11 @@ export function buildWorktreeSampleCommand(input: WorktreeSampleInput): string {
 
   lines.push('set +e')
   lines.push(`__enc() { printf %s "$1" | base64 | tr -d '\\n'; }`)
+  // Validity canary for the worktree plane. A failure here means the whole
+  // sample cannot describe the scene (issue #122: fail unknown, never render).
+  // Required reads capture stderr so a failure keeps its raw error text.
+  lines.push('g=$(git rev-parse --git-dir 2>&1)')
+  section('WT_GITDIR', '$?', '"$g"')
   // The default branch (origin/HEAD) is resolved first when the workflow
   // baseRef carries no branch of its own, mirroring derive's
   // workflowBaseBranch(baseRef, defaultBranch) resolution.
@@ -68,9 +80,9 @@ export function buildWorktreeSampleCommand(input: WorktreeSampleInput): string {
 
   lines.push('h=$(git rev-parse --short HEAD 2>/dev/null)')
   section('WT_HEAD', '$?', '"$h"')
-  lines.push('b=$(git branch --show-current 2>/dev/null)')
+  lines.push('b=$(git branch --show-current 2>&1)')
   section('WT_BRANCH', '$?', '"$b"')
-  lines.push('s=$(git status --porcelain 2>/dev/null)')
+  lines.push('s=$(git status --porcelain 2>&1)')
   section('WT_STATUS', '$?', '"$s"')
 
   lines.push(`m=$(git rev-parse --short ${shellQuote('main')} 2>/dev/null)`)
@@ -164,8 +176,33 @@ function compare(section: { rc: number; value: string } | undefined): { behind: 
   return { behind, ahead }
 }
 
-export function parseWorktreeSample(output: string): WorktreeSample {
+export function parseWorktreeSample(output: string): WorktreeSample & { requiredFailures: RequiredReadFailure[] } {
   const sections = decodeSections(output)
+
+  const requiredFailures: RequiredReadFailure[] = []
+  // Absent refs and unborn HEADs are expected absence; these reads must
+  // succeed in any observable worktree, so their failure is operational and
+  // the sample must not be published as facts (issue #122 failure-mode rule).
+  const gitdir = sections.get('WT_GITDIR')
+  if (gitdir && gitdir.rc !== 0) {
+    requiredFailures.push({ operation: 'git rev-parse --git-dir', rc: gitdir.rc, error: gitdir.value.trim() })
+  }
+  const statusSection = sections.get('WT_STATUS')
+  if (statusSection && statusSection.rc !== 0) {
+    requiredFailures.push({
+      operation: 'git status --porcelain',
+      rc: statusSection.rc,
+      error: statusSection.value.trim(),
+    })
+  }
+  const branchSection = sections.get('WT_BRANCH')
+  if (branchSection && branchSection.rc !== 0) {
+    requiredFailures.push({
+      operation: 'git branch --show-current',
+      rc: branchSection.rc,
+      error: branchSection.value.trim(),
+    })
+  }
 
   const head = optionalRef(sections.get('WT_HEAD'))
   const branch = optionalRef(sections.get('WT_BRANCH'))
@@ -246,7 +283,7 @@ export function parseWorktreeSample(output: string): WorktreeSample {
     behindUpstream,
     mergeConflict: mergeHead !== null,
   }
-  return { gitFacts, branchFacts }
+  return { gitFacts, branchFacts, requiredFailures }
 }
 
 export async function sampleWorktreeFacts(ctx: Context, input: WorktreeSampleInput): Promise<WorktreeSample> {
@@ -255,7 +292,17 @@ export async function sampleWorktreeFacts(ctx: Context, input: WorktreeSampleInp
     timeoutMs: 10000,
     sandboxPolicy: { mode: 'read-only', workspaceRoot: input.worktree },
   })
-  return parseWorktreeSample(output)
+  const parsed = parseWorktreeSample(output)
+  if (parsed.requiredFailures.length > 0) {
+    // Issue #122: a failed required read is unknown, never clean/false. The
+    // raw operation, exit code and error text travel with the error so the
+    // retry-once-then-unknown path keeps the original evidence.
+    const detail = parsed.requiredFailures
+      .map((failure) => `${failure.operation} rc=${failure.rc}: ${failure.error || '(no stderr)'}`)
+      .join('; ')
+    throw new Error(`本地 Git 必需读取失败: ${detail}`)
+  }
+  return parsed
 }
 
 /** One sampled observation of the configured repository checkout. */

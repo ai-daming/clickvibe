@@ -31,8 +31,16 @@ export { notifyLocalGitMutation, type LocalGitMutationScope } from './local-git-
 
 /** What consumers need from the snapshot plane (issue #122). */
 export interface LocalGitSnapshotReader {
-  worktreeSample(ctx: Context, repoKey: string, input: WorktreeSampleInput): Promise<WorktreeSample>
-  repositorySample(ctx: Context, repoKey: string, input: RepositorySampleInput): Promise<RepositorySample>
+  worktreeSample(
+    ctx: Context,
+    repoKey: string,
+    input: WorktreeSampleInput,
+  ): Promise<ObservationEnvelope<WorktreeSample>>
+  repositorySample(
+    ctx: Context,
+    repoKey: string,
+    input: RepositorySampleInput,
+  ): Promise<ObservationEnvelope<RepositorySample>>
 }
 
 /** Mirror readConfiguredBranchFacts' front gate: null when unconfigured or missing on disk. */
@@ -56,6 +64,20 @@ export interface LocalGitCounters {
   singleflightJoins: number
   executions: number
   failures: number
+  invalidations: number
+}
+
+/**
+ * The consumable observation contract (issue #122 AC): every sample carries
+ * its scope, generation, observedAt and source revision. The envelope is one
+ * immutable object per published generation.
+ */
+export interface ObservationEnvelope<T> {
+  scope: string
+  generation: number
+  observedAt: number
+  sourceRevision: string | null
+  sample: T
 }
 
 export function worktreeScopeKey(repoKey: string, worktreePath: string): string {
@@ -72,6 +94,7 @@ export class LocalGitSnapshotRegistry {
     singleflightJoins: 0,
     executions: 0,
     failures: 0,
+    invalidations: 0,
   }
 
   private scopes = new Map<
@@ -82,25 +105,43 @@ export class LocalGitSnapshotRegistry {
       sample: WorktreeSample | null
       observedAt: number
       sourceRevision: string | null
+      envelope: ObservationEnvelope<WorktreeSample> | null
     }
   >()
-  private inflight = new Map<string, Promise<WorktreeSample>>()
+  private inflight = new Map<string, { generation: number; promise: Promise<WorktreeSample> }>()
   private repoScopes = new Map<
     string,
-    { repoKey: string; generation: number; sample: RepositorySample | null; observedAt: number }
+    {
+      repoKey: string
+      generation: number
+      sample: RepositorySample | null
+      observedAt: number
+      envelope: ObservationEnvelope<RepositorySample> | null
+    }
   >()
-  private repoInflight = new Map<string, Promise<RepositorySample>>()
+  private repoInflight = new Map<string, { generation: number; promise: Promise<RepositorySample> }>()
   private readonly sampler: (ctx: Context, repoKey: string, input: WorktreeSampleInput) => Promise<WorktreeSample>
+  private readonly repositorySampler: (
+    ctx: Context,
+    repoKey: string,
+    input: RepositorySampleInput,
+  ) => Promise<RepositorySample>
 
-  /** Injectable for tests; production uses the real compound sampler. */
+  /** Injectable for tests; production uses the real compound samplers. */
   constructor(
     sampler: (ctx: Context, repoKey: string, input: WorktreeSampleInput) => Promise<WorktreeSample> = (
       ctx,
       _repoKey,
       input,
     ) => sampleWorktreeFacts(ctx, input),
+    repositorySampler: (ctx: Context, repoKey: string, input: RepositorySampleInput) => Promise<RepositorySample> = (
+      ctx,
+      _repoKey,
+      input,
+    ) => sampleRepositoryFacts(ctx, input),
   ) {
     this.sampler = sampler
+    this.repositorySampler = repositorySampler
     registerSnapshotRegistry(this)
   }
 
@@ -109,22 +150,37 @@ export class LocalGitSnapshotRegistry {
     unregisterSnapshotRegistry(this)
   }
 
-  async worktreeSample(ctx: Context, repoKey: string, input: WorktreeSampleInput): Promise<WorktreeSample> {
+  async worktreeSample(
+    ctx: Context,
+    repoKey: string,
+    input: WorktreeSampleInput,
+  ): Promise<ObservationEnvelope<WorktreeSample>> {
     this.counters.logicalRequests++
     const key = worktreeScopeKey(repoKey, input.worktree)
     let entry = this.scopes.get(key)
     if (!entry) {
-      entry = { repoKey, generation: 0, sample: null, observedAt: 0, sourceRevision: null }
+      entry = { repoKey, generation: 0, sample: null, observedAt: 0, sourceRevision: null, envelope: null }
       this.scopes.set(key, entry)
     }
-    if (entry.sample) {
+    if (entry.sample && entry.envelope) {
       this.counters.cacheHits++
-      return entry.sample
+      return entry.envelope
     }
     const running = this.inflight.get(key)
-    if (running) {
+    // Joining is generation-bound (review finding): a consumer that arrives
+    // after an invalidation must never consume a sample started for a stale
+    // generation, even while that old promise is still in flight.
+    if (running && running.generation === entry.generation) {
       this.counters.singleflightJoins++
-      return running
+      const result = await running.promise
+      if (entry.envelope && entry.generation === running.generation) return entry.envelope
+      return {
+        scope: key,
+        generation: running.generation,
+        observedAt: entry.observedAt,
+        sourceRevision: entry.sourceRevision,
+        sample: result,
+      }
     }
     const requestedGeneration = entry.generation
     const sample = (async () => {
@@ -137,56 +193,102 @@ export class LocalGitSnapshotRegistry {
           entry.sample = result
           entry.observedAt = Date.now()
           entry.sourceRevision = result.gitFacts.head
+          entry.envelope = {
+            scope: key,
+            generation: requestedGeneration,
+            observedAt: entry.observedAt,
+            sourceRevision: entry.sourceRevision,
+            sample: result,
+          }
         }
         return result
       } catch (error) {
         this.counters.failures++
         throw error
       } finally {
-        this.inflight.delete(key)
+        if (this.inflight.get(key)?.generation === requestedGeneration) this.inflight.delete(key)
       }
     })()
-    this.inflight.set(key, sample)
-    return sample
+    this.inflight.set(key, { generation: requestedGeneration, promise: sample })
+    const result = await sample
+    // Published consumers share the cached immutable envelope; a caller whose
+    // generation was invalidated mid-flight still gets its result, described
+    // by the generation it was bound to.
+    if (entry.envelope && entry.generation === requestedGeneration) return entry.envelope
+    return {
+      scope: key,
+      generation: requestedGeneration,
+      observedAt: entry.observedAt,
+      sourceRevision: entry.sourceRevision,
+      sample: result,
+    }
   }
 
   /** Sample the configured repository checkout once per repo+generation. */
-  async repositorySample(ctx: Context, repoKey: string, input: RepositorySampleInput): Promise<RepositorySample> {
+  async repositorySample(
+    ctx: Context,
+    repoKey: string,
+    input: RepositorySampleInput,
+  ): Promise<ObservationEnvelope<RepositorySample>> {
     this.counters.logicalRequests++
     const key = `repo:${repoKey}:${input.repoPath}`
     let entry = this.repoScopes.get(key)
     if (!entry) {
-      entry = { repoKey, generation: 0, sample: null, observedAt: 0 }
+      entry = { repoKey, generation: 0, sample: null, observedAt: 0, envelope: null }
       this.repoScopes.set(key, entry)
     }
-    if (entry.sample) {
+    if (entry.sample && entry.envelope) {
       this.counters.cacheHits++
-      return entry.sample
+      return entry.envelope
     }
     const running = this.repoInflight.get(key)
-    if (running) {
+    // Generation-bound join, same rule as worktree samples (review finding).
+    if (running && running.generation === entry.generation) {
       this.counters.singleflightJoins++
-      return running
+      const result = await running.promise
+      if (entry.envelope && entry.generation === running.generation) return entry.envelope
+      return {
+        scope: key,
+        generation: running.generation,
+        observedAt: entry.observedAt,
+        sourceRevision: null,
+        sample: result,
+      }
     }
     const requestedGeneration = entry.generation
     const sample = (async () => {
       try {
-        const result = await sampleRepositoryFacts(ctx, input)
+        const result = await this.repositorySampler(ctx, repoKey, input)
         this.counters.executions++
         if (entry.generation === requestedGeneration) {
           entry.sample = result
           entry.observedAt = Date.now()
+          entry.envelope = {
+            scope: key,
+            generation: requestedGeneration,
+            observedAt: entry.observedAt,
+            sourceRevision: null,
+            sample: result,
+          }
         }
         return result
       } catch (error) {
         this.counters.failures++
         throw error
       } finally {
-        this.repoInflight.delete(key)
+        if (this.repoInflight.get(key)?.generation === requestedGeneration) this.repoInflight.delete(key)
       }
     })()
-    this.repoInflight.set(key, sample)
-    return sample
+    this.repoInflight.set(key, { generation: requestedGeneration, promise: sample })
+    const result = await sample
+    if (entry.envelope && entry.generation === requestedGeneration) return entry.envelope
+    return {
+      scope: key,
+      generation: requestedGeneration,
+      observedAt: entry.observedAt,
+      sourceRevision: null,
+      sample: result,
+    }
   }
 
   /** Bump matching scope generations; the next consumer after this resamples. */
@@ -197,12 +299,15 @@ export class LocalGitSnapshotRegistry {
       if (scope.worktreePath && key !== worktreeScopeKey(scope.repoKey, scope.worktreePath)) continue
       entry.generation++
       entry.sample = null
+      entry.envelope = null
     }
     for (const entry of this.repoScopes.values()) {
       if (entry.repoKey !== scope.repoKey) continue
       entry.generation++
       entry.sample = null
+      entry.envelope = null
     }
+    this.counters.invalidations++
     this.invalidations.push({
       scope: scope.worktreePath ? worktreeScopeKey(scope.repoKey, scope.worktreePath) : `repo:${scope.repoKey}`,
       reason,

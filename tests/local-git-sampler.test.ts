@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { buildWorktreeSampleCommand, parseWorktreeSample } from '../src/infra/local-git-sampler.ts'
+import type { Context } from '@deepseek-ai/cordis'
+import { buildWorktreeSampleCommand, parseWorktreeSample, sampleWorktreeFacts } from '../src/infra/local-git-sampler.ts'
 
 function section(key: string, rc: number, value: string | null): string {
   const encoded = value === null ? '' : Buffer.from(value, 'utf8').toString('base64')
@@ -99,11 +100,11 @@ test('missing local branch suppresses upstream facts only', () => {
   assert.equal(sample.gitFacts.behindUpstream, null)
 })
 
-test('status read failure degrades to false, merge head presence is conflict', () => {
+test('a failed required read (git status) is flagged, never rendered as clean', () => {
   const output = [
     section('WT_HEAD', 0, 'abc1234'),
     section('WT_BRANCH', 0, 'feature'),
-    section('WT_STATUS', 1, ''),
+    section('WT_STATUS', 1, 'fatal: unable to read tree'),
     section('WT_MAIN', 1, ''),
     section('WT_MAIN_COUNT', 1, ''),
     section('WT_BASE', 0, 'bbb0000'),
@@ -113,14 +114,76 @@ test('status read failure degrades to false, merge head presence is conflict', (
     section('WT_MERGE_HEAD', 0, 'deadbee'),
   ].join('\n')
   const sample = parseWorktreeSample(output)
-  assert.equal(sample.gitFacts.hasUncommittedChanges, false)
-  assert.equal(sample.gitFacts.mergeConflict, true)
+  assert.equal(sample.gitFacts.mergeConflict, true, 'expected-absence rules still apply to refs')
   assert.equal(sample.gitFacts.mainHead, null)
-  assert.equal(sample.gitFacts.aheadOfMain, 0)
-  assert.equal(sample.gitFacts.behindMain, 0)
   assert.equal(sample.gitFacts.behindBase, 0)
   assert.equal(sample.gitFacts.aheadOfUpstream, 0)
   assert.equal(sample.gitFacts.behindUpstream, 1)
+  assert.deepEqual(
+    sample.requiredFailures.map((failure) => [failure.operation, failure.rc]),
+    [['git status --porcelain', 1]],
+  )
+  assert.match(sample.requiredFailures[0].error, /fatal:/)
+})
+
+test('canary failure marks the whole worktree plane unobservable', () => {
+  const output = [
+    section('WT_GITDIR', 128, 'fatal: not a git repository: /wt/broken'),
+    section('WT_HEAD', 128, ''),
+    section('WT_BRANCH', 128, 'fatal: not a git repository'),
+    section('WT_STATUS', 128, 'fatal: not a git repository'),
+    section('WT_MAIN', 128, ''),
+    section('WT_MAIN_COUNT', 128, ''),
+    section('WT_BASE', 128, ''),
+    section('WT_BASE_COUNT', 128, ''),
+    section('WT_UPSTREAM', 127, ''),
+    section('WT_UP_COUNT', 127, ''),
+    section('WT_MERGE_HEAD', 1, ''),
+  ].join('\n')
+  const sample = parseWorktreeSample(output)
+  assert.deepEqual(
+    sample.requiredFailures.map((failure) => failure.operation),
+    ['git rev-parse --git-dir', 'git status --porcelain', 'git branch --show-current'],
+  )
+  assert.equal(sample.gitFacts.head, null)
+})
+
+test('sampleWorktreeFacts rejects with the raw operation/rc/error when a required read fails', async () => {
+  const output = [
+    section('WT_GITDIR', 0, '/wt/issue-122/.git'),
+    section('WT_HEAD', 0, 'abc1234'),
+    section('WT_BRANCH', 0, 'clickvibe-issue-122'),
+    section('WT_STATUS', 1, 'fatal: unable to read tree'),
+    section('WT_MAIN', 1, ''),
+    section('WT_MAIN_COUNT', 1, ''),
+    section('WT_BASE', 1, ''),
+    section('WT_BASE_COUNT', 1, ''),
+    section('WT_UPSTREAM', 127, ''),
+    section('WT_UP_COUNT', 127, ''),
+    section('WT_MERGE_HEAD', 1, ''),
+  ].join('\n')
+  const ctx = {
+    shell: {
+      resolve: (spec: { command: string }) => spec,
+      run: async () => ({ exitCode: 0, stdout: { text: output }, stderr: { text: '' } }),
+    },
+  } as unknown as Context
+  await assert.rejects(
+    sampleWorktreeFacts(ctx, {
+      worktree: '/wt/issue-122',
+      branch: 'clickvibe-issue-122',
+      baseBranch: 'main',
+      baseBranchNeedsDefault: false,
+      frozenBase: null,
+      repoPath: null,
+    }),
+    (error: Error) => {
+      assert.match(error.message, /本地 Git 必需读取失败/)
+      assert.match(error.message, /git status --porcelain rc=1/)
+      assert.match(error.message, /unable to read tree/)
+      return true
+    },
+  )
 })
 
 test('unparseable or missing base count keeps zero counts', () => {
@@ -206,8 +269,10 @@ test('command builder pins the compound sample shape', () => {
   })
   // Worktree facts are gathered with the worktree as the command workdir.
   assert.match(command, /h=\$\(git rev-parse --short HEAD 2>\/dev\/null\)/)
-  assert.match(command, /git branch --show-current 2>\/dev\/null/)
-  assert.match(command, /git status --porcelain 2>\/dev\/null/)
+  assert.match(command, /git rev-parse --git-dir 2>&1/)
+  assert.match(command, /git branch --show-current 2>&1/, 'required read captures stderr')
+  assert.match(command, /git status --porcelain 2>&1/, 'required read captures stderr')
+  assert.match(command, /printf 'WT_GITDIR\\t%d\\t%s\\n'/)
   assert.match(command, /git rev-parse --short 'main' 2>\/dev\/null/)
   assert.match(command, /git rev-list --left-right --count "\$base"\.\.\.'HEAD' 2>\/dev\/null/)
   assert.match(command, /base='origin\/main'/)

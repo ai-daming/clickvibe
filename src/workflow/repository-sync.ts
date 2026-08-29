@@ -71,8 +71,8 @@ export async function readConfiguredRepositoryAdvance(
   if (!repoPath) return null
   let facts: RepositoryGitFacts
   if (observation) {
-    const sample = await observation.repositorySample(ctx, repoKey, { repoPath }).catch(() => null)
-    facts = sample ?? (await readRepositoryGitFacts(ctx, repoPath))
+    const envelope = await observation.repositorySample(ctx, repoKey, { repoPath }).catch(() => null)
+    facts = envelope ? envelope.sample : await readRepositoryGitFacts(ctx, repoPath)
   } else {
     facts = await readRepositoryGitFacts(ctx, repoPath)
   }

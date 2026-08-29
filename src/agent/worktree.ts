@@ -233,6 +233,7 @@ export async function ensureWorktree(
       timeoutMs: 60000,
       sandboxPolicy: policy,
     })
+    notifyLocalGitMutation({ repoKey, worktreePath: worktree }, 'worktree-mutation', 'ensureWorktree')
     await appendLog(workflow.key, 'dev', `[clickvibe] 已为 detached worktree 创建目标分支`)
   } else if (recovery.kind === 'attach-existing') {
     await runCommand(ctx, `git switch ${shellQuote(branch)}`, {
@@ -240,6 +241,7 @@ export async function ensureWorktree(
       timeoutMs: 60000,
       sandboxPolicy: policy,
     })
+    notifyLocalGitMutation({ repoKey, worktreePath: worktree }, 'worktree-mutation', 'ensureWorktree')
     await appendLog(workflow.key, 'dev', `[clickvibe] 已将 detached worktree 切换到现有目标分支`)
   } else if (recovery.kind === 'repair') {
     if (!remoteBaseExists && !branchExists) return { ok: false, error: `基线分支已不存在: ${remoteBase}` }

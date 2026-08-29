@@ -48,7 +48,20 @@ import { workflowBaseBranch } from './state-view.ts'
 import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
 import type { ClickVibeConfigV1 } from '../infra/contracts.ts'
 import { frozenBaseHash } from '../agent/baseline.ts'
-import { type LocalGitSnapshotReader, resolveConfiguredRepoPath } from '../infra/local-git-snapshot.ts'
+import {
+  type LocalGitSnapshotReader,
+  resolveConfiguredRepoPath,
+  worktreeScopeKey,
+} from '../infra/local-git-snapshot.ts'
+
+/** Metadata of the healthy snapshot a row was derived from (issue #122 AC). */
+export interface HealthyObservation {
+  freshness: 'current'
+  scope: string
+  generation: number
+  observedAt: number
+  sourceRevision: string | null
+}
 
 /** Sample once per generation; a failed sample retries exactly once (issue #122 Q2). */
 async function sampleWorktreeWithRetry(
@@ -56,7 +69,14 @@ async function sampleWorktreeWithRetry(
   observation: LocalGitSnapshotReader,
   config: ClickVibeConfig,
   workflow: IssueWorkflow,
-): Promise<{ ok: true; sample: WorktreeSample } | { ok: false; error: string; cause: unknown }> {
+): Promise<
+  | {
+      ok: true
+      sample: WorktreeSample
+      meta: { scope: string; generation: number; observedAt: number; sourceRevision: string | null }
+    }
+  | { ok: false; error: string; cause: unknown }
+> {
   // Mirror the legacy existsSync gate: a missing worktree yields the all-null
   // facts without invoking git at all, and branch facts still come from the
   // configured checkout.
@@ -87,6 +107,12 @@ async function sampleWorktreeWithRetry(
           workflow.baseRef ? workflowBaseBranch(workflow.baseRef) : undefined,
         ),
       },
+      meta: {
+        scope: worktreeScopeKey(workflow.repoKey, workflow.worktree),
+        generation: 0,
+        observedAt: Date.now(),
+        sourceRevision: null,
+      },
     }
   }
   const input = {
@@ -98,10 +124,30 @@ async function sampleWorktreeWithRetry(
     repoPath: resolveConfiguredRepoPath(config, workflow.repoKey),
   }
   try {
-    return { ok: true, sample: await observation.worktreeSample(ctx, workflow.repoKey, input) }
+    const envelope = await observation.worktreeSample(ctx, workflow.repoKey, input)
+    return {
+      ok: true,
+      sample: envelope.sample,
+      meta: {
+        scope: envelope.scope,
+        generation: envelope.generation,
+        observedAt: envelope.observedAt,
+        sourceRevision: envelope.sourceRevision,
+      },
+    }
   } catch (firstError) {
     try {
-      return { ok: true, sample: await observation.worktreeSample(ctx, workflow.repoKey, input) }
+      const envelope = await observation.worktreeSample(ctx, workflow.repoKey, input)
+      return {
+        ok: true,
+        sample: envelope.sample,
+        meta: {
+          scope: envelope.scope,
+          generation: envelope.generation,
+          observedAt: envelope.observedAt,
+          sourceRevision: envelope.sourceRevision,
+        },
+      }
     } catch (secondError) {
       const message = String(secondError instanceof Error ? secondError.message : secondError)
       console.warn(
@@ -120,7 +166,11 @@ export async function enrichWorkflowStates(
   observation?: LocalGitSnapshotReader,
 ): Promise<
   Array<
-    | (IssueWorkflow & { runStartedAt: number | null; derived: WorkflowDerived })
+    | (IssueWorkflow & {
+        runStartedAt: number | null
+        derived: WorkflowDerived
+        observation?: HealthyObservation
+      })
     | (IssueWorkflow & {
         runStartedAt: null
         derived: null
@@ -176,6 +226,8 @@ export async function enrichWorkflowStates(
         return row
       }
       const sample = attempt && attempt.ok ? attempt.sample : null
+      const healthyObservation: HealthyObservation | undefined =
+        attempt && attempt.ok ? { freshness: 'current' as const, ...attempt.meta } : undefined
       const branchFacts = sample
         ? sample.branchFacts
         : await readConfiguredBranchFacts(
@@ -189,7 +241,7 @@ export async function enrichWorkflowStates(
         fetchIssueContract(ctx, workflow.url).catch(() => null),
         fetchGithubIssueState(ctx, workflow.url),
       ])
-      return deriveWorkflowState(
+      const enriched = await deriveWorkflowState(
         ctx,
         {
           ...workflow,
@@ -207,6 +259,7 @@ export async function enrichWorkflowStates(
           ...branchFacts,
         },
       )
+      return healthyObservation ? { ...enriched, observation: healthyObservation } : enriched
     }),
   )
 }
