@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs'
 import { userInfo } from 'node:os'
 import { isAbsolute, relative, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import { notifyLocalGitMutation } from '../infra/local-git-snapshot.ts'
 import { parseWorktreeList } from '../agent/worktree.ts'
 import { fetchGithubIssueState, fetchGithubPrFact } from '../github/facts.ts'
 import { fetchIssue, issueSnapshot } from '../github/issue.ts'
@@ -274,7 +275,14 @@ export async function mergeAndCleanup(ctx: Context, payload: unknown): Promise<M
   if (mergingWorkflows.has(key)) return { ok: false, error: '该 PR 正在合并或清理,请等待当前请求完成' }
   mergingWorkflows.add(key)
   try {
-    return await withWorkflowLock(key, async () => mergeAndCleanupUnlocked(ctx, payload))
+    const result = await withWorkflowLock(key, async () => mergeAndCleanupUnlocked(ctx, payload))
+    notifyLocalGitMutation({ repoKey }, 'merge', 'mergeAndCleanup')
+    return result
+  } catch (error) {
+    // Merge attempts can fail midway and still change the local scene
+    // (conflicted merge, partial cleanup); the snapshot must not survive it.
+    notifyLocalGitMutation({ repoKey }, 'merge-failed', 'mergeAndCleanup')
+    throw error
   } finally {
     mergingWorkflows.delete(key)
   }

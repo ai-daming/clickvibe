@@ -31,6 +31,23 @@ function fakeShell(scenario: Scenario, commands: string[]) {
   return async (spec: { command: string }): Promise<ShellResult> => {
     const command = spec.command
     commands.push(command)
+    if (command.startsWith('set +e') && command.includes('REPO_MAIN_COUNT')) {
+      const enc = (value: string) => Buffer.from(value, 'utf8').toString('base64')
+      const line = (key: string, rc: number, value: string) => `${key}\t${rc}\t${enc(value)}`
+      return shellResult(
+        [
+          line('REPO_DEFAULT', 0, 'origin/main'),
+          line('REPO_BRANCH', 0, scenario.branch ?? ''),
+          line('REPO_HEAD', 0, 'abc1234'),
+          scenario.main
+            ? line('REPO_MAIN_COUNT', 0, `${scenario.main.behind} ${scenario.main.ahead}`)
+            : line('REPO_MAIN_COUNT', 1, ''),
+          scenario.checkout
+            ? line('REPO_HEAD_COUNT', 0, `${scenario.checkout.behind} ${scenario.checkout.ahead}`)
+            : line('REPO_HEAD_COUNT', 1, ''),
+        ].join('\n'),
+      )
+    }
     if (command === 'git fetch origin --prune') return shellResult()
     if (command === 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD') return shellResult('origin/main')
     if (command === 'git branch --show-current') return shellResult(scenario.branch ?? '')

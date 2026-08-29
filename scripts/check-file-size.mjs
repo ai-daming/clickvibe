@@ -24,8 +24,11 @@ for (const file of [...(await collect('src')), ...(await collect('tests'))].sort
   const contents = await readFile(path.join(root, file), 'utf8')
   const lines = contents === '' ? 0 : contents.split(/\r?\n/).length
   const exception = exceptionByPath.get(file)
-  if (file.startsWith('src/') && lines > 800) failures.push(`${file}: ${lines} lines (>800, split required)`)
-  else if (lines > 500 && !exception) failures.push(`${file}: ${lines} lines (>500, explanation required)`)
+  if (lines > 800 && !(exception?.over800Legacy === true)) {
+    failures.push(`${file}: ${lines} lines (>800, split required)`)
+  } else if (lines > 800 && exception?.over800Legacy === true) {
+    console.warn(`${file}: ${lines} lines (>800 legacy debt, tracked split in ${exception.issueRef})`)
+  } else if (lines > 500 && !exception) failures.push(`${file}: ${lines} lines (>500, explanation required)`)
   else if (exception && lines <= 500) failures.push(`${file}: stale exception (${lines} lines)`)
 }
 

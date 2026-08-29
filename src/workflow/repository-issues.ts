@@ -36,6 +36,8 @@ import {
   parseUrl,
   runCommand,
 } from '../infra/runtime.ts'
+import { localGitSnapshots, type LocalGitSnapshotReader } from '../infra/local-git-snapshot.ts'
+import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
 import { type IssueWorkflow, issueBodyHash, issueKey, loadAllWorkflows } from '../infra/state.ts'
 import { deriveAutoDevelopment } from './auto-development.ts'
 import { deriveWorkflowState } from './derive.ts'
@@ -46,7 +48,11 @@ import { readConfiguredRepositoryAdvance, type RepositoryAdvanceSignal } from '.
 export async function fetchRepositoryIssues(
   ctx: Context,
   payload: unknown,
-  overrides: { config?: ClickVibeConfig; workflows?: IssueWorkflow[] } = {},
+  overrides: {
+    config?: ClickVibeConfig
+    workflows?: IssueWorkflow[]
+    observation?: LocalGitSnapshotReader
+  } = {},
 ): Promise<
   | {
       ok: true
@@ -69,7 +75,13 @@ export async function fetchRepositoryIssues(
     const [githubSnapshot, allWorkflows, repoAdvance] = await Promise.all([
       fetchGithubRepoSnapshot(ctx, repoKey, fetchTtlMs(config), forceRefresh),
       overrides.workflows ? Promise.resolve(overrides.workflows) : loadAllWorkflows(),
-      readConfiguredRepositoryAdvance(ctx, config, repoKey, freshness?.lastSuccessAt ?? null),
+      readConfiguredRepositoryAdvance(
+        ctx,
+        config,
+        repoKey,
+        freshness?.lastSuccessAt ?? null,
+        overrides.observation ?? localGitSnapshots,
+      ),
     ])
     const allIssues = githubSnapshot.issues
       .filter((issue) => issue.pull_request === undefined)
@@ -116,14 +128,31 @@ export async function fetchRepositoryIssues(
     const project = basename(repoPath)
     let refs = new Set<string>()
     let defaultBranch = 'main'
-    if (existsSync(repoPath)) {
+    let counts: Record<string, number> | null = null
+    if (existsSync(repoPath) && overrides.observation) {
+      // Issue #122 Q3: enumeration runs on the single observation primitive —
+      // one compound subprocess per repo per generation, retry-once and both
+      // attempts' evidence owned by the registry (Runtime Observer round 7).
+      const outcome = await overrides.observation.observeEnumeration(ctx, repoKey, { repoPath })
+      if (!outcome.ok) {
+        logTaskDiagnostic('local-git-enumeration-sample-failed', {
+          repoKey,
+          repoPath,
+          attempts: outcome.attempts,
+        })
+        throw new Error(`本地 Git 枚举不可用(已重试一次): ${outcome.error.message}`)
+      }
+      refs = new Set(outcome.envelope.sample.refs)
+      defaultBranch = outcome.envelope.sample.defaultBranch || defaultBranch
+      counts = outcome.envelope.sample.counts
+    } else if (existsSync(repoPath)) {
       const policy = { mode: 'read-only' as const, workspaceRoot: repoPath }
       const [refOutput, defaultRef] = await Promise.all([
         runCommand(ctx, "git for-each-ref --format='%(refname:short)' refs/heads refs/remotes/origin", {
           workdir: repoPath,
           timeoutMs: 5000,
           sandboxPolicy: policy,
-        }).catch(() => ''),
+        }),
         runCommand(ctx, 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD', {
           workdir: repoPath,
           timeoutMs: 3000,
@@ -181,7 +210,11 @@ export async function fetchRepositoryIssues(
           prStatusKnown = true
         }
         let hasCommits = false
-        if (branchExists && existsSync(repoPath)) {
+        if (counts !== null) {
+          // Snapshot plane: the enumeration already counted every local head
+          // against the same default base; a missing entry is expected absence.
+          hasCommits = branchExists && (counts[branch] ?? 0) > 0
+        } else if (branchExists && existsSync(repoPath)) {
           hasCommits = await runCommand(
             ctx,
             `git rev-list --count ${shellQuote(`origin/${defaultBranch}`)}..${shellQuote(branch)}`,
@@ -190,9 +223,13 @@ export async function fetchRepositoryIssues(
               timeoutMs: 10000,
               sandboxPolicy: { mode: 'read-only', workspaceRoot: repoPath },
             },
-          )
-            .then((count) => Number(count) > 0)
-            .catch(() => false)
+          ).then((count) => {
+            const value = Number(count)
+            if (!Number.isSafeInteger(value) || value < 0) {
+              throw new Error(`本地 Git 提交计数非法(${branch}): ${count}`)
+            }
+            return value > 0
+          })
         }
         const workflow: IssueWorkflow = existing ?? {
           key: issueKey(repoKey, String(issue.number)),

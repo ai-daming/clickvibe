@@ -18,6 +18,7 @@
  *                      └── rework ────────┘
  */
 import type { Context } from '@deepseek-ai/cordis'
+import { notifyLocalGitMutation } from '../infra/local-git-snapshot.ts'
 import { buildResumePrompt, resolvePromptSnapshot } from '../agent/prompts.ts'
 import {
   attachAgentProcess,
@@ -127,6 +128,11 @@ export async function resumeDevelop(
     pushTaskLine(live, `[clickvibe] git fetch 失败(继续): ${String(e instanceof Error ? e.message : e)}`)
   }
 
+  notifyLocalGitMutation(
+    { repoKey: workflow.repoKey, worktreePath: workflow.worktree },
+    'remote-fetch',
+    'resumeDevelopment',
+  )
   // issue #26:worktree 落后基线或处于冲突合并中时,把「合并 main、解决冲突」
   // 作为前置指令交给 agent(danger-full-access 有能力处理),review 意见不再
   // 被同步门禁挡住送不进来。

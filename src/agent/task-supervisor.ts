@@ -18,6 +18,7 @@
  *                      └── rework ────────┘
  */
 import type { Context } from '@deepseek-ai/cordis'
+import { notifyLocalGitMutation } from '../infra/local-git-snapshot.ts'
 import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
 import { type DevelopAgent, LineLog, shouldFallbackFromExactResume } from '../infra/develop-core.ts'
 import { LineBuffer } from '../infra/line-buffer.ts'
@@ -231,6 +232,13 @@ export function finishTask(
   task.exitCode = exitCode
   pushTaskLine(task, `[clickvibe] 任务结束:${status},退出码 ${exitCode ?? '未知'}`, { status, exitCode })
   task.closed = true
+  // Agent-owned worktree mutations stay invisible while the task runs; its
+  // terminal state is the deterministic invalidation point (issue #122).
+  notifyLocalGitMutation(
+    { repoKey: task.workflow.repoKey, worktreePath: task.workflow.worktree },
+    `agent-task-${status}`,
+    'finishTask',
+  )
   hostReservations.get(task)?.settle(status)
   logTaskDiagnostic('live-task-close', {
     taskId: task.taskId,

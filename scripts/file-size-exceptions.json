@@ -1,8 +1,9 @@
 [
   {
     "path": "tests/routes.test.ts",
-    "reason": "Existing route-contract suite is intentionally unchanged during issue #61's production-code-only split.",
-    "issueRef": "#61"
+    "reason": "Legacy route-contract suite from the pre-split monolith (#61); >800 hard-limit legacy debt tracked for a dedicated test-only split (issue below), out of scope for feature PRs.",
+    "issueRef": "#145",
+    "over800Legacy": true
   },
   {
     "path": "src/workflow/merge.ts",
@@ -18,5 +19,15 @@
     "path": "tests/sync-conflict.test.ts",
     "reason": "Issue #127 adds merge-metadata replay coverage to the existing real-git sync-conflict suite; splitting the integration fixture is deferred from the release gate repair.",
     "issueRef": "#127"
+  },
+  {
+    "path": "src/infra/local-git-sampler.ts",
+    "reason": "Issue #122 keeps the compound builders and parsers (worktree, repository, enumeration) in one module so shell output and its parsing stay co-reviewable; further splitting is deferred from the L3 snapshot plane.",
+    "issueRef": "#122"
+  },
+  {
+    "path": "tests/local-git-sampler-equivalence.test.ts",
+    "reason": "Issue #122 real-git equivalence, the final-behavior matrix (review round 4/5) and the deleted-base/non-git regressions share one fixture builder; splitting the matrix from equivalence is deferred.",
+    "issueRef": "#122"
   }
 ]
