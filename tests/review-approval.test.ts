@@ -16,7 +16,9 @@ test('passed review with a PR submits a native GitHub approval', async () => {
   )
 
   assert.equal(result, 'approved')
-  assert.deepEqual(commands, ["gh pr review 'https://github.com/o/r/pull/29' --approve --body 'LGTM'"])
+  assert.deepEqual(commands, [
+    "gh pr review 'https://github.com/o/r/pull/29' --approve --body '**身份：Review Agent**\n\nLGTM'",
+  ])
 })
 
 test('failed review stays neutral and does not submit an approval', async () => {

@@ -76,6 +76,8 @@ test('passed review comment points to merge', () => {
   assert.match(body, /- passed: true\n- next: merge/)
   assert.match(body, /- next: merge\n- round: 1\n- stats: commits=1 filesChanged=1 insertions=2 deletions=0/)
   assert.match(body, /✅ ClickVibe Review 通过/)
+  assert.match(body, /\*\*身份：Review Agent\*\*/)
+  assert.match(body, /\bLGTM\b/)
   assert.match(body, /下一步:可合并当前提交。/)
 })
 
@@ -106,6 +108,8 @@ test('failed review comment lists every issue and points to rework', () => {
     at: '2026-08-22T10:00:00Z',
   })
   assert.match(body, /- passed: false\n- next: rework/)
+  assert.match(body, /\*\*身份：Review Agent\*\*/)
+  assert.doesNotMatch(body, /\bLGTM\b/)
   assert.match(body, /- 竞态\n- 缺测试/)
   assert.match(body, /下一步:请重新开发并处理上述问题。/)
 })

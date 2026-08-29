@@ -226,7 +226,9 @@ export async function buildReviewPrompt(
       ...(extraContext ? ['附加上下文:', extraContext] : []),
     ],
     requirements: [
-      '本轮 review 采用根因 review 协议:先读取 PR/issue 上全部历史 review 轮次做母题分类(同类复发必须点名轮次),对每个 finding 给出代码根因(什么构造让这类问题不可能)与过程根因(为什么活到本轮);先做静态枚举审计(枚举全部可违反路径,非构造保护即为 finding,不需要复现),再做动态对抗验证(CRITICAL 必须复现,含失败率);判定修复高度时对比改造前后的公开 API/导出面,排除改名式修复;结论按 verdict 输出(pass/fix-these/stop-and-redesign),同类连续复发或 diff 持续发散时输出 stop-and-redesign 而非问题清单。若仓库存在 skills/root-cause-review/SKILL.md 或 docs/fix-discipline.md,以其全文为准。',
+      '身份：Review Agent;公开结论和 Review Meta 必须明确标注该身份。通过时使用 LGTM,但仅限当前精确 HEAD 达到 approval 门禁;存在 blocker、CI 未绿、draft、基线变化或未完成的必需验证时禁止使用 LGTM。',
+      '本轮 review 采用根因 review 协议:先读取 PR/issue 上全部历史 review 轮次并建立 closure ledger,再做母题分类;对每个 blocking finding 必须给出契约锚点、当前 HEAD 的可复现行为、影响、最小关闭条件与明确非目标,并区分代码根因和过程根因。静态枚举先找全部可能绕过路径,动态对抗验证负责证明正常可达影响(CRITICAL 必须复现);同类连续复发、diff 发散或概念连续新增时输出 stop-and-redesign。若仓库存在 skills/root-cause-review/SKILL.md 或 docs/fix-discipline.md,以其全文为准。',
+      '执行奥卡姆门:修复建议新增类型/协议段/表/层之前,说明对应 AC、读取其值的生产消费者、删除后可复现的最终行为差异及现有机制为何不能表达;答不全不得作为本 PR 的修复要求。Reviewer 只规定不变量与关闭条件,Review 评论不构成未经接受的架构授权。',
       '先执行 git fetch origin 同步远端最新状态(并行开发时 base 可能已变化)。',
       GITHUB_USAGE_REQUIREMENT,
       `执行 git diff ${base}...HEAD 查看完整改动。`,

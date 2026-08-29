@@ -2869,7 +2869,9 @@ test('invalid exact review session clears the stale id and falls back to a fresh
       /^== Review Meta ==\n- event: review\n- commit: abc123\n- issue: #918\n- passed: true\n- next: merge/m,
     )
     assert.match(comments[0].body, /下一步:可合并当前提交。/)
-    assert.deepEqual(approvals, ["gh pr review 'https://github.com/o/r/pull/29' --approve --body 'LGTM'"])
+    assert.deepEqual(approvals, [
+      "gh pr review 'https://github.com/o/r/pull/29' --approve --body '**身份：Review Agent**\n\nLGTM'",
+    ])
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome

@@ -442,6 +442,10 @@ test('legacy review without a persisted baseline retains origin/main without pro
     'abc123',
   )
   assert.match(prompt, /git diff origin\/main\.\.\.HEAD/)
+  assert.match(prompt, /身份：Review Agent/)
+  assert.match(prompt, /契约锚点.*可复现行为.*最小关闭条件.*明确非目标/)
+  assert.match(prompt, /奥卡姆门/)
+  assert.match(prompt, /通过时.*LGTM/)
 })
 
 test('fresh review removes ClickVibe review lists but preserves ordinary requirement comments', () => {
@@ -489,6 +493,8 @@ test('reworkRoundDirective prefers an explicit next-round directive block', asyn
     reviewMeta(['- passed: false', '- verdict: fix-these']) +
     '\n\n## 下一轮指令\n按 docs/fix-discipline.md〈修复轮〉模板执行…'
   assert.match(String(reworkRoundDirective(withDirective)), /「下一轮指令」段:以该段为准执行/)
+  assert.match(String(reworkRoundDirective(withDirective)), /关闭条件/)
+  assert.doesNotMatch(String(reworkRoundDirective(withDirective)), /唯一指定/)
 })
 
 test('reworkRoundDirective maps stop-and-redesign verdicts to the redesign template', async () => {
@@ -498,6 +504,8 @@ test('reworkRoundDirective maps stop-and-redesign verdicts to the redesign templ
   )
   assert.match(String(redesign), /重设计轮/)
   assert.match(String(redesign), /fix-discipline/)
+  assert.match(String(redesign), /只产出待确认设计/)
+  assert.match(String(redesign), /未经确认不得实现/)
 
   // verdict 缺失但 next 标注 stop-and-redesign 的旧格式同样触发
   const byNextOnly = reworkRoundDirective(reviewMeta(['- passed: false', '- next: stop-and-redesign']))

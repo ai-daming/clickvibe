@@ -65,7 +65,11 @@ export function buildReviewComment(input: ReviewCommentInput): string {
   const result = input.passed
     ? input.issues.length > 0
       ? [
+          '**身份：Review Agent**',
+          '',
           '## ✅ ClickVibe Review 通过',
+          '',
+          'LGTM',
           '',
           '未发现阻塞问题(随行备注 ' + input.issues.length + ' 条,不影响合并):',
           '',
@@ -73,8 +77,20 @@ export function buildReviewComment(input: ReviewCommentInput): string {
           '',
           '下一步:可合并当前提交。',
         ]
-      : ['## ✅ ClickVibe Review 通过', '', '未发现阻塞问题。', '', '下一步:可合并当前提交。']
+      : [
+          '**身份：Review Agent**',
+          '',
+          '## ✅ ClickVibe Review 通过',
+          '',
+          'LGTM',
+          '',
+          '未发现阻塞问题。',
+          '',
+          '下一步:可合并当前提交。',
+        ]
     : [
+        '**身份：Review Agent**',
+        '',
         `## ❌ ClickVibe Review 发现问题(${input.issues.length} 条)`,
         '',
         ...input.issues.map((issue) =>
@@ -96,6 +112,7 @@ export function buildReviewComment(input: ReviewCommentInput): string {
     ...(input.fixedRound === undefined ? [] : [`- fixed-round: ${input.fixedRound}`]),
     `- stats: ${statsMeta(input.stats)}`,
     `- agent: ${input.agent}`,
+    '- role: Review Agent',
     `- at: ${input.at}`,
     '',
     ...result,
