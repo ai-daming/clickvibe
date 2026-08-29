@@ -20,6 +20,7 @@
 
 import { existsSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
+import { remoteFetch, remotePush } from '../infra/remote-git.ts'
 import { notifyLocalGitMutation } from '../infra/local-git-snapshot.ts'
 import { updateBaseTip } from '../agent/baseline.ts'
 import { shellQuote } from '../infra/develop-core.ts'
@@ -81,7 +82,7 @@ async function syncWorktreeLocked(ctx: Context, key: string): Promise<SyncResult
       if (changes) throw new Error('worktree 有未提交改动,请先提交或清理后再同步')
     }
     await appendLog(workflow.key, 'dev', '[clickvibe] 同步:git fetch origin…')
-    await runCommand(ctx, 'git fetch origin --prune', {
+    await remoteFetch(ctx, {
       workdir: workflow.worktree,
       timeoutMs: 60_000,
       sandboxPolicy: policy,
@@ -173,10 +174,11 @@ async function syncWorktreeLocked(ctx: Context, key: string): Promise<SyncResult
     }
     const head = await readWorktreeHead(ctx, workflow.worktree)
     await appendLog(workflow.key, 'dev', `[clickvibe] 同步:推送 ${workflow.branch} 到 origin…`)
-    await runCommand(ctx, `git push origin ${shellQuote(workflow.branch)}`, {
+    await remotePush(ctx, {
       workdir: workflow.worktree,
       timeoutMs: 60_000,
       sandboxPolicy: policy,
+      refspec: shellQuote(workflow.branch),
     })
     await appendLog(workflow.key, 'dev', `[clickvibe] 同步并推送完成,HEAD ${head ?? '未知'}`)
     // 记录同步事件到权威时间线(不改变开发/审查语义)

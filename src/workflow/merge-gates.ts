@@ -19,6 +19,7 @@ import { existsSync } from 'node:fs'
  *                      └── rework ────────┘
  */
 import type { Context } from '@deepseek-ai/cordis'
+import { remoteFetch } from '../infra/remote-git.ts'
 import { fetchIssueRestDetail } from '../github/reads.ts'
 import { type MergeOverrideGate, shellQuote } from '../infra/develop-core.ts'
 import { parseUrl, runCommand } from '../infra/runtime.ts'
@@ -115,7 +116,12 @@ export async function isSyncEquivalentMerge(
   }
   const remoteBase = `origin/${baseBranch}`
   // 先同步远端:被检的 H(远端分支 HEAD)与最新冻结基线对象必须在本地可解析
-  if (!(await gitOk('fetch origin --prune', 60_000))) return false
+  if (
+    !(await remoteFetch(ctx, { workdir: worktree, timeoutMs: 60_000, sandboxPolicy: policy })
+      .then(() => true)
+      .catch(() => false))
+  )
+    return false
   const head = await gitOut(`rev-parse --verify ${shellQuote(`${prHead}^{commit}`)}`)
   const reviewed = await gitOut(`rev-parse --verify ${shellQuote(`${reviewedHash}^{commit}`)}`)
   if (!head || !reviewed || head === reviewed) return false

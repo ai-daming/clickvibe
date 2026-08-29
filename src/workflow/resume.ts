@@ -18,6 +18,7 @@
  *                      └── rework ────────┘
  */
 import type { Context } from '@deepseek-ai/cordis'
+import { remoteFetch } from '../infra/remote-git.ts'
 import { notifyLocalGitMutation } from '../infra/local-git-snapshot.ts'
 import { buildResumePrompt, resolvePromptSnapshot } from '../agent/prompts.ts'
 import {
@@ -29,7 +30,7 @@ import {
 } from '../agent/task-supervisor.ts'
 import { buildFreshAgentCommand, buildResumeAgentCommand } from '../infra/develop-core.ts'
 import { buildMergePreface } from '../infra/git.ts'
-import { type LiveTask, parseUrl, readWorktreeHead, resumeTaskGate, runCommand, taskId } from '../infra/runtime.ts'
+import { type LiveTask, parseUrl, readWorktreeHead, resumeTaskGate, taskId } from '../infra/runtime.ts'
 import { clearStaleSessionId, issueKey, loadWorkflow, resolveSessionForAgent } from '../infra/state.ts'
 import {
   observeWorkflowTask,
@@ -118,9 +119,10 @@ export async function resumeDevelop(
   const command = launch.startsFresh ? buildFreshAgentCommand(agent) : buildResumeAgentCommand(agent, sessionId)
   // 续会话前也同步远端(并行开发时 base 会变化)
   try {
-    await runCommand(ctx, 'git fetch origin', {
+    await remoteFetch(ctx, {
       workdir: workflow.worktree,
       timeoutMs: 30000,
+      prune: false,
       sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: workflow.worktree },
     })
     pushTaskLine(live, `[clickvibe] 已同步远端(origin)`)

@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
+import { remoteFetch } from './remote-git.ts'
 import { shellQuote } from './develop-core.ts'
 import { runCommand } from './runtime.ts'
 import type { WorkflowStorageIdentity } from './state-layout.ts'
@@ -46,7 +47,7 @@ export async function restoreMissingOriginBranch(
   hash: string,
 ): Promise<void> {
   const policy = { mode: 'danger-full-access' as const, workspaceRoot: repoPath }
-  await runCommand(ctx, 'git fetch origin --prune', { workdir: repoPath, timeoutMs: 60_000, sandboxPolicy: policy })
+  await remoteFetch(ctx, { workdir: repoPath, timeoutMs: 60_000, sandboxPolicy: policy })
   const remoteRef = `refs/remotes/origin/${branch}`
   const existing = await runCommand(ctx, `git rev-parse --verify ${shellQuote(remoteRef)}`, {
     workdir: repoPath,

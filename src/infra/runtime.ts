@@ -27,6 +27,7 @@ import { notifyLocalGitMutation } from './local-git-invalidate.ts'
  *                      └── rework ────────┘
  */
 import type { Context } from '@deepseek-ai/cordis'
+import { remoteFetch } from './remote-git.ts'
 import { parse as parseYaml } from 'yaml'
 import { parseClickVibeConfigV1 } from './project-binding.ts'
 import { verifyProjectBindingRepository } from './repository-identity.ts'
@@ -362,7 +363,7 @@ export async function ensureConfiguredRepoFresh(
     fetchTtlMs(config),
     async () => {
       try {
-        await runCommand(ctx, 'git fetch origin --prune', {
+        await remoteFetch(ctx, {
           workdir: repoPath,
           timeoutMs: 30_000,
           sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: repoPath },
