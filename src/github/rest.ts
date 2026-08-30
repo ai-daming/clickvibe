@@ -362,6 +362,17 @@ export class GithubRestReader {
       record.status = 'observed'
       record.observedAt = now
       record.observedKey = key
+      // The completion is a durable fact (#133: invalidation without a
+      // recorded re-observation stays unknown), persisted readback-able.
+      logTaskDiagnostic('github-rest-invalidation-observed', {
+        seq: record.seq,
+        generation: record.generation,
+        prefix: record.prefix,
+        reason: record.reason,
+        trigger: record.trigger,
+        observedKey: record.observedKey,
+        observedAt: record.observedAt,
+      })
     }
   }
 
@@ -450,10 +461,13 @@ export class GithubRestReader {
       this.recordBudgetSnapshot(response.headers)
       const detail = [result.stderr?.text, response.body].filter(Boolean).join('\n')
       if (isRateLimited(response, detail)) {
-        this.recordUpstreamFailure(requestOperation, new GithubRateLimitError(resetFrom(response.headers, Date.now())))
-        this.circuitUntil = resetFrom(response.headers, Date.now())
         const kind: GithubRateLimitKind =
           response.headers.get('x-ratelimit-remaining') === '0' ? 'primary' : 'secondary'
+        this.recordUpstreamFailure(
+          requestOperation,
+          new GithubRateLimitError(resetFrom(response.headers, Date.now()), kind),
+        )
+        this.circuitUntil = resetFrom(response.headers, Date.now())
         this.circuitKind = kind
         const resource = response.headers.get('x-ratelimit-resource') ?? 'core'
         logTaskDiagnostic('github-rate-circuit-trip', {
@@ -489,7 +503,10 @@ export class GithubRestReader {
       const response = await this.request(path, accept, timeoutMs)
       try {
         return JSON.parse(response.body || 'null') as T
-      } catch {
+      } catch (parseError) {
+        // The upstream child returned an unparseable body: it is upstream
+        // evidence even though the child itself exited zero (review round 3).
+        this.recordUpstreamFailure(`GET ${path}`, parseError)
         throw new Error(`GitHub REST 返回了无效 JSON: ${path}`)
       }
     } catch (error) {
@@ -503,7 +520,8 @@ export class GithubRestReader {
       const response = await this.request(path, undefined, timeoutMs, { method, body })
       try {
         return JSON.parse(response.body || 'null') as T
-      } catch {
+      } catch (parseError) {
+        this.recordUpstreamFailure(`${method} ${path}`, parseError)
         throw new Error(`GitHub REST 返回了无效 JSON: ${path}`)
       }
     } catch (error) {

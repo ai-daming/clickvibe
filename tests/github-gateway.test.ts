@@ -209,3 +209,77 @@ test('rate exhaustion trips the circuit carrying the bucket snapshot', async () 
     /额度已用完/,
   )
 })
+
+test('composed JSON parse failure keeps the upstream level naming the garbage child', async () => {
+  // Review round 3: HTTP 200 + valid rate headers + body=not-json must not
+  // lose the upstream row — the child that returned the unparseable body is
+  // the evidence (#133 failures retain the upstream operation).
+  const { ctx } = okShell({ exitCode: 0, stdout: { text: included(200, 'not-json', rateHeaders('4998')) } })
+  const reader = new GithubRestReader(ctx as never)
+  await assert.rejects(
+    reader.cachedResource('detail:o/r/1', null, () => reader.json('repos/o/r/issues/1')),
+    /返回了无效 JSON/,
+  )
+  const upstream = reader.evidence.failureRecords.find((record) => record.level === 'upstream')
+  assert.equal(upstream?.operation, 'GET repos/o/r/issues/1')
+  assert.match(upstream?.message ?? '', /not-json|无效 JSON/)
+  const access = reader.evidence.failureRecords.find((record) => record.level === 'access')
+  assert.equal(access?.scope, 'detail:o/r/1')
+})
+
+test('secondary rate-limit upstream evidence carries the secondary classification', async () => {
+  // Review round 3: a 403 secondary limit must not be persisted as 额度已用完
+  // (primary) at the upstream level while the circuit records secondary.
+  const secondary = included(403, '{"message":"You have exceeded a secondary rate limit"}', {
+    ...rateHeaders('4990'),
+    'retry-after': '60',
+  })
+  const { ctx } = okShell({ exitCode: 0, stdout: { text: secondary } })
+  const reader = new GithubRestReader(ctx as never)
+  await assert.rejects(reader.json('repos/o/r'), /二级限流/)
+  const upstream = reader.evidence.failureRecords.find((record) => record.level === 'upstream')
+  assert.match(upstream?.message ?? '', /二级限流/, 'upstream evidence must match the actual kind')
+  assert.doesNotMatch(upstream?.message ?? '', /额度已用完/)
+})
+
+test('subsequent observation persists to diagnostics and survives readback', async () => {
+  const previousHome = process.env.HOME
+  const home = mkdtempSync(join(tmpdir(), 'clickvibe-gateway-inv-'))
+  process.env.HOME = home
+  try {
+    const { ctx } = okShell({ exitCode: 0, stdout: { text: included(200, '"v"', rateHeaders('4998')) } })
+    const reader = new GithubRestReader(ctx as never)
+    reader.invalidate('repo:o/r', 'comment-published', 'publishDeliveryComment')
+    await reader.cachedAggregate('repo:o/r', 30_000, false, () => Promise.resolve(['i']))
+    assert.equal(reader.evidence.invalidationRecords[0].status, 'observed')
+    const globalDiag = join(home, '.clickvibe', 'state', 'diagnostics.jsonl')
+    for (let spin = 0; spin < 100; spin++) {
+      try {
+        const lines = readFileSync(globalDiag, 'utf8')
+        if (lines.includes('github-rest-invalidation-observed')) {
+          assert.match(lines, /"prefix":"repo:o\/r"/)
+          assert.match(lines, /"observedKey":"repo:o\/r"/)
+          return
+        }
+      } catch {
+        /* not yet flushed */
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    assert.fail('observed invalidation event never reached diagnostics.jsonl')
+  } finally {
+    process.env.HOME = previousHome
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('spill read failure keeps the upstream level (dispatched child, unreadable output)', async () => {
+  const { ctx } = okShell({
+    exitCode: 0,
+    stdout: { text: '', truncated: true, spillPath: '/nonexistent/clickvibe-spill' },
+  })
+  const reader = new GithubRestReader(ctx as never)
+  await assert.rejects(reader.json('repos/o/r/pulls'), /spill|ENOENT|失败/)
+  assert.equal(reader.evidence.failureRecords[0].level, 'upstream')
+  assert.equal(reader.evidence.failureRecords[0].operation, 'GET repos/o/r/pulls')
+})
