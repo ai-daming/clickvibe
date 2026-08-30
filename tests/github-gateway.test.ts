@@ -283,3 +283,85 @@ test('spill read failure keeps the upstream level (dispatched child, unreadable 
   assert.equal(reader.evidence.failureRecords[0].level, 'upstream')
   assert.equal(reader.evidence.failureRecords[0].operation, 'GET repos/o/r/pulls')
 })
+
+test('a response with partial rate headers still leaves an observation', async () => {
+  // Review round 4: a response carrying resource/limit/reset but missing
+  // remaining must not vanish from the series — present fields survive,
+  // missing ones are explicitly null (unknown, not absence).
+  const partial = included(200, '"ok"', {
+    'x-ratelimit-resource': 'search',
+    'x-ratelimit-limit': '30',
+    'x-ratelimit-reset': '1893456100',
+  })
+  const responses = [
+    { exitCode: 0, stdout: { text: partial } },
+    { exitCode: 0, stdout: { text: included(200, '1', rateHeaders('4998')) } },
+  ]
+  let index = 0
+  const ctx = {
+    shell: {
+      resolve: (spec: unknown) => spec,
+      run: async () => {
+        const next = responses[Math.min(index, responses.length - 1)]
+        index++
+        return next
+      },
+    },
+  }
+  const reader = new GithubRestReader(ctx as never)
+  await reader.json('search/code')
+  await reader.json('repos/o/r')
+  const [searchSample, coreSample] = reader.evidence.rateLimitSamples
+  assert.equal(searchSample.resource, 'search', 'partial-header responses are still observations')
+  assert.equal(searchSample.limit, 30)
+  assert.equal(searchSample.reset, 1_893_456_100_000)
+  assert.equal(searchSample.remaining, null, 'missing field is unknown, not zero')
+  assert.equal(searchSample.used, null)
+  assert.equal(coreSample.resource, 'core', 'the following full response records normally')
+  assert.equal(reader.evidence.rateLimitBuckets.search?.remaining, null)
+})
+
+test('a response with no rate headers at all still counts as an observation with nulls', async () => {
+  const bare = included(200, '"ok"', {})
+  const { ctx } = okShell({ exitCode: 0, stdout: { text: bare } })
+  const reader = new GithubRestReader(ctx as never)
+  await reader.json('repos/o/r/meta')
+  // Every response leaves an observation; with no headers present the
+  // resource is unknown (null-marked core-less row), distinguishable from
+  // "no response happened".
+  assert.equal(reader.evidence.rateLimitSamples.length, 1)
+  assert.equal(reader.evidence.rateLimitSamples[0].limit, null)
+  assert.equal(reader.evidence.rateLimitSamples[0].remaining, null)
+  assert.equal(reader.evidence.rateLimitSamples[0].reset, null)
+})
+
+test('pagination shape failure keeps the upstream operation and the access scope', async () => {
+  // Review round 4: HTTP 200 + valid JSON + wrong shape ({"items":[]}) must
+  // record the upstream GET with the real page path; a composed aggregate
+  // access keeps its scope alongside.
+  const wrongShape = included(200, '{"items":[]}', rateHeaders('4998'))
+  const { ctx } = okShell({ exitCode: 0, stdout: { text: wrongShape } })
+  const reader = new GithubRestReader(ctx as never)
+  await assert.rejects(
+    reader.cachedAggregate('repo:o/r/aggregated', 30_000, false, () => reader.paginate('repos/o/r/contributors')),
+    /分页返回格式无效/,
+  )
+  const upstream = reader.evidence.failureRecords.find((record) => record.level === 'upstream')
+  assert.equal(upstream?.operation, 'GET repos/o/r/contributors?per_page=100&page=1')
+  assert.match(upstream?.message ?? '', /items|格式无效|Array/)
+  const access = reader.evidence.failureRecords.find((record) => record.level === 'access')
+  assert.equal(access?.scope, 'repo:o/r/aggregated')
+})
+
+test('direct pagination shape failure records its own access level', async () => {
+  const wrongShape = included(200, '{"total": 3}', rateHeaders('4998'))
+  const { ctx } = okShell({ exitCode: 0, stdout: { text: wrongShape } })
+  const reader = new GithubRestReader(ctx as never)
+  await assert.rejects(reader.paginate('repos/o/r/milestones'), /分页返回格式无效/)
+  assert.ok(reader.evidence.failureRecords.some((record) => record.level === 'upstream'))
+  assert.ok(
+    reader.evidence.failureRecords.some(
+      (record) => record.level === 'access' && record.operation.includes('milestones'),
+    ),
+  )
+})

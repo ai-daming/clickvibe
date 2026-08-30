@@ -31,7 +31,8 @@ interface CachedValue<T> {
 
 /** One observed rate-limit sample from a single response (#133: every response records the bucket). */
 export interface RateLimitSample {
-  resource: string
+  /** null when the response carried no rate headers at all. */
+  resource: string | null
   limit: number | null
   remaining: number | null
   /** limit − remaining when both are known. */
@@ -376,14 +377,25 @@ export class GithubRestReader {
     }
   }
 
+  /**
+   * Every response leaves an observation (review round 4): present fields
+   * survive, missing ones are explicit null (unknown) — a partial-header or
+   * bare response is distinguishable from "no response happened" and never
+   * drops an already-seen bucket/limit/reset.
+   */
   private recordBudgetSnapshot(headers: Map<string, string>): void {
-    const remainingRaw = headers.get('x-ratelimit-remaining')
-    if (remainingRaw === undefined) return
-    const resetSeconds = Number(headers.get('x-ratelimit-reset'))
+    const hasAnyHeader = [
+      'x-ratelimit-remaining',
+      'x-ratelimit-limit',
+      'x-ratelimit-reset',
+      'x-ratelimit-resource',
+    ].some((name) => headers.get(name) !== undefined)
+    const resource = headers.get('x-ratelimit-resource') ?? (hasAnyHeader ? 'core' : null)
     const limitRaw = Number(headers.get('x-ratelimit-limit'))
-    const resource = headers.get('x-ratelimit-resource') ?? 'core'
+    const remainingRaw = Number(headers.get('x-ratelimit-remaining'))
+    const resetSeconds = Number(headers.get('x-ratelimit-reset'))
     const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : null
-    const remaining = Number.isFinite(Number(remainingRaw)) ? Number(remainingRaw) : null
+    const remaining = Number.isFinite(remainingRaw) ? Number(remainingRaw) : null
     const sample: RateLimitSample = {
       resource,
       limit,
@@ -396,7 +408,7 @@ export class GithubRestReader {
     if (this.evidence.rateLimitSamples.length > MAX_GATEWAY_EVIDENCE_RECORDS) {
       this.evidence.rateLimitSamples.splice(0, this.evidence.rateLimitSamples.length - MAX_GATEWAY_EVIDENCE_RECORDS)
     }
-    this.evidence.rateLimitBuckets[resource] = sample
+    if (resource !== null) this.evidence.rateLimitBuckets[resource] = sample
   }
 
   private async request(
@@ -534,8 +546,17 @@ export class GithubRestReader {
     const values: T[] = []
     for (let page = 1; ; page++) {
       const separator = path.includes('?') ? '&' : '?'
-      const batch = await this.json<T[]>(`${path}${separator}per_page=100&page=${page}`, accept, timeoutMs)
-      if (!Array.isArray(batch)) throw new Error('GitHub REST 分页返回格式无效')
+      const pagePath = `${path}${separator}per_page=100&page=${page}`
+      const batch = await this.json<T[]>(pagePath, accept, timeoutMs)
+      if (!Array.isArray(batch)) {
+        // The upstream child answered 2xx with the wrong shape: the raw page
+        // operation is the evidence (review round 4), at both levels — this
+        // access (or the composed wrapper's scope) plus the upstream GET.
+        const shapeFailure = new Error(`GitHub REST 分页返回格式无效: ${JSON.stringify(batch).slice(0, 120)}`)
+        this.recordUpstreamFailure(`GET ${pagePath}`, shapeFailure)
+        if (!this.isComposed()) this.recordFailure(`GET ${path} (paginate)`, shapeFailure, null)
+        throw shapeFailure
+      }
       values.push(...batch)
       if (batch.length < 100) return values
     }
