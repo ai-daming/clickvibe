@@ -122,9 +122,10 @@ test('rate-limit headers become a budget snapshot; exhaustion trips the circuit 
   const reader = new GithubRestReader(ctx as never)
   await assert.rejects(reader.json('repos/o/r'), /额度已用完/)
   assert.equal(reader.counters.failures, 1)
-  assert.equal(reader.counters.rateLimit?.resource, 'core')
-  assert.equal(reader.counters.rateLimit?.remaining, 0)
-  assert.equal(reader.counters.rateLimit?.reset, 1_893_456_000_000)
+  assert.equal(reader.counters.rateLimitBuckets.core?.resource, 'core')
+  assert.equal(reader.counters.rateLimitBuckets.core?.remaining, 0)
+  assert.equal(reader.counters.rateLimitBuckets.core?.used, 5000)
+  assert.equal(reader.counters.rateLimitBuckets.core?.reset, 1_893_456_000_000)
   // The circuit is open: the next access intent fails closed and still lands
   // in exactly one bucket.
   await assert.rejects(
@@ -139,9 +140,15 @@ test('failures keep the operation and raw message as evidence', async () => {
   const { ctx } = okShell({ exitCode: 0, stdout: { text: included(500, '{"message":"boom"}', RATE_HEADERS) } })
   const reader = new GithubRestReader(ctx as never)
   await assert.rejects(reader.json('repos/o/r/pulls'), /GitHub REST 500: boom/)
-  assert.equal(reader.counters.failureRecords.length, 1)
+  // Both evidence levels are retained: the raw upstream operation and the
+  // direct access intent that surfaced it.
+  assert.deepEqual(
+    reader.counters.failureRecords.map((record) => record.level),
+    ['upstream', 'access'],
+  )
   assert.equal(reader.counters.failureRecords[0].operation, 'GET repos/o/r/pulls')
   assert.match(reader.counters.failureRecords[0].message, /boom/)
+  assert.equal(reader.counters.failureRecords[1].operation, 'GET repos/o/r/pulls')
 })
 
 test('invalidations are counted with their scope prefix', () => {
@@ -149,7 +156,13 @@ test('invalidations are counted with their scope prefix', () => {
   reader.invalidate('repo:o/r')
   reader.invalidate('repo:o/r')
   assert.equal(reader.counters.invalidations, 2)
-  assert.deepEqual(reader.counters.invalidationRecords, ['repo:o/r', 'repo:o/r'])
+  assert.deepEqual(
+    reader.counters.invalidationRecords.map((record) => [record.seq, record.prefix]),
+    [
+      [1, 'repo:o/r'],
+      [2, 'repo:o/r'],
+    ],
+  )
 })
 
 test('lane queue waits are measured from access entry to dispatch', async () => {
@@ -192,4 +205,112 @@ test('lane queue waits are measured from access entry to dispatch', async () => 
   assert.equal(reader.counters.upstreamRequests, 2)
   assert.equal(reader.counters.waitCount, 1, 'only the second request queued behind the first')
   assert.equal(reader.counters.waitMsTotal, 500)
+})
+
+test('concurrent cross-access counting: a composing loader never hides a sibling direct request', async () => {
+  // Review finding 1: the instance-level loader guard leaked across
+  // concurrent accesses — while access A's loader was composing upstream
+  // calls, a sibling direct json was misclassified as composed and its
+  // logical intent vanished, letting multi-work-item metrics pass falsely.
+  let releaseA!: () => void
+  const gate = new Promise<void>((resolve) => {
+    releaseA = resolve
+  })
+  const commands: string[] = []
+  let call = 0
+  const ctx = {
+    shell: {
+      resolve: (spec: unknown) => spec,
+      run: async (spec: { command: string }) => {
+        commands.push(spec.command)
+        call += 1
+        return { exitCode: 0, stdout: { text: included(200, `"v${call}"`, RATE_HEADERS) } }
+      },
+    },
+  }
+  const reader = new GithubRestReader(ctx as never)
+  const accessA = reader.cachedResource('A', null, async () => {
+    const inner = await reader.json<string>('repos/o/r/inner')
+    await gate
+    return `a:${inner}`
+  })
+  for (let spin = 0; spin < 100 && reader.counters.upstreamRequests < 1; spin++) {
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  assert.equal(reader.counters.upstreamRequests, 1, 'access A composed one upstream call')
+  const direct = reader.json<string>('repos/o/r/direct')
+  releaseA()
+  assert.deepEqual(await Promise.all([accessA, direct]), ['a:v1', 'v2'])
+  assert.equal(reader.counters.logicalRequests, 2, 'the sibling direct request is its own logical intent')
+  assert.equal(reader.counters.executions, 2)
+  assert.equal(reader.counters.upstreamRequests, 2)
+  assert.equal(
+    reader.counters.logicalRequests,
+    reader.counters.cacheHits +
+      reader.counters.singleflightJoins +
+      reader.counters.executions +
+      reader.counters.failures,
+  )
+})
+
+test('rate-limit buckets keep per-resource state including used', async () => {
+  const secondary = included(200, 'null', {
+    'x-ratelimit-resource': 'search',
+    'x-ratelimit-limit': '30',
+    'x-ratelimit-remaining': '27',
+    'x-ratelimit-reset': '1893456100',
+  })
+  const core = included(200, 'null', RATE_HEADERS)
+  const results = [core, secondary, core]
+  let index = 0
+  const ctx = {
+    shell: {
+      resolve: (spec: unknown) => spec,
+      run: async () => {
+        const next = results[Math.min(index, results.length - 1)]
+        index++
+        return { exitCode: 0, stdout: { text: next } }
+      },
+    },
+  }
+  const reader = new GithubRestReader(ctx as never)
+  await reader.json('repos/o/r')
+  await reader.json('search/code')
+  await reader.json('repos/o/r/again')
+  const buckets = reader.counters.rateLimitBuckets
+  assert.equal(buckets.core?.resource, 'core', 'both buckets survive, not just the last response')
+  assert.equal(buckets.core?.remaining, 4998)
+  assert.equal(buckets.core?.used, 2)
+  assert.equal(buckets.search?.resource, 'search')
+  assert.equal(buckets.search?.used, 3)
+})
+
+test('invalidations carry scope, reason, trigger and a monotonic sequence', () => {
+  const reader = new GithubRestReader({} as never)
+  reader.invalidate('repo:o/r', 'pr-merged', 'mergeAndCleanup')
+  reader.invalidate('repo:o/r/pulls/9', 'pr-merged', 'mergeAndCleanup')
+  assert.equal(reader.counters.invalidations, 2)
+  assert.deepEqual(
+    reader.counters.invalidationRecords.map((record) => [record.seq, record.prefix, record.reason, record.trigger]),
+    [
+      [1, 'repo:o/r', 'pr-merged', 'mergeAndCleanup'],
+      [2, 'repo:o/r/pulls/9', 'pr-merged', 'mergeAndCleanup'],
+    ],
+  )
+})
+
+test('failure evidence keeps both levels: the upstream operation and the access scope', async () => {
+  const { ctx } = okShell({ exitCode: 0, stdout: { text: included(500, '{"message":"boom"}', RATE_HEADERS) } })
+  const reader = new GithubRestReader(ctx as never)
+  await assert.rejects(
+    reader.cachedResource('detail:o/r/1', null, () => reader.json('repos/o/r/issues/1')),
+    /boom/,
+  )
+  const levels = reader.counters.failureRecords.map((record) => record.level)
+  assert.ok(levels.includes('upstream'), 'the raw gh operation failure is retained')
+  assert.ok(levels.includes('access'), 'the access-scope failure is retained')
+  const upstream = reader.counters.failureRecords.find((record) => record.level === 'upstream')
+  assert.equal(upstream?.operation, 'GET repos/o/r/issues/1')
+  const access = reader.counters.failureRecords.find((record) => record.level === 'access')
+  assert.equal(access?.scope, 'detail:o/r/1')
 })

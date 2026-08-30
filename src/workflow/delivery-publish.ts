@@ -28,8 +28,14 @@ export async function publishDeliveryComment(
       ...(commentUrl ? { url: commentUrl } : {}),
     }
     const number = workflow.prNumber ?? parseUrl(workflow.url)?.number
-    if (number) githubRest(ctx).invalidate(`${workflow.repoKey}/${target === 'pr' ? 'pulls' : 'issues'}/${number}`)
-    githubRest(ctx).invalidate(`repo:${workflow.repoKey}`)
+    if (number) {
+      githubRest(ctx).invalidate(
+        `${workflow.repoKey}/${target === 'pr' ? 'pulls' : 'issues'}/${number}`,
+        'comment-published',
+        'publishDeliveryComment',
+      )
+    }
+    githubRest(ctx).invalidate(`repo:${workflow.repoKey}`, 'comment-published', 'publishDeliveryComment')
     await appendLog(
       workflow.key,
       event.kind === 'review' ? 'review' : 'dev',

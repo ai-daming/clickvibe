@@ -266,8 +266,8 @@ export async function maintainCompletedDependencyLedger(
       return { issue, updated: false }
     }
     const updated = await rest.mutate<RepositoryIssueRest>(`repos/${repoKey}/issues/${issue.number}`, 'PATCH', { body })
-    rest.invalidate(`repo:${repoKey}`)
-    rest.invalidate(`${repoKey}/issues/${issue.number}`)
+    rest.invalidate(`repo:${repoKey}`, 'dependency-unlocked', 'maintainCompletedDependencyLedger')
+    rest.invalidate(`${repoKey}/issues/${issue.number}`, 'dependency-unlocked', 'maintainCompletedDependencyLedger')
     dependencyLedgerRetryGate.succeed(retryKey)
     return {
       issue: {

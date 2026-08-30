@@ -386,8 +386,8 @@ export async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): P
       ].join(' ')
       try {
         await runCommand(ctx, command, { timeoutMs: 120_000 })
-        githubRest(ctx).invalidate(`${repoKey}/pulls/${pr.number}`)
-        githubRest(ctx).invalidate(`repo:${repoKey}`)
+        githubRest(ctx).invalidate(`${repoKey}/pulls/${pr.number}`, 'pr-merged', 'mergeAndCleanup')
+        githubRest(ctx).invalidate(`repo:${repoKey}`, 'pr-merged', 'mergeAndCleanup')
       } catch (error) {
         return { ok: false, error: `PR 合并失败: ${String(error instanceof Error ? error.message : error)}` }
       }
@@ -509,8 +509,8 @@ export async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): P
           `gh issue close ${shellQuote(parsed.number)} --repo ${shellQuote(repoKey)} --comment ${shellQuote(`由 PR #${pr.number} 以 merge commit 合并交付。`)}`,
           { timeoutMs: 30_000 },
         )
-        githubRest(ctx).invalidate(`${repoKey}/issues/${parsed.number}`)
-        githubRest(ctx).invalidate(`repo:${repoKey}`)
+        githubRest(ctx).invalidate(`${repoKey}/issues/${parsed.number}`, 'issue-closed', 'mergeAndCleanup')
+        githubRest(ctx).invalidate(`repo:${repoKey}`, 'issue-closed', 'mergeAndCleanup')
       }
       workflow.issueState = 'CLOSED'
       delivery.cleanup.issue = true

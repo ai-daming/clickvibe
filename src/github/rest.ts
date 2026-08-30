@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
 
 interface ShellContext {
@@ -24,6 +25,33 @@ interface CachedValue<T> {
  * failure; upstream children, rate-limit budget snapshots, invalidations
  * and queue waits are recorded alongside as evidence.
  */
+/** One observed rate-limit bucket from response headers (#133 unit: per resource). */
+export interface RateLimitBucketSnapshot {
+  resource: string
+  limit: number | null
+  remaining: number | null
+  /** limit − remaining when both are known. */
+  used: number | null
+  reset: number | null
+  observedAt: number
+}
+
+/** One failure evidence row: the raw upstream operation and/or the access scope it failed. */
+export interface AccessFailureRecord {
+  level: 'upstream' | 'access'
+  operation: string
+  message: string
+  scope: string | null
+}
+
+/** One invalidation evidence row (#133 unit: object, reason, triggering action, sequence). */
+export interface InvalidationRecord {
+  seq: number
+  prefix: string
+  reason: string | null
+  trigger: string | null
+}
+
 export interface GithubAccessCounters {
   logicalRequests: number
   cacheHits: number
@@ -34,10 +62,10 @@ export interface GithubAccessCounters {
   invalidations: number
   waitCount: number
   waitMsTotal: number
-  /** Last observed account budget from response headers. */
-  rateLimit: { resource: string; limit: number | null; remaining: number | null; reset: number | null } | null
-  failureRecords: Array<{ operation: string; message: string }>
-  invalidationRecords: string[]
+  /** Per-resource budget snapshots; every observed bucket survives (#133). */
+  rateLimitBuckets: Record<string, RateLimitBucketSnapshot>
+  failureRecords: AccessFailureRecord[]
+  invalidationRecords: InvalidationRecord[]
 }
 
 const MAX_GATEWAY_EVIDENCE_RECORDS = 200
@@ -53,7 +81,7 @@ function emptyCounters(): GithubAccessCounters {
     invalidations: 0,
     waitCount: 0,
     waitMsTotal: 0,
-    rateLimit: null,
+    rateLimitBuckets: {},
     failureRecords: [],
     invalidationRecords: [],
   }
@@ -76,6 +104,15 @@ interface HostGithubRequestLane {
   tail: Promise<void>
   nextStartAt: number
 }
+
+/**
+ * Per-intent composition scope (review finding 1): marks upstream calls a
+ * cached loader composes for one already-counted access. Instance-level
+ * state leaked across concurrent accesses — a sibling direct request was
+ * misclassified and its logical intent vanished. Async context is isolated
+ * per access chain, including across awaits.
+ */
+const accessCompositionScope = new AsyncLocalStorage<{ composed: boolean }>()
 
 const HOST_GITHUB_MINIMUM_INTERVAL_MS = 250
 const hostGithubLaneSymbol = Symbol.for('clickvibe.github-request-lane')
@@ -206,8 +243,7 @@ export class GithubRestReader {
   private readonly minimumIntervalMs: number
   private readonly now: () => number
   readonly counters: GithubAccessCounters = emptyCounters()
-  /** >0 while a cached loader composes upstream calls for one already-counted intent. */
-  private loaderDepth = 0
+  private invalidationSeq = 0
   private readonly resources = new Map<string, CachedValue<unknown>>()
   private readonly aggregates = new Map<string, CachedValue<unknown>>()
   private readonly inFlight = new Map<string, Promise<unknown>>()
@@ -223,26 +259,47 @@ export class GithubRestReader {
     this.now = options.now ?? Date.now
   }
 
-  private recordFailure(operation: string, error: unknown): void {
+  private recordFailure(operation: string, error: unknown, scope: string | null = null): void {
     this.counters.failures++
-    this.counters.failureRecords.push({
+    this.pushFailureRecord({
+      level: 'access',
       operation,
+      scope,
       message: error instanceof Error ? error.message : String(error),
     })
+  }
+
+  /** Raw upstream evidence: retained even when the access layer already recorded the failure. */
+  private recordUpstreamFailure(operation: string, error: unknown): void {
+    this.pushFailureRecord({
+      level: 'upstream',
+      operation,
+      scope: null,
+      message: error instanceof Error ? error.message : String(error),
+    })
+  }
+
+  private pushFailureRecord(record: AccessFailureRecord): void {
+    this.counters.failureRecords.push(record)
     if (this.counters.failureRecords.length > MAX_GATEWAY_EVIDENCE_RECORDS) {
       this.counters.failureRecords.splice(0, this.counters.failureRecords.length - MAX_GATEWAY_EVIDENCE_RECORDS)
     }
+    // Production consumer + 错误不埋葬: failures land in the persisted
+    // diagnostics channel the panel can query.
+    logTaskDiagnostic('github-access-failure', {
+      level: record.level,
+      operation: record.operation,
+      scope: record.scope,
+      message: record.message,
+    })
   }
 
   private withLoaderDepth<T>(loader: () => Promise<T>): () => Promise<T> {
-    return async () => {
-      this.loaderDepth++
-      try {
-        return await loader()
-      } finally {
-        this.loaderDepth--
-      }
-    }
+    return () => accessCompositionScope.run({ composed: true }, loader)
+  }
+
+  private isComposed(): boolean {
+    return accessCompositionScope.getStore()?.composed === true
   }
 
   rateLimitError(now = Date.now()): GithubRateLimitError | null {
@@ -257,15 +314,18 @@ export class GithubRestReader {
     return this.versions.get(key) ?? null
   }
 
-  invalidate(prefix: string): void {
+  invalidate(prefix: string, reason: string | null = null, trigger: string | null = null): void {
     this.counters.invalidations++
-    this.counters.invalidationRecords.push(prefix)
+    this.invalidationSeq++
+    const record = { seq: this.invalidationSeq, prefix, reason, trigger }
+    this.counters.invalidationRecords.push(record)
     if (this.counters.invalidationRecords.length > MAX_GATEWAY_EVIDENCE_RECORDS) {
       this.counters.invalidationRecords.splice(
         0,
         this.counters.invalidationRecords.length - MAX_GATEWAY_EVIDENCE_RECORDS,
       )
     }
+    logTaskDiagnostic('github-rest-invalidation', { ...record })
     for (const key of this.resources.keys()) {
       if (key === prefix || key.startsWith(`${prefix}/`)) this.resources.delete(key)
     }
@@ -302,11 +362,16 @@ export class GithubRestReader {
     if (remainingRaw === undefined) return
     const resetSeconds = Number(headers.get('x-ratelimit-reset'))
     const limitRaw = Number(headers.get('x-ratelimit-limit'))
-    this.counters.rateLimit = {
-      resource: headers.get('x-ratelimit-resource') ?? 'core',
-      limit: Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : null,
-      remaining: Number.isFinite(Number(remainingRaw)) ? Number(remainingRaw) : null,
+    const resource = headers.get('x-ratelimit-resource') ?? 'core'
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : null
+    const remaining = Number.isFinite(Number(remainingRaw)) ? Number(remainingRaw) : null
+    this.counters.rateLimitBuckets[resource] = {
+      resource,
+      limit,
+      remaining,
+      used: limit !== null && remaining !== null ? limit - remaining : null,
       reset: Number.isFinite(resetSeconds) && resetSeconds > 0 ? resetSeconds * 1000 : null,
+      observedAt: this.now(),
     }
   }
 
@@ -363,8 +428,10 @@ export class GithubRestReader {
         throw parseError
       }
       this.recordBudgetSnapshot(response.headers)
+      const requestOperation = `${mutation?.method ?? 'GET'} ${path}`
       const detail = [result.stderr?.text, response.body].filter(Boolean).join('\n')
       if (isRateLimited(response, detail)) {
+        this.recordUpstreamFailure(requestOperation, new GithubRateLimitError(resetFrom(response.headers, Date.now())))
         this.circuitUntil = resetFrom(response.headers, Date.now())
         const kind: GithubRateLimitKind =
           response.headers.get('x-ratelimit-remaining') === '0' ? 'primary' : 'secondary'
@@ -380,6 +447,10 @@ export class GithubRestReader {
         throw new GithubRateLimitError(this.circuitUntil, kind)
       }
       if (result.exitCode !== 0 || response.status < 200 || response.status >= 300) {
+        this.recordUpstreamFailure(
+          requestOperation,
+          new Error(`GitHub REST ${response.status}: ${response.body.trim() || result.stderr?.text || '请求失败'}`),
+        )
         let message = response.body.trim()
         try {
           const parsed = JSON.parse(response.body) as { message?: unknown }
@@ -394,7 +465,7 @@ export class GithubRestReader {
   }
 
   async json<T = unknown>(path: string, accept?: string, timeoutMs?: number): Promise<T> {
-    const direct = this.loaderDepth === 0
+    const direct = !this.isComposed()
     if (direct) this.counters.logicalRequests++
     try {
       const response = await this.request(path, accept, timeoutMs)
@@ -412,7 +483,7 @@ export class GithubRestReader {
   }
 
   async mutate<T = unknown>(path: string, method: 'POST' | 'PATCH', body: unknown, timeoutMs?: number): Promise<T> {
-    const direct = this.loaderDepth === 0
+    const direct = !this.isComposed()
     if (direct) this.counters.logicalRequests++
     try {
       const response = await this.request(path, undefined, timeoutMs, { method, body })
@@ -430,27 +501,28 @@ export class GithubRestReader {
   }
 
   async paginate<T>(path: string, accept?: string, timeoutMs?: number): Promise<T[]> {
-    const direct = this.loaderDepth === 0
+    const direct = !this.isComposed()
     if (direct) this.counters.logicalRequests++
-    this.loaderDepth++
-    try {
-      const values: T[] = []
-      for (let page = 1; ; page++) {
-        const separator = path.includes('?') ? '&' : '?'
-        const batch = await this.json<T[]>(`${path}${separator}per_page=100&page=${page}`, accept, timeoutMs)
-        if (!Array.isArray(batch)) throw new Error('GitHub REST 分页返回格式无效')
-        values.push(...batch)
-        if (batch.length < 100) {
-          if (direct) this.counters.executions++
-          return values
+    return accessCompositionScope.run({ composed: true }, async () => {
+      try {
+        const values: T[] = []
+        for (let page = 1; ; page++) {
+          const separator = path.includes('?') ? '&' : '?'
+          const batch = await this.json<T[]>(`${path}${separator}per_page=100&page=${page}`, accept, timeoutMs)
+          if (!Array.isArray(batch)) throw new Error('GitHub REST 分页返回格式无效')
+          values.push(...batch)
+          if (batch.length < 100) {
+            if (direct) this.counters.executions++
+            return values
+          }
         }
+      } catch (error) {
+        if (direct) this.recordFailure(`GET ${path} (paginate)`, error)
+        throw error
+      } finally {
+        // scope closed by the wrapping run
       }
-    } catch (error) {
-      if (direct) this.recordFailure(`GET ${path} (paginate)`, error)
-      throw error
-    } finally {
-      this.loaderDepth--
-    }
+    })
   }
 
   async cachedResource<T>(
@@ -504,7 +576,7 @@ export class GithubRestReader {
 
     // `force` means fresh from this invocation point. It must not coalesce
     // with an earlier force call whose GitHub fact may already be obsolete.
-    const forced = this.withOutcome(`access ${key}`, load())
+    const forced = this.withOutcome(key, load())
     this.forcedResources.set(key, forced)
     const clear = () => {
       if (this.forcedResources.get(key) === forced) this.forcedResources.delete(key)
@@ -539,19 +611,22 @@ export class GithubRestReader {
       this.counters.singleflightJoins++
       return pending
     }
-    const created = this.withOutcome(`access ${key}`, loader()).finally(() => this.inFlight.delete(key))
+    // `key` is an internal dedup handle (`resource:ordinary:…`); the scope
+    // carried in evidence is the access key without the handle prefix.
+    const scope = key.replace(/^(?:resource:ordinary:|aggregate:)/, '')
+    const created = this.withOutcome(scope, loader()).finally(() => this.inFlight.delete(key))
     this.inFlight.set(key, created)
     return created
   }
 
   /** Leader outcome lands in exactly one bucket; joiners are already counted. */
-  private async withOutcome<T>(operation: string, promise: Promise<T>): Promise<T> {
+  private async withOutcome<T>(scope: string, promise: Promise<T>): Promise<T> {
     try {
       const value = await promise
       this.counters.executions++
       return value
     } catch (error) {
-      this.recordFailure(operation, error)
+      this.recordFailure(`access ${scope}`, error, scope)
       throw error
     }
   }
