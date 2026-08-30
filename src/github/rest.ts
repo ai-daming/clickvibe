@@ -481,11 +481,14 @@ export class GithubRestReader {
         logTaskDiagnostic('github-rate-circuit-trip', {
           kind,
           path,
-          // Bound to THIS response's observation (review round 5): unknown
-          // stays unknown; a prior response's bucket never leaks onto the
-          // trip event.
+          // Bound to THIS response's observation (review round 5/6): the
+          // resource stays unknown when the header is missing, a prior
+          // response's bucket never leaks — but the numeric budget fields
+          // this response DID carry are always persisted (review round 6:
+          // dropping the whole sample because one field is unknown erases
+          // known evidence).
           resource: currentSample.resource,
-          bucket: currentSample.resource !== null ? currentSample : null,
+          bucket: currentSample,
           retryAfter: response.headers.get('retry-after'),
           until: this.circuitUntil,
         })
