@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { waitForTaskDiagnosticPersistence } from '../src/infra/task-diagnostics.ts'
 import { commitWorkflowFixture } from './workflow-fixture.ts'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer, request, type RequestListener } from 'node:http'
@@ -368,6 +369,7 @@ test('/create-pr uses a one-use privileged authorization before the shared handl
     )
     assert.equal(replay.status, 403)
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -572,6 +574,7 @@ test('develop authorization previews fetched baselines and binds a custom select
     assert.equal(replaceFrozen.status, 400)
     assert.match(String(replaceFrozen.body.error), /基线已定格/)
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -699,6 +702,7 @@ test('concurrent first-development authorizations freeze exactly one baseline an
     assert.match(frozen?.baseRef ?? '', /^origin\/(?:main|release\/2\.0) @ (?:1111111|2222222)$/)
     await new Promise((resolve) => setTimeout(resolve, 120))
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -892,6 +896,7 @@ test('missing baseline restoration requires and consumes an exact one-use author
     )
     assert.equal(replay.status, 403)
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(home, { recursive: true, force: true })
@@ -1098,6 +1103,7 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
     )
     assert.equal(replay.status, 403)
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -1158,6 +1164,7 @@ test('/merge rejects a stale review hash before invoking gh pr merge', async () 
     )
     assert.equal((await loadWorkflow(workflow.key))?.delivery, undefined)
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -1228,6 +1235,7 @@ test('/merge authorization rejects a changed acceptance contract with the same P
       false,
     )
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -1401,6 +1409,7 @@ test('/merge gate rejection offers manual override that merges once and audits t
     )
     assert.equal(replay.status, 403)
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -1516,6 +1525,7 @@ test('/merge manual override refuses gate failures not covered by the confirmati
     )
     assert.equal(persisted?.delivery, undefined)
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -1642,6 +1652,7 @@ test('cleanup failure keeps merged terminal state and retries without merging ag
     assert.equal(commands.filter((command) => command.startsWith('gh pr merge')).length, 1)
     assert.equal((await loadAllArchivedWorkflows())[0]?.delivery?.status, 'archived')
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -1683,6 +1694,7 @@ test('/state uses the live GitHub issue state instead of the stored issueState',
     assert.equal(response.body.workflows?.[0].issueState, 'CLOSED')
     assert.equal(response.body.workflows?.[0].derived.nextAction.kind, 'none')
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -1752,6 +1764,7 @@ test('/state and repo/issues share one repository fetch TTL while manual refresh
     assert.equal((list.body as { freshness?: { refreshed: boolean } }).freshness?.refreshed, false)
     assert.equal((forced.body as { freshness?: { refreshed: boolean } }).freshness?.refreshed, true)
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -1779,6 +1792,7 @@ test('/state keeps local-ref state readable and marks freshness stale when fetch
     assert.deepEqual((result.body as { workflows?: unknown[] }).workflows, [])
     assert.equal((result.body as { freshness?: { stale: boolean } }).freshness?.stale, true)
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -1804,6 +1818,7 @@ test('/state schedules dependency refreshes for a remote-only configured reposit
     assert.equal((second.body as { dependenciesRefreshDue?: boolean }).dependenciesRefreshDue, false)
     assert.equal((first.body as { freshness?: unknown }).freshness, null)
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -1833,6 +1848,7 @@ test('/state returns stale local facts within a bounded wait when git fetch hang
     assert.equal((result.body as { freshness?: { stale: boolean; refreshing: boolean } }).freshness?.refreshing, true)
     assert.ok(elapsedMs < 3_000, `state response took ${elapsedMs}ms`)
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -1893,6 +1909,7 @@ test('a rejected dry-run worktree attempt preserves the previous durable dev his
     assert.equal(history[0], 'previous completed task history')
     assert.ok(history.some((line) => line.includes('worktree 冲突')))
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -1974,6 +1991,7 @@ test('dryrun uses the default baseline, reports command output and closes succes
     assert.equal(failure.polled.status, 'failed')
     assert.match(failure.polled.delta?.join('\n') ?? '', /dry-run 失败/)
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -1998,6 +2016,7 @@ test('/history restores the complete disk log by task id after Host restart', as
     assert.equal(result.body.active, false)
     assert.equal(result.body.kind, 'dev')
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -2030,6 +2049,7 @@ test('/history queries an older round by project and issue while binding the rou
     )
     assert.equal(wrongIssue.status, 404)
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -2063,6 +2083,7 @@ test('/history restores structured agent records and keeps legacy lines compatib
       { source: 'system', kind: 'system', text: '[clickvibe] legacy system line' },
     ])
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -2088,6 +2109,7 @@ test('/history accepts a safe workflow key and rejects unknown or traversal targ
     const missing = await get(handler, '/clickvibe/api/history?taskId=missing')
     assert.equal(missing.status, 404)
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -2305,6 +2327,7 @@ test('invalid exact dev session falls back once to a fresh session on the same t
     assert.equal(delivery?.publication?.status, 'posted')
     assert.equal(delivery?.publication?.target, 'pr')
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -2438,6 +2461,7 @@ test('lossy agent output recovers the missing head from the host spill file into
     assert.ok(historyEvents.some((event) => event.text.includes('lost in the host buffer')))
     assert.ok(historyEvents.some((event) => event.text.includes('已从宿主 spill 文件恢复 2 行')))
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -2533,6 +2557,7 @@ test('completed development without a PR appends its Dev Meta comment to the iss
     assert.equal(reloaded?.events.at(-1)?.publication?.target, 'issue')
     assert.equal(reloaded?.events.at(-1)?.publication?.status, 'posted')
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -2632,6 +2657,7 @@ test('concurrent resume requests reserve one workflow task before refreshing the
     assert.ok(first.body.taskId)
     await waitForTask(handler, first.body.taskId)
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -2713,6 +2739,7 @@ test('comment publication failure keeps the delivery event and stores a bounded 
     assert.equal(reloaded?.events[0].publication?.error?.length, 500)
     assert.match(reloaded?.events[0].publication?.error ?? '', /offline-/)
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -2891,6 +2918,7 @@ test('invalid exact review session clears the stale id and falls back to a fresh
       "gh pr review 'https://github.com/o/r/pull/29' --approve --body '**身份：Review Agent**\n\nLGTM'",
     ])
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -3008,6 +3036,7 @@ test('duplicate review requests reuse the reserved task before fetching the Issu
     assert.ok(first.body.taskId)
     await waitForTask(handler, first.body.taskId)
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -3107,6 +3136,7 @@ test('cross-agent review starts fresh and an empty failed verdict requires re-re
     assert.equal(reloaded?.reviewResult, null)
     assert.equal(reloaded?.stage, 'review-ready')
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -3267,6 +3297,7 @@ test('/develop automatic mode rejects a branch with commits when workflow histor
     assert.ok(commands.some((command) => command.startsWith('git rev-list --count')))
     assert.ok(commands.every((command) => !command.startsWith('git worktree add')))
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -3384,6 +3415,7 @@ test('rate-limit response opens a circuit and returns the friendly recovery time
     assert.equal(second.body.error, first.body.error)
     assert.equal(githubRequests, 1, 'open circuit must reject without another GitHub request')
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -4219,6 +4251,7 @@ test('develop with user context stays a first development and records the note i
     assert.equal(reloaded?.events.at(-1)?.userContext, secondContext)
     assert.equal(typeof reloaded?.events.at(-1)?.durationMs, 'number')
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -4314,6 +4347,7 @@ test('resume (rework) carries the user context next to the review feedback and a
     assert.equal(reloaded?.events.at(-1)?.userContext, userContext)
     assert.equal(typeof reloaded?.events.at(-1)?.durationMs, 'number')
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -4428,6 +4462,7 @@ test('review with user context appends it to the prompt and audits it in the rev
       false,
     )
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })

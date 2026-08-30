@@ -64,10 +64,6 @@ export interface InvalidationRecord {
 }
 
 export interface GithubAccessEvidence {
-  /** Append-only per-response series (capped); same-bucket responses never overwrite each other. */
-  rateLimitSamples: RateLimitSample[]
-  /** Latest snapshot per resource bucket; consumed by the circuit-trip diagnostic. */
-  rateLimitBuckets: Record<string, RateLimitSample>
   failureRecords: AccessFailureRecord[]
   invalidationRecords: InvalidationRecord[]
 }
@@ -76,8 +72,6 @@ const MAX_GATEWAY_EVIDENCE_RECORDS = 200
 
 function emptyEvidence(): GithubAccessEvidence {
   return {
-    rateLimitSamples: [],
-    rateLimitBuckets: {},
     failureRecords: [],
     invalidationRecords: [],
   }
@@ -392,7 +386,7 @@ export class GithubRestReader {
     const resetSeconds = Number(headers.get('x-ratelimit-reset'))
     const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : null
     const remaining = Number.isFinite(remainingRaw) ? Number(remainingRaw) : null
-    const sample: RateLimitSample = {
+    return {
       resource,
       limit,
       remaining,
@@ -400,12 +394,6 @@ export class GithubRestReader {
       reset: Number.isFinite(resetSeconds) && resetSeconds > 0 ? resetSeconds * 1000 : null,
       observedAt: this.now(),
     }
-    this.evidence.rateLimitSamples.push(sample)
-    if (this.evidence.rateLimitSamples.length > MAX_GATEWAY_EVIDENCE_RECORDS) {
-      this.evidence.rateLimitSamples.splice(0, this.evidence.rateLimitSamples.length - MAX_GATEWAY_EVIDENCE_RECORDS)
-    }
-    if (resource !== null) this.evidence.rateLimitBuckets[resource] = sample
-    return sample
   }
 
   private async request(

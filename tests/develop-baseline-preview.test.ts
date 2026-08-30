@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { waitForTaskDiagnosticPersistence } from '../src/infra/task-diagnostics.ts'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -50,6 +51,7 @@ test('baseline preview validates URLs and degrades an unconfigured repository on
       /无法在未配置的本地仓库中验证/,
     )
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(home, { recursive: true, force: true })
@@ -82,6 +84,7 @@ test('baseline preview exposes fetch failure for the default but rejects an unve
       /offline/,
     )
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(home, { recursive: true, force: true })
@@ -138,6 +141,7 @@ test('baseline preview excludes and rejects the current issue development branch
       /默认分支指向当前 Issue 开发分支/,
     )
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(home, { recursive: true, force: true })
@@ -186,6 +190,7 @@ test('frozen issue-branch preview skips self-dependencies and ignores a closed p
     const warning = await developBaselinePreview(rateLimited as never, workflow('7', '').url, undefined)
     assert.match(warning.baselineWarning ?? '', /无法确认基线关联 Issue #5.*GitHub 额度已用完/)
   } finally {
+    await waitForTaskDiagnosticPersistence(undefined).catch(() => undefined)
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(home, { recursive: true, force: true })

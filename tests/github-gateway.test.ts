@@ -53,35 +53,6 @@ function okShell(result: ShellResult) {
   }
 }
 
-test('same-bucket responses append samples instead of overwriting', async () => {
-  const responses = [
-    { exitCode: 0, stdout: { text: included(200, '1', rateHeaders('4999')) } },
-    { exitCode: 0, stdout: { text: included(200, '2', rateHeaders('4998')) } },
-  ]
-  let index = 0
-  const ctx = {
-    shell: {
-      resolve: (spec: unknown) => spec,
-      run: async () => {
-        const next = responses[Math.min(index, responses.length - 1)]
-        index++
-        return next
-      },
-    },
-  }
-  const reader = new GithubRestReader(ctx as never)
-  await reader.json('repos/o/r/first')
-  await reader.json('repos/o/r/second')
-  // Every response is recoverable from the append-only series (review gap 1).
-  assert.deepEqual(
-    reader.evidence.rateLimitSamples.map((sample) => sample.used),
-    [1, 2],
-  )
-  // The bucket view keeps the latest observation for the trip diagnostic.
-  assert.equal(reader.evidence.rateLimitBuckets.core?.used, 2)
-  assert.equal(reader.evidence.rateLimitBuckets.core?.remaining, 4998)
-})
-
 test('non-HTTP CLI failure keeps the upstream level with the raw operation', async () => {
   const { ctx } = okShell({ exitCode: 1, stdout: { text: 'gh: some CLI failure' } })
   const reader = new GithubRestReader(ctx as never)
@@ -202,8 +173,6 @@ test('rate exhaustion trips the circuit carrying the bucket snapshot', async () 
   const { ctx } = okShell({ exitCode: 0, stdout: { text: exhausted } })
   const reader = new GithubRestReader(ctx as never)
   await assert.rejects(reader.json('repos/o/r'), /额度已用完/)
-  assert.equal(reader.evidence.rateLimitBuckets.core?.remaining, 0)
-  assert.equal(reader.evidence.rateLimitBuckets.core?.used, 5000)
   await assert.rejects(
     reader.cachedResource('k', null, () => Promise.resolve('x')),
     /额度已用完/,
@@ -284,57 +253,6 @@ test('spill read failure keeps the upstream level (dispatched child, unreadable 
   assert.equal(reader.evidence.failureRecords[0].operation, 'GET repos/o/r/pulls')
 })
 
-test('a response with partial rate headers still leaves an observation', async () => {
-  // Review round 4: a response carrying resource/limit/reset but missing
-  // remaining must not vanish from the series — present fields survive,
-  // missing ones are explicitly null (unknown, not absence).
-  const partial = included(200, '"ok"', {
-    'x-ratelimit-resource': 'search',
-    'x-ratelimit-limit': '30',
-    'x-ratelimit-reset': '1893456100',
-  })
-  const responses = [
-    { exitCode: 0, stdout: { text: partial } },
-    { exitCode: 0, stdout: { text: included(200, '1', rateHeaders('4998')) } },
-  ]
-  let index = 0
-  const ctx = {
-    shell: {
-      resolve: (spec: unknown) => spec,
-      run: async () => {
-        const next = responses[Math.min(index, responses.length - 1)]
-        index++
-        return next
-      },
-    },
-  }
-  const reader = new GithubRestReader(ctx as never)
-  await reader.json('search/code')
-  await reader.json('repos/o/r')
-  const [searchSample, coreSample] = reader.evidence.rateLimitSamples
-  assert.equal(searchSample.resource, 'search', 'partial-header responses are still observations')
-  assert.equal(searchSample.limit, 30)
-  assert.equal(searchSample.reset, 1_893_456_100_000)
-  assert.equal(searchSample.remaining, null, 'missing field is unknown, not zero')
-  assert.equal(searchSample.used, null)
-  assert.equal(coreSample.resource, 'core', 'the following full response records normally')
-  assert.equal(reader.evidence.rateLimitBuckets.search?.remaining, null)
-})
-
-test('a response with no rate headers at all still counts as an observation with nulls', async () => {
-  const bare = included(200, '"ok"', {})
-  const { ctx } = okShell({ exitCode: 0, stdout: { text: bare } })
-  const reader = new GithubRestReader(ctx as never)
-  await reader.json('repos/o/r/meta')
-  // Every response leaves an observation; with no headers present the
-  // resource is unknown (null-marked core-less row), distinguishable from
-  // "no response happened".
-  assert.equal(reader.evidence.rateLimitSamples.length, 1)
-  assert.equal(reader.evidence.rateLimitSamples[0].limit, null)
-  assert.equal(reader.evidence.rateLimitSamples[0].remaining, null)
-  assert.equal(reader.evidence.rateLimitSamples[0].reset, null)
-})
-
 test('pagination shape failure keeps the upstream operation and the access scope', async () => {
   // Review round 4: HTTP 200 + valid JSON + wrong shape ({"items":[]}) must
   // record the upstream GET with the real page path; a composed aggregate
@@ -364,23 +282,6 @@ test('direct pagination shape failure records its own access level', async () =>
       (record) => record.level === 'access' && record.operation.includes('milestones'),
     ),
   )
-})
-
-test('rate headers without a resource stay unknown and never fabricate a core bucket', async () => {
-  // Review round 5: limit/remaining/reset present, resource absent — the
-  // sample must keep resource=null and must not update any named bucket.
-  const noResource = included(200, '"ok"', {
-    'x-ratelimit-limit': '5000',
-    'x-ratelimit-remaining': '4997',
-    'x-ratelimit-reset': '1893456000',
-  })
-  const { ctx } = okShell({ exitCode: 0, stdout: { text: noResource } })
-  const reader = new GithubRestReader(ctx as never)
-  await reader.json('repos/o/r')
-  assert.equal(reader.evidence.rateLimitSamples[0].resource, null, 'unknown resource stays unknown')
-  assert.equal(reader.evidence.rateLimitSamples[0].limit, 5000)
-  assert.equal(reader.evidence.rateLimitSamples[0].remaining, 4997)
-  assert.deepEqual(reader.evidence.rateLimitBuckets, {}, 'no named bucket is fabricated')
 })
 
 test('a headerless 429 trip never carries a prior response bucket', async () => {
@@ -451,10 +352,6 @@ test('a rate-limited response with numeric headers but no resource keeps its bud
     const { ctx } = okShell({ exitCode: 0, stdout: { text: noResource429 } })
     const reader = new GithubRestReader(ctx as never)
     await assert.rejects(reader.json('repos/o/r'), /额度已用完|限流/)
-    const sample = reader.evidence.rateLimitSamples[0]
-    assert.equal(sample.resource, null)
-    assert.equal(sample.remaining, 0)
-    assert.equal(sample.used, 5000)
     const globalDiag = join(home, '.clickvibe', 'state', 'diagnostics.jsonl')
     for (let spin = 0; spin < 100; spin++) {
       try {
