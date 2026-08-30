@@ -20,13 +20,17 @@ interface CachedValue<T> {
 }
 
 /**
- * Gateway access metrics in the frozen #133 units (issue #131 slice A):
- * every logical request lands in exactly one of hit / join / execution /
- * failure; upstream children, rate-limit budget snapshots, invalidations
- * and queue waits are recorded alongside as evidence.
+ * Gateway evidence in the frozen #133 units (issue #131 slice A). Numeric
+ * access counters (logical/hit/join/execution/wait) are deferred to the
+ * slice that consumes them — the threshold assertions and scheduling of the
+ * Gateway mechanism — per the concept-budget discipline; what ships here is
+ * the evidence that already has production consumers: failures and
+ * invalidations land in the persisted diagnostics channel, the per-response
+ * rate-limit series feeds the circuit-trip diagnostic.
  */
-/** One observed rate-limit bucket from response headers (#133 unit: per resource). */
-export interface RateLimitBucketSnapshot {
+
+/** One observed rate-limit sample from a single response (#133: every response records the bucket). */
+export interface RateLimitSample {
   resource: string
   limit: number | null
   remaining: number | null
@@ -44,43 +48,34 @@ export interface AccessFailureRecord {
   scope: string | null
 }
 
-/** One invalidation evidence row (#133 unit: object, reason, triggering action, sequence). */
+/** One invalidation evidence row (#133 unit: object, reason, triggering action, generation, subsequent observation). */
 export interface InvalidationRecord {
   seq: number
+  /** Per-prefix invalidation generation; distinguishes repeat invalidations of the same scope. */
+  generation: number
   prefix: string
-  reason: string | null
-  trigger: string | null
+  reason: string
+  trigger: string
+  /** observed once a subsequent cached load repopulated a matching key; pending = unknown. */
+  status: 'pending' | 'observed'
+  observedAt: number | null
+  observedKey: string | null
 }
 
-export interface GithubAccessCounters {
-  logicalRequests: number
-  cacheHits: number
-  singleflightJoins: number
-  executions: number
-  failures: number
-  upstreamRequests: number
-  invalidations: number
-  waitCount: number
-  waitMsTotal: number
-  /** Per-resource budget snapshots; every observed bucket survives (#133). */
-  rateLimitBuckets: Record<string, RateLimitBucketSnapshot>
+export interface GithubAccessEvidence {
+  /** Append-only per-response series (capped); same-bucket responses never overwrite each other. */
+  rateLimitSamples: RateLimitSample[]
+  /** Latest snapshot per resource bucket; consumed by the circuit-trip diagnostic. */
+  rateLimitBuckets: Record<string, RateLimitSample>
   failureRecords: AccessFailureRecord[]
   invalidationRecords: InvalidationRecord[]
 }
 
 const MAX_GATEWAY_EVIDENCE_RECORDS = 200
 
-function emptyCounters(): GithubAccessCounters {
+function emptyEvidence(): GithubAccessEvidence {
   return {
-    logicalRequests: 0,
-    cacheHits: 0,
-    singleflightJoins: 0,
-    executions: 0,
-    failures: 0,
-    upstreamRequests: 0,
-    invalidations: 0,
-    waitCount: 0,
-    waitMsTotal: 0,
+    rateLimitSamples: [],
     rateLimitBuckets: {},
     failureRecords: [],
     invalidationRecords: [],
@@ -106,11 +101,10 @@ interface HostGithubRequestLane {
 }
 
 /**
- * Per-intent composition scope (review finding 1): marks upstream calls a
- * cached loader composes for one already-counted access. Instance-level
- * state leaked across concurrent accesses — a sibling direct request was
- * misclassified and its logical intent vanished. Async context is isolated
- * per access chain, including across awaits.
+ * Composition scope: upstream calls a cached loader composes for one access
+ * intent. Evidence routing uses it — a composed failure records its access
+ * level at the wrapper (which knows the true scope), while direct calls
+ * record their own access level.
  */
 const accessCompositionScope = new AsyncLocalStorage<{ composed: boolean }>()
 
@@ -242,8 +236,9 @@ export class GithubRestReader {
   private readonly ctx: ShellContext
   private readonly minimumIntervalMs: number
   private readonly now: () => number
-  readonly counters: GithubAccessCounters = emptyCounters()
+  readonly evidence: GithubAccessEvidence = emptyEvidence()
   private invalidationSeq = 0
+  private readonly prefixGenerations = new Map<string, number>()
   private readonly resources = new Map<string, CachedValue<unknown>>()
   private readonly aggregates = new Map<string, CachedValue<unknown>>()
   private readonly inFlight = new Map<string, Promise<unknown>>()
@@ -260,7 +255,6 @@ export class GithubRestReader {
   }
 
   private recordFailure(operation: string, error: unknown, scope: string | null = null): void {
-    this.counters.failures++
     this.pushFailureRecord({
       level: 'access',
       operation,
@@ -280,9 +274,9 @@ export class GithubRestReader {
   }
 
   private pushFailureRecord(record: AccessFailureRecord): void {
-    this.counters.failureRecords.push(record)
-    if (this.counters.failureRecords.length > MAX_GATEWAY_EVIDENCE_RECORDS) {
-      this.counters.failureRecords.splice(0, this.counters.failureRecords.length - MAX_GATEWAY_EVIDENCE_RECORDS)
+    this.evidence.failureRecords.push(record)
+    if (this.evidence.failureRecords.length > MAX_GATEWAY_EVIDENCE_RECORDS) {
+      this.evidence.failureRecords.splice(0, this.evidence.failureRecords.length - MAX_GATEWAY_EVIDENCE_RECORDS)
     }
     // Production consumer + 错误不埋葬: failures land in the persisted
     // diagnostics channel the panel can query.
@@ -292,14 +286,6 @@ export class GithubRestReader {
       scope: record.scope,
       message: record.message,
     })
-  }
-
-  private withLoaderDepth<T>(loader: () => Promise<T>): () => Promise<T> {
-    return () => accessCompositionScope.run({ composed: true }, loader)
-  }
-
-  private isComposed(): boolean {
-    return accessCompositionScope.getStore()?.composed === true
   }
 
   rateLimitError(now = Date.now()): GithubRateLimitError | null {
@@ -314,15 +300,25 @@ export class GithubRestReader {
     return this.versions.get(key) ?? null
   }
 
-  invalidate(prefix: string, reason: string | null = null, trigger: string | null = null): void {
-    this.counters.invalidations++
+  invalidate(prefix: string, reason: string, trigger: string): void {
     this.invalidationSeq++
-    const record = { seq: this.invalidationSeq, prefix, reason, trigger }
-    this.counters.invalidationRecords.push(record)
-    if (this.counters.invalidationRecords.length > MAX_GATEWAY_EVIDENCE_RECORDS) {
-      this.counters.invalidationRecords.splice(
+    const generation = (this.prefixGenerations.get(prefix) ?? 0) + 1
+    this.prefixGenerations.set(prefix, generation)
+    const record: InvalidationRecord = {
+      seq: this.invalidationSeq,
+      generation,
+      prefix,
+      reason,
+      trigger,
+      status: 'pending',
+      observedAt: null,
+      observedKey: null,
+    }
+    this.evidence.invalidationRecords.push(record)
+    if (this.evidence.invalidationRecords.length > MAX_GATEWAY_EVIDENCE_RECORDS) {
+      this.evidence.invalidationRecords.splice(
         0,
-        this.counters.invalidationRecords.length - MAX_GATEWAY_EVIDENCE_RECORDS,
+        this.evidence.invalidationRecords.length - MAX_GATEWAY_EVIDENCE_RECORDS,
       )
     }
     logTaskDiagnostic('github-rest-invalidation', { ...record })
@@ -357,6 +353,18 @@ export class GithubRestReader {
     return stdout.text
   }
 
+  /** A subsequent cached load completes every pending invalidation whose prefix covers the key (#133: invalidation without re-observation stays unknown). */
+  private observeInvalidationsFor(key: string): void {
+    const now = this.now()
+    for (const record of this.evidence.invalidationRecords) {
+      if (record.status !== 'pending') continue
+      if (key !== record.prefix && !key.startsWith(`${record.prefix}/`)) continue
+      record.status = 'observed'
+      record.observedAt = now
+      record.observedKey = key
+    }
+  }
+
   private recordBudgetSnapshot(headers: Map<string, string>): void {
     const remainingRaw = headers.get('x-ratelimit-remaining')
     if (remainingRaw === undefined) return
@@ -365,7 +373,7 @@ export class GithubRestReader {
     const resource = headers.get('x-ratelimit-resource') ?? 'core'
     const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : null
     const remaining = Number.isFinite(Number(remainingRaw)) ? Number(remainingRaw) : null
-    this.counters.rateLimitBuckets[resource] = {
+    const sample: RateLimitSample = {
       resource,
       limit,
       remaining,
@@ -373,6 +381,11 @@ export class GithubRestReader {
       reset: Number.isFinite(resetSeconds) && resetSeconds > 0 ? resetSeconds * 1000 : null,
       observedAt: this.now(),
     }
+    this.evidence.rateLimitSamples.push(sample)
+    if (this.evidence.rateLimitSamples.length > MAX_GATEWAY_EVIDENCE_RECORDS) {
+      this.evidence.rateLimitSamples.splice(0, this.evidence.rateLimitSamples.length - MAX_GATEWAY_EVIDENCE_RECORDS)
+    }
+    this.evidence.rateLimitBuckets[resource] = sample
   }
 
   private async request(
@@ -381,18 +394,9 @@ export class GithubRestReader {
     timeoutMs = 30_000,
     mutation?: { method: 'POST' | 'PATCH'; body: unknown },
   ): Promise<IncludedResponse> {
-    const enteredAt = this.now()
     return serializeGithubRequest(this.minimumIntervalMs, async () => {
       // A request queued before another resource trips the circuit must not hit GitHub afterwards.
       this.assertCircuitOpen()
-      // Queue wait (#133): access entry → physical dispatch. Service time
-      // after dispatch is not queue wait and is not accumulated here.
-      const waitMs = this.now() - enteredAt
-      if (waitMs > 0) {
-        this.counters.waitCount++
-        this.counters.waitMsTotal += waitMs
-      }
-      this.counters.upstreamRequests++
       const command = [
         'gh api --include',
         shellQuote(path),
@@ -406,14 +410,25 @@ export class GithubRestReader {
         timeoutMs,
         ...(mutation ? { stdin: JSON.stringify(mutation.body) } : {}),
       })
-      const result = await this.ctx.shell.run(spec)
-      const stdout = await this.output(result)
+      const requestOperation = `${mutation?.method ?? 'GET'} ${path}`
+      let result: Awaited<ReturnType<ShellContext['shell']['run']>>
+      let stdout: string
+      try {
+        result = await this.ctx.shell.run(spec)
+        stdout = await this.output(result)
+      } catch (transportError) {
+        // The child was dispatched and the transport failed (shell reject,
+        // spill read): upstream-level evidence must survive (review round 2).
+        this.recordUpstreamFailure(requestOperation, transportError)
+        throw transportError
+      }
       let response: IncludedResponse
       try {
         response = parseIncludedResponse(stdout)
       } catch (parseError) {
         const detail = [result.stderr?.text, stdout].filter(Boolean).join('\n').trim()
         if (result.exitCode !== 0 && /(?:rate limit|secondary rate)/i.test(detail)) {
+          this.recordUpstreamFailure(requestOperation, new GithubRateLimitError(Date.now() + 60 * 60_000, 'unknown'))
           this.circuitUntil = Date.now() + 60 * 60_000
           this.circuitKind = 'unknown'
           logTaskDiagnostic('github-rate-circuit-trip', {
@@ -424,11 +439,15 @@ export class GithubRestReader {
           })
           throw new GithubRateLimitError(this.circuitUntil, 'unknown')
         }
-        if (result.exitCode !== 0) throw new Error(detail || `gh api 执行失败(exit ${result.exitCode})`)
+        if (result.exitCode !== 0) {
+          const cliFailure = new Error(detail || `gh api 执行失败(exit ${result.exitCode})`)
+          this.recordUpstreamFailure(requestOperation, cliFailure)
+          throw cliFailure
+        }
+        this.recordUpstreamFailure(requestOperation, parseError)
         throw parseError
       }
       this.recordBudgetSnapshot(response.headers)
-      const requestOperation = `${mutation?.method ?? 'GET'} ${path}`
       const detail = [result.stderr?.text, response.body].filter(Boolean).join('\n')
       if (isRateLimited(response, detail)) {
         this.recordUpstreamFailure(requestOperation, new GithubRateLimitError(resetFrom(response.headers, Date.now())))
@@ -436,11 +455,12 @@ export class GithubRestReader {
         const kind: GithubRateLimitKind =
           response.headers.get('x-ratelimit-remaining') === '0' ? 'primary' : 'secondary'
         this.circuitKind = kind
+        const resource = response.headers.get('x-ratelimit-resource') ?? 'core'
         logTaskDiagnostic('github-rate-circuit-trip', {
           kind,
           path,
-          remaining: response.headers.get('x-ratelimit-remaining'),
-          reset: response.headers.get('x-ratelimit-reset'),
+          resource,
+          bucket: this.evidence.rateLimitBuckets[resource] ?? null,
           retryAfter: response.headers.get('retry-after'),
           until: this.circuitUntil,
         })
@@ -465,64 +485,42 @@ export class GithubRestReader {
   }
 
   async json<T = unknown>(path: string, accept?: string, timeoutMs?: number): Promise<T> {
-    const direct = !this.isComposed()
-    if (direct) this.counters.logicalRequests++
     try {
       const response = await this.request(path, accept, timeoutMs)
       try {
-        const parsed = JSON.parse(response.body || 'null') as T
-        if (direct) this.counters.executions++
-        return parsed
+        return JSON.parse(response.body || 'null') as T
       } catch {
         throw new Error(`GitHub REST 返回了无效 JSON: ${path}`)
       }
     } catch (error) {
-      if (direct) this.recordFailure(`GET ${path}`, error)
+      if (!this.isComposed()) this.recordFailure(`GET ${path}`, error, null)
       throw error
     }
   }
 
   async mutate<T = unknown>(path: string, method: 'POST' | 'PATCH', body: unknown, timeoutMs?: number): Promise<T> {
-    const direct = !this.isComposed()
-    if (direct) this.counters.logicalRequests++
     try {
       const response = await this.request(path, undefined, timeoutMs, { method, body })
       try {
-        const parsed = JSON.parse(response.body || 'null') as T
-        if (direct) this.counters.executions++
-        return parsed
+        return JSON.parse(response.body || 'null') as T
       } catch {
         throw new Error(`GitHub REST 返回了无效 JSON: ${path}`)
       }
     } catch (error) {
-      if (direct) this.recordFailure(`${method} ${path}`, error)
+      if (!this.isComposed()) this.recordFailure(`${method} ${path}`, error, null)
       throw error
     }
   }
 
   async paginate<T>(path: string, accept?: string, timeoutMs?: number): Promise<T[]> {
-    const direct = !this.isComposed()
-    if (direct) this.counters.logicalRequests++
-    return accessCompositionScope.run({ composed: true }, async () => {
-      try {
-        const values: T[] = []
-        for (let page = 1; ; page++) {
-          const separator = path.includes('?') ? '&' : '?'
-          const batch = await this.json<T[]>(`${path}${separator}per_page=100&page=${page}`, accept, timeoutMs)
-          if (!Array.isArray(batch)) throw new Error('GitHub REST 分页返回格式无效')
-          values.push(...batch)
-          if (batch.length < 100) {
-            if (direct) this.counters.executions++
-            return values
-          }
-        }
-      } catch (error) {
-        if (direct) this.recordFailure(`GET ${path} (paginate)`, error)
-        throw error
-      } finally {
-        // scope closed by the wrapping run
-      }
-    })
+    const values: T[] = []
+    for (let page = 1; ; page++) {
+      const separator = path.includes('?') ? '&' : '?'
+      const batch = await this.json<T[]>(`${path}${separator}per_page=100&page=${page}`, accept, timeoutMs)
+      if (!Array.isArray(batch)) throw new Error('GitHub REST 分页返回格式无效')
+      values.push(...batch)
+      if (batch.length < 100) return values
+    }
   }
 
   async cachedResource<T>(
@@ -531,16 +529,14 @@ export class GithubRestReader {
     loader: () => Promise<T>,
     options: { ttlMs?: number; force?: boolean; versionOf?: (value: T) => string | null | undefined } = {},
   ): Promise<T> {
-    this.counters.logicalRequests++
     try {
       this.assertCircuitOpen()
     } catch (error) {
-      this.recordFailure(`access ${key}`, error)
+      this.recordFailure(`access ${key}`, error, key)
       throw error
     }
     const forcedPending = this.forcedResources.get(key) as Promise<T> | undefined
     if (!options.force && forcedPending) {
-      this.counters.singleflightJoins++
       return forcedPending
     }
     const knownVersion = version || null
@@ -552,7 +548,6 @@ export class GithubRestReader {
       cached.expiresAt > now &&
       (knownVersion === null || cached.version === knownVersion)
     ) {
-      this.counters.cacheHits++
       return cached.value
     }
     const load = this.withLoaderDepth(async () => {
@@ -569,6 +564,7 @@ export class GithubRestReader {
           expiresAt: Date.now() + (options.ttlMs ?? 30_000),
         })
         if (loadedVersion) this.versions.set(key, loadedVersion)
+        this.observeInvalidationsFor(key)
       }
       return value
     })
@@ -586,21 +582,20 @@ export class GithubRestReader {
   }
 
   async cachedAggregate<T>(key: string, ttlMs: number, force: boolean, loader: () => Promise<T>): Promise<T> {
-    this.counters.logicalRequests++
     try {
       this.assertCircuitOpen()
     } catch (error) {
-      this.recordFailure(`access ${key}`, error)
+      this.recordFailure(`access ${key}`, error, key)
       throw error
     }
     const cached = this.aggregates.get(key) as CachedValue<T> | undefined
     if (!force && cached && cached.expiresAt > Date.now()) {
-      this.counters.cacheHits++
       return cached.value
     }
     return this.deduplicate(`aggregate:${key}`, async () => {
       const value = await this.withLoaderDepth(loader)()
       this.aggregates.set(key, { value, version: null, expiresAt: Date.now() + ttlMs })
+      this.observeInvalidationsFor(key)
       return value
     })
   }
@@ -608,7 +603,6 @@ export class GithubRestReader {
   private async deduplicate<T>(key: string, loader: () => Promise<T>): Promise<T> {
     const pending = this.inFlight.get(key) as Promise<T> | undefined
     if (pending) {
-      this.counters.singleflightJoins++
       return pending
     }
     // `key` is an internal dedup handle (`resource:ordinary:…`); the scope
@@ -619,12 +613,18 @@ export class GithubRestReader {
     return created
   }
 
-  /** Leader outcome lands in exactly one bucket; joiners are already counted. */
+  private isComposed(): boolean {
+    return accessCompositionScope.getStore()?.composed === true
+  }
+
+  private withLoaderDepth<T>(loader: () => Promise<T>): () => Promise<T> {
+    return () => accessCompositionScope.run({ composed: true }, loader)
+  }
+
+  /** The access scope a leader failure surfaced through; evidence only (counters land with their consumers in slice B). */
   private async withOutcome<T>(scope: string, promise: Promise<T>): Promise<T> {
     try {
-      const value = await promise
-      this.counters.executions++
-      return value
+      return await promise
     } catch (error) {
       this.recordFailure(`access ${scope}`, error, scope)
       throw error
