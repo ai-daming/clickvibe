@@ -20,13 +20,15 @@ interface CachedValue<T> {
 }
 
 /**
- * Gateway evidence in the frozen #133 units (issue #131 slice A). Numeric
- * access counters (logical/hit/join/execution/wait) are deferred to the
- * slice that consumes them — the threshold assertions and scheduling of the
- * Gateway mechanism — per the concept-budget discipline; what ships here is
- * the evidence that already has production consumers: failures and
- * invalidations land in the persisted diagnostics channel, the per-response
- * rate-limit series feeds the circuit-trip diagnostic.
+ * Gateway evidence (issue #131 slice A). Numeric access counters
+ * (logical/hit/join/execution/wait) and in-memory rate series are deferred
+ * to the slice that consumes them — threshold assertions and scheduling of
+ * the Gateway mechanism — per the concept-budget discipline. What ships
+ * here is the evidence with production consumers now: two-level failure
+ * records (upstream operation + access scope) and invalidation records
+ * (generation, reason/trigger, observed completion) persist to the
+ * diagnostics channel, and the circuit-trip event carries the current
+ * response's rate-limit observation with unknown fields kept unknown.
  */
 
 /** One observed rate-limit sample from a single response (#133: every response records the bucket). */

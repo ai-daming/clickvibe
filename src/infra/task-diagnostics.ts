@@ -1,5 +1,10 @@
 import { randomUUID } from 'node:crypto'
-import { appendDiagnosticLine, DEFAULT_DIAGNOSTIC_MAX_BYTES, waitForDiagnosticLines } from './diagnostic-log-store.ts'
+import {
+  appendDiagnosticLine,
+  DEFAULT_DIAGNOSTIC_MAX_BYTES,
+  waitForAllDiagnosticLines,
+  waitForDiagnosticLines,
+} from './diagnostic-log-store.ts'
 import { loadConfig } from './runtime.ts'
 import { stateDir } from './state.ts'
 
@@ -30,4 +35,9 @@ export function logTaskDiagnostic(event: string, fields: Record<string, unknown>
 /** Await best-effort writes before a task releases or deletes its persistence directory. */
 export function waitForTaskDiagnosticPersistence(workflowKey: unknown): Promise<void> {
   return waitForDiagnosticLines(stateDir(), workflowKey)
+}
+
+/** Await ALL writes under the current state root (global + workflow-scoped) before teardown. */
+export function waitForAllTaskDiagnostics(): Promise<void> {
+  return waitForAllDiagnosticLines(stateDir())
 }

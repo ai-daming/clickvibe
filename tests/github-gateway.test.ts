@@ -9,6 +9,7 @@
  * assertions, scheduling).
  */
 import assert from 'node:assert/strict'
+import { waitForAllTaskDiagnostics } from '../src/infra/task-diagnostics.ts'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -158,6 +159,7 @@ test('failures and invalidations persist into the diagnostics channel (readback 
     }
     assert.fail('diagnostics readback did not observe the gateway evidence lines')
   } finally {
+    await waitForAllTaskDiagnostics().catch(() => undefined)
     process.env.HOME = previousHome
     rmSync(home, { recursive: true, force: true })
   }
@@ -237,6 +239,7 @@ test('subsequent observation persists to diagnostics and survives readback', asy
     }
     assert.fail('observed invalidation event never reached diagnostics.jsonl')
   } finally {
+    await waitForAllTaskDiagnostics().catch(() => undefined)
     process.env.HOME = previousHome
     rmSync(home, { recursive: true, force: true })
   }
@@ -331,6 +334,7 @@ test('a headerless 429 trip never carries a prior response bucket', async () => 
     }
     assert.fail('circuit trip never reached diagnostics.jsonl')
   } finally {
+    await waitForAllTaskDiagnostics().catch(() => undefined)
     process.env.HOME = previousHome
     rmSync(home, { recursive: true, force: true })
   }
@@ -372,6 +376,7 @@ test('a rate-limited response with numeric headers but no resource keeps its bud
     }
     assert.fail('circuit trip never reached diagnostics.jsonl')
   } finally {
+    await waitForAllTaskDiagnostics().catch(() => undefined)
     process.env.HOME = previousHome
     rmSync(home, { recursive: true, force: true })
   }

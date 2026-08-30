@@ -77,3 +77,20 @@ export async function waitForDiagnosticLines(root: string, workflowKey: unknown)
     await logQueues.get(path)?.catch(() => undefined)
   }
 }
+
+/**
+ * Drain every diagnostic stream under one root (review round 8): teardown
+ * must wait for global AND workflow-scoped writes — a root-scoped drain is
+ * the only caller-correct wait when a test removes the whole temp HOME.
+ * Streams registered under other roots are untouched.
+ */
+export async function waitForAllDiagnosticLines(root: string): Promise<void> {
+  const prefix = `${root}/`
+  for (const path of [...logQueues.keys()]) {
+    if (path === root || path.startsWith(prefix)) {
+      while (logQueues.has(path)) {
+        await logQueues.get(path)?.catch(() => undefined)
+      }
+    }
+  }
+}
