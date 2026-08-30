@@ -86,8 +86,18 @@ export async function waitForDiagnosticLines(root: string, workflowKey: unknown)
  */
 export async function waitForAllDiagnosticLines(root: string): Promise<void> {
   const prefix = `${root}/`
-  for (const path of [...logQueues.keys()]) {
-    if (path === root || path.startsWith(prefix)) {
+  // Re-enumerate until a full pass finds no queue under this root: streams
+  // registered while an earlier pass was awaiting must be observed too
+  // (review round 9 — a single entry snapshot lets a late scoped write
+  // resurrect a deleted root).
+  // Re-enumerate until a full pass finds no queue under this root: streams
+  // registered while an earlier pass was awaiting must be observed too
+  // (review round 9 — a single entry snapshot lets a late scoped write
+  // resurrect a deleted root).
+  for (;;) {
+    const pending = [...logQueues.keys()].filter((path) => path === root || path.startsWith(prefix))
+    if (pending.length === 0) return
+    for (const path of pending) {
       while (logQueues.has(path)) {
         await logQueues.get(path)?.catch(() => undefined)
       }
