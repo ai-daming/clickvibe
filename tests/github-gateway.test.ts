@@ -365,3 +365,69 @@ test('direct pagination shape failure records its own access level', async () =>
     ),
   )
 })
+
+test('rate headers without a resource stay unknown and never fabricate a core bucket', async () => {
+  // Review round 5: limit/remaining/reset present, resource absent — the
+  // sample must keep resource=null and must not update any named bucket.
+  const noResource = included(200, '"ok"', {
+    'x-ratelimit-limit': '5000',
+    'x-ratelimit-remaining': '4997',
+    'x-ratelimit-reset': '1893456000',
+  })
+  const { ctx } = okShell({ exitCode: 0, stdout: { text: noResource } })
+  const reader = new GithubRestReader(ctx as never)
+  await reader.json('repos/o/r')
+  assert.equal(reader.evidence.rateLimitSamples[0].resource, null, 'unknown resource stays unknown')
+  assert.equal(reader.evidence.rateLimitSamples[0].limit, 5000)
+  assert.equal(reader.evidence.rateLimitSamples[0].remaining, 4997)
+  assert.deepEqual(reader.evidence.rateLimitBuckets, {}, 'no named bucket is fabricated')
+})
+
+test('a headerless 429 trip never carries a prior response bucket', async () => {
+  const previousHome = process.env.HOME
+  const home = mkdtempSync(join(tmpdir(), 'clickvibe-gateway-trip-'))
+  process.env.HOME = home
+  try {
+    const realCore = included(200, '1', rateHeaders('4999'))
+    const bare429 = included(429, '{"message":"too many"}', { 'retry-after': '60' })
+    const responses = [
+      { exitCode: 0, stdout: { text: realCore } },
+      { exitCode: 0, stdout: { text: bare429 } },
+    ]
+    let index = 0
+    const ctx = {
+      shell: {
+        resolve: (spec: unknown) => spec,
+        run: async () => {
+          const next = responses[Math.min(index, responses.length - 1)]
+          index++
+          return next
+        },
+      },
+    }
+    const reader = new GithubRestReader(ctx as never)
+    await reader.json('repos/o/r')
+    await assert.rejects(reader.json('repos/o/r'), /限流/)
+    // The persisted trip event must bind to THIS response's observation —
+    // resource unknown, no bucket — not the earlier core response's.
+    const globalDiag = join(home, '.clickvibe', 'state', 'diagnostics.jsonl')
+    for (let spin = 0; spin < 100; spin++) {
+      try {
+        const lines = readFileSync(globalDiag, 'utf8')
+        const tripLine = lines.split('\n').find((line) => line.includes('github-rate-circuit-trip'))
+        if (tripLine) {
+          assert.match(tripLine, /"resource":null/, 'the trip names the current observation, not a fallback')
+          assert.match(tripLine, /"bucket":null/, 'a prior response bucket must not leak onto this trip')
+          return
+        }
+      } catch {
+        /* not yet flushed */
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    assert.fail('circuit trip never reached diagnostics.jsonl')
+  } finally {
+    process.env.HOME = previousHome
+    rmSync(home, { recursive: true, force: true })
+  }
+})

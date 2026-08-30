@@ -383,14 +383,10 @@ export class GithubRestReader {
    * bare response is distinguishable from "no response happened" and never
    * drops an already-seen bucket/limit/reset.
    */
-  private recordBudgetSnapshot(headers: Map<string, string>): void {
-    const hasAnyHeader = [
-      'x-ratelimit-remaining',
-      'x-ratelimit-limit',
-      'x-ratelimit-reset',
-      'x-ratelimit-resource',
-    ].some((name) => headers.get(name) !== undefined)
-    const resource = headers.get('x-ratelimit-resource') ?? (hasAnyHeader ? 'core' : null)
+  private recordBudgetSnapshot(headers: Map<string, string>): RateLimitSample {
+    // A missing resource header stays unknown (review round 5): no `core`
+    // fabrication, no named-bucket update from an unattributed response.
+    const resource = headers.get('x-ratelimit-resource') ?? null
     const limitRaw = Number(headers.get('x-ratelimit-limit'))
     const remainingRaw = Number(headers.get('x-ratelimit-remaining'))
     const resetSeconds = Number(headers.get('x-ratelimit-reset'))
@@ -409,6 +405,7 @@ export class GithubRestReader {
       this.evidence.rateLimitSamples.splice(0, this.evidence.rateLimitSamples.length - MAX_GATEWAY_EVIDENCE_RECORDS)
     }
     if (resource !== null) this.evidence.rateLimitBuckets[resource] = sample
+    return sample
   }
 
   private async request(
@@ -470,7 +467,7 @@ export class GithubRestReader {
         this.recordUpstreamFailure(requestOperation, parseError)
         throw parseError
       }
-      this.recordBudgetSnapshot(response.headers)
+      const currentSample = this.recordBudgetSnapshot(response.headers)
       const detail = [result.stderr?.text, response.body].filter(Boolean).join('\n')
       if (isRateLimited(response, detail)) {
         const kind: GithubRateLimitKind =
@@ -481,12 +478,14 @@ export class GithubRestReader {
         )
         this.circuitUntil = resetFrom(response.headers, Date.now())
         this.circuitKind = kind
-        const resource = response.headers.get('x-ratelimit-resource') ?? 'core'
         logTaskDiagnostic('github-rate-circuit-trip', {
           kind,
           path,
-          resource,
-          bucket: this.evidence.rateLimitBuckets[resource] ?? null,
+          // Bound to THIS response's observation (review round 5): unknown
+          // stays unknown; a prior response's bucket never leaks onto the
+          // trip event.
+          resource: currentSample.resource,
+          bucket: currentSample.resource !== null ? currentSample : null,
           retryAfter: response.headers.get('retry-after'),
           until: this.circuitUntil,
         })
