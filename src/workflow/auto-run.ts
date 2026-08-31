@@ -1,8 +1,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { ensureWorktree } from '../agent/worktree.ts'
 import { fetchIssue, issueSnapshot, sameIssueContract } from '../github/issue.ts'
-import { githubRest } from '../github/rest.ts'
 import { type IssuePromptSnapshot } from '../infra/develop-core.ts'
+import { isGithubRateLimitError } from '../github/rest.ts'
 import { localGitSnapshots } from '../infra/local-git-snapshot.ts'
 import { liveTasks, parseUrl } from '../infra/runtime.ts'
 import {
@@ -139,8 +139,10 @@ async function applyDecision(ctx: Context, key: string, decision: AutoRunDecisio
       break
   }
   if (!result.ok) {
-    const circuit = githubRest(ctx as never).rateLimitError()
-    if (circuit) throw circuit
+    // Consume the action's own error: a rate-limited operation already throws
+    // GithubRateLimitError from Gateway admission — no bypassed circuit probe
+    // re-derives the cause (design §11).
+    if (result.error && isGithubRateLimitError(result.error)) throw result.error
     if (result.conflict) {
       // 原则 10(可恢复性优于预防):sync 冲突现场已由 syncWorktree 保留并记录,
       // 属可恢复工作——不暂停,直接排队下一轮 reconcile,由 derive 推导出 resume

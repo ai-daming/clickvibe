@@ -22,7 +22,7 @@ import { existsSync } from 'node:fs'
 import type { IncomingMessage } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import { fetchIssue, issueSnapshot } from '../github/issue.ts'
-import { githubErrorMessage, githubRest, isGithubRateLimitError } from '../github/rest.ts'
+import { githubErrorMessage, isGithubRateLimitError } from '../github/rest.ts'
 import { handleApiPost } from './dispatch.ts'
 import { type IssuePromptSnapshot, mergeGateLabel } from '../infra/develop-core.ts'
 import { aggregateRepositoryFreshness, type RepositoryFreshness } from '../infra/repo-freshness.ts'
@@ -84,8 +84,8 @@ export async function stateWorkflows(
         : workflows.map((workflow) => workflow.repoKey),
   )
   try {
-    const circuitError = githubRest(ctx).rateLimitError()
-    if (circuitError) throw circuitError
+    // No pre-probe of the legacy circuit: each operation's admission surfaces
+    // GithubRateLimitError itself (design §11 — no bypassed state answers).
     const force = filter?.forceRefresh === true
     if (force) {
       // forceRefresh is the panel's escape hatch: it must observe fresh local

@@ -331,8 +331,14 @@ export class GithubRestReader {
     return this.owner.cachedResource(key, version, loader, options)
   }
 
-  async cachedAggregate<T>(key: string, ttlMs: number, force: boolean, loader: () => Promise<T>): Promise<T> {
-    return this.owner.cachedAggregate(key, ttlMs, force, loader)
+  async cachedAggregate<T>(
+    key: string,
+    ttlMs: number,
+    force: boolean,
+    loader: () => Promise<T>,
+    options?: { derivedVersions?: (value: T) => Array<[key: string, version: string | null | undefined]> },
+  ): Promise<T> {
+    return this.owner.cachedAggregate(key, ttlMs, force, loader, options)
   }
 }
 

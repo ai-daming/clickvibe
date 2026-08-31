@@ -58,6 +58,12 @@ export interface CachedResourceOptions<T> {
   versionOf?: (value: T) => string | null | undefined
 }
 
+export interface CachedAggregateOptions<T> {
+  /** Child resource versions observed by this aggregate settlement — the owner
+   *  records them so callers never write reader cache state (design §11). */
+  derivedVersions?: (value: T) => Array<[key: string, version: string | null | undefined]>
+}
+
 export interface GithubGatewayOwner {
   /** Opaque identity; never contains token material. */
   readonly credentialScopeId: string
@@ -102,7 +108,13 @@ export interface GithubGatewayOwner {
     loader: () => Promise<T>,
     options?: CachedResourceOptions<T>,
   ): Promise<T>
-  cachedAggregate<T>(key: string, ttlMs: number, force: boolean, loader: () => Promise<T>): Promise<T>
+  cachedAggregate<T>(
+    key: string,
+    ttlMs: number,
+    force: boolean,
+    loader: () => Promise<T>,
+    options?: CachedAggregateOptions<T>,
+  ): Promise<T>
   /** Resolve when no step is waiting or running (test/evidence quiescence). */
   idle(): Promise<void>
   /** Stop admission, interrupt queued steps, drain running to a deadline, seal. */
@@ -468,7 +480,13 @@ export function createGithubGatewayOwner(): GithubGatewayOwner {
       void forced.then(clear, clear)
       return forced
     },
-    async cachedAggregate<T>(key: string, ttlMs: number, force: boolean, loader: () => Promise<T>): Promise<T> {
+    async cachedAggregate<T>(
+      key: string,
+      ttlMs: number,
+      force: boolean,
+      loader: () => Promise<T>,
+      options: CachedAggregateOptions<T> = {},
+    ): Promise<T> {
       const requestId = owner.declareLogicalRequest('aggregate', key)
       try {
         owner.assertCircuitOpen()
@@ -492,6 +510,9 @@ export function createGithubGatewayOwner(): GithubGatewayOwner {
           if ((aggregateGenerations.get(key) ?? 0) === generation - 1) {
             aggregates.set(key, { value, version: null, expiresAt: Date.now() + ttlMs })
             aggregateGenerations.set(key, generation)
+            for (const [childKey, childVersion] of options?.derivedVersions?.(value) ?? []) {
+              owner.rememberVersion(childKey, childVersion)
+            }
           }
           return value
         })

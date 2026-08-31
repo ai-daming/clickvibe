@@ -244,6 +244,16 @@ async function loadPanel(ctx: Context, intent: GithubReadIntent, force: boolean,
   )
 }
 
+interface SnapshotIssue {
+  number: number
+  updatedAt?: string
+}
+
+interface SnapshotPull {
+  number: number
+  updated_at?: string
+}
+
 export const GITHUB_READ_OPERATIONS: Record<GithubReadOperationId, GithubReadPolicy> = {
   'pr-detail': {
     effect: 'read',
@@ -371,13 +381,30 @@ export const GITHUB_READ_OPERATIONS: Record<GithubReadOperationId, GithubReadPol
     joinable: true,
     execute: (ctx, intent, force) => {
       const rest = githubRest(ctx)
-      return rest.cachedAggregate(`repo:${intent.repoKey}`, intent.ttlMs ?? 30_000, force, async () => {
-        const [issues, pulls] = await Promise.all([
-          rest.paginate(`repos/${intent.repoKey}/issues?state=all`),
-          rest.paginate(`repos/${intent.repoKey}/pulls?state=all`),
-        ])
-        return { issues, pulls }
-      })
+      return rest.cachedAggregate(
+        `repo:${intent.repoKey}`,
+        intent.ttlMs ?? 30_000,
+        force,
+        async () => {
+          const [issues, pulls] = await Promise.all([
+            rest.paginate<SnapshotIssue>(`repos/${intent.repoKey}/issues?state=all`),
+            rest.paginate<SnapshotPull>(`repos/${intent.repoKey}/pulls?state=all`),
+          ])
+          return { issues, pulls }
+        },
+        {
+          // Aggregate settlement records the child resource versions inside
+          // the owner; callers never write reader cache state (design §11).
+          derivedVersions: (value: { issues: SnapshotIssue[]; pulls: SnapshotPull[] }) => [
+            ...value.issues.map(
+              (issue) => [`${intent.repoKey}/issues/${issue.number}`, issue.updatedAt] as [string, string | undefined],
+            ),
+            ...value.pulls.map(
+              (pr) => [`${intent.repoKey}/pulls/${pr.number}`, pr.updated_at] as [string, string | undefined],
+            ),
+          ],
+        },
+      )
     },
   },
 }

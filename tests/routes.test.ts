@@ -3384,7 +3384,11 @@ test('rate-limit response opens a circuit and returns the friendly recovery time
     })
 
     const first = await post(handler, '/clickvibe/api/fetch', { url: 'https://github.com/o/r/issues/41' })
-    const second = await post(handler, '/clickvibe/api/state', { repoKey: 'o/r' })
+    // r3 declared behavior change: the pre-probe bypass is gone, so a route
+    // with ZERO GitHub operations (empty-repo /state) no longer 429s by
+    // side effect. The circuit protection is asserted on a route that
+    // actually submits operations — its admission must reject pre-dispatch.
+    const second = await post(handler, '/clickvibe/api/fetch', { url: 'https://github.com/o/r/issues/41' })
     assert.equal(first.status, 429)
     assert.equal(second.status, 429)
     assert.match(first.body.error ?? '', /^GitHub 额度已用完,约 \d{2}:\d{2} 恢复$/)
