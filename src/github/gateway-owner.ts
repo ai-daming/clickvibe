@@ -55,33 +55,6 @@ interface GatewayAdmission {
   maxPages: number
 }
 
-/** One real resource bucket's last published snapshot (design §8). */
-interface BucketLedger {
-  limit: number | null
-  remaining: number | null
-  used: number | null
-  reset: number | null
-  observedAt: number
-  /** Monotonic republish counter — tells a step whether fresh evidence
-   *  superseded its dispatch (vs. a silently consumed unit). */
-  evidenceSeq: number
-}
-
-interface PendingStep {
-  requestId: string
-  repo: string
-  bucket: string
-  priority: 'critical' | 'normal'
-  deadlineAt: number
-  enqueuedAt: number
-  /** Evidence sequence at dispatch — see settleReservation. */
-  evidenceSeq: number
-  pacingMs: number
-  run: () => Promise<unknown>
-  settle: (value: unknown) => void
-  fail: (error: unknown) => void
-}
-
 interface CachedValue<T> {
   value: T
   version: string | null
@@ -184,6 +157,8 @@ export interface GithubGatewayOwner {
 }
 
 /** Conservative v0.2 scope: the host's gh auth is one credential. */
+import { type BucketLedger, selectCandidate, type PendingStep } from './gateway-scheduling.ts'
+
 const CONSERVATIVE_CREDENTIAL_SCOPE = 'host-gh-auth:v1'
 
 export function createGithubGatewayOwner(
@@ -253,34 +228,30 @@ export function createGithubGatewayOwner(
   /** Atomically REMOVE the next eligible step — the taker owns it exclusively,
    *  so concurrent dispatch loops can never double-dispatch one step. */
   const takeCandidate = (): PendingStep | null => {
-    const now = Date.now()
-    const eligible = waiting.filter((step) => {
-      const repoRunning = [...running.values()].filter((entry) => entry.repo === step.repo).length
-      return repoRunning < REPOSITORY_CONCURRENCY
+    const runningRepos = new Map<string, number>()
+    for (const step of running.values()) runningRepos.set(step.repo, (runningRepos.get(step.repo) ?? 0) + 1)
+    const chosen = selectCandidate({
+      waiting,
+      runningRepos,
+      lastDispatchPerRepo,
+      repositoryConcurrency: REPOSITORY_CONCURRENCY,
+      agingMs,
+      now: Date.now(),
     })
-    if (eligible.length === 0) return null
-    const critical = eligible.filter((step) => step.priority === 'critical')
-    const aged = eligible.filter((step) => step.priority === 'normal' && now - step.enqueuedAt >= agingMs)
-    // ADR-0010: normal aging is a scheduling dimension, not a tie-breaker —
-    // a request that already waited past the aging threshold gets its
-    // execution turn before NEW critical arrivals (review r6/F2: without
-    // this, a steady critical stream starves panel refreshes forever).
-    const lane =
-      aged.length > 0 ? aged : critical.length > 0 ? critical : eligible.filter((s) => s.priority === 'normal')
-    const pool = lane.length > 0 ? lane : eligible
-    // Repository round-robin inside the lane: prefer the repo least recently
-    // dispatched; ties break by FIFO (array order).
-    let chosen = pool[0]
-    for (const step of pool) {
-      if ((lastDispatchPerRepo.get(step.repo) ?? 0) < (lastDispatchPerRepo.get(chosen.repo) ?? 0)) chosen = step
-    }
+    if (!chosen) return null
     waiting.splice(waiting.indexOf(chosen), 1)
     return chosen
   }
 
   /** Put a step back at the head of its lane order and stop this loop pass —
    *  the deciding fact (a settlement or a timer) re-schedules dispatch. */
+  // A dequeued candidate paces before it runs: during that window it is in
+  // NEITHER waiting NOR running — close()/idle() must still see it (review
+  // r7/F3: an invisible mid-pacing request survived close with no terminal).
+  const pacing = new Map<string, PendingStep>()
+
   const requeueFront = (step: PendingStep) => {
+    pacing.delete(step.requestId)
     waiting.unshift(step)
   }
 
@@ -319,9 +290,10 @@ export function createGithubGatewayOwner(
       if (running.size >= CREDENTIAL_TOTAL_CONCURRENCY) return
       const candidate = takeCandidate()
       if (!candidate) {
-        flushIdleWaiters()
+        if (pacing.size === 0) flushIdleWaiters()
         return
       }
+      pacing.set(candidate.requestId, candidate)
       // A queued step whose deadline already passed fails closed as
       // interrupted — it must never spin or dispatch past its budget of time.
       if (Date.now() > candidate.deadlineAt) {
@@ -379,18 +351,21 @@ export function createGithubGatewayOwner(
       // The deadline is absolute for the whole logical request: pacing may
       // have crossed it while this step waited its turn — an expired request
       // must fail, never spend a GitHub call (review r6/F2).
+      pacing.delete(candidate.requestId)
       if (Date.now() > candidate.deadlineAt) {
         const error = new Error('GitHub 上游步骤超时(等待 pacing 超过 deadline)')
         owner.noteTerminal(candidate.requestId, 'interrupted', error)
         candidate.fail(error)
         continue
       }
+      pacing.delete(candidate.requestId)
       if (closed || recorder.sealed) {
         const error = new Error('Gateway 已关闭,排队步骤被中断')
         owner.noteTerminal(candidate.requestId, 'interrupted', error)
         candidate.fail(error)
         return
       }
+      pacing.delete(candidate.requestId)
       const dispatchGeneration = ownerGeneration
       reservedByBucket.set(candidate.bucket, (reservedByBucket.get(candidate.bucket) ?? 0) + 1)
       candidate.evidenceSeq = buckets.get(candidate.bucket)?.evidenceSeq ?? 0
@@ -500,7 +475,7 @@ export function createGithubGatewayOwner(
       }
     },
     idle(): Promise<void> {
-      if (waiting.length === 0 && running.size === 0) return Promise.resolve()
+      if (waiting.length === 0 && running.size === 0 && pacing.size === 0) return Promise.resolve()
       return new Promise<void>((resolve) => {
         idleWaiters.push(resolve)
       })
@@ -514,6 +489,12 @@ export function createGithubGatewayOwner(
       for (const step of waiting.splice(0)) {
         owner.noteTerminal(step.requestId, 'interrupted', 'Gateway 关闭:排队步骤被中断')
         step.fail(new Error('Gateway 已关闭,排队步骤被中断'))
+      }
+      for (const step of pacing.values()) {
+        pacing.delete(step.requestId)
+        const error = new Error('Gateway 已关闭:节流等待中的步骤被中断')
+        owner.noteTerminal(step.requestId, 'interrupted', error)
+        step.fail(error)
       }
       if (running.size > 0) {
         await Promise.race([owner.idle(), new Promise((resolve) => setTimeout(resolve, drainMs))])

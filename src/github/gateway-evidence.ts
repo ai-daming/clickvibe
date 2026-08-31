@@ -61,15 +61,21 @@ export function createDiagnosticEvidenceSink(): GatewayEvidenceSink {
     const outgoing = lines
     lines = []
     for (const line of outgoing) await append(line, budget)
-    // The production #133 threshold consumer: each flush publishes the
-    // derived metrics of everything written so far.
-    if (events.length > 0) {
-      const metrics = deriveGatewayMetrics(events)
+    // Metrics derive ONLY from requests that reached a terminal inside this
+    // batch; still-open requests carry their events across flushes so a
+    // request spanning several debounce windows is measured exactly once,
+    // with its true outcome (review r7/F3: per-batch derivation permanently
+    // recorded slow successes as interrupted).
+    const terminated = new Set(events.filter((event) => event.kind === 'terminal').map((event) => event.requestId))
+    const closed = events.filter((event) => terminated.has(event.requestId))
+    const open = events.filter((event) => !terminated.has(event.requestId))
+    events = open
+    if (closed.length > 0) {
+      const metrics = deriveGatewayMetrics(closed)
       await append(
         JSON.stringify({ event: 'github-gateway-metrics', ...metrics, at: new Date().toISOString() }),
         budget,
       )
-      events = []
     }
     await waitForDiagnosticLines(stateDir(), GATEWAY_EVIDENCE_KEY).catch((error: unknown) => {
       logTaskDiagnostic('github-gateway-evidence-write-failed', {

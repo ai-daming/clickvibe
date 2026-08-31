@@ -369,3 +369,89 @@ test('r6/F3 regression: the evidence sink persists without flush() and publishes
     rmSync(home, { recursive: true, force: true })
   }
 })
+
+test('r7/F3 regression: a request spanning flush windows is measured once with its true outcome', async () => {
+  const previousHome = process.env.HOME
+  const home = mkdtempSync(join(tmpdir(), 'clickvibe-gw-evidence-r7-'))
+  process.env.HOME = home
+  try {
+    const sink = createDiagnosticEvidenceSink()
+    const requestId = 'gh-span'
+    // Window 1: the request opens (declared/queued/dispatched) — no terminal yet.
+    sink.write({ kind: 'declared', requestId, scope: 'direct', key: 'k', priority: 'normal', at: Date.now() })
+    sink.write({ kind: 'queued', requestId, at: Date.now() })
+    sink.write({ kind: 'dispatched', requestId, at: Date.now() })
+    await sink.flush()
+    // Window 2: the same request finishes successfully.
+    sink.write({ kind: 'upstream-settled', requestId, step: 1, ok: true, rate: null, at: Date.now() })
+    sink.write({ kind: 'terminal', requestId, outcome: 'succeeded', at: Date.now() })
+    await sink.flush()
+    const content = await readFile(join(stateDir(), 'diagnostics.jsonl'), 'utf8')
+    const metricsLines = content.split('\n').filter((line) => line.includes('github-gateway-metrics'))
+    assert.equal(metricsLines.length, 1, `metrics publish exactly once, at terminal: ${metricsLines.length}`)
+    const metrics = JSON.parse(metricsLines[0])
+    assert.equal(metrics.logicalRequests, 1)
+    assert.equal(metrics.upstreamRequests, 1)
+    assert.equal(metrics.failures, 0)
+    assert.equal(metrics.rateLimited, 0)
+    assert.equal(
+      metrics.interrupted ?? 0,
+      0,
+      'an open request carried across a flush window must never be recorded as interrupted',
+    )
+  } finally {
+    process.env.HOME = previousHome
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('r7/F7 regression: primary pauses the RESPONSE resource, not the URL guess', async () => {
+  const commands: string[] = []
+  // A code-scanning endpoint (URL-guess 'core') exhausts its real resource
+  // pool; the follow-up core read must still reach the shell.
+  const ctx = fakeCtx(async (command) => {
+    commands.push(command)
+    if (/code-scanning/.test(command)) {
+      return {
+        exitCode: 0,
+        stdout: {
+          text: okBody({ v: 1 }, [
+            'x-ratelimit-remaining: 0',
+            'x-ratelimit-resource: code_scanning_upload',
+            `x-ratelimit-reset: ${Math.floor(Date.now() / 1000) + 3600}`,
+          ]),
+        },
+        stderr: { text: '' },
+      }
+    }
+    return { exitCode: 0, stdout: { text: okBody({ v: 2 }) }, stderr: { text: '' } }
+  })
+  const reader = new GithubRestReader(ctx)
+  await assert.rejects(() => reader.json('repos/o/r/code-scanning/alerts'))
+  const healthy = await reader.json('repos/o/r/issues/9')
+  assert.ok(healthy)
+  assert.equal(commands.length, 2, 'the healthy core bucket must reach the executor')
+})
+
+test('r7/F7 regression: a primary response without a resource header stays credential-wide unknown', async () => {
+  const commands: string[] = []
+  const ctx = fakeCtx(async (command) => {
+    commands.push(command)
+    return {
+      exitCode: 0,
+      stdout: {
+        text: okBody({ v: 1 }, [
+          'x-ratelimit-remaining: 0',
+          `x-ratelimit-reset: ${Math.floor(Date.now() / 1000) + 3600}`,
+        ]),
+      },
+      stderr: { text: '' },
+    }
+  })
+  const reader = new GithubRestReader(ctx)
+  await assert.rejects(() => reader.json('repos/o/r/whatever'))
+  // No resource evidence → the pause cannot be attributed to a bucket; it
+  // stays credential-wide (fail closed), so the next request never shells out.
+  await assert.rejects(() => reader.json('repos/o/r/issues/9'))
+  assert.equal(commands.length, 1, 'an unattributable primary pauses the credential, not a guessed bucket')
+})

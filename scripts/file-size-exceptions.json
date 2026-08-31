@@ -37,7 +37,7 @@
   },
   {
     "path": "src/github/gateway-owner.ts",
-    "reason": "Issue #131 r2: the owner hosts the full admission state machine (priority lanes, repo rotation, budget, pacing, close) in one module beside the state it owns; the lifecycle stream lives in gateway-lifecycle.ts; further splitting is deferred from the L3 gateway plane.",
+    "reason": "Issue #131: the owner hosts the admission/lifecycle/close state machine whose pieces share closure state (waiting/pacing/running, buckets, generation fence); the pure selection policy is split into gateway-scheduling.ts. Further splitting is deferred from the L3 gateway slice.",
     "issueRef": "#131"
   }
 ]

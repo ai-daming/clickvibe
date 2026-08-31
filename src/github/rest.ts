@@ -251,7 +251,12 @@ export class GithubRestReader {
           const until = resetFrom(response.headers, Date.now())
           const kind: GithubRateLimitKind =
             response.headers.get('x-ratelimit-remaining') === '0' ? 'primary' : 'secondary'
-          this.owner.noteRateLimitTrip(until, kind, kind === 'primary' ? bucket : undefined)
+          // The pause targets the bucket the RESPONSE says it consumed
+          // (x-ratelimit-resource), never the URL guess; a primary response
+          // without a resource stays credential-wide unknown — a path guess
+          // must never impersonate response evidence (review r7/F7).
+          const observedResource = response.headers.get('x-ratelimit-resource')
+          this.owner.noteRateLimitTrip(until, kind, kind === 'primary' ? (observedResource ?? undefined) : undefined)
           logTaskDiagnostic('github-rate-circuit-trip', {
             kind,
             path,

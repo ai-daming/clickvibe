@@ -171,3 +171,35 @@ function fakeShellReturning(raw: string): { shell: unknown } {
     },
   }
 }
+
+test('r7/F3 regression: a mid-pacing candidate is settled by close() — promise, terminal, no execution', async () => {
+  const owner = createGithubGatewayOwner()
+  let executed = 0
+  // First dispatch sets a long pacing gap; the victim is dequeued and pacing
+  // INSIDE that gap when close() fires (review r7 reproduction).
+  await owner.submitStep('pacer', 10_000, 500, () => {
+    executed += 1
+    return 'paced'
+  })
+  const requestId = owner.declareLogicalRequest('direct', 'pacing-victim')
+  const victim = owner.runWithRequest(requestId, () =>
+    owner.submitStep('victim-repo', 10_000, 0, () => {
+      executed += 1
+      return 'must-not-run'
+    }),
+  )
+  // One microtask pass so the victim is DEQUEUED (mid-pacing), not still queued.
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  await owner.close({ drainMs: 0 })
+  await assert.rejects(() => victim, /节流等待中的步骤被中断|排队步骤被中断/)
+  const terminals = owner
+    .lifecycleEvents()
+    .filter((event) => event.kind === 'terminal' && event.requestId === requestId)
+  assert.equal(executed, 1, 'only the pacer ran; the mid-pacing victim must never execute')
+  assert.equal(terminals.length, 1, `exactly one terminal, produced by the close path: ${JSON.stringify(terminals)}`)
+  assert.equal(
+    (terminals[0] as { outcome?: string }).outcome,
+    'interrupted',
+    'the mid-pacing victim terminal is the close interruption',
+  )
+})
