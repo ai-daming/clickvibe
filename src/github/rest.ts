@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises'
 import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
+import { githubGatewayOwner } from './gateway-owner.ts'
 
 interface ShellContext {
   shell: {
@@ -31,45 +32,7 @@ interface IncludedResponse {
   body: string
 }
 
-interface HostGithubRequestLane {
-  tail: Promise<void>
-  nextStartAt: number
-}
-
 const HOST_GITHUB_MINIMUM_INTERVAL_MS = 250
-const hostGithubLaneSymbol = Symbol.for('clickvibe.github-request-lane')
-
-function hostGithubLane(): HostGithubRequestLane {
-  const root = globalThis as unknown as Record<PropertyKey, unknown>
-  const existing = root[hostGithubLaneSymbol] as HostGithubRequestLane | undefined
-  if (existing) return existing
-  const created = { tail: Promise.resolve(), nextStartAt: 0 }
-  root[hostGithubLaneSymbol] = created
-  return created
-}
-
-async function serializeGithubRequest<T>(minimumIntervalMs: number, request: () => Promise<T>): Promise<T> {
-  const lane = hostGithubLane()
-  const previous = lane.tail
-  let release = () => {}
-  lane.tail = new Promise<void>((resolve) => {
-    release = resolve
-  })
-  await previous
-  try {
-    // Timers may wake just before their requested deadline. Re-check the
-    // monotonic wall-clock condition so the configured start interval is a
-    // guarantee rather than a best-effort delay.
-    while (Date.now() < lane.nextStartAt) {
-      await new Promise((resolve) => setTimeout(resolve, lane.nextStartAt - Date.now()))
-    }
-    const pending = request()
-    lane.nextStartAt = Date.now() + minimumIntervalMs
-    return await pending
-  } finally {
-    release()
-  }
-}
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`
@@ -227,7 +190,7 @@ export class GithubRestReader {
     timeoutMs = 30_000,
     mutation?: { method: 'POST' | 'PATCH'; body: unknown },
   ): Promise<IncludedResponse> {
-    return serializeGithubRequest(this.minimumIntervalMs, async () => {
+    return githubGatewayOwner().serializeRequest(this.minimumIntervalMs, async () => {
       // A request queued before another resource trips the circuit must not hit GitHub afterwards.
       this.assertCircuitOpen()
       const command = [
