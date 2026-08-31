@@ -116,6 +116,29 @@ export function deriveReviewDecision(reviews: GithubReviewRest[]): 'APPROVED' | 
   return [...latest.values()].some((review) => String(review.state).toUpperCase() === 'APPROVED') ? 'APPROVED' : null
 }
 
+function rateObservationFrom(headers: Map<string, string> | null) {
+  if (!headers) return null
+  const numberOr = (key: string): number | null => {
+    const raw = headers.get(key)
+    if (raw === undefined) return null
+    const value = Number(raw)
+    return Number.isFinite(value) ? value : null
+  }
+  // No rate headers at all → no bucket observation (unknown), never a
+  // fabricated core bucket (#149 rounds 4-6).
+  const hasAnyRateHeader = ['x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset', 'retry-after'].some(
+    (key) => headers.get(key) !== undefined,
+  )
+  if (!hasAnyRateHeader) return null
+  return {
+    limit: numberOr('x-ratelimit-limit'),
+    remaining: numberOr('x-ratelimit-remaining'),
+    reset: numberOr('x-ratelimit-reset'),
+    retryAfterSeconds: numberOr('retry-after'),
+    observedAt: Date.now(),
+  }
+}
+
 /** One ctx-scoped REST reader: rate-limit circuit, request parsing and read caches. */
 export class GithubRestReader {
   private readonly ctx: ShellContext
@@ -176,6 +199,8 @@ export class GithubRestReader {
         timeoutMs,
         ...(mutation ? { stdin: JSON.stringify(mutation.body) } : {}),
       })
+      const requestId = this.owner.ambientRequestId()
+      if (requestId) this.owner.noteDispatched(requestId)
       const result = await this.ctx.shell.run(spec)
       const stdout = await this.output(result)
       let response: IncludedResponse
@@ -183,6 +208,7 @@ export class GithubRestReader {
         response = parseIncludedResponse(stdout)
       } catch (parseError) {
         const detail = [result.stderr?.text, stdout].filter(Boolean).join('\n').trim()
+        if (requestId) this.owner.noteUpstreamSettled(requestId, false, null)
         if (result.exitCode !== 0 && /(?:rate limit|secondary rate)/i.test(detail)) {
           const until = Date.now() + 60 * 60_000
           this.owner.noteRateLimitTrip(until, 'unknown')
@@ -199,6 +225,7 @@ export class GithubRestReader {
       }
       const detail = [result.stderr?.text, response.body].filter(Boolean).join('\n')
       if (isRateLimited(response, detail)) {
+        if (requestId) this.owner.noteUpstreamSettled(requestId, false, rateObservationFrom(response.headers))
         const until = resetFrom(response.headers, Date.now())
         const kind: GithubRateLimitKind =
           response.headers.get('x-ratelimit-remaining') === '0' ? 'primary' : 'secondary'
@@ -214,6 +241,7 @@ export class GithubRestReader {
         throw new GithubRateLimitError(until, kind)
       }
       if (result.exitCode !== 0 || response.status < 200 || response.status >= 300) {
+        if (requestId) this.owner.noteUpstreamSettled(requestId, false, rateObservationFrom(response.headers))
         let message = response.body.trim()
         try {
           const parsed = JSON.parse(response.body) as { message?: unknown }
@@ -223,37 +251,58 @@ export class GithubRestReader {
         }
         throw new Error(`GitHub REST ${response.status}: ${message || result.stderr?.text || '请求失败'}`)
       }
+      if (requestId) this.owner.noteUpstreamSettled(requestId, true, rateObservationFrom(response.headers))
       return response
     })
   }
 
-  async json<T = unknown>(path: string, accept?: string, timeoutMs?: number): Promise<T> {
-    const response = await this.request(path, accept, timeoutMs)
+  /** A top-level (non-loader) request is its own logical request in the lifecycle stream. */
+  private async direct<T>(path: string, run: () => Promise<T>): Promise<T> {
+    if (this.owner.ambientRequestId()) return run()
+    const requestId = this.owner.declareLogicalRequest('direct', path)
     try {
-      return JSON.parse(response.body || 'null') as T
-    } catch {
-      throw new Error(`GitHub REST 返回了无效 JSON: ${path}`)
+      const value = await this.owner.runWithRequest(requestId, run)
+      this.owner.noteTerminal(requestId, 'succeeded')
+      return value
+    } catch (error) {
+      this.owner.noteTerminal(requestId, error instanceof GithubRateLimitError ? 'rate-limited' : 'failed', error)
+      throw error
     }
+  }
+
+  async json<T = unknown>(path: string, accept?: string, timeoutMs?: number): Promise<T> {
+    return this.direct(path, async () => {
+      const response = await this.request(path, accept, timeoutMs)
+      try {
+        return JSON.parse(response.body || 'null') as T
+      } catch {
+        throw new Error(`GitHub REST 返回了无效 JSON: ${path}`)
+      }
+    })
   }
 
   async mutate<T = unknown>(path: string, method: 'POST' | 'PATCH', body: unknown, timeoutMs?: number): Promise<T> {
-    const response = await this.request(path, undefined, timeoutMs, { method, body })
-    try {
-      return JSON.parse(response.body || 'null') as T
-    } catch {
-      throw new Error(`GitHub REST 返回了无效 JSON: ${path}`)
-    }
+    return this.direct(path, async () => {
+      const response = await this.request(path, undefined, timeoutMs, { method, body })
+      try {
+        return JSON.parse(response.body || 'null') as T
+      } catch {
+        throw new Error(`GitHub REST 返回了无效 JSON: ${path}`)
+      }
+    })
   }
 
   async paginate<T>(path: string, accept?: string, timeoutMs?: number): Promise<T[]> {
-    const values: T[] = []
-    for (let page = 1; ; page++) {
-      const separator = path.includes('?') ? '&' : '?'
-      const batch = await this.json<T[]>(`${path}${separator}per_page=100&page=${page}`, accept, timeoutMs)
-      if (!Array.isArray(batch)) throw new Error('GitHub REST 分页返回格式无效')
-      values.push(...batch)
-      if (batch.length < 100) return values
-    }
+    return this.direct(path, async () => {
+      const values: T[] = []
+      for (let page = 1; ; page++) {
+        const separator = path.includes('?') ? '&' : '?'
+        const batch = await this.json<T[]>(`${path}${separator}per_page=100&page=${page}`, accept, timeoutMs)
+        if (!Array.isArray(batch)) throw new Error('GitHub REST 分页返回格式无效')
+        values.push(...batch)
+        if (batch.length < 100) return values
+      }
+    })
   }
 
   cachedResource<T>(
@@ -265,7 +314,7 @@ export class GithubRestReader {
     return this.owner.cachedResource(key, version, loader, options)
   }
 
-  cachedAggregate<T>(key: string, ttlMs: number, force: boolean, loader: () => Promise<T>): Promise<T> {
+  async cachedAggregate<T>(key: string, ttlMs: number, force: boolean, loader: () => Promise<T>): Promise<T> {
     return this.owner.cachedAggregate(key, ttlMs, force, loader)
   }
 }

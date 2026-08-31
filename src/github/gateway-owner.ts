@@ -16,7 +16,15 @@
  * lifecycle events join in later commits together with their consumers.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { GithubRateLimitError, type GithubRateLimitKind } from './rest.ts'
+import {
+  GatewayLifecycleRecorder,
+  type GatewayLifecycleEvent,
+  type GatewayMetrics,
+  type GatewayRateObservation,
+} from './gateway-lifecycle.ts'
+import { deriveGatewayMetrics } from './gateway-lifecycle.ts'
 
 interface OwnerRequestLane {
   tail: Promise<void>
@@ -38,6 +46,26 @@ export interface CachedResourceOptions<T> {
 export interface GithubGatewayOwner {
   /** Opaque identity; never contains token material. */
   readonly credentialScopeId: string
+  /** Declare one logical request; throws once the owner is closed. */
+  declareLogicalRequest(scope: 'resource' | 'aggregate' | 'direct', key: string): string
+  /** Ambient logical-request attribution for loader-internal upstream steps. */
+  runWithRequest<T>(requestId: string, fn: () => Promise<T>): Promise<T>
+  ambientRequestId(): string | null
+  /** One dispatched HTTP step of a logical request. */
+  noteDispatched(requestId: string): void
+  /** Settle one HTTP step with the response's real rate fields (null when absent). */
+  noteUpstreamSettled(requestId: string, ok: boolean, rate: GatewayRateObservation | null): void
+  /** Terminal for a logical request; outcome from the error shape when thrown. */
+  noteTerminal(
+    requestId: string,
+    outcome: 'succeeded' | 'failed' | 'rate-limited' | 'interrupted',
+    error?: unknown,
+  ): void
+  /** The lifecycle stream — the single metric and evidence source (ADR-0010 §10). */
+  lifecycleEvents(): GatewayLifecycleEvent[]
+  lifecycleMetrics(): GatewayMetrics
+  /** Seal the owner: no new logical requests; recorder stops accepting events. */
+  close(): void
   /** Serialize one HTTP step across the credential scope with a minimum start interval. */
   serializeRequest<T>(minimumIntervalMs: number, request: () => Promise<T>): Promise<T>
   rateLimitError(now?: number): GithubRateLimitError | null
@@ -63,12 +91,27 @@ export function createGithubGatewayOwner(): GithubGatewayOwner {
   const lane: OwnerRequestLane = { tail: Promise.resolve(), nextStartAt: 0 }
   const resources = new Map<string, CachedValue<unknown>>()
   const aggregates = new Map<string, CachedValue<unknown>>()
-  const inFlight = new Map<string, Promise<unknown>>()
-  const forcedResources = new Map<string, Promise<unknown>>()
+  const inFlight = new Map<string, { promise: Promise<unknown>; requestId: string }>()
+  const forcedResources = new Map<string, { promise: Promise<unknown>; requestId: string }>()
   const versions = new Map<string, string>()
   const resourceLoadSequence = new Map<string, number>()
   let circuitUntil = 0
   let circuitKind: GithubRateLimitKind = 'unknown'
+  const recorder = new GatewayLifecycleRecorder()
+  const requestAls = new AsyncLocalStorage<string>()
+  const stepCounts = new Map<string, number>()
+  let nextRequestId = 0
+
+  const errorText = (error: unknown): string | null =>
+    error instanceof Error ? error.message : error === undefined ? null : String(error)
+  const isRateLimit = (error: unknown): boolean => error instanceof GithubRateLimitError
+
+  const settleTerminalOn = (promise: Promise<unknown>, requestId: string): void => {
+    void promise.then(
+      () => owner.noteTerminal(requestId, 'succeeded'),
+      (error: unknown) => owner.noteTerminal(requestId, isRateLimit(error) ? 'rate-limited' : 'failed', error),
+    )
+  }
 
   const owner: GithubGatewayOwner = {
     credentialScopeId: CONSERVATIVE_CREDENTIAL_SCOPE,
@@ -94,6 +137,44 @@ export function createGithubGatewayOwner(): GithubGatewayOwner {
           release()
         }
       })()
+    },
+    declareLogicalRequest(scope: 'resource' | 'aggregate' | 'direct', key: string): string {
+      if (recorder.sealed) throw new Error('Gateway 已关闭,拒绝新的 GitHub 访问申请')
+      nextRequestId += 1
+      const requestId = `gh-${nextRequestId}`
+      recorder.emit({ kind: 'declared', requestId, scope, key, at: Date.now() })
+      return requestId
+    },
+    runWithRequest<T>(requestId: string, fn: () => Promise<T>): Promise<T> {
+      return requestAls.run(requestId, fn)
+    },
+    ambientRequestId(): string | null {
+      return requestAls.getStore() ?? null
+    },
+    noteDispatched(requestId: string): void {
+      const step = (stepCounts.get(requestId) ?? 0) + 1
+      stepCounts.set(requestId, step)
+      recorder.emit({ kind: 'dispatched', requestId, step, at: Date.now() })
+    },
+    noteUpstreamSettled(requestId: string, ok: boolean, rate: GatewayRateObservation | null): void {
+      const step = stepCounts.get(requestId) ?? 1
+      recorder.emit({ kind: 'upstream-settled', requestId, step, ok, rate, at: Date.now() })
+    },
+    noteTerminal(
+      requestId: string,
+      outcome: 'succeeded' | 'failed' | 'rate-limited' | 'interrupted',
+      error?: unknown,
+    ): void {
+      recorder.emit({ kind: 'terminal', requestId, outcome, error: errorText(error), at: Date.now() })
+    },
+    lifecycleEvents(): GatewayLifecycleEvent[] {
+      return recorder.snapshot()
+    },
+    lifecycleMetrics(): GatewayMetrics {
+      return deriveGatewayMetrics(recorder.snapshot())
+    },
+    close(): void {
+      recorder.seal()
     },
     rateLimitError(now = Date.now()): GithubRateLimitError | null {
       return circuitUntil > now ? new GithubRateLimitError(circuitUntil, circuitKind) : null
@@ -129,15 +210,25 @@ export function createGithubGatewayOwner(): GithubGatewayOwner {
         }
       }
     },
-    cachedResource<T>(
+    async cachedResource<T>(
       key: string,
       version: string | null | undefined,
       loader: () => Promise<T>,
       options: CachedResourceOptions<T> = {},
     ): Promise<T> {
-      owner.assertCircuitOpen()
-      const forcedPending = forcedResources.get(key) as Promise<T> | undefined
-      if (!options.force && forcedPending) return forcedPending
+      const requestId = owner.declareLogicalRequest('resource', key)
+      try {
+        owner.assertCircuitOpen()
+      } catch (error) {
+        owner.noteTerminal(requestId, 'rate-limited', error)
+        return Promise.reject(error)
+      }
+      const forcedPending = forcedResources.get(key) as { promise: Promise<T>; requestId: string } | undefined
+      if (!options.force && forcedPending) {
+        recorder.emit({ kind: 'joined', requestId, leaderId: forcedPending.requestId, at: Date.now() })
+        settleTerminalOn(forcedPending.promise, requestId)
+        return forcedPending.promise
+      }
       const knownVersion = version || null
       const cached = resources.get(key) as CachedValue<T> | undefined
       const now = Date.now()
@@ -146,9 +237,12 @@ export function createGithubGatewayOwner(): GithubGatewayOwner {
         cached &&
         cached.expiresAt > now &&
         (knownVersion === null || cached.version === knownVersion)
-      )
+      ) {
+        recorder.emit({ kind: 'cache-hit', requestId, at: Date.now() })
+        owner.noteTerminal(requestId, 'succeeded')
         return Promise.resolve(cached.value)
-      const load = async () => {
+      }
+      const load: Promise<T> = owner.runWithRequest(requestId, async () => {
         const sequence = (resourceLoadSequence.get(key) ?? 0) + 1
         resourceLoadSequence.set(key, sequence)
         const value = await loader()
@@ -164,37 +258,54 @@ export function createGithubGatewayOwner(): GithubGatewayOwner {
           if (loadedVersion) versions.set(key, loadedVersion)
         }
         return value
-      }
-      if (!options.force) return deduplicate(`resource:ordinary:${key}`, load)
+      })
+      settleTerminalOn(load, requestId)
+      if (!options.force) return deduplicate(`resource:ordinary:${key}`, load, requestId)
 
       // `force` means fresh from this invocation point. It must not coalesce
       // with an earlier force call whose GitHub fact may already be obsolete.
-      const forced = load()
-      forcedResources.set(key, forced)
+      const forced = load
+      forcedResources.set(key, { promise: forced, requestId })
       const clear = () => {
-        if (forcedResources.get(key) === forced) forcedResources.delete(key)
+        if (forcedResources.get(key)?.promise === forced) forcedResources.delete(key)
       }
       void forced.then(clear, clear)
       return forced
     },
-    cachedAggregate<T>(key: string, ttlMs: number, force: boolean, loader: () => Promise<T>): Promise<T> {
-      owner.assertCircuitOpen()
+    async cachedAggregate<T>(key: string, ttlMs: number, force: boolean, loader: () => Promise<T>): Promise<T> {
+      const requestId = owner.declareLogicalRequest('aggregate', key)
+      try {
+        owner.assertCircuitOpen()
+      } catch (error) {
+        owner.noteTerminal(requestId, 'rate-limited', error)
+        return Promise.reject(error)
+      }
       const cached = aggregates.get(key) as CachedValue<T> | undefined
-      if (!force && cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.value)
-      return deduplicate(`aggregate:${key}`, async () => {
+      if (!force && cached && cached.expiresAt > Date.now()) {
+        recorder.emit({ kind: 'cache-hit', requestId, at: Date.now() })
+        owner.noteTerminal(requestId, 'succeeded')
+        return Promise.resolve(cached.value)
+      }
+      const load = owner.runWithRequest(requestId, async () => {
         const value = await loader()
         aggregates.set(key, { value, version: null, expiresAt: Date.now() + ttlMs })
         return value
       })
+      settleTerminalOn(load, requestId)
+      return deduplicate(`aggregate:${key}`, load, requestId)
     },
   }
 
-  function deduplicate<T>(key: string, loader: () => Promise<T>): Promise<T> {
-    const pending = inFlight.get(key) as Promise<T> | undefined
-    if (pending) return pending
-    const created = loader().finally(() => inFlight.delete(key))
-    inFlight.set(key, created)
-    return created
+  function deduplicate<T>(key: string, created: Promise<T>, leaderRequestId: string): Promise<T> {
+    const entry = inFlight.get(key) as { promise: Promise<T>; requestId: string } | undefined
+    if (entry) {
+      recorder.emit({ kind: 'joined', requestId: leaderRequestId, leaderId: entry.requestId, at: Date.now() })
+      settleTerminalOn(entry.promise, leaderRequestId)
+      return entry.promise
+    }
+    const tracked = created.finally(() => inFlight.delete(key))
+    inFlight.set(key, { promise: tracked, requestId: leaderRequestId })
+    return tracked
   }
 
   return owner
