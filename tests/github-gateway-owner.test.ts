@@ -256,3 +256,126 @@ test('r8/F2 regression: the cap recheck does not serialize different repositorie
   await Promise.all([submit('o/one'), submit('o/two'), submit('o/three'), submit('o/four')])
   assert.ok(maxConcurrent >= 2, `distinct repositories must still run in parallel (peak ${maxConcurrent})`)
 })
+
+test('r9/F7 regression: a learned special-resource bucket blocks its own path without touching core', async () => {
+  const owner = createGithubGatewayOwner()
+  const commands: string[] = []
+  const ctx = {
+    shell: {
+      resolve: (spec: unknown) => spec,
+      run: async (spec: { command: string }) => {
+        commands.push(spec.command)
+        const resource = /code-scanning/.test(spec.command) ? 'code_scanning_upload' : 'core'
+        const headers = [
+          'x-ratelimit-limit: 100',
+          `x-ratelimit-remaining: ${/code-scanning/.test(spec.command) && commands.filter((c) => /code-scanning/.test(c)).length > 1 ? 0 : 50}`,
+          `x-ratelimit-resource: ${resource}`,
+          `x-ratelimit-reset: ${Math.floor(Date.now() / 1000) + 3600}`,
+        ]
+        const body = `HTTP/2.0 200 OK\n${headers.join('\n')}\n\n{"v":1}`
+        return { exitCode: 0, stdout: { text: body }, stderr: { text: '' } }
+      },
+    },
+  } as never
+  const { GithubRestReader, isGithubRateLimitError } = await import('../src/github/rest.ts')
+  const reader = new GithubRestReader(ctx, { owner, minimumIntervalMs: 1 })
+  await reader.json('repos/o/r/code-scanning/alerts') // learns code_scanning_upload
+  // The same path again with remaining:0 → the SECOND response reports 0 →
+  // this request fails, the bucket pauses, and a subsequent core read still
+  // executes (identity learned; core never polluted).
+  const commandsBeforeCore = commands.length
+  await reader.json('repos/o/r/code-scanning/alerts').catch((error: unknown) => {
+    assert.ok(isGithubRateLimitError(error), 'the exhausted special bucket rate-limits its own path')
+  })
+  await reader.json('repos/o/r/issues/9')
+  assert.ok(commands.length > commandsBeforeCore, 'the healthy core bucket still reaches the executor')
+})
+
+test('r9/F7 regression: a successful special-resource call never deducts the core ledger', async () => {
+  const owner = createGithubGatewayOwner()
+  const commands: string[] = []
+  const ctx = {
+    shell: {
+      resolve: (spec: unknown) => spec,
+      run: async (spec: { command: string }) => {
+        commands.push(spec.command)
+        const special = /code-scanning/.test(spec.command)
+        const headers = [
+          'x-ratelimit-limit: 100',
+          `x-ratelimit-remaining: ${special ? 50 : 1}`,
+          `x-ratelimit-resource: ${special ? 'code_scanning_upload' : 'core'}`,
+          `x-ratelimit-reset: ${Math.floor(Date.now() / 1000) + 3600}`,
+        ]
+        return {
+          exitCode: 0,
+          stdout: { text: `HTTP/2.0 200 OK\n${headers.join('\n')}\n\n{"v":1}` },
+          stderr: { text: '' },
+        }
+      },
+    },
+  } as never
+  const { GithubRestReader } = await import('../src/github/rest.ts')
+  const reader = new GithubRestReader(ctx, { owner, minimumIntervalMs: 1 })
+  await reader.json('repos/o/r/code-scanning/alerts') // succeeds on the special bucket
+  // Core reported remaining:1 and was never charged for the special call —
+  // a core read must execute, not be rate-limited.
+  await reader.json('repos/o/r/issues/9')
+  assert.equal(
+    commands.filter((command) => /issues\/9/.test(command)).length,
+    1,
+    'core executes after the special call',
+  )
+})
+
+test('r9/idle regression: quiescence after deadline-fail, rate-limited fail, and mid-pacing settle', async () => {
+  const owner = createGithubGatewayOwner()
+  // (a) a step queued behind full repo slots whose deadline expires fails
+  // and idle() resolves.
+  const occupiers = [0, 1, 2].map((index) =>
+    owner.submitStep('o/r', 30_000, 0, () => new Promise((resolve) => setTimeout(() => resolve(index), 40))),
+  )
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  await assert.rejects(() =>
+    owner.runWithAdmission({ priority: 'normal', deadlineMs: 20, maxPages: 1 }, () =>
+      owner.submitStep('o/r', 30_000, 0, () => new Promise(() => {})),
+    ),
+  )
+  await Promise.all(occupiers)
+  await owner.idle()
+
+  // (b) a known-exhausted bucket rejects fast; idle() resolves.
+  const ownerB = createGithubGatewayOwner()
+  ownerB.noteUpstreamSettled('gh-seed', true, {
+    resource: 'core',
+    limit: 10,
+    remaining: 0,
+    reset: Math.floor(Date.now() / 1000) + 3600,
+    retryAfterSeconds: null,
+    observedAt: Date.now(),
+  })
+  await assert.rejects(() => ownerB.submitStep('o/r', 60_000, 0, () => 'never'))
+  await ownerB.idle()
+
+  // (c) A settles while B paces: idle() must NOT resolve before B runs.
+  const ownerC = createGithubGatewayOwner()
+  let startedB = false
+  // A's 100ms pacing opens the window; B dequeues and paces inside it while
+  // A settles at ~20ms — idle must hold until B actually runs.
+  const a = ownerC.submitStep('repo-a', 30_000, 100, () => new Promise((resolve) => setTimeout(() => resolve('a'), 20)))
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  const b = ownerC.submitStep('repo-b', 30_000, 0, () => {
+    startedB = true
+    return 'b'
+  })
+  const idlePromise = ownerC.idle()
+  let idleResolved = false
+  void idlePromise.then(() => {
+    idleResolved = true
+  })
+  await new Promise((resolve) => setTimeout(resolve, 30)) // A settled (~25ms); B paces until ~105ms
+  assert.equal(idleResolved, false, 'idle must hold while B paces even though A settled')
+  assert.equal(startedB, false, 'B has not run yet inside the pacing window')
+  await Promise.all([a, b])
+  await idlePromise
+  assert.ok(startedB, 'idle() resolves only after the pacing step actually ran')
+})

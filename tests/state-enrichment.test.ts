@@ -96,7 +96,9 @@ test('/state enrichment checks configured branches while the host serializes Git
       worktreeRoot: root,
     })
     assert.equal(maxGithub, 1)
-    assert.deepEqual(githubTimeouts, [5000, 5000])
+    // r9 composition: one shared repo-snapshot aggregate page (30s budget)
+    // precedes the per-branch head lookups; serial lane keeps maxGithub at 1.
+    assert.deepEqual(githubTimeouts, [30_000, 5000, 5000])
     assert.deepEqual(
       enriched.map((item) => item.derived.nextAction.label),
       ['恢复 worktree 继续开发', '恢复 worktree 继续开发'],

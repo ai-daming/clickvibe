@@ -201,7 +201,7 @@ export class GithubRestReader {
     mutation?: { method: 'POST' | 'PATCH'; body: unknown },
   ): Promise<IncludedResponse> {
     const repo = repoKeyFromPath(path)
-    const bucket = bucketFromPath(path)
+    const bucket = this.owner.resolveResourceIdentity(path, bucketFromPath(path))
     return this.owner.submitStep(
       repo,
       timeoutMs,

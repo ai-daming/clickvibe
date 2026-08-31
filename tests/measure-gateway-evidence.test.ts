@@ -19,3 +19,20 @@ test('identity row fails when the partition does not hold', () => {
   const broken = thresholdChecks('review-dense', { ...base, logicalRequests: 5, executions: 4 }, 4)
   assert.equal(broken[1].pass, false)
 })
+
+test('multi rows fail on real upstream breaches (negative oracle)', () => {
+  const cold = thresholdChecks('multi-cold', { ...base, upstreamRequests: 6 }, 6)
+  assert.equal(cold[0].pass, false, 'six cold upstream pages must fail the ≤2 row')
+  const hot = thresholdChecks('multi-hot', { ...base, upstreamRequests: 1 }, 1)
+  assert.ok(
+    hot.every((row) => row.pass === false),
+    'one hot upstream must fail both hot rows',
+  )
+})
+
+test('rate rows fail when reads failed or did not execute (negative oracle)', () => {
+  const failed = thresholdChecks('rate', { ...base, executions: 5, failures: 1 }, 5)
+  assert.equal(failed[0].pass, false, 'a failed read must fail the rate row')
+  const short = thresholdChecks('rate', { ...base, executions: 3 }, 3)
+  assert.equal(short[0].pass, false, 'fewer than five executions must fail the rate row')
+})

@@ -33,6 +33,8 @@ import {
 } from './reads.ts'
 import { isGithubRateLimitError } from './rest.ts'
 import { consistencyFromForce, githubRead } from './operations.ts'
+import { githubRest } from './rest.ts'
+import { issueBodyHash } from '../infra/state.ts'
 
 export interface GithubPrLookup {
   known: boolean
@@ -164,4 +166,75 @@ export async function fetchGithubRepoSnapshot(
     ttlMs,
     consistency: consistencyFromForce(force),
   })
+}
+
+/** Per-repo enrichment inputs resolved from ONE shared snapshot per TTL
+ *  window (issue #131 review r9: five same-repo items must cost ≤2 aggregate
+ *  pages cold and 0 hot — per-item fan-out priced 15 logical requests and
+ *  blew the 5s deadlines under pacing). */
+export interface EnrichmentSnapshot {
+  /** Open issue list item by issue number (body included → contract hash). */
+  issueByNumber: Map<number, RepositoryIssueRest>
+  /** PR by head branch from the state=all pulls list (one page typical). */
+  prByHeadBranch: Map<string, RepositoryPrRest>
+}
+
+export async function fetchEnrichmentSnapshot(
+  ctx: Context,
+  repoKey: string,
+  ttlMs: number,
+  force = false,
+): Promise<EnrichmentSnapshot> {
+  const rest = githubRest(ctx)
+  const load = async () =>
+    (await githubRead(ctx, {
+      operation: 'repo-snapshot',
+      repoKey,
+      ttlMs,
+      consistency: consistencyFromForce(force),
+    })) as RepositoryGithubSnapshot
+  const snapshot = await rest.cachedAggregate(`enrichment:${repoKey}`, ttlMs, force, load)
+  const issueByNumber = new Map<number, RepositoryIssueRest>()
+  for (const issue of snapshot.issues ?? []) issueByNumber.set(issue.number, issue)
+  const prByHeadBranch = new Map<string, RepositoryPrRest>()
+  for (const pull of snapshot.pulls ?? []) {
+    const head = (pull as { head?: { ref?: string } }).head?.ref
+    if (head) prByHeadBranch.set(head, pull)
+  }
+  return { issueByNumber, prByHeadBranch }
+}
+
+/** Adapt a snapshot PR row into the fact shape derive consumes (no review
+ *  decision — callers wanting the live verdict use the number-keyed read). */
+export function snapshotPrFact(
+  pull: RepositoryPrRest & { head?: { sha?: string }; base?: { ref?: string; sha?: string } },
+): GithubPrFact {
+  const state = String(pull.state).toUpperCase()
+  return {
+    number: String(pull.number),
+    state: state === 'MERGED' || pull.merged_at ? 'MERGED' : state === 'CLOSED' ? 'CLOSED' : 'OPEN',
+    mergedAt: pull.merged_at ?? null,
+    headRefName: pull.head?.ref ?? '',
+    url: pull.html_url,
+    reviewDecision: null,
+    headRefOid: pull.head?.sha,
+    baseRefName: pull.base?.ref,
+    baseRefOid: pull.base?.sha,
+  }
+}
+
+/** Derive the review contract fields from a snapshot issue row. */
+export function issueContractFrom(issue: RepositoryIssueRest): {
+  title: string
+  body: string
+  state: string
+  contract: { bodyHash: string; updatedAt: string }
+} {
+  const body = String(issue.body ?? '')
+  return {
+    title: String(issue.title ?? ''),
+    body,
+    state: String(issue.state ?? '').toUpperCase(),
+    contract: { bodyHash: issueBodyHash(body), updatedAt: String(issue.updated_at ?? '') },
+  }
 }

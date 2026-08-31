@@ -20,12 +20,16 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import {
+  type EnrichmentSnapshot,
+  fetchEnrichmentSnapshot,
   fetchGithubIssueState,
   fetchGithubPrFact,
+  issueContractFrom,
   type IssueCommentRest,
   type RepositoryIssueItem,
   type RepositoryIssueRest,
   readConfiguredBranchFacts,
+  snapshotPrFact,
 } from '../github/facts.ts'
 import { githubErrorMessage, githubRest } from '../github/rest.ts'
 import { githubRead } from '../github/operations.ts'
@@ -134,6 +138,18 @@ export async function enrichWorkflowStates(
   >
 > {
   const config = configOverride ?? (await loadConfig())
+  // One shared GitHub snapshot per repo per TTL window (review r9): the
+  // per-item PR/contract/state fan-out priced 15 logical requests for five
+  // items and blew 5s deadlines under pacing — the aggregate is ≤2 pages
+  // cold and 0 hot, which is what the frozen multi threshold prices.
+  const snapshots = new Map<string, Promise<EnrichmentSnapshot | null>>()
+  const snapshotFor = (repoKey: string) => {
+    const cached = snapshots.get(repoKey)
+    if (cached) return cached
+    const promise = fetchEnrichmentSnapshot(ctx, repoKey, 30_000).catch(() => null)
+    snapshots.set(repoKey, promise)
+    return promise
+  }
   return Promise.all(
     workflows.map(async (workflow) => {
       const attempt = observation ? await observeWorktreeFor(ctx, observation, config, workflow) : null
@@ -189,10 +205,33 @@ export async function enrichWorkflowStates(
             workflow,
             workflow.baseRef ? workflowBaseBranch(workflow.baseRef) : undefined,
           )
+      const snapshot = await snapshotFor(workflow.repoKey)
+      const issueNumber = Number(workflow.key.split('#').pop())
+      const snapshotIssue = snapshot?.issueByNumber.get(issueNumber) ?? null
+      const snapshotPull = snapshot?.prByHeadBranch.get(workflow.branch) ?? null
       const [prLookup, currentIssue, liveIssueState] = await Promise.all([
-        fetchGithubPrFact(ctx, workflow.repoKey, workflow.branch, workflow.prNumber),
-        fetchIssueContract(ctx, workflow.url).catch(() => null),
-        fetchGithubIssueState(ctx, workflow.url),
+        // A PR found in the shared snapshot may still need its live review
+        // state (verdict binding) — the number-keyed read is cached per PR,
+        // so a snapshot hit without local verdict costs one detail read.
+        snapshotPull
+          ? workflow.reviewResult
+            ? Promise.resolve({ known: true, pr: snapshotPrFact(snapshotPull) })
+            : fetchGithubPrFact(ctx, workflow.repoKey, workflow.branch, String(snapshotPull.number))
+          : snapshot && workflow.prNumber === null
+            ? // No PR anywhere in the shared snapshot and none claimed: a
+              // definite miss, priced 0 extra upstream (review r9).
+              Promise.resolve({ known: true, pr: null })
+            : fetchGithubPrFact(ctx, workflow.repoKey, workflow.branch, workflow.prNumber),
+        snapshotIssue
+          ? Promise.resolve(issueContractFrom(snapshotIssue))
+          : fetchIssueContract(ctx, workflow.url).catch(() => null),
+        snapshotIssue
+          ? Promise.resolve(
+              String(snapshotIssue.state).toUpperCase() === 'CLOSED' ? ('CLOSED' as const) : ('OPEN' as const),
+            )
+          : snapshot
+            ? Promise.resolve(null)
+            : fetchGithubIssueState(ctx, workflow.url),
       ])
       const enriched = await deriveWorkflowState(
         ctx,

@@ -147,7 +147,23 @@ export function thresholdChecks(kind, metrics, ghChildren) {
         },
       ]
     case 'rate':
-      return [{ row: 'consumption equals actual pages (contamination marked)', pass: true }]
+      return [
+        {
+          row: 'every workload read executed exactly once upstream (5 reads → ≥5 executions, all succeeded)',
+          pass:
+            metrics.executions >= 5 &&
+            metrics.failures === 0 &&
+            (metrics.rateLimited ?? 0) === 0 &&
+            (metrics.interrupted ?? 0) === 0,
+        },
+        {
+          row: 'identity holds',
+          pass:
+            metrics.logicalRequests ===
+            metrics.cacheHits + metrics.singleflightJoins + metrics.executions + metrics.failures,
+        },
+        { row: 'each response carried a real resource observation (no fabricated buckets)', pass: ghChildren > 0 },
+      ]
     default:
       return []
   }

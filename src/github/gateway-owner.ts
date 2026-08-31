@@ -3,7 +3,7 @@
  *
  * One credential scope owns one Gateway runtime: the request lanes, the
  * observation caches with their generations, in-flight singleflight, forced
- * reads, resource versions, the per-bucket rate budget and the lifecycle
+ * reads, resource cache.versions, the per-bucket rate budget and the lifecycle
  * evidence writer. v0.2 is deliberately conservative about scope identity —
  * the `gh` CLI host auth cannot be safely split into distinct credentials, so
  * every owner declares the same single scope (under-sharing reuse is
@@ -43,117 +43,11 @@ const NORMAL_AGING_MS = 10_000
 
 /** Attributes the operation policy declares; the owner composes them into the
  *  ambient admission context (priority lanes, absolute deadline, cost bound). */
-export interface GatewayAdmissionAttributes {
-  priority: 'critical' | 'normal'
-  deadlineMs: number
-  maxPages: number
-}
 
 interface GatewayAdmission {
   priority: 'critical' | 'normal'
   deadlineAt: number
   maxPages: number
-}
-
-interface CachedValue<T> {
-  value: T
-  version: string | null
-  expiresAt: number
-}
-
-export interface CachedResourceOptions<T> {
-  ttlMs?: number
-  force?: boolean
-  versionOf?: (value: T) => string | null | undefined
-}
-
-export interface CachedAggregateOptions<T> {
-  /** Child resource versions observed by this aggregate settlement — the owner
-   *  records them so callers never write reader cache state (design §11). */
-  derivedVersions?: (value: T) => Array<[key: string, version: string | null | undefined]>
-}
-
-export interface SubmitStepOptions {
-  /** Resource bucket the step draws from (`search` endpoints vs `core`). */
-  bucket?: string
-}
-
-export interface GithubGatewayOwner {
-  /** Opaque identity; never contains token material. */
-  readonly credentialScopeId: string
-  /** Declare one logical request; throws once the owner is closed. */
-  declareLogicalRequest(scope: 'resource' | 'aggregate' | 'direct', key: string): string
-  /** Ambient logical-request attribution for loader-internal upstream steps. */
-  runWithRequest<T>(requestId: string, fn: () => Promise<T>): Promise<T>
-  ambientRequestId(): string | null
-  /**
-   * Stamp the policy's admission attributes (priority lane, absolute logical
-   * deadline, per-request dispatch bound) around a composition. Nested calls
-   * compose: critical propagates inward, deadlines only tighten, and the
-   * innermost bound governs pagination.
-   */
-  runWithAdmission<T>(attributes: GatewayAdmissionAttributes, fn: () => Promise<T>): Promise<T>
-  /** Cost-bound admission before dispatching the next pagination page. */
-  admitNextPage(): void
-  /** Settle one HTTP step with the response's real rate fields (null when absent). */
-  noteUpstreamSettled(requestId: string, ok: boolean, rate: GatewayRateObservation | null): void
-  /** Terminal for a logical request; exactly one per request — a second
-   *  outcome is recorded as a late diagnostic and never rewrites the first. */
-  noteTerminal(
-    requestId: string,
-    outcome: 'succeeded' | 'failed' | 'rate-limited' | 'interrupted',
-    error?: unknown,
-  ): void
-  /** The lifecycle stream — the single metric and evidence source (ADR-0010 §10). */
-  lifecycleEvents(): GatewayLifecycleEvent[]
-  lifecycleMetrics(): GatewayMetrics
-  /**
-   * Admit and execute ONE upstream HTTP step (ADR-0010 §6 dispatch loop).
-   * Steps wait in priority lanes (critical first, normal with aging), are
-   * picked by repository round-robin under credential/repo concurrency caps,
-   * pass per-bucket budget admission (known remaining is atomically reserved
-   * at dispatch and released at settlement; unknown buckets probe
-   * conservatively) and start no sooner than the pacing interval. A slow step
-   * occupies only its own execution slot — no scheduler mutex is held while
-   * awaiting the network.
-   */
-  submitStep<T>(
-    repo: string,
-    timeoutMs: number,
-    pacingMs: number,
-    run: () => Promise<T>,
-    options?: SubmitStepOptions,
-  ): Promise<T>
-
-  rateLimitError(now?: number): GithubRateLimitError | null
-  /** Record a rate-limit trip observed on a response (kind from the response shape). */
-  /**
-   * Primary exhaustion pauses ONLY the hit resource bucket (ADR-0010 §3);
-   * secondary/Retry-After pauses the whole credential (review r6/F7).
-   */
-  noteRateLimitTrip(until: number, kind: GithubRateLimitKind, bucket?: string): void
-  assertCircuitOpen(bucket?: string): void
-  rememberVersion(key: string, version: string | null | undefined): void
-  resourceVersion(key: string): string | null
-  invalidate(prefix: string): void
-  cachedResource<T>(
-    key: string,
-    version: string | null | undefined,
-    loader: () => Promise<T>,
-    options?: CachedResourceOptions<T>,
-  ): Promise<T>
-  cachedAggregate<T>(
-    key: string,
-    ttlMs: number,
-    force: boolean,
-    loader: () => Promise<T>,
-    options?: CachedAggregateOptions<T>,
-  ): Promise<T>
-  /** Resolve when no step is waiting or running (test/evidence quiescence). */
-  idle(): Promise<void>
-  /** Stop admission, interrupt queued steps, drain running to a deadline, fence
-   *  late settlements behind a new owner generation, seal and flush evidence. */
-  close(options?: { drainMs?: number }): Promise<void>
 }
 
 /** Conservative v0.2 scope: the host's gh auth is one credential. */
@@ -163,6 +57,14 @@ import {
   selectCandidate,
   type PendingStep,
 } from './gateway-scheduling.ts'
+import { GatewayCache, type CachedValue } from './gateway-cache.ts'
+import type {
+  CachedAggregateOptions,
+  CachedResourceOptions,
+  GatewayAdmissionAttributes,
+  GithubGatewayOwner,
+  SubmitStepOptions,
+} from './gateway-contracts.ts'
 
 const CONSERVATIVE_CREDENTIAL_SCOPE = 'host-gh-auth:v1'
 
@@ -173,21 +75,20 @@ export function createGithubGatewayOwner(
   const agingMs = options.agingMs ?? NORMAL_AGING_MS
   const waiting: PendingStep[] = []
   const running = new Map<number, PendingStep & { runner: Promise<unknown> }>()
+  const observedResourceByTicket = new Map<number, string | null>()
   const lastDispatchPerRepo = new Map<string, number>()
   let nextStartAt = 0
   let dispatchScheduled = false
   const buckets = new Map<string, BucketLedger>()
+  // Path-template → real resource identity learned from responses (review
+  // r9/F7): admission must check the bucket GitHub actually charges for this
+  // path, not a URL guess. No new layer — one map beside the ledgers it feeds.
+  const resourceIdentityByPath = new Map<string, string>()
   const reservedByBucket = new Map<string, number>()
   let ownerGeneration = 0
   let closed = false
   let idleWaiters: Array<() => void> = []
-  const resources = new Map<string, CachedValue<unknown>>()
-  const aggregates = new Map<string, CachedValue<unknown>>()
-  const inFlight = new Map<string, { promise: Promise<unknown>; requestId: string }>()
-  const forcedResources = new Map<string, { promise: Promise<unknown>; requestId: string }>()
-  const versions = new Map<string, string>()
-  const resourceLoadSequence = new Map<string, number>()
-  const aggregateGenerations = new Map<string, number>()
+  const cache = new GatewayCache()
   let circuitUntil = 0
   let circuitKind: GithubRateLimitKind = 'unknown'
   const recorder = new GatewayLifecycleRecorder(options.sink)
@@ -210,7 +111,9 @@ export function createGithubGatewayOwner(
   }
 
   const flushIdleWaiters = () => {
-    if (waiting.length === 0 && running.size === 0) {
+    // Quiescence = nothing waiting, nothing pacing, nothing running (review
+    // r9: waiting+running-only resolved idle() while a step still paced).
+    if (waiting.length === 0 && running.size === 0 && pacing.size === 0) {
       const waiters = idleWaiters
       idleWaiters = []
       for (const resolve of waiters) resolve()
@@ -260,6 +163,8 @@ export function createGithubGatewayOwner(
     waiting.unshift(step)
   }
 
+  const resourceKeyFor = (path: string): string => path.replace(/\d+/g, 'n')
+
   const releaseReservation = (bucket: string) => {
     const outstanding = (reservedByBucket.get(bucket) ?? 1) - 1
     if (outstanding > 0) reservedByBucket.set(bucket, outstanding)
@@ -272,10 +177,17 @@ export function createGithubGatewayOwner(
    *  WITHOUT rate fields really consumed a unit, so the published remaining
    *  drops by one — sequential headerless requests must not re-spend the
    *  same unit forever (review r5/F7). */
-  const settleReservation = (step: PendingStep) => {
-    const ledger = buckets.get(step.bucket)
-    if (ledger && ledger.evidenceSeq === step.evidenceSeq && ledger.remaining !== null && ledger.remaining > 0) {
-      ledger.remaining -= 1
+  const settleReservation = (step: PendingStep, observedResource: string | null = null) => {
+    // The reservation was taken under the resolved identity (learned or
+    // guessed); the ledger charge applies ONLY when the response did not
+    // publish a different real resource — a real response's headers are the
+    // authority and charging the guessed ledger would pollute it (review
+    // r9/F7: core deducted for a code_scanning_upload call).
+    if (observedResource === null || observedResource === step.bucket) {
+      const ledger = buckets.get(step.bucket)
+      if (ledger && ledger.evidenceSeq === step.evidenceSeq && ledger.remaining !== null && ledger.remaining > 0) {
+        ledger.remaining -= 1
+      }
     }
     releaseReservation(step.bucket)
   }
@@ -314,9 +226,11 @@ export function createGithubGatewayOwner(
       // A queued step whose deadline already passed fails closed as
       // interrupted — it must never spin or dispatch past its budget of time.
       if (Date.now() > candidate.deadlineAt) {
+        pacing.delete(candidate.requestId)
         const error = new Error('GitHub 上游步骤超时(排队超过 deadline)')
         owner.noteTerminal(candidate.requestId, 'interrupted', error)
         candidate.fail(error)
+        flushIdleWaiters()
         continue
       }
       const earlyAdmission = admitCandidate(candidate)
@@ -324,7 +238,11 @@ export function createGithubGatewayOwner(
         requeueFront(candidate)
         return
       }
-      if (earlyAdmission === 'rejected') continue
+      if (earlyAdmission === 'rejected') {
+        pacing.delete(candidate.requestId)
+        flushIdleWaiters()
+        continue
+      }
       // Pacing between dispatch STARTS — monotonic re-check, no mutex held
       // across the network (the r2 failure mode of the old lane).
       while (Date.now() < nextStartAt) {
@@ -338,6 +256,7 @@ export function createGithubGatewayOwner(
         const error = new Error('GitHub 上游步骤超时(等待 pacing 超过 deadline)')
         owner.noteTerminal(candidate.requestId, 'interrupted', error)
         candidate.fail(error)
+        flushIdleWaiters()
         continue
       }
       pacing.delete(candidate.requestId)
@@ -358,18 +277,25 @@ export function createGithubGatewayOwner(
         requeueFront(candidate)
         return
       }
-      if (late === 'rejected') continue
+      if (late === 'rejected') {
+        flushIdleWaiters()
+        continue
+      }
+      // One authoritative decision timestamp for the pacing interval AND the
+      // dispatched event — two Date.now() calls made the recorded interval
+      // shorter than the enforced one (CI attempt-1 flake, review r9).
+      const decisionAt = Date.now()
       const dispatchGeneration = ownerGeneration
       reservedByBucket.set(candidate.bucket, (reservedByBucket.get(candidate.bucket) ?? 0) + 1)
       candidate.evidenceSeq = buckets.get(candidate.bucket)?.evidenceSeq ?? 0
-      nextStartAt = Date.now() + candidate.pacingMs
-      lastDispatchPerRepo.set(candidate.repo, Date.now())
+      nextStartAt = decisionAt + candidate.pacingMs
+      lastDispatchPerRepo.set(candidate.repo, decisionAt)
       recorder.emit({
         kind: 'dispatched',
         requestId: candidate.requestId,
         step: (stepCounts.get(candidate.requestId) ?? 0) + 1,
-        waitedMs: Date.now() - candidate.enqueuedAt,
-        at: Date.now(),
+        waitedMs: decisionAt - candidate.enqueuedAt,
+        at: decisionAt,
       })
       stepCounts.set(candidate.requestId, (stepCounts.get(candidate.requestId) ?? 0) + 1)
       const ticket = Date.now() + Math.random()
@@ -378,7 +304,8 @@ export function createGithubGatewayOwner(
         .then(
           (value) => {
             running.delete(ticket)
-            settleReservation(candidate)
+            settleReservation(candidate, observedResourceByTicket.get(ticket) ?? null)
+            observedResourceByTicket.delete(ticket)
             // Generation fence: a settlement that lands after the close
             // deadline must not resolve its caller or publish anything — the
             // caller already owns its interrupted terminal.
@@ -392,7 +319,8 @@ export function createGithubGatewayOwner(
           },
           (error) => {
             running.delete(ticket)
-            settleReservation(candidate)
+            settleReservation(candidate, observedResourceByTicket.get(ticket) ?? null)
+            observedResourceByTicket.delete(ticket)
             if (ownerGeneration !== dispatchGeneration) {
               noteLateResponse(candidate, 'rejected')
               candidate.fail(new Error('GitHub 网关已关闭:迟到响应被丢弃'))
@@ -520,12 +448,23 @@ export function createGithubGatewayOwner(
     runWithRequest<T>(requestId: string, fn: () => Promise<T>): Promise<T> {
       return requestAls.run(requestId, fn)
     },
+    /** Resolve the resource identity for a path: learned from real responses,
+     *  falling back to the URL classification (review r9/F7). */
+    resolveResourceIdentity(path: string, fallback: string): string {
+      return resourceIdentityByPath.get(resourceKeyFor(path)) ?? fallback
+    },
     ambientRequestId(): string | null {
       return requestAls.getStore() ?? null
     },
-    noteUpstreamSettled(requestId: string, ok: boolean, rate: GatewayRateObservation | null): void {
+    noteUpstreamSettled(requestId: string, ok: boolean, rate: GatewayRateObservation | null, path?: string): void {
       const step = stepCounts.get(requestId) ?? 1
       recorder.emit({ kind: 'upstream-settled', requestId, step, ok, rate, at: Date.now() })
+      if (rate && rate.resource) {
+        if (path) resourceIdentityByPath.set(resourceKeyFor(path), rate.resource)
+        for (const [ticket, entry] of running) {
+          if (entry.requestId === requestId) observedResourceByTicket.set(ticket, rate.resource)
+        }
+      }
       // The per-bucket budget derives from the same evidence stream — a
       // response with real rate fields republishes its bucket; observations
       // without them never fabricate one (ADR-0010 §8).
@@ -602,28 +541,28 @@ export function createGithubGatewayOwner(
       }
     },
     rememberVersion(key: string, version: string | null | undefined): void {
-      if (version) versions.set(key, version)
+      if (version) cache.versions.set(key, version)
     },
     resourceVersion(key: string): string | null {
-      return versions.get(key) ?? null
+      return cache.versions.get(key) ?? null
     },
     invalidate(prefix: string): void {
-      for (const key of resources.keys()) {
-        if (key === prefix || key.startsWith(`${prefix}/`)) resources.delete(key)
+      for (const key of cache.resources.keys()) {
+        if (key === prefix || key.startsWith(`${prefix}/`)) cache.resources.delete(key)
       }
-      for (const key of aggregates.keys()) {
+      for (const key of cache.aggregates.keys()) {
         if (key === prefix || key.startsWith(`${prefix}/`)) {
-          aggregates.delete(key)
-          aggregateGenerations.set(key, (aggregateGenerations.get(key) ?? 0) + 1)
+          cache.aggregates.delete(key)
+          cache.aggregateGenerations.set(key, (cache.aggregateGenerations.get(key) ?? 0) + 1)
         }
       }
-      versions.delete(prefix)
-      for (const key of forcedResources.keys()) {
-        if (key === prefix || key.startsWith(`${prefix}/`)) forcedResources.delete(key)
+      cache.versions.delete(prefix)
+      for (const key of cache.forcedResources.keys()) {
+        if (key === prefix || key.startsWith(`${prefix}/`)) cache.forcedResources.delete(key)
       }
-      for (const key of resourceLoadSequence.keys()) {
+      for (const key of cache.resourceLoadSequence.keys()) {
         if (key === prefix || key.startsWith(`${prefix}/`)) {
-          resourceLoadSequence.set(key, (resourceLoadSequence.get(key) ?? 0) + 1)
+          cache.resourceLoadSequence.set(key, (cache.resourceLoadSequence.get(key) ?? 0) + 1)
         }
       }
     },
@@ -640,14 +579,14 @@ export function createGithubGatewayOwner(
         owner.noteTerminal(requestId, 'rate-limited', error)
         return Promise.reject(error)
       }
-      const forcedPending = forcedResources.get(key) as { promise: Promise<T>; requestId: string } | undefined
+      const forcedPending = cache.forcedResources.get(key) as { promise: Promise<T>; requestId: string } | undefined
       if (!options.force && forcedPending) {
         recorder.emit({ kind: 'joined', requestId, leaderId: forcedPending.requestId, at: Date.now() })
         settleTerminalOn(forcedPending.promise, requestId)
         return forcedPending.promise
       }
       const knownVersion = version || null
-      const cached = resources.get(key) as CachedValue<T> | undefined
+      const cached = cache.resources.get(key) as CachedValue<T> | undefined
       const now = Date.now()
       if (
         !options.force &&
@@ -664,19 +603,19 @@ export function createGithubGatewayOwner(
       // dispatch a second upstream request behind the leader (review r1).
       const startLoad = () =>
         owner.runWithRequest(requestId, async () => {
-          const sequence = (resourceLoadSequence.get(key) ?? 0) + 1
-          resourceLoadSequence.set(key, sequence)
+          const sequence = (cache.resourceLoadSequence.get(key) ?? 0) + 1
+          cache.resourceLoadSequence.set(key, sequence)
           const value = await loader()
           const loadedVersion = options.versionOf?.(value) || knownVersion
           // A later-started force read is authoritative. An older ordinary request
           // may still resolve for its caller, but must never overwrite that result.
-          if (resourceLoadSequence.get(key) === sequence) {
-            resources.set(key, {
+          if (cache.resourceLoadSequence.get(key) === sequence) {
+            cache.resources.set(key, {
               value,
               version: loadedVersion,
               expiresAt: Date.now() + (options.ttlMs ?? 30_000),
             })
-            if (loadedVersion) versions.set(key, loadedVersion)
+            if (loadedVersion) cache.versions.set(key, loadedVersion)
           }
           return value
         })
@@ -686,9 +625,9 @@ export function createGithubGatewayOwner(
       // with an earlier force call whose GitHub fact may already be obsolete.
       const forced = startLoad()
       settleTerminalOn(forced, requestId)
-      forcedResources.set(key, { promise: forced, requestId })
+      cache.forcedResources.set(key, { promise: forced, requestId })
       const clear = () => {
-        if (forcedResources.get(key)?.promise === forced) forcedResources.delete(key)
+        if (cache.forcedResources.get(key)?.promise === forced) cache.forcedResources.delete(key)
       }
       void forced.then(clear, clear)
       return forced
@@ -707,7 +646,7 @@ export function createGithubGatewayOwner(
         owner.noteTerminal(requestId, 'rate-limited', error)
         return Promise.reject(error)
       }
-      const cached = aggregates.get(key) as CachedValue<T> | undefined
+      const cached = cache.aggregates.get(key) as CachedValue<T> | undefined
       if (!force && cached && cached.expiresAt > Date.now()) {
         recorder.emit({ kind: 'cache-hit', requestId, at: Date.now() })
         owner.noteTerminal(requestId, 'succeeded')
@@ -716,13 +655,13 @@ export function createGithubGatewayOwner(
       // Generation fencing + lazy leader, mirroring the resource path: a loader
       // that started before an invalidate() must never republish the stale
       // aggregate (review r3).
-      const generation = (aggregateGenerations.get(key) ?? 0) + 1
+      const generation = (cache.aggregateGenerations.get(key) ?? 0) + 1
       const startLoad = () =>
         owner.runWithRequest(requestId, async () => {
           const value = await loader()
-          if ((aggregateGenerations.get(key) ?? 0) === generation - 1) {
-            aggregates.set(key, { value, version: null, expiresAt: Date.now() + ttlMs })
-            aggregateGenerations.set(key, generation)
+          if ((cache.aggregateGenerations.get(key) ?? 0) === generation - 1) {
+            cache.aggregates.set(key, { value, version: null, expiresAt: Date.now() + ttlMs })
+            cache.aggregateGenerations.set(key, generation)
             for (const [childKey, childVersion] of options?.derivedVersions?.(value) ?? []) {
               owner.rememberVersion(childKey, childVersion)
             }
@@ -734,7 +673,7 @@ export function createGithubGatewayOwner(
   }
 
   function deduplicate<T>(key: string, start: () => Promise<T>, leaderRequestId: string): Promise<T> {
-    const entry = inFlight.get(key) as { promise: Promise<T>; requestId: string } | undefined
+    const entry = cache.inFlight.get(key) as { promise: Promise<T>; requestId: string } | undefined
     if (entry) {
       // Follower: zero loader invocation, zero dispatch — join the leader only.
       recorder.emit({ kind: 'joined', requestId: leaderRequestId, leaderId: entry.requestId, at: Date.now() })
@@ -744,8 +683,8 @@ export function createGithubGatewayOwner(
     // Leader: register BEFORE starting, so a concurrent caller can only join.
     const created = start()
     settleTerminalOn(created, leaderRequestId)
-    const tracked = created.finally(() => inFlight.delete(key))
-    inFlight.set(key, { promise: tracked, requestId: leaderRequestId })
+    const tracked = created.finally(() => cache.inFlight.delete(key))
+    cache.inFlight.set(key, { promise: tracked, requestId: leaderRequestId })
     return tracked
   }
 
@@ -774,3 +713,11 @@ export async function closeGithubGateway(options: { drainMs?: number } = {}): Pr
 export function resetGithubGatewayOwnerForTests(): void {
   processOwner = null
 }
+
+export type {
+  CachedAggregateOptions,
+  CachedResourceOptions,
+  GatewayAdmissionAttributes,
+  GithubGatewayOwner,
+  SubmitStepOptions,
+} from './gateway-contracts.ts'
