@@ -31,7 +31,8 @@ import {
   type GithubPrDetailRest,
   type GithubPrFact,
 } from './reads.ts'
-import { deriveReviewDecision, githubRest, isGithubRateLimitError } from './rest.ts'
+import { isGithubRateLimitError } from './rest.ts'
+import { consistencyFromForce, githubRead } from './operations.ts'
 
 export interface GithubPrLookup {
   known: boolean
@@ -46,47 +47,15 @@ export async function fetchGithubPrFact(
   includeReviews = true,
   force = false,
 ): Promise<GithubPrLookup> {
-  const hasPrNumber = prNumber !== null && prNumber !== undefined
   try {
-    const rest = githubRest(ctx)
-    let raw: GithubPrDetailRest | undefined
-    if (hasPrNumber) {
-      raw = await fetchPrRestDetail(ctx, repoKey, String(prNumber), force, 5_000)
-    } else {
-      const owner = repoKey.split('/')[0]
-      raw = await rest.cachedResource(
-        `${repoKey}/pulls/head/${branch}`,
-        null,
-        async () =>
-          (
-            await rest.json<GithubPrDetailRest[]>(
-              `repos/${repoKey}/pulls?state=all&head=${encodeURIComponent(`${owner}:${branch}`)}&per_page=1`,
-              undefined,
-              5_000,
-            )
-          )[0],
-        { force },
-      )
-    }
-    if (!raw) return { known: true, pr: null }
-    rest.rememberVersion(`${repoKey}/pulls/${raw.number}`, raw.updated_at)
-    // lists 之外的回源刷新默认带 reviews 推导 reviewDecision;已有本地 verdict 时
-    // 跳过,省掉一轮 pulls/{n}/reviews 请求(列表路径由调用方按需传入)。
-    const reviews = includeReviews ? await fetchPrRestReviews(ctx, repoKey, raw.number, 5_000) : []
-    return {
-      known: true,
-      pr: {
-        number: String(raw.number),
-        state: raw.merged_at ? 'MERGED' : String(raw.state).toUpperCase() === 'CLOSED' ? 'CLOSED' : 'OPEN',
-        mergedAt: raw.merged_at ?? null,
-        headRefName: String(raw.head?.ref ?? branch),
-        url: String(raw.html_url ?? `https://github.com/${repoKey}/pull/${raw.number}`),
-        reviewDecision: deriveReviewDecision(reviews),
-        headRefOid: raw.head?.sha ? String(raw.head.sha) : undefined,
-        baseRefName: raw.base?.ref ? String(raw.base.ref) : undefined,
-        baseRefOid: raw.base?.sha ? String(raw.base.sha) : undefined,
-      },
-    }
+    const pr = await githubRead<GithubPrFact | null>(ctx, {
+      operation: force ? 'gate-pr-fact' : 'pr-fact',
+      repoKey,
+      ...(prNumber === null || prNumber === undefined ? { branch } : { number: prNumber }),
+      includeReviews,
+      consistency: consistencyFromForce(force),
+    })
+    return { known: true, pr }
   } catch (error) {
     if (isGithubRateLimitError(error)) throw error
     return { known: false, pr: null }
@@ -189,12 +158,10 @@ export async function fetchGithubRepoSnapshot(
   ttlMs: number,
   force: boolean,
 ): Promise<RepositoryGithubSnapshot> {
-  const rest = githubRest(ctx)
-  return rest.cachedAggregate(`repo:${repoKey}`, ttlMs, force, async () => {
-    const [issues, pulls] = await Promise.all([
-      rest.paginate<RepositoryIssueRest>(`repos/${repoKey}/issues?state=all`),
-      rest.paginate<RepositoryPrRest>(`repos/${repoKey}/pulls?state=all`),
-    ])
-    return { issues, pulls }
+  return githubRead(ctx, {
+    operation: 'repo-snapshot',
+    repoKey,
+    ttlMs,
+    consistency: consistencyFromForce(force),
   })
 }

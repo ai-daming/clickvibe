@@ -29,7 +29,8 @@ import {
   mapIssueDetail,
   mapPrDetail,
 } from '../github/reads.ts'
-import { githubErrorMessage, githubRest, isGithubRateLimitError } from '../github/rest.ts'
+import { githubErrorMessage, isGithubRateLimitError } from '../github/rest.ts'
+import { consistencyFromForce, githubRead } from '../github/operations.ts'
 import { type IssuePromptSnapshot } from '../infra/develop-core.ts'
 import { dependencyRefreshClock, fetchTtlMs, loadConfig, parseUrl } from '../infra/runtime.ts'
 export async function fetchIssue(
@@ -56,43 +57,18 @@ export async function fetchIssue(
   const isPR = parsed.kind === 'pr'
   try {
     const repoKey = `${parsed.owner}/${parsed.repo}`
-    const rest = githubRest(ctx)
     const resourceKey = `${repoKey}/${isPR ? 'pulls' : 'issues'}/${parsed.number}`
     const panelCacheKey = `${resourceKey}/panel`
     const fetchOptions = payload as { forceRefresh?: unknown; forceDependencyRefresh?: unknown } | undefined
     const forceRefresh = fetchOptions?.forceRefresh === true
     const forceDependencyRefresh =
       fetchOptions?.forceDependencyRefresh === undefined ? forceRefresh : fetchOptions.forceDependencyRefresh === true
-    const detail = await rest.cachedResource(
-      panelCacheKey,
-      rest.resourceVersion(resourceKey),
-      async () => {
-        if (isPR) {
-          const pr = await fetchPrRestDetail(ctx, repoKey, parsed.number, forceRefresh, 20_000)
-          const [comments, reviews, requested] = await Promise.all([
-            rest.paginate<GithubCommentRest>(`repos/${repoKey}/issues/${parsed.number}/comments`, undefined, 20_000),
-            fetchPrRestReviews(ctx, repoKey, parsed.number, 20_000),
-            rest.json<{ users?: GithubUserRest[]; teams?: Array<{ name?: string; slug?: string }> }>(
-              `repos/${repoKey}/pulls/${parsed.number}/requested_reviewers`,
-              undefined,
-              20_000,
-            ),
-          ])
-          return { item: mapPrDetail(pr, comments, reviews, requested), updatedAt: pr.updated_at ?? '' }
-        }
-        const issue = await fetchIssueRestDetail(ctx, repoKey, parsed.number, forceRefresh, 20_000)
-        const [comments, timeline] = await Promise.all([
-          rest.paginate<GithubCommentRest>(`repos/${repoKey}/issues/${parsed.number}/comments`, undefined, 20_000),
-          fetchTimeline(ctx, parsed.owner, parsed.repo, parsed.number),
-        ])
-        return { item: mapIssueDetail(issue, comments), timeline, updatedAt: issue.updated_at ?? '' }
-      },
-      {
-        force: forceRefresh,
-        ttlMs: fetchTtlMs(await loadConfig()),
-        versionOf: (value) => value.updatedAt,
-      },
-    )
+    const detail = (await githubRead(ctx, {
+      operation: isPR ? 'pr-panel' : 'issue-panel',
+      repoKey,
+      number: parsed.number,
+      consistency: consistencyFromForce(forceRefresh),
+    })) as { item: unknown; timeline?: unknown; updatedAt: string }
     const data: {
       kind: 'issue' | 'pr'
       item: unknown

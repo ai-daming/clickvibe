@@ -28,6 +28,7 @@ import {
   readConfiguredBranchFacts,
 } from '../github/facts.ts'
 import { githubErrorMessage, githubRest } from '../github/rest.ts'
+import { githubRead } from '../github/operations.ts'
 import { existsSync } from 'node:fs'
 import { type ClickVibeConfig, loadConfig } from '../infra/runtime.ts'
 import { observeTaskOwnership, type TaskOwnershipContext } from '../infra/task-ownership.ts'
@@ -250,7 +251,12 @@ export async function maintainCompletedDependencyLedger(
   const rest = githubRest(ctx)
   const marker = dependencyUnlockMarker(dependencyNumbers)
   try {
-    const comments = await rest.paginate<IssueCommentRest>(`repos/${repoKey}/issues/${issue.number}/comments`)
+    const comments = (await githubRead(ctx, {
+      operation: 'issue-comments',
+      repoKey,
+      number: issue.number,
+      consistency: 'cache-ok',
+    })) as IssueCommentRest[]
     if (!comments.some((comment) => String(comment.body ?? '').includes(marker))) {
       await rest.mutate(`repos/${repoKey}/issues/${issue.number}/comments`, 'POST', {
         body: buildDependencyUnlockComment({

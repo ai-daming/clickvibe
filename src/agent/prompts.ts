@@ -20,7 +20,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { fetchIssue, issueSnapshot } from '../github/issue.ts'
 import { fetchPrRestDetail, type GithubCommentRest } from '../github/reads.ts'
-import { githubRest, isGithubRateLimitError } from '../github/rest.ts'
+import { isGithubRateLimitError } from '../github/rest.ts'
+import { githubRead } from '../github/operations.ts'
 import { REVIEW_RESULT_RELATIVE_PATH } from '../infra/review-result.ts'
 import { readWorktreeHead, runCommand } from '../infra/runtime.ts'
 import {
@@ -53,11 +54,12 @@ export async function fetchPrPromptComments(
 ): Promise<{ author: string; body: string }[] | null> {
   if (!workflow.prNumber) return []
   try {
-    const rest = githubRest(ctx)
-    const key = `${workflow.repoKey}/pulls/${workflow.prNumber}`
-    const comments = await rest.cachedResource(`${key}/comments`, rest.resourceVersion(key), () =>
-      rest.paginate<GithubCommentRest>(`repos/${workflow.repoKey}/issues/${workflow.prNumber}/comments`),
-    )
+    const comments = (await githubRead(ctx, {
+      operation: 'pr-comments',
+      repoKey: workflow.repoKey,
+      number: workflow.prNumber,
+      consistency: 'cache-ok',
+    })) as GithubCommentRest[]
     return comments.map((comment) => ({
       author: String(comment.user?.login ?? 'unknown'),
       body: String(comment.body ?? ''),

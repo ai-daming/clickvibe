@@ -18,7 +18,8 @@
  *                      └── rework ────────┘
  */
 import type { Context } from '@deepseek-ai/cordis'
-import { deriveReviewDecision, githubRest } from './rest.ts'
+import { deriveReviewDecision } from './rest.ts'
+import { consistencyFromForce, githubRead } from './operations.ts'
 
 export interface GithubPrFact {
   number: string
@@ -163,17 +164,13 @@ export async function fetchPrRestDetail(
   force = false,
   timeoutMs?: number,
 ): Promise<GithubPrDetailRest> {
-  const rest = githubRest(ctx)
-  const key = `${repoKey}/pulls/${number}`
-  return rest.cachedResource(
-    key,
-    rest.resourceVersion(key),
-    () => rest.json<GithubPrDetailRest>(`repos/${repoKey}/pulls/${number}`, undefined, timeoutMs),
-    {
-      force,
-      versionOf: (pr) => pr.updated_at,
-    },
-  )
+  return githubRead(ctx, {
+    operation: 'pr-detail',
+    repoKey,
+    number,
+    consistency: consistencyFromForce(force),
+    timeoutMs,
+  })
 }
 
 export async function fetchPrRestReviews(
@@ -182,11 +179,13 @@ export async function fetchPrRestReviews(
   number: string | number,
   timeoutMs?: number,
 ): Promise<GithubReviewRest[]> {
-  const rest = githubRest(ctx)
-  const resourceKey = `${repoKey}/pulls/${number}`
-  return rest.cachedResource(`${resourceKey}/reviews`, rest.resourceVersion(resourceKey), () =>
-    rest.paginate<GithubReviewRest>(`repos/${repoKey}/pulls/${number}/reviews`, undefined, timeoutMs),
-  )
+  return githubRead(ctx, {
+    operation: 'pr-reviews',
+    repoKey,
+    number,
+    consistency: 'cache-ok',
+    timeoutMs,
+  })
 }
 
 export async function fetchIssueRestDetail(
@@ -196,15 +195,11 @@ export async function fetchIssueRestDetail(
   force = false,
   timeoutMs?: number,
 ): Promise<GithubIssueDetailRest> {
-  const rest = githubRest(ctx)
-  const key = `${repoKey}/issues/${number}`
-  return rest.cachedResource(
-    key,
-    rest.resourceVersion(key),
-    () => rest.json<GithubIssueDetailRest>(`repos/${repoKey}/issues/${number}`, undefined, timeoutMs),
-    {
-      force,
-      versionOf: (issue) => issue.updated_at,
-    },
-  )
+  return githubRead(ctx, {
+    operation: 'issue-detail',
+    repoKey,
+    number,
+    consistency: consistencyFromForce(force),
+    timeoutMs,
+  })
 }
