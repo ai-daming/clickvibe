@@ -70,6 +70,7 @@ test('r2: known-exhausted budget before deadline fails fast with retryAt', async
   // far in the future (epoch+3600).
   const farReset = Math.floor(Date.now() / 1000) + 3600
   owner.noteUpstreamSettled('gh-seed', true, {
+    resource: 'core',
     limit: 5000,
     remaining: 0,
     reset: farReset,
@@ -202,4 +203,56 @@ test('r7/F3 regression: a mid-pacing candidate is settled by close() — promise
     'interrupted',
     'the mid-pacing victim terminal is the close interruption',
   )
+})
+
+test('r8/F2 regression: staggered same-repo sleepers never pass the 6/3 caps after waking', async () => {
+  const owner = createGithubGatewayOwner()
+  let active = 0
+  let maxActive = 0
+  const perRepo = new Map<string, number>()
+  const maxPerRepo = new Map<string, number>()
+  const track = (repo: string, delta: number) => {
+    active += delta
+    maxActive = Math.max(maxActive, active)
+    const now = (perRepo.get(repo) ?? 0) + delta
+    perRepo.set(repo, now)
+    maxPerRepo.set(repo, Math.max(maxPerRepo.get(repo) ?? 0, now))
+  }
+  const submit = (repo: string, pacingMs: number) =>
+    owner.submitStep(repo, 30_000, pacingMs, () => {
+      track(repo, 1)
+      return new Promise((resolve) =>
+        setTimeout(() => {
+          track(repo, -1)
+          resolve(repo)
+        }, 10),
+      )
+    })
+  // One dispatch opens a 250ms pacing window; ten SAME-REPO requests arrive
+  // staggered inside it — each sleeper must re-pass the caps when it wakes
+  // (review r8 reproduction: 10 woke and ran together).
+  const first = submit('o/r', 250)
+  const sleepers = []
+  for (let index = 0; index < 10; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 8))
+    sleepers.push(submit('o/r', 0))
+  }
+  await Promise.all([first, ...sleepers])
+  assert.ok(maxActive <= 6, `credential active peak ${maxActive} must stay ≤ 6`)
+  assert.ok((maxPerRepo.get('o/r') ?? 0) <= 3, `repo active peak ${maxPerRepo.get('o/r')} must stay ≤ 3`)
+  assert.equal(sleepers.length + 1, 11, 'every request completed')
+})
+
+test('r8/F2 regression: the cap recheck does not serialize different repositories', async () => {
+  const owner = createGithubGatewayOwner()
+  let concurrent = 0
+  let maxConcurrent = 0
+  const submit = (repo: string) =>
+    owner.submitStep(repo, 30_000, 0, () => {
+      concurrent += 1
+      maxConcurrent = Math.max(maxConcurrent, concurrent)
+      return new Promise((resolve) => setTimeout(() => resolve(repo), 40))
+    })
+  await Promise.all([submit('o/one'), submit('o/two'), submit('o/three'), submit('o/four')])
+  assert.ok(maxConcurrent >= 2, `distinct repositories must still run in parallel (peak ${maxConcurrent})`)
 })

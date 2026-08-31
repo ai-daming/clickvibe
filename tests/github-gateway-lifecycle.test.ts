@@ -448,10 +448,19 @@ test('r7/F7 regression: a primary response without a resource header stays crede
       stderr: { text: '' },
     }
   })
-  const reader = new GithubRestReader(ctx)
+  const owner = createGithubGatewayOwner()
+  const reader = new GithubRestReader(ctx, { owner })
   await assert.rejects(() => reader.json('repos/o/r/whatever'))
-  // No resource evidence → the pause cannot be attributed to a bucket; it
-  // stays credential-wide (fail closed), so the next request never shells out.
   await assert.rejects(() => reader.json('repos/o/r/issues/9'))
   assert.equal(commands.length, 1, 'an unattributable primary pauses the credential, not a guessed bucket')
+  // r8/F7: the unknown resource must stay null through the lifecycle stream —
+  // never recorded as a fabricated core bucket.
+  const observed = owner
+    .lifecycleEvents()
+    .filter((event) => event.kind === 'upstream-settled')
+    .map((event) => (event as { rate: { resource: string | null } | null }).rate)
+  assert.ok(observed.length >= 1, 'the rate-limited response settled upstream')
+  for (const rate of observed) {
+    assert.notEqual(rate?.resource, 'core', 'no observation may fabricate a core bucket')
+  }
 })

@@ -128,7 +128,7 @@ function bucketFromPath(path: string): string {
   return path.startsWith('search/') ? 'search' : 'core'
 }
 
-function rateObservationFrom(headers: Map<string, string> | null, fallbackBucket: string) {
+function rateObservationFrom(headers: Map<string, string> | null) {
   if (!headers) return null
   const numberOr = (key: string): number | null => {
     const raw = headers.get(key)
@@ -144,7 +144,9 @@ function rateObservationFrom(headers: Map<string, string> | null, fallbackBucket
   if (!hasAnyRateHeader) return null
   const resource = headers.get('x-ratelimit-resource')
   return {
-    resource: resource !== undefined ? resource : fallbackBucket,
+    // A missing resource stays null — a URL guess never impersonates
+    // response evidence (review r8/F7).
+    resource: resource !== undefined ? resource : null,
     limit: numberOr('x-ratelimit-limit'),
     remaining: numberOr('x-ratelimit-remaining'),
     used: numberOr('x-ratelimit-used'),
@@ -247,7 +249,7 @@ export class GithubRestReader {
         }
         const detail = [result.stderr?.text, response.body].filter(Boolean).join('\n')
         if (isRateLimited(response, detail)) {
-          if (requestId) this.owner.noteUpstreamSettled(requestId, false, rateObservationFrom(response.headers, bucket))
+          if (requestId) this.owner.noteUpstreamSettled(requestId, false, rateObservationFrom(response.headers))
           const until = resetFrom(response.headers, Date.now())
           const kind: GithubRateLimitKind =
             response.headers.get('x-ratelimit-remaining') === '0' ? 'primary' : 'secondary'
@@ -268,7 +270,7 @@ export class GithubRestReader {
           throw new GithubRateLimitError(until, kind)
         }
         if (result.exitCode !== 0 || response.status < 200 || response.status >= 300) {
-          if (requestId) this.owner.noteUpstreamSettled(requestId, false, rateObservationFrom(response.headers, bucket))
+          if (requestId) this.owner.noteUpstreamSettled(requestId, false, rateObservationFrom(response.headers))
           let message = response.body.trim()
           try {
             const parsed = JSON.parse(response.body) as { message?: unknown }
@@ -326,10 +328,10 @@ export class GithubRestReader {
     try {
       const value = JSON.parse(response.body || 'null') as T
       validate?.(value)
-      if (requestId) this.owner.noteUpstreamSettled(requestId, true, rateObservationFrom(response.headers, bucket))
+      if (requestId) this.owner.noteUpstreamSettled(requestId, true, rateObservationFrom(response.headers))
       return value
     } catch (error) {
-      if (requestId) this.owner.noteUpstreamSettled(requestId, false, rateObservationFrom(response.headers, bucket))
+      if (requestId) this.owner.noteUpstreamSettled(requestId, false, rateObservationFrom(response.headers))
       if (error instanceof SyntaxError) throw new Error(`GitHub REST 返回了无效 JSON: ${path}`)
       throw error
     }

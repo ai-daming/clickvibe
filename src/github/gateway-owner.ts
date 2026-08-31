@@ -157,7 +157,12 @@ export interface GithubGatewayOwner {
 }
 
 /** Conservative v0.2 scope: the host's gh auth is one credential. */
-import { type BucketLedger, selectCandidate, type PendingStep } from './gateway-scheduling.ts'
+import {
+  admitCandidate as admitCandidatePure,
+  type BucketLedger,
+  selectCandidate,
+  type PendingStep,
+} from './gateway-scheduling.ts'
 
 const CONSERVATIVE_CREDENTIAL_SCOPE = 'host-gh-auth:v1'
 
@@ -285,6 +290,18 @@ export function createGithubGatewayOwner(
     })
   }
 
+  const admitCandidate = (candidate: PendingStep): 'dispatch' | 'requeue' | 'rejected' =>
+    admitCandidatePure(candidate, {
+      running,
+      buckets,
+      reservedByBucket,
+      credentialConcurrency: CREDENTIAL_TOTAL_CONCURRENCY,
+      repositoryConcurrency: REPOSITORY_CONCURRENCY,
+      unknownBudgetProbeCap: UNKNOWN_BUDGET_PROBE_CAP,
+      noteTerminal: owner.noteTerminal,
+      scheduleDispatch,
+    })
+
   const dispatchLoop = async () => {
     for (;;) {
       if (running.size >= CREDENTIAL_TOTAL_CONCURRENCY) return
@@ -302,47 +319,12 @@ export function createGithubGatewayOwner(
         candidate.fail(error)
         continue
       }
-      // Per-bucket budget admission (design §8). A published ledger whose
-      // reset already elapsed is stale — drop it and probe like unknown.
-      let ledger = buckets.get(candidate.bucket)
-      if (ledger && ledger.reset !== null && ledger.reset * 1000 <= Date.now()) {
-        buckets.delete(candidate.bucket)
-        ledger = undefined
+      const earlyAdmission = admitCandidate(candidate)
+      if (earlyAdmission === 'requeue') {
+        requeueFront(candidate)
+        return
       }
-      if (ledger && ledger.remaining !== null) {
-        const outstanding = reservedByBucket.get(candidate.bucket) ?? 0
-        if (ledger.remaining - outstanding <= 0) {
-          if (outstanding > 0) {
-            // The in-flight reservation owns the truth; wait for its
-            // settlement instead of failing on a possibly-stale number.
-            requeueFront(candidate)
-            return
-          }
-          const resetAt = ledger.reset !== null ? ledger.reset * 1000 : null
-          if (resetAt !== null && resetAt > Date.now()) {
-            if (resetAt > candidate.deadlineAt) {
-              const error = new GithubRateLimitError(resetAt, 'primary')
-              owner.noteTerminal(candidate.requestId, 'rate-limited', error)
-              candidate.fail(error)
-              continue
-            }
-            requeueFront(candidate)
-            const wake = setTimeout(() => scheduleDispatch(), Math.max(resetAt - Date.now(), 1))
-            wake.unref?.()
-            return
-          }
-          // Exhausted with no usable reset: forget the guess, probe on.
-          buckets.delete(candidate.bucket)
-        }
-      } else if (!ledger) {
-        // Unknown budget: at most a conservative number of probe steps runs
-        // concurrently; a settlement publishes the bucket and unlocks the lane.
-        const unknownRunning = [...running.values()].filter((entry) => !buckets.has(entry.bucket)).length
-        if (unknownRunning >= UNKNOWN_BUDGET_PROBE_CAP) {
-          requeueFront(candidate)
-          return
-        }
-      }
+      if (earlyAdmission === 'rejected') continue
       // Pacing between dispatch STARTS — monotonic re-check, no mutex held
       // across the network (the r2 failure mode of the old lane).
       while (Date.now() < nextStartAt) {
@@ -366,6 +348,17 @@ export function createGithubGatewayOwner(
         return
       }
       pacing.delete(candidate.requestId)
+      // The sleep admitted races: concurrency and budget may have moved while
+      // this step paced — the gate re-runs as the final indivisible decision
+      // before run() (review r8/F2). A requeue reschedules via a running
+      // settlement (something holds the slot this candidate needs) or the
+      // budget wake timer.
+      const late = admitCandidate(candidate)
+      if (late === 'requeue') {
+        requeueFront(candidate)
+        return
+      }
+      if (late === 'rejected') continue
       const dispatchGeneration = ownerGeneration
       reservedByBucket.set(candidate.bucket, (reservedByBucket.get(candidate.bucket) ?? 0) + 1)
       candidate.evidenceSeq = buckets.get(candidate.bucket)?.evidenceSeq ?? 0
@@ -536,9 +529,12 @@ export function createGithubGatewayOwner(
       // The per-bucket budget derives from the same evidence stream — a
       // response with real rate fields republishes its bucket; observations
       // without them never fabricate one (ADR-0010 §8).
-      if (rate && rate.remaining !== null) {
-        const previous = buckets.get(rate.resource ?? 'core')
-        buckets.set(rate.resource ?? 'core', {
+      // An unknown resource (null) never creates or updates a NAMED bucket
+      // — unknown is missing evidence, not a fabricated bucket name
+      // (review r8/F7).
+      if (rate && rate.remaining !== null && rate.resource !== null) {
+        const previous = buckets.get(rate.resource)
+        buckets.set(rate.resource, {
           limit: rate.limit,
           remaining: rate.remaining,
           used: rate.used,
