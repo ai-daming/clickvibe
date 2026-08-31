@@ -135,12 +135,15 @@ async function loadPrFact(ctx: Context, intent: GithubReadIntent, force: boolean
   rest.rememberVersion(`${intent.repoKey}/pulls/${raw.number}`, raw.updated_at)
   // lists 之外的回源刷新默认带 reviews 推导 reviewDecision;已有本地 verdict 时
   // 跳过,省掉一轮 pulls/{n}/reviews 请求(列表路径由调用方按需传入)。
+  // The gate families run this composition with an upstream-confirmed floor;
+  // the nested reviews read inherits it — a cached APPROVED must never stand in
+  // for the live review state at a merge gate (review r1, CRITICAL 4).
   const reviews = intent.includeReviews
     ? await githubRead(ctx, {
         operation: 'pr-reviews',
         repoKey: intent.repoKey,
         number: raw.number,
-        consistency: 'cache-ok',
+        consistency: force ? 'upstream-confirmed' : 'cache-ok',
         timeoutMs: 5_000,
       })
     : []

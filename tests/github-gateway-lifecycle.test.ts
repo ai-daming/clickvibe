@@ -59,7 +59,7 @@ test('cache hit: two calls → two logical requests, one execution, identity hol
   assert.equal(commands.length, 1)
 })
 
-test('singleflight join: concurrent calls → follower joins the leader, one execution', async () => {
+test('singleflight join: follower never dispatches — asserted after full lane drain', async () => {
   const owner = createGithubGatewayOwner()
   const commands: string[] = []
   let release: (() => void) | null = null
@@ -71,22 +71,112 @@ test('singleflight join: concurrent calls → follower joins the leader, one exe
     await gate
     return { exitCode: 0, stdout: { text: okBody({ v: 1 }) }, stderr: { text: '' } }
   })
-  const reader = new GithubRestReader(ctx, { owner })
+  // Fast pacing so the drain wait stays short; the assertion waits for the lane
+  // to fully dequeue — the r1 lesson: checking before drain produced a green
+  // test over a double dispatch.
+  const reader = new GithubRestReader(ctx, { owner, minimumIntervalMs: 5 })
   const first = reader.cachedResource('o/r/slow', null, () => reader.json('repos/o/r/slow'))
   const second = reader.cachedResource('o/r/slow', null, () => reader.json('repos/o/r/slow'))
   await new Promise((resolve) => setTimeout(resolve, 20))
   release?.()
-  const [a, b] = await Promise.all([first, second])
-  assert.equal(a, b)
+  await Promise.all([first, second])
+  await new Promise((resolve) => setTimeout(resolve, 150))
+  assert.equal(commands.length, 1, 'exactly one upstream dispatch, asserted after lane drain')
   const metrics = deriveGatewayMetrics(owner.lifecycleEvents())
-  assert.equal(metrics.logicalRequests, 2)
   assert.equal(metrics.singleflightJoins, 1)
   assert.equal(metrics.executions, 1)
-  assert.equal(commands.length, 1)
+  assert.equal(metrics.upstreamRequests, 1)
+  const terminals = owner.lifecycleEvents().filter((event) => event.kind === 'terminal')
+  assert.equal(terminals.length, 2, 'exactly one terminal per logical request')
   assert.equal(
     metrics.logicalRequests,
     metrics.cacheHits + metrics.singleflightJoins + metrics.executions + metrics.failures + metrics.rateLimited,
   )
+})
+
+test('r1 regression: HTTP 200 with a garbage body settles as a failed step, not a success', async () => {
+  const owner = createGithubGatewayOwner()
+  const ctx = fakeCtx(async () => ({
+    exitCode: 0,
+    stdout: { text: 'HTTP/1.1 200\nx-ratelimit-remaining: 4999\n\nnot-json{{{' },
+    stderr: { text: '' },
+  }))
+  const reader = new GithubRestReader(ctx, { owner })
+  await assert.rejects(() => reader.json('repos/o/r/garbage'))
+  const settled = owner.lifecycleEvents().find((event) => event.kind === 'upstream-settled')
+  assert.equal(settled?.kind === 'upstream-settled' ? settled.ok : null, false, 'parse failure settles ok=false')
+  const metrics = deriveGatewayMetrics(owner.lifecycleEvents())
+  assert.equal(metrics.failures, 1)
+  assert.equal(metrics.executions, 0)
+})
+
+test('r1 regression: a late aggregate loader cannot republish across an invalidate', async () => {
+  const owner = createGithubGatewayOwner()
+  const commands: string[] = []
+  let release: (() => void) | null = null
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let version = 0
+  const ctx = fakeCtx(async (command) => {
+    commands.push(command)
+    if (command.includes('/issues?')) await gate // the aggregate's issue page hangs
+    return { exitCode: 0, stdout: { text: okBody(version === 0 ? [] : [{ number: 1 }]) }, stderr: { text: '' } }
+  })
+  const reader = new GithubRestReader(ctx, { owner, minimumIntervalMs: 1 })
+  const loadOne = reader.cachedAggregate('repo:o/r', 60_000, false, async () => {
+    version = 0
+    const issues = await reader.paginate('repos/o/r/issues?state=all')
+    return { issues }
+  })
+  await new Promise((resolve) => setTimeout(resolve, 15))
+  owner.invalidate('repo:o/r')
+  version = 1
+  release?.()
+  await loadOne
+  const loadTwo = await reader.cachedAggregate('repo:o/r', 60_000, false, async () => {
+    const issues = await reader.paginate('repos/o/r/issues?state=all')
+    return { issues }
+  })
+  assert.ok(
+    (loadTwo.issues as unknown[]).length > 0,
+    'the invalidated generation must not be served from the late loader',
+  )
+})
+
+test('r1 regression: a gate floor propagates through the nested reviews read', async () => {
+  const { githubRead } = await import('../src/github/operations.ts')
+  let reviewCalls = 0
+  let reviews = [{ user: { login: 'a' }, state: 'APPROVED', submitted_at: '2026-08-30T01:00:00Z' }]
+  const prDetail = {
+    number: 9,
+    title: 'p',
+    state: 'open',
+    updated_at: 'SAME-VERSION',
+    html_url: 'x',
+    head: { ref: 'b', sha: 'abc' },
+    base: { ref: 'main', sha: 'def' },
+  }
+  const ctx = fakeCtx(async (command) => {
+    if (command.includes('/reviews')) {
+      reviewCalls += 1
+      return { exitCode: 0, stdout: { text: okBody(reviews) }, stderr: { text: '' } }
+    }
+    return { exitCode: 0, stdout: { text: okBody(prDetail) }, stderr: { text: '' } }
+  })
+  const intent = {
+    operation: 'gate-pr-fact' as const,
+    repoKey: 'o/r',
+    number: 9,
+    includeReviews: true,
+    consistency: 'cache-ok' as const,
+  }
+  const first = await githubRead(ctx, intent)
+  assert.equal(first.reviewDecision, 'APPROVED')
+  reviews = [...reviews, { user: { login: 'b' }, state: 'CHANGES_REQUESTED', submitted_at: '2026-08-30T02:00:00Z' }]
+  const second = await githubRead(ctx, intent)
+  assert.equal(reviewCalls, 2, 'the second gate read must re-fetch reviews despite an unchanged PR version')
+  assert.equal(second.reviewDecision, 'CHANGES_REQUESTED')
 })
 
 test('loaderDepth: one logical request may settle multiple upstream steps (paginate)', async () => {

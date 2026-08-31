@@ -95,6 +95,7 @@ export function createGithubGatewayOwner(): GithubGatewayOwner {
   const forcedResources = new Map<string, { promise: Promise<unknown>; requestId: string }>()
   const versions = new Map<string, string>()
   const resourceLoadSequence = new Map<string, number>()
+  const aggregateGenerations = new Map<string, number>()
   let circuitUntil = 0
   let circuitKind: GithubRateLimitKind = 'unknown'
   const recorder = new GatewayLifecycleRecorder()
@@ -198,7 +199,10 @@ export function createGithubGatewayOwner(): GithubGatewayOwner {
         if (key === prefix || key.startsWith(`${prefix}/`)) resources.delete(key)
       }
       for (const key of aggregates.keys()) {
-        if (key === prefix || key.startsWith(`${prefix}/`)) aggregates.delete(key)
+        if (key === prefix || key.startsWith(`${prefix}/`)) {
+          aggregates.delete(key)
+          aggregateGenerations.set(key, (aggregateGenerations.get(key) ?? 0) + 1)
+        }
       }
       versions.delete(prefix)
       for (const key of forcedResources.keys()) {
@@ -242,29 +246,33 @@ export function createGithubGatewayOwner(): GithubGatewayOwner {
         owner.noteTerminal(requestId, 'succeeded')
         return Promise.resolve(cached.value)
       }
-      const load: Promise<T> = owner.runWithRequest(requestId, async () => {
-        const sequence = (resourceLoadSequence.get(key) ?? 0) + 1
-        resourceLoadSequence.set(key, sequence)
-        const value = await loader()
-        const loadedVersion = options.versionOf?.(value) || knownVersion
-        // A later-started force read is authoritative. An older ordinary request
-        // may still resolve for its caller, but must never overwrite that result.
-        if (resourceLoadSequence.get(key) === sequence) {
-          resources.set(key, {
-            value,
-            version: loadedVersion,
-            expiresAt: Date.now() + (options.ttlMs ?? 30_000),
-          })
-          if (loadedVersion) versions.set(key, loadedVersion)
-        }
-        return value
-      })
-      settleTerminalOn(load, requestId)
-      if (!options.force) return deduplicate(`resource:ordinary:${key}`, load, requestId)
+      // Lazy thunk: the loader must only start for the LEADER, after the
+      // in-flight registration check — a follower that invokes its loader would
+      // dispatch a second upstream request behind the leader (review r1).
+      const startLoad = () =>
+        owner.runWithRequest(requestId, async () => {
+          const sequence = (resourceLoadSequence.get(key) ?? 0) + 1
+          resourceLoadSequence.set(key, sequence)
+          const value = await loader()
+          const loadedVersion = options.versionOf?.(value) || knownVersion
+          // A later-started force read is authoritative. An older ordinary request
+          // may still resolve for its caller, but must never overwrite that result.
+          if (resourceLoadSequence.get(key) === sequence) {
+            resources.set(key, {
+              value,
+              version: loadedVersion,
+              expiresAt: Date.now() + (options.ttlMs ?? 30_000),
+            })
+            if (loadedVersion) versions.set(key, loadedVersion)
+          }
+          return value
+        })
+      if (!options.force) return deduplicate(`resource:ordinary:${key}`, startLoad, requestId)
 
       // `force` means fresh from this invocation point. It must not coalesce
       // with an earlier force call whose GitHub fact may already be obsolete.
-      const forced = load
+      const forced = startLoad()
+      settleTerminalOn(forced, requestId)
       forcedResources.set(key, { promise: forced, requestId })
       const clear = () => {
         if (forcedResources.get(key)?.promise === forced) forcedResources.delete(key)
@@ -286,23 +294,34 @@ export function createGithubGatewayOwner(): GithubGatewayOwner {
         owner.noteTerminal(requestId, 'succeeded')
         return Promise.resolve(cached.value)
       }
-      const load = owner.runWithRequest(requestId, async () => {
-        const value = await loader()
-        aggregates.set(key, { value, version: null, expiresAt: Date.now() + ttlMs })
-        return value
-      })
-      settleTerminalOn(load, requestId)
-      return deduplicate(`aggregate:${key}`, load, requestId)
+      // Generation fencing + lazy leader, mirroring the resource path: a loader
+      // that started before an invalidate() must never republish the stale
+      // aggregate (review r3).
+      const generation = (aggregateGenerations.get(key) ?? 0) + 1
+      const startLoad = () =>
+        owner.runWithRequest(requestId, async () => {
+          const value = await loader()
+          if ((aggregateGenerations.get(key) ?? 0) === generation - 1) {
+            aggregates.set(key, { value, version: null, expiresAt: Date.now() + ttlMs })
+            aggregateGenerations.set(key, generation)
+          }
+          return value
+        })
+      return deduplicate(`aggregate:${key}`, startLoad, requestId)
     },
   }
 
-  function deduplicate<T>(key: string, created: Promise<T>, leaderRequestId: string): Promise<T> {
+  function deduplicate<T>(key: string, start: () => Promise<T>, leaderRequestId: string): Promise<T> {
     const entry = inFlight.get(key) as { promise: Promise<T>; requestId: string } | undefined
     if (entry) {
+      // Follower: zero loader invocation, zero dispatch — join the leader only.
       recorder.emit({ kind: 'joined', requestId: leaderRequestId, leaderId: entry.requestId, at: Date.now() })
       settleTerminalOn(entry.promise, leaderRequestId)
       return entry.promise
     }
+    // Leader: register BEFORE starting, so a concurrent caller can only join.
+    const created = start()
+    settleTerminalOn(created, leaderRequestId)
     const tracked = created.finally(() => inFlight.delete(key))
     inFlight.set(key, { promise: tracked, requestId: leaderRequestId })
     return tracked

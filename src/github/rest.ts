@@ -251,7 +251,6 @@ export class GithubRestReader {
         }
         throw new Error(`GitHub REST ${response.status}: ${message || result.stderr?.text || '请求失败'}`)
       }
-      if (requestId) this.owner.noteUpstreamSettled(requestId, true, rateObservationFrom(response.headers))
       return response
     })
   }
@@ -273,23 +272,30 @@ export class GithubRestReader {
   async json<T = unknown>(path: string, accept?: string, timeoutMs?: number): Promise<T> {
     return this.direct(path, async () => {
       const response = await this.request(path, accept, timeoutMs)
-      try {
-        return JSON.parse(response.body || 'null') as T
-      } catch {
-        throw new Error(`GitHub REST 返回了无效 JSON: ${path}`)
-      }
+      return this.settleAfterParse<T>(response, path)
     })
   }
 
   async mutate<T = unknown>(path: string, method: 'POST' | 'PATCH', body: unknown, timeoutMs?: number): Promise<T> {
     return this.direct(path, async () => {
       const response = await this.request(path, undefined, timeoutMs, { method, body })
-      try {
-        return JSON.parse(response.body || 'null') as T
-      } catch {
-        throw new Error(`GitHub REST 返回了无效 JSON: ${path}`)
-      }
+      return this.settleAfterParse<T>(response, path)
     })
+  }
+
+  /** Settle the upstream step only once the payload actually parsed — an HTTP
+   *  200 with a garbage body is a failed step, never a successful settlement
+   *  followed by a terminal failure (review r1). */
+  private async settleAfterParse<T>(response: IncludedResponse, path: string): Promise<T> {
+    const requestId = this.owner.ambientRequestId()
+    try {
+      const value = JSON.parse(response.body || 'null') as T
+      if (requestId) this.owner.noteUpstreamSettled(requestId, true, rateObservationFrom(response.headers))
+      return value
+    } catch {
+      if (requestId) this.owner.noteUpstreamSettled(requestId, false, null)
+      throw new Error(`GitHub REST 返回了无效 JSON: ${path}`)
+    }
   }
 
   async paginate<T>(path: string, accept?: string, timeoutMs?: number): Promise<T[]> {
