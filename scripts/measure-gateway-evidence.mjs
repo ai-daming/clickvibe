@@ -227,7 +227,7 @@ async function panelScenario() {
   resetGithubGatewayOwnerForTests()
   const { ctx, commands } = recordingContext()
   const config = { repos: { [REPO_KEY]: process.cwd() }, worktreeRoot: '/tmp' }
-  const item = workflowFixture(133)
+  const item = workflowFixture(135)
   const rounds = []
   for (let round = 1; round <= 4; round += 1) {
     const mark = githubGatewayOwner().lifecycleEvents().length
@@ -263,7 +263,7 @@ async function multiScenario() {
   resetGithubGatewayOwnerForTests()
   const { ctx, commands } = recordingContext()
   const config = { repos: { [REPO_KEY]: process.cwd() }, worktreeRoot: '/tmp' }
-  const items = [133, 134, 135, 136, 137].map(workflowFixture)
+  const items = [135, 136, 137, 132, 116].map(workflowFixture)
   const rounds = []
   for (let round = 1; round <= 2; round += 1) {
     const mark = githubGatewayOwner().lifecycleEvents().length
@@ -300,9 +300,9 @@ async function reviewScenario() {
   const mark = githubGatewayOwner().lifecycleEvents().length
   const before = commands.length
   await Promise.all([
-    fetchGithubPrFact(ctx, REPO_KEY, 'codex/issue-133-gateway-evidence', null),
-    fetchGithubPrFact(ctx, REPO_KEY, 'codex/issue-134-gateway-evidence', null),
     fetchGithubPrFact(ctx, REPO_KEY, 'codex/issue-135-gateway-evidence', null),
+    fetchGithubPrFact(ctx, REPO_KEY, 'codex/issue-136-gateway-evidence', null),
+    fetchGithubPrFact(ctx, REPO_KEY, 'codex/issue-137-gateway-evidence', null),
   ])
   const ghChildren = commands.slice(before).filter((entry) => isGh(entry.command)).length
   const { derived } = metricsOf(githubGatewayOwner(), mark)
@@ -332,7 +332,7 @@ async function rateScenario() {
   const before = await reader.json('rate_limit')
   const mark = githubGatewayOwner().lifecycleEvents().length
   for (let index = 0; index < 5; index += 1) {
-    await reader.json(`repos/${REPO_KEY}/issues/133`)
+    await reader.json(`repos/${REPO_KEY}/issues/135`)
   }
   const after = await reader.json('rate_limit')
   const { derived } = metricsOf(githubGatewayOwner(), mark)
