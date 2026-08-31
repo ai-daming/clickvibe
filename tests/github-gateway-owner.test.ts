@@ -85,16 +85,19 @@ test('r2: known-exhausted budget before deadline fails fast with retryAt', async
   assert.ok(terminal, 'a rate-limited terminal is recorded for the rejected step')
 })
 
-test('r2: pacing between sequential starts is a guarantee', async () => {
+test('r2: pacing between sequential dispatch decisions is a guarantee', async () => {
   const owner = createGithubGatewayOwner()
-  const starts: number[] = []
-  await owner.submitStep('o/r', 5_000, 30, async () => {
-    starts.push(Date.now())
-  })
-  await owner.submitStep('o/r', 5_000, 30, async () => {
-    starts.push(Date.now())
-  })
-  assert.ok(starts[1] - starts[0] >= 30, `starts only ${starts[1] - starts[0]}ms apart`)
+  await owner.submitStep('o/r', 5_000, 30, async () => 'first')
+  await owner.submitStep('o/r', 5_000, 30, async () => 'second')
+  // The guarantee applies at the dispatch DECISION point (the monotonic
+  // re-check inside the scheduler); measuring inside run() is subject to
+  // microtask delay and can legitimately read < interval on slow runners.
+  const decisions = owner
+    .lifecycleEvents()
+    .filter((event) => event.kind === 'dispatched')
+    .map((event) => (event.kind === 'dispatched' ? event.at : 0))
+  assert.equal(decisions.length, 2)
+  assert.ok(decisions[1] - decisions[0] >= 30, `dispatch decisions only ${decisions[1] - decisions[0]}ms apart`)
 })
 
 test('c3: owners host the cache — two readers on one owner share facts and singleflight', async () => {
