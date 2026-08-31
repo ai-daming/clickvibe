@@ -210,6 +210,9 @@ evidence writer 是 owner 的组成部分。`close()` 顺序固定：关闭准�
 | `src/github/facts.ts` | PR/repo aggregate cache 组合 | typed resource/aggregate plan；paged continuation | A |
 | `src/github/issue.ts`、`dependencies.ts` | caller 拼 comments/timeline/dependency pages | typed read families；同资源 merge key | A |
 | `src/workflow/*` gate readers | 各调用点传 `force` | gate operation 强制 upstream-confirmed | A |
+| `src/workflow/repository-issues.ts` | aggregate 结果将子资源 `updated_at` 直接写入 reader versions | aggregate settlement 在 owner 内更新子资源版本元数据，cache lookup 消费；调用方不写 cache 状态 | A |
+| `src/workflow/handlers.ts` | `/state` 在面板刷新前直接探测 reader circuit | panel 的 cache-ok operations 分别由 owner 准入并返回 typed `rate-limited/retryAt`；不读取 legacy circuit | A |
+| `src/workflow/auto-run.ts` | action 失败后再次探测 reader circuit 归类失败 | action 直接传播 Gateway terminal `rate-limited/retryAt`；controller 不从旁路 circuit 重推原因 | A |
 | `src/github/pr.ts` | PR lookup + REST create | write attempt + PR-by-head readback | B |
 | `src/workflow/repository-state.ts` | comment/PATCH 后调用方 invalidate | typed writes；issue/comment predicate | B |
 | `src/workflow/delivery-publish.ts` | direct `gh issue comment` | non-repeatable comment + marker/readback | B |
@@ -223,6 +226,8 @@ evidence writer 是 owner 的组成部分。`close()` 顺序固定：关闭准�
 | Issue/PR detail、reviews、comments、timeline | 迁移 | — | typed read + resource cache/join |
 | Repository issues/pulls aggregate 与分页 | 迁移 | — | typed paged read + aggregate Observation |
 | merge/Review/exact HEAD/contract gate reads | 迁移 | — | policy-forced upstream-confirmed |
+| Panel state/list refresh | 迁移 | — | cache-ok reads；每个 operation 独立返回 typed rate-limited terminal |
+| Auto-run action 失败归类 | 迁移 | — | 消费 operation terminal；禁止失败后旁路探测 circuit |
 | PR create、dependency ledger writes | allowlist | 迁移 | typed write + affected resources + readback |
 | delivery/meta comments、approval | allowlist | 迁移 | typed non-repeatable write + readback |
 | merge、issue close | allowlist | 迁移 | exclusive write transaction + predicate |
@@ -264,7 +269,7 @@ evidence writer 是 owner 的组成部分。`close()` 顺序固定：关闭准�
 
 ### 静态枚举
 
-- 枚举所有 `githubRest/json/paginate/mutate/cached*/invalidate` 调用和所有 Controller `gh api/issue/pr` 构造。
+- 枚举 `githubRest` factory 与全部 reader 状态/执行方法调用；基线至少包含 `json/paginate/mutate/cachedResource/cachedAggregate/invalidate/rememberVersion/resourceVersion/rateLimitError`，并枚举所有 Controller `gh api/issue/pr` 构造。机器门禁按导出符号/方法能力识别，不以这组名字作为封闭白名单。
 - 每条路径登记 operation family、owner、consistency、effect、affected resources、readback 和 slice。
 - Slice A 后只有具名写 allowlist；Slice B 后 Controller 绕过为零。
 
