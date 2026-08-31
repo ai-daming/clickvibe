@@ -137,6 +137,9 @@ function createHandler(
         return () => {}
       },
     },
+    // cordis fiber lifecycle api: the gateway close effect registers here and
+    // is torn down with the plugin (never invoked by this unit harness).
+    effect: () => () => {},
     shell: {
       resolve(spec: unknown) {
         return spec

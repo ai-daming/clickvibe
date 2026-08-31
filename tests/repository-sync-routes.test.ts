@@ -88,6 +88,9 @@ function createHandler(run: (spec: { command: string; workdir?: string }) => Pro
         return () => {}
       },
     },
+    // cordis fiber lifecycle api; the gateway close effect is never torn down
+    // by this unit harness.
+    effect: () => () => {},
     shell: {
       resolve(spec: unknown) {
         return spec

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { audit, scanSource } from '../scripts/check-github-access.mjs'
 
@@ -50,6 +50,64 @@ test('audit fails a new Controller site constructing gh commands (rogue file mat
       audit(root, () => ''),
       [],
       'no construction, no violations',
+    )
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('r5/F6: helper forwarding and literal indirection fail closed', () => {
+  // Reviewer repro: forwarding literals through an untracked helper.
+  assert.ok(
+    scanSource("exec(build('gh','api','repos/o/r'))").length >= 1,
+    'literal gh+api arguments to any helper are a construction site',
+  )
+  assert.ok(
+    scanSource("run(['gh', 'api'].concat(args))").length >= 1,
+    'array element pairs gh+api count as construction',
+  )
+  const helper = scanSource("function build() { return 'gh' + ' api x' }\nexport const go = () => exec(build())")
+  assert.ok(helper.length >= 2, `helper body AND its call site are reported (saw ${helper.length})`)
+  assert.ok(
+    scanSource("const c = 'gh' + op").length >= 1,
+    'an unresolved concat headed by a standalone gh token fails closed',
+  )
+})
+
+test('r5/F6: the allowlist binds named symbols — a rogue read inside an allowlisted file is caught', () => {
+  const root = mkdtempSync(join(tmpdir(), 'clickvibe-gh-gate-symbols-'))
+  try {
+    const rest = [
+      'export class GithubRestReader {',
+      '  private async request() {',
+      "    const command = ['gh api --include', path].join(' ')",
+      '    return command',
+      '  }',
+      '}',
+      'export const rogue = () => exec(`gh api repos/o/r/rogue`)',
+    ].join('\n')
+    const files = new Map([
+      ['src/github/rest.ts', rest],
+      ['src/agent/prompts.ts', 'export const tip = "优先使用 `gh api` REST"\n'],
+      ['src/agent/prompts-exec.ts', 'export const bad = () => run(`gh api repos/o/r`)\n'],
+      ['src/client/panel.tsx', 'export const panel = () => exec(`gh api repos/o/r`)\n'],
+    ])
+    for (const [name, source] of files) {
+      const path = join(root, name)
+      mkdirSync(dirname(path), { recursive: true })
+      writeFileSync(path, source)
+    }
+    const violations = audit(root, (file) => files.get(file.slice(root.length + 1)) ?? '')
+    assert.deepEqual(
+      violations.map((violation) => violation.file).sort(),
+      ['src/agent/prompts-exec.ts', 'src/client/panel.tsx', 'src/github/rest.ts'].sort(),
+      'prompt TEXT stays allowed, execution inside the prompt boundary does not, rogue symbols in rest.ts are caught',
+    )
+    const restViolation = violations.find((violation) => violation.file === 'src/github/rest.ts')
+    assert.ok(restViolation, 'rest.ts still reports its rogue symbol')
+    assert.ok(
+      restViolation.hits.every((hit) => hit.symbol !== 'request'),
+      'the allowlisted request method itself is not reported',
     )
   } finally {
     rmSync(root, { recursive: true, force: true })

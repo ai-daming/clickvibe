@@ -16,8 +16,12 @@
  */
 
 export interface GatewayRateObservation {
+  /** Real bucket name from the response (`x-ratelimit-resource`); null never
+   *  falls back to a fabricated core bucket (#149 rounds 4-6). */
+  resource: string | null
   limit: number | null
   remaining: number | null
+  used: number | null
   reset: number | null
   retryAfterSeconds: number | null
   observedAt: number
@@ -67,15 +71,30 @@ export interface GatewayMetrics {
 
 const MAX_EVENTS = 2000
 
-/** Bounded in-memory recorder owned by the Gateway owner; sealed by close(). */
+/** Owner-owned async evidence writer; flush() is awaitable and close() drains
+ *  it after the final terminal (ADR-0010 §10). */
+export interface GatewayEvidenceSink {
+  write(event: GatewayLifecycleEvent): void
+  flush(): Promise<void>
+}
+
+/** Bounded in-memory recorder owned by the Gateway owner; sealed by close().
+ *  Every emitted event also reaches the evidence sink — the production
+ *  consumer of the stream. */
 export class GatewayLifecycleRecorder {
   private events: GatewayLifecycleEvent[] = []
   private closed = false
+  private readonly sink?: GatewayEvidenceSink
+
+  constructor(sink?: GatewayEvidenceSink) {
+    this.sink = sink
+  }
 
   emit(event: GatewayLifecycleEvent): void {
     if (this.closed) return
     this.events.push(event)
     if (this.events.length > MAX_EVENTS) this.events.splice(0, this.events.length - MAX_EVENTS)
+    this.sink?.write(event)
   }
 
   snapshot(): GatewayLifecycleEvent[] {

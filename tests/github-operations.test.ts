@@ -77,6 +77,79 @@ test('registry: every read operation declares effect, floor, joinability and an 
   assert.equal(GITHUB_READ_OPERATIONS['gate-pr-fact'].consistencyFloor, 'upstream-confirmed')
 })
 
+test('r5/F2: every family declares the admission ladder; only the gate families are critical', () => {
+  for (const [id, policy] of Object.entries(GITHUB_READ_OPERATIONS)) {
+    assert.ok(['critical', 'normal'].includes(policy.priority), `${id} priority`)
+    assert.ok(
+      Number.isSafeInteger(policy.deadlineMs) && policy.deadlineMs > 0,
+      `${id} carries a finite absolute logical deadline`,
+    )
+    assert.ok(
+      Number.isSafeInteger(policy.maxPages) && policy.maxPages >= 1,
+      `${id} carries a finite dispatch (cost) bound`,
+    )
+  }
+  const critical = (Object.keys(GITHUB_READ_OPERATIONS) as GithubReadOperationId[]).filter(
+    (id) => GITHUB_READ_OPERATIONS[id].priority === 'critical',
+  )
+  assert.deepEqual(critical, ['contract-issue-detail', 'gate-pr-fact'], 'critical is for gates only')
+})
+
+test('r5/F2: a gate read declares critical in the production owner; the panel stays normal', async () => {
+  const { githubGatewayOwner } = await import('../src/github/gateway-owner.ts')
+  const owner = githubGatewayOwner()
+  const gateRoutes = [
+    { match: /pulls\/9\/reviews/, body: [{ id: 1, user: { login: 'rev' }, state: 'APPROVED', submitted_at: 't' }] },
+    {
+      match: /repos\/o\/r\/pulls\/9(?![/a-z])/,
+      body: { number: 9, title: 'p', state: 'open', updated_at: 'u', html_url: 'x', head: {}, base: {} },
+    },
+  ]
+  const gate = recordingContext(gateRoutes)
+  await githubRead(gate.ctx, {
+    operation: 'gate-pr-fact',
+    repoKey: 'o/r',
+    number: 9,
+    consistency: 'cache-ok',
+    includeReviews: true,
+  })
+  const gateDeclared = owner.lifecycleEvents().filter((event) => event.kind === 'declared')
+  assert.ok(gateDeclared.length > 0, 'the gate flow declared logical requests')
+  for (const event of gateDeclared) {
+    assert.equal(
+      event.kind === 'declared' ? event.priority : null,
+      'critical',
+      'gate composition (including nested reads) declares critical',
+    )
+  }
+  await owner.close({ drainMs: 0 })
+  resetGithubGatewayOwnerForTests()
+
+  const panelOwner = githubGatewayOwner()
+  const panelRoutes = [
+    { match: /requested_reviewers/, body: { users: [], teams: [] } },
+    { match: /pulls\/9\/reviews/, body: [] },
+    { match: /issues\/9\/comments/, body: [] },
+    {
+      match: /repos\/o\/r\/pulls\/9(?![/a-z])/,
+      body: { number: 9, title: 'p', state: 'open', updated_at: 'u', html_url: 'x', head: {}, base: {} },
+    },
+  ]
+  const panel = recordingContext(panelRoutes)
+  await githubRead(panel.ctx, {
+    operation: 'pr-panel',
+    repoKey: 'o/r',
+    number: 9,
+    consistency: 'cache-ok',
+  })
+  const panelDeclared = panelOwner.lifecycleEvents().filter((event) => event.kind === 'declared')
+  assert.ok(panelDeclared.length > 0)
+  for (const event of panelDeclared) {
+    assert.equal(event.kind === 'declared' ? event.priority : null, 'normal', 'panel refreshes stay in the normal lane')
+  }
+  await panelOwner.close({ drainMs: 0 })
+})
+
 test('tighten-not-loosen: a floor below-request is upgraded and observably forced', async () => {
   // contract-issue-detail floor is upstream-confirmed; asking for cache-ok
   // must still bypass the cache on every call (force applied), exactly like

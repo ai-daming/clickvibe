@@ -68,8 +68,31 @@ export interface GithubReadPolicy {
   effect: 'read'
   consistencyFloor: GithubReadConsistency
   joinable: boolean
+  /**
+   * Admission ladder the Gateway actually consumes (ADR-0010 §2/§3): the
+   * priority lane, the absolute logical deadline and the per-request dispatch
+   * (cost) bound. `critical` is reserved for the merge/contract gate families;
+   * one-request families carry maxPages = 1. Values are pinned per ADR-0010
+   * Neutral from the #133 frozen scenarios' shapes — re-cite when the frozen
+   * thresholds are rerun on the implementation SHA.
+   */
+  priority: 'critical' | 'normal'
+  deadlineMs: number
+  maxPages: number
   execute(ctx: Context, intent: GithubReadIntent, force: boolean): Promise<unknown>
 }
+
+const normalRead = (deadlineMs: number, maxPages: number) => ({
+  priority: 'normal' as const,
+  deadlineMs,
+  maxPages,
+})
+
+const criticalGate = (deadlineMs: number, maxPages: number) => ({
+  priority: 'critical' as const,
+  deadlineMs,
+  maxPages,
+})
 
 function consistencyRank(value: GithubReadConsistency): number {
   return value === 'upstream-confirmed' ? 1 : 0
@@ -259,18 +282,21 @@ export const GITHUB_READ_OPERATIONS: Record<GithubReadOperationId, GithubReadPol
     effect: 'read',
     consistencyFloor: 'cache-ok',
     joinable: true,
+    ...normalRead(30_000, 1),
     execute: (ctx, intent, force) => loadPrDetail(ctx, intent, force),
   },
   'pr-by-head': {
     effect: 'read',
     consistencyFloor: 'cache-ok',
     joinable: true,
+    ...normalRead(35_000, 1),
     execute: (ctx, intent, force) => loadPrFact(ctx, { ...intent, number: undefined }, force).then((fact) => fact),
   },
   'pr-reviews': {
     effect: 'read',
     consistencyFloor: 'cache-ok',
     joinable: true,
+    ...normalRead(60_000, 10),
     execute: (ctx, intent, force) => {
       const rest = githubRest(ctx)
       const resourceKey = `${intent.repoKey}/pulls/${intent.number}`
@@ -291,45 +317,54 @@ export const GITHUB_READ_OPERATIONS: Record<GithubReadOperationId, GithubReadPol
     effect: 'read',
     consistencyFloor: 'cache-ok',
     joinable: true,
+    ...normalRead(30_000, 1),
     execute: (ctx, intent, force) => loadIssueDetail(ctx, intent, force),
   },
   'contract-issue-detail': {
     // Merge/contract gates must observe the live issue body; the floor keeps a
-    // caller from relaxing the read into a cached answer (ADR-0010 §4).
+    // caller from relaxing the read into a cached answer (ADR-0010 §4), and
+    // the gate rides the critical admission lane (ADR-0010 §2).
     effect: 'read',
     consistencyFloor: 'upstream-confirmed',
     joinable: false,
+    ...criticalGate(30_000, 1),
     execute: (ctx, intent) => loadIssueDetail(ctx, intent, true),
   },
   'pr-fact': {
     effect: 'read',
     consistencyFloor: 'cache-ok',
     joinable: true,
+    ...normalRead(40_000, 2),
     execute: (ctx, intent, force) => loadPrFact(ctx, intent, force),
   },
   'gate-pr-fact': {
-    // Exact-HEAD gate reads share the composition but can never be cached.
+    // Exact-HEAD gate reads share the composition but can never be cached,
+    // and ride the critical admission lane.
     effect: 'read',
     consistencyFloor: 'upstream-confirmed',
     joinable: false,
+    ...criticalGate(45_000, 2),
     execute: (ctx, intent) => loadPrFact(ctx, intent, true),
   },
   'pr-panel': {
     effect: 'read',
     consistencyFloor: 'cache-ok',
     joinable: true,
+    ...normalRead(90_000, 10),
     execute: (ctx, intent, force) => loadPanel(ctx, intent, force, true),
   },
   'issue-panel': {
     effect: 'read',
     consistencyFloor: 'cache-ok',
     joinable: true,
+    ...normalRead(90_000, 30),
     execute: (ctx, intent, force) => loadPanel(ctx, intent, force, false),
   },
   'issue-comments': {
     effect: 'read',
     consistencyFloor: 'cache-ok',
     joinable: true,
+    ...normalRead(60_000, 10),
     execute: (ctx, intent) =>
       githubRest(ctx).paginate<GithubCommentRest>(
         `repos/${intent.repoKey}/issues/${intent.number}/comments`,
@@ -341,6 +376,7 @@ export const GITHUB_READ_OPERATIONS: Record<GithubReadOperationId, GithubReadPol
     effect: 'read',
     consistencyFloor: 'cache-ok',
     joinable: true,
+    ...normalRead(60_000, 10),
     execute: (ctx, intent, force) => {
       const rest = githubRest(ctx)
       const key = `${intent.repoKey}/pulls/${intent.number}`
@@ -361,6 +397,7 @@ export const GITHUB_READ_OPERATIONS: Record<GithubReadOperationId, GithubReadPol
     effect: 'read',
     consistencyFloor: 'cache-ok',
     joinable: true,
+    ...normalRead(30_000, 1),
     execute: (ctx, intent) =>
       githubRest(ctx).json(
         `repos/${intent.repoKey}/pulls/${intent.number}/requested_reviewers`,
@@ -372,6 +409,7 @@ export const GITHUB_READ_OPERATIONS: Record<GithubReadOperationId, GithubReadPol
     effect: 'read',
     consistencyFloor: 'cache-ok',
     joinable: true,
+    ...normalRead(45_000, 15),
     execute: (ctx, intent) =>
       fetchTimeline(ctx, intent.repoKey.split('/')[0], intent.repoKey.split('/')[1], String(intent.number)),
   },
@@ -379,6 +417,7 @@ export const GITHUB_READ_OPERATIONS: Record<GithubReadOperationId, GithubReadPol
     effect: 'read',
     consistencyFloor: 'cache-ok',
     joinable: true,
+    ...normalRead(120_000, 40),
     execute: (ctx, intent, force) => {
       const rest = githubRest(ctx)
       return rest.cachedAggregate(
@@ -417,5 +456,10 @@ export async function githubRead<T = unknown>(ctx: Context, intent: GithubReadIn
     consistencyRank(policy.consistencyFloor) > consistencyRank(intent.consistency)
       ? policy.consistencyFloor
       : intent.consistency
-  return policy.execute(ctx, intent, effective === 'upstream-confirmed') as Promise<T>
+  // The policy DRIVES admission: its priority lane, absolute deadline and
+  // cost bound wrap the executor, so every declared request and dispatched
+  // step (pagination continuations included) inherits them (review r5/F2).
+  return githubRest(ctx).withAdmission(policy.priority, policy.deadlineMs, policy.maxPages, () =>
+    policy.execute(ctx, intent, effective === 'upstream-confirmed'),
+  ) as Promise<T>
 }

@@ -21,6 +21,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
+import { closeGithubGateway } from './github/gateway-owner.ts'
 import { loadEmbeddedGhIssueSkill } from './infra/embedded-skill.ts'
 import { ROUTE } from './infra/http-contract.ts'
 import { readJsonBody, writeJson } from './infra/runtime.ts'
@@ -157,6 +158,11 @@ export function apply(ctx: Context): void {
       writeJson(res, status, body)
     },
   })
+  // Gateway lifecycle follows the plugin fiber: on unload, admission closes,
+  // queued steps interrupt, running steps drain and lifecycle evidence
+  // flushes (ADR-0010 §10); nothing crosses into the next credential
+  // generation. cordis effects await their disposer during teardown.
+  ctx.effect(() => closeGithubGateway, 'clickvibe: close the GitHub gateway')
 }
 
 export { buildMergePreface } from './infra/git.ts'

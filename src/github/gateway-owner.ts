@@ -1,25 +1,32 @@
 /**
- * Gateway owner (issue #131 slice A; ADR-0010 §1/§4/§7).
+ * Gateway owner (issue #131 slice A; ADR-0010 §1/§3-§6/§10).
  *
- * One credential scope owns one Gateway runtime: the request lane, the
+ * One credential scope owns one Gateway runtime: the request lanes, the
  * observation caches with their generations, in-flight singleflight, forced
- * reads, resource versions and the rate-limit circuit. v0.2 is deliberately
- * conservative about scope identity — the `gh` CLI host auth cannot be safely
- * split into distinct credentials, so every owner declares the same single
- * scope (under-sharing reuse is acceptable, splitting one budget never is).
+ * reads, resource versions, the per-bucket rate budget and the lifecycle
+ * evidence writer. v0.2 is deliberately conservative about scope identity —
+ * the `gh` CLI host auth cannot be safely split into distinct credentials, so
+ * every owner declares the same single scope (under-sharing reuse is
+ * acceptable, splitting one budget never is).
  *
  * Readers bind to an owner and keep only shell I/O and response parsing:
  * two readers on one owner share observations, singleflight and the circuit
- * (worktrees attribute calls, they never own Gateway state). The algorithms
- * are moved verbatim from the former reader-private state; the lane came
- * from the former host-global symbol. Priority admission, budgets and
- * lifecycle events join in later commits together with their consumers.
+ * (worktrees attribute calls, they never own Gateway state).
+ *
+ * Admission is driven by the typed operation policy (operations.ts): the
+ * priority lane, ONE absolute logical deadline shared by every step of a
+ * request (pagination continuations never mint a fresh window) and a
+ * per-request dispatch (cost) bound all arrive through the admission context
+ * the policy wraps around its executor.
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
 import { GithubRateLimitError, type GithubRateLimitKind } from './rest.ts'
+import { createDiagnosticEvidenceSink } from './gateway-evidence.ts'
 import {
   GatewayLifecycleRecorder,
+  type GatewayEvidenceSink,
   type GatewayLifecycleEvent,
   type GatewayMetrics,
   type GatewayRateObservation,
@@ -34,12 +41,41 @@ const REPOSITORY_CONCURRENCY = 3
 const UNKNOWN_BUDGET_PROBE_CAP = 2
 const NORMAL_AGING_MS = 10_000
 
+/** Attributes the operation policy declares; the owner composes them into the
+ *  ambient admission context (priority lanes, absolute deadline, cost bound). */
+export interface GatewayAdmissionAttributes {
+  priority: 'critical' | 'normal'
+  deadlineMs: number
+  maxPages: number
+}
+
+interface GatewayAdmission {
+  priority: 'critical' | 'normal'
+  deadlineAt: number
+  maxPages: number
+}
+
+/** One real resource bucket's last published snapshot (design §8). */
+interface BucketLedger {
+  limit: number | null
+  remaining: number | null
+  used: number | null
+  reset: number | null
+  observedAt: number
+  /** Monotonic republish counter — tells a step whether fresh evidence
+   *  superseded its dispatch (vs. a silently consumed unit). */
+  evidenceSeq: number
+}
+
 interface PendingStep {
   requestId: string
   repo: string
+  bucket: string
   priority: 'critical' | 'normal'
   deadlineAt: number
   enqueuedAt: number
+  /** Evidence sequence at dispatch — see settleReservation. */
+  evidenceSeq: number
   pacingMs: number
   run: () => Promise<unknown>
   settle: (value: unknown) => void
@@ -64,6 +100,11 @@ export interface CachedAggregateOptions<T> {
   derivedVersions?: (value: T) => Array<[key: string, version: string | null | undefined]>
 }
 
+export interface SubmitStepOptions {
+  /** Resource bucket the step draws from (`search` endpoints vs `core`). */
+  bucket?: string
+}
+
 export interface GithubGatewayOwner {
   /** Opaque identity; never contains token material. */
   readonly credentialScopeId: string
@@ -72,9 +113,19 @@ export interface GithubGatewayOwner {
   /** Ambient logical-request attribution for loader-internal upstream steps. */
   runWithRequest<T>(requestId: string, fn: () => Promise<T>): Promise<T>
   ambientRequestId(): string | null
+  /**
+   * Stamp the policy's admission attributes (priority lane, absolute logical
+   * deadline, per-request dispatch bound) around a composition. Nested calls
+   * compose: critical propagates inward, deadlines only tighten, and the
+   * innermost bound governs pagination.
+   */
+  runWithAdmission<T>(attributes: GatewayAdmissionAttributes, fn: () => Promise<T>): Promise<T>
+  /** Cost-bound admission before dispatching the next pagination page. */
+  admitNextPage(): void
   /** Settle one HTTP step with the response's real rate fields (null when absent). */
   noteUpstreamSettled(requestId: string, ok: boolean, rate: GatewayRateObservation | null): void
-  /** Terminal for a logical request; outcome from the error shape when thrown. */
+  /** Terminal for a logical request; exactly one per request — a second
+   *  outcome is recorded as a late diagnostic and never rewrites the first. */
   noteTerminal(
     requestId: string,
     outcome: 'succeeded' | 'failed' | 'rate-limited' | 'interrupted',
@@ -87,13 +138,19 @@ export interface GithubGatewayOwner {
    * Admit and execute ONE upstream HTTP step (ADR-0010 §6 dispatch loop).
    * Steps wait in priority lanes (critical first, normal with aging), are
    * picked by repository round-robin under credential/repo concurrency caps,
-   * pass budget admission (known remaining / reset vs the step deadline) and
-   * start no sooner than the pacing interval. A slow step occupies only its
-   * own execution slot — no scheduler mutex is held while awaiting the network.
+   * pass per-bucket budget admission (known remaining is atomically reserved
+   * at dispatch and released at settlement; unknown buckets probe
+   * conservatively) and start no sooner than the pacing interval. A slow step
+   * occupies only its own execution slot — no scheduler mutex is held while
+   * awaiting the network.
    */
-  submitStep<T>(repo: string, timeoutMs: number, pacingMs: number, run: () => Promise<T>): Promise<T>
-  /** Stamp the ambient operation priority ('critical' only for gate families). */
-  withPriority<T>(priority: 'critical' | 'normal', fn: () => Promise<T>): Promise<T>
+  submitStep<T>(
+    repo: string,
+    timeoutMs: number,
+    pacingMs: number,
+    run: () => Promise<T>,
+    options?: SubmitStepOptions,
+  ): Promise<T>
 
   rateLimitError(now?: number): GithubRateLimitError | null
   /** Record a rate-limit trip observed on a response (kind from the response shape). */
@@ -117,20 +174,24 @@ export interface GithubGatewayOwner {
   ): Promise<T>
   /** Resolve when no step is waiting or running (test/evidence quiescence). */
   idle(): Promise<void>
-  /** Stop admission, interrupt queued steps, drain running to a deadline, seal. */
+  /** Stop admission, interrupt queued steps, drain running to a deadline, fence
+   *  late settlements behind a new owner generation, seal and flush evidence. */
   close(options?: { drainMs?: number }): Promise<void>
 }
 
 /** Conservative v0.2 scope: the host's gh auth is one credential. */
 const CONSERVATIVE_CREDENTIAL_SCOPE = 'host-gh-auth:v1'
 
-export function createGithubGatewayOwner(): GithubGatewayOwner {
+export function createGithubGatewayOwner(options: { sink?: GatewayEvidenceSink } = {}): GithubGatewayOwner {
+  const evidenceSink = options.sink
   const waiting: PendingStep[] = []
   const running = new Map<number, PendingStep & { runner: Promise<unknown> }>()
   const lastDispatchPerRepo = new Map<string, number>()
   let nextStartAt = 0
   let dispatchScheduled = false
-  let budget: { remaining: number; reset: number | null } | null = null // eslint-disable-line prefer-const
+  const buckets = new Map<string, BucketLedger>()
+  const reservedByBucket = new Map<string, number>()
+  let ownerGeneration = 0
   let closed = false
   let idleWaiters: Array<() => void> = []
   const resources = new Map<string, CachedValue<unknown>>()
@@ -142,9 +203,12 @@ export function createGithubGatewayOwner(): GithubGatewayOwner {
   const aggregateGenerations = new Map<string, number>()
   let circuitUntil = 0
   let circuitKind: GithubRateLimitKind = 'unknown'
-  const recorder = new GatewayLifecycleRecorder()
+  const recorder = new GatewayLifecycleRecorder(options.sink)
   const requestAls = new AsyncLocalStorage<string>()
+  const admissionAls = new AsyncLocalStorage<GatewayAdmission>()
   const stepCounts = new Map<string, number>()
+  const requestPriorities = new Map<string, 'critical' | 'normal'>()
+  const terminaledRequests = new Set<string>()
   let nextRequestId = 0
 
   const errorText = (error: unknown): string | null =>
@@ -157,9 +221,6 @@ export function createGithubGatewayOwner(): GithubGatewayOwner {
       (error: unknown) => owner.noteTerminal(requestId, isRateLimit(error) ? 'rate-limited' : 'failed', error),
     )
   }
-
-  const requestPriorities = new Map<string, 'critical' | 'normal'>()
-  const priorityAls = new AsyncLocalStorage<'critical' | 'normal'>()
 
   const flushIdleWaiters = () => {
     if (waiting.length === 0 && running.size === 0) {
@@ -205,13 +266,45 @@ export function createGithubGatewayOwner(): GithubGatewayOwner {
     return chosen
   }
 
+  /** Put a step back at the head of its lane order and stop this loop pass —
+   *  the deciding fact (a settlement or a timer) re-schedules dispatch. */
+  const requeueFront = (step: PendingStep) => {
+    waiting.unshift(step)
+  }
+
+  const releaseReservation = (bucket: string) => {
+    const outstanding = (reservedByBucket.get(bucket) ?? 1) - 1
+    if (outstanding > 0) reservedByBucket.set(bucket, outstanding)
+    else reservedByBucket.delete(bucket)
+  }
+
+  /** Settle the reservation on one step's completion. A bucket whose evidence
+   *  sequence moved past this dispatch was republished by a real response —
+   *  the published remaining already carries the truth; a step that settled
+   *  WITHOUT rate fields really consumed a unit, so the published remaining
+   *  drops by one — sequential headerless requests must not re-spend the
+   *  same unit forever (review r5/F7). */
+  const settleReservation = (step: PendingStep) => {
+    const ledger = buckets.get(step.bucket)
+    if (ledger && ledger.evidenceSeq === step.evidenceSeq && ledger.remaining !== null && ledger.remaining > 0) {
+      ledger.remaining -= 1
+    }
+    releaseReservation(step.bucket)
+  }
+
+  const noteLateResponse = (step: PendingStep, phase: 'settled' | 'rejected') => {
+    logTaskDiagnostic('github-gateway-late-response', {
+      requestId: step.requestId,
+      repo: step.repo,
+      bucket: step.bucket,
+      phase,
+      note: '迟到响应被 owner generation 隔离:调用方保留 interrupted terminal,缓存不回填',
+    })
+  }
+
   const dispatchLoop = async () => {
     for (;;) {
-      const totalCap =
-        budget === null
-          ? Math.min(CREDENTIAL_TOTAL_CONCURRENCY, UNKNOWN_BUDGET_PROBE_CAP)
-          : CREDENTIAL_TOTAL_CONCURRENCY
-      if (running.size >= totalCap) return
+      if (running.size >= CREDENTIAL_TOTAL_CONCURRENCY) return
       const candidate = takeCandidate()
       if (!candidate) {
         flushIdleWaiters()
@@ -225,23 +318,44 @@ export function createGithubGatewayOwner(): GithubGatewayOwner {
         candidate.fail(error)
         continue
       }
-      // Budget admission: a known-exhausted bucket keeps the step queued only
-      // when reset lands before its deadline; otherwise it fails fast with a
-      // retryAt (GithubRateLimitError.resetAt). Keeping it queued MUST return
-      // — nothing in this loop can change the budget, and a `continue` here
-      // would spin synchronously forever (the r2 hang).
-      if (budget !== null && budget.remaining <= 0 && budget.reset !== null) {
-        const resetAt = budget.reset * 1000
-        if (resetAt > Date.now()) {
-          if (resetAt > candidate.deadlineAt) {
-            const error = new GithubRateLimitError(resetAt, 'primary')
-            owner.noteTerminal(candidate.requestId, 'rate-limited', error)
-            candidate.fail(error)
-            continue
+      // Per-bucket budget admission (design §8). A published ledger whose
+      // reset already elapsed is stale — drop it and probe like unknown.
+      let ledger = buckets.get(candidate.bucket)
+      if (ledger && ledger.reset !== null && ledger.reset * 1000 <= Date.now()) {
+        buckets.delete(candidate.bucket)
+        ledger = undefined
+      }
+      if (ledger && ledger.remaining !== null) {
+        const outstanding = reservedByBucket.get(candidate.bucket) ?? 0
+        if (ledger.remaining - outstanding <= 0) {
+          if (outstanding > 0) {
+            // The in-flight reservation owns the truth; wait for its
+            // settlement instead of failing on a possibly-stale number.
+            requeueFront(candidate)
+            return
           }
-          waiting.unshift(candidate)
-          const wake = setTimeout(() => scheduleDispatch(), Math.max(resetAt - Date.now(), 1))
-          wake.unref?.()
+          const resetAt = ledger.reset !== null ? ledger.reset * 1000 : null
+          if (resetAt !== null && resetAt > Date.now()) {
+            if (resetAt > candidate.deadlineAt) {
+              const error = new GithubRateLimitError(resetAt, 'primary')
+              owner.noteTerminal(candidate.requestId, 'rate-limited', error)
+              candidate.fail(error)
+              continue
+            }
+            requeueFront(candidate)
+            const wake = setTimeout(() => scheduleDispatch(), Math.max(resetAt - Date.now(), 1))
+            wake.unref?.()
+            return
+          }
+          // Exhausted with no usable reset: forget the guess, probe on.
+          buckets.delete(candidate.bucket)
+        }
+      } else if (!ledger) {
+        // Unknown budget: at most a conservative number of probe steps runs
+        // concurrently; a settlement publishes the bucket and unlocks the lane.
+        const unknownRunning = [...running.values()].filter((entry) => !buckets.has(entry.bucket)).length
+        if (unknownRunning >= UNKNOWN_BUDGET_PROBE_CAP) {
+          requeueFront(candidate)
           return
         }
       }
@@ -256,6 +370,9 @@ export function createGithubGatewayOwner(): GithubGatewayOwner {
         candidate.fail(error)
         return
       }
+      const dispatchGeneration = ownerGeneration
+      reservedByBucket.set(candidate.bucket, (reservedByBucket.get(candidate.bucket) ?? 0) + 1)
+      candidate.evidenceSeq = buckets.get(candidate.bucket)?.evidenceSeq ?? 0
       nextStartAt = Date.now() + candidate.pacingMs
       lastDispatchPerRepo.set(candidate.repo, Date.now())
       recorder.emit({
@@ -272,12 +389,27 @@ export function createGithubGatewayOwner(): GithubGatewayOwner {
         .then(
           (value) => {
             running.delete(ticket)
-            candidate.settle(value)
+            settleReservation(candidate)
+            // Generation fence: a settlement that lands after the close
+            // deadline must not resolve its caller or publish anything — the
+            // caller already owns its interrupted terminal.
+            if (ownerGeneration !== dispatchGeneration) {
+              noteLateResponse(candidate, 'settled')
+              candidate.fail(new Error('GitHub 网关已关闭:迟到响应被丢弃'))
+            } else {
+              candidate.settle(value)
+            }
             scheduleDispatch()
           },
           (error) => {
             running.delete(ticket)
-            candidate.fail(error)
+            settleReservation(candidate)
+            if (ownerGeneration !== dispatchGeneration) {
+              noteLateResponse(candidate, 'rejected')
+              candidate.fail(new Error('GitHub 网关已关闭:迟到响应被丢弃'))
+            } else {
+              candidate.fail(error)
+            }
             scheduleDispatch()
           },
         )
@@ -287,9 +419,16 @@ export function createGithubGatewayOwner(): GithubGatewayOwner {
 
   const owner: GithubGatewayOwner = {
     credentialScopeId: CONSERVATIVE_CREDENTIAL_SCOPE,
-    submitStep<T>(repo: string, timeoutMs: number, pacingMs: number, run: () => Promise<T>): Promise<T> {
+    submitStep<T>(
+      repo: string,
+      timeoutMs: number,
+      pacingMs: number,
+      run: () => Promise<T>,
+      options: SubmitStepOptions = {},
+    ): Promise<T> {
       const requestId = owner.ambientRequestId()
-      const priority = requestId ? (requestPriorities.get(requestId) ?? 'normal') : 'normal'
+      const ambient = admissionAls.getStore()
+      const priority = ambient?.priority ?? (requestId ? (requestPriorities.get(requestId) ?? 'normal') : 'normal')
       return new Promise<T>((resolve, reject) => {
         if (closed || recorder.sealed) {
           reject(new Error('Gateway 已关闭,拒绝新的上游步骤'))
@@ -298,9 +437,13 @@ export function createGithubGatewayOwner(): GithubGatewayOwner {
         const step: PendingStep = {
           requestId: requestId ?? 'gh-ambient',
           repo,
+          bucket: options.bucket ?? 'core',
           priority,
-          deadlineAt: Date.now() + Math.max(timeoutMs, 1),
+          // One absolute logical deadline per request — a continuation page
+          // may only tighten the window, never mint a fresh one.
+          deadlineAt: Math.min(Date.now() + Math.max(timeoutMs, 1), ambient?.deadlineAt ?? Number.POSITIVE_INFINITY),
           enqueuedAt: Date.now(),
+          evidenceSeq: 0,
           pacingMs,
           run: run as () => Promise<unknown>,
           settle: (value) => resolve(value as T),
@@ -311,8 +454,29 @@ export function createGithubGatewayOwner(): GithubGatewayOwner {
         scheduleDispatch()
       })
     },
-    withPriority<T>(priority: 'critical' | 'normal', fn: () => Promise<T>): Promise<T> {
-      return priorityAls.run(priority, fn)
+    runWithAdmission<T>(attributes: GatewayAdmissionAttributes, fn: () => Promise<T>): Promise<T> {
+      const ambient = admissionAls.getStore()
+      const admission: GatewayAdmission = {
+        priority: attributes.priority === 'critical' || ambient?.priority === 'critical' ? 'critical' : 'normal',
+        deadlineAt: Math.min(
+          ambient?.deadlineAt ?? Number.POSITIVE_INFINITY,
+          Date.now() + Math.max(attributes.deadlineMs, 1),
+        ),
+        maxPages: attributes.maxPages,
+      }
+      return admissionAls.run(admission, fn)
+    },
+    admitNextPage(): void {
+      const admission = admissionAls.getStore()
+      if (!admission) return
+      const requestId = requestAls.getStore()
+      if (!requestId) return
+      const dispatched = stepCounts.get(requestId) ?? 0
+      if (dispatched + 1 > admission.maxPages) {
+        throw new Error(
+          `GitHub 读取超出声明的成本上界:请求 ${requestId} 已派发 ${dispatched} 次,声明上界 ${admission.maxPages} 次`,
+        )
+      }
     },
     idle(): Promise<void> {
       if (waiting.length === 0 && running.size === 0) return Promise.resolve()
@@ -336,14 +500,19 @@ export function createGithubGatewayOwner(): GithubGatewayOwner {
       for (const step of running.values()) {
         owner.noteTerminal(step.requestId, 'interrupted', 'Gateway 关闭:运行步骤未在窗口内结算')
       }
+      // Fence every still-in-flight settlement: from here on a late response
+      // is diagnostic-only — no caller resolution, no cache publish, no
+      // second terminal.
+      ownerGeneration += 1
       recorder.seal()
+      await evidenceSink?.flush()
       flushIdleWaiters()
     },
     declareLogicalRequest(scope: 'resource' | 'aggregate' | 'direct', key: string): string {
       if (recorder.sealed) throw new Error('Gateway 已关闭,拒绝新的 GitHub 访问申请')
       nextRequestId += 1
       const requestId = `gh-${nextRequestId}`
-      const priority = priorityAls.getStore() ?? 'normal'
+      const priority = admissionAls.getStore()?.priority ?? 'normal'
       requestPriorities.set(requestId, priority)
       recorder.emit({ kind: 'declared', requestId, scope, key, priority, at: Date.now() })
       return requestId
@@ -357,11 +526,19 @@ export function createGithubGatewayOwner(): GithubGatewayOwner {
     noteUpstreamSettled(requestId: string, ok: boolean, rate: GatewayRateObservation | null): void {
       const step = stepCounts.get(requestId) ?? 1
       recorder.emit({ kind: 'upstream-settled', requestId, step, ok, rate, at: Date.now() })
-      // The admission budget derives from the same evidence stream — a response
-      // with real rate fields updates the known bucket; observations without
-      // them never fabricate one (ADR-0010 §8).
+      // The per-bucket budget derives from the same evidence stream — a
+      // response with real rate fields republishes its bucket; observations
+      // without them never fabricate one (ADR-0010 §8).
       if (rate && rate.remaining !== null) {
-        budget = { remaining: rate.remaining, reset: rate.reset }
+        const previous = buckets.get(rate.resource ?? 'core')
+        buckets.set(rate.resource ?? 'core', {
+          limit: rate.limit,
+          remaining: rate.remaining,
+          used: rate.used,
+          reset: rate.reset,
+          observedAt: rate.observedAt,
+          evidenceSeq: (previous?.evidenceSeq ?? 0) + 1,
+        })
       }
     },
     noteTerminal(
@@ -369,6 +546,18 @@ export function createGithubGatewayOwner(): GithubGatewayOwner {
       outcome: 'succeeded' | 'failed' | 'rate-limited' | 'interrupted',
       error?: unknown,
     ): void {
+      if (terminaledRequests.has(requestId)) {
+        // Exactly one terminal per logical request: a late second outcome
+        // (typically the fenced rejection after close) stays diagnostic.
+        logTaskDiagnostic('github-gateway-late-terminal', {
+          requestId,
+          lateOutcome: outcome,
+          error: errorText(error),
+          note: '首个 terminal 保留;迟到结果仅作诊断,不改写业务结局',
+        })
+        return
+      }
+      terminaledRequests.add(requestId)
       recorder.emit({ kind: 'terminal', requestId, outcome, error: errorText(error), at: Date.now() })
     },
     lifecycleEvents(): GatewayLifecycleEvent[] {
@@ -544,8 +733,17 @@ let processOwner: GithubGatewayOwner | null = null
 /** The process-level owner for the conservative v0.2 credential scope. */
 export function githubGatewayOwner(): GithubGatewayOwner {
   if (processOwner) return processOwner
-  processOwner = createGithubGatewayOwner()
+  processOwner = createGithubGatewayOwner({ sink: createDiagnosticEvidenceSink() })
   return processOwner
+}
+
+/** Stop the process owner (plugin dispose): admission closes, queued steps
+ *  interrupt, running steps drain, evidence flushes. The next caller gets a
+ *  fresh owner — nothing crosses the credential generation. */
+export async function closeGithubGateway(options: { drainMs?: number } = {}): Promise<void> {
+  const owner = processOwner
+  processOwner = null
+  await owner?.close(options)
 }
 
 /** Test isolation: drop the process owner so the next caller gets a fresh one. */

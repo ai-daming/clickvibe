@@ -381,3 +381,52 @@ test('REST mutation sends JSON on stdin instead of interpolating issue content i
   assert.doesNotMatch(resolved?.command ?? '', /do-not-expand/)
   assert.equal(resolved?.stdin, JSON.stringify({ body: '$(do-not-expand)' }))
 })
+
+test('r5/F3: a 2xx non-array page settles ok=false — shape validation precedes the upstream settlement', async () => {
+  const owner = createGithubGatewayOwner()
+  const ctx = {
+    shell: {
+      resolve: (spec: unknown) => spec,
+      run: async () => ({
+        exitCode: 0,
+        stdout: { text: 'HTTP/1.1 200\n\n{"message":"not-a-list"}' },
+        stderr: { text: '' },
+      }),
+    },
+  } as never
+  const reader = new GithubRestReader(ctx, { owner, minimumIntervalMs: 0 })
+  await assert.rejects(() => reader.paginate('repos/o/r/issues/1/comments'), /分页返回格式无效/)
+  const settled = owner
+    .lifecycleEvents()
+    .filter((event) => event.kind === 'upstream-settled')
+    .at(-1)
+  assert.equal(
+    settled?.kind === 'upstream-settled' ? settled.ok : null,
+    false,
+    'a bad-shape page is a failed settlement',
+  )
+})
+
+test('r5/F2: pagination runs inside the declared cost bound and fails closed past it', async () => {
+  const owner = createGithubGatewayOwner()
+  const commands: string[] = []
+  const fullPage = Array.from({ length: 100 }, (_, index) => ({ id: index + 1 }))
+  const ctx = {
+    shell: {
+      resolve: (spec: unknown) => spec,
+      run: async (spec: { command: string }) => {
+        commands.push(spec.command)
+        return { exitCode: 0, stdout: { text: included(fullPage) }, stderr: { text: '' } }
+      },
+    },
+  } as never
+  const reader = new GithubRestReader(ctx, { owner, minimumIntervalMs: 0 })
+  await owner.runWithAdmission({ priority: 'normal', deadlineMs: 300_000, maxPages: 3 }, async () => {
+    await assert.rejects(
+      () => reader.paginate('repos/o/r/issues/1/comments'),
+      /成本上界/,
+      'page 4 is beyond the declared bound and must fail the logical request',
+    )
+  })
+  assert.equal(commands.length, 3, 'exactly maxPages pages dispatched before the bound failed the request')
+})
