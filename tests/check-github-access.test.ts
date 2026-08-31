@@ -11,7 +11,7 @@ test('scanSource evaluates literal, template, alias, concat and join constructio
   assert.equal(scanSource('run(`gh issue close 7`)').length, 1)
   // r2 reviewer bypass: computed alias resolved through const bindings
   const aliased = scanSource(
-    "const binary = 'gh'\nconst command = `${" + 'binary' + "} api repos/o/r/issues/1`\nexport const cmd = command",
+    "const binary = 'gh'\nconst command = `${" + 'binary' + '} api repos/o/r/issues/1`\nexport const cmd = command',
   )
   assert.equal(aliased.length, 1, 'const alias must be evaluated, not slipped past')
   assert.equal(aliased[0].resolved, true)
@@ -35,7 +35,7 @@ test('audit fails a new Controller site constructing gh commands (rogue file mat
   try {
     const cases: Array<[name: string, source: string]> = [
       ['rogue.ts', 'export const run = async () => {\n  await exec(`gh api repos/o/r`)\n}\n'],
-      ['alias.ts', "const b = 'gh'\nexport const run = async () => exec(`${" + 'b' + "} pr view 7`)\n"],
+      ['alias.ts', "const b = 'gh'\nexport const run = async () => exec(`${" + 'b' + '} pr view 7`)\n'],
       ['join.ts', "export const run = async () => exec(['gh', 'issue', 'close', '7'].join(' '))\n"],
     ]
     const files = new Map<string, string>(cases)
