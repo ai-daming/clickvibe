@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict'
+import { beforeEach } from 'node:test'
+import { resetGithubGatewayOwnerForTests } from '../src/github/gateway-owner.ts'
+
+beforeEach(() => resetGithubGatewayOwnerForTests())
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer, request, type RequestListener } from 'node:http'
 import { tmpdir } from 'node:os'

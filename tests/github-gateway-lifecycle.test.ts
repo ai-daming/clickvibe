@@ -11,6 +11,10 @@
  */
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { beforeEach } from 'node:test'
+import { resetGithubGatewayOwnerForTests } from '../src/github/gateway-owner.ts'
+
+beforeEach(() => resetGithubGatewayOwnerForTests())
 import { createGithubGatewayOwner } from '../src/github/gateway-owner.ts'
 import { deriveGatewayMetrics } from '../src/github/gateway-lifecycle.ts'
 import { GithubRestReader } from '../src/github/rest.ts'

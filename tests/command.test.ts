@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict'
+import { beforeEach } from 'node:test'
+import { resetGithubGatewayOwnerForTests } from '../src/github/gateway-owner.ts'
+
+beforeEach(() => resetGithubGatewayOwnerForTests())
 import { commitWorkflowFixture } from './workflow-fixture.ts'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer, request, type RequestListener } from 'node:http'

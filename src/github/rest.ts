@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises'
 import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
-import { createGithubGatewayOwner, type GithubGatewayOwner } from './gateway-owner.ts'
+import { createGithubGatewayOwner, githubGatewayOwner, type GithubGatewayOwner } from './gateway-owner.ts'
 
 interface ShellContext {
   shell: {
@@ -116,6 +116,12 @@ export function deriveReviewDecision(reviews: GithubReviewRest[]): 'APPROVED' | 
   return [...latest.values()].some((review) => String(review.state).toUpperCase() === 'APPROVED') ? 'APPROVED' : null
 }
 
+/** Extract `owner/repo` from a REST path for per-repository admission; unknown paths share one bucket. */
+function repoKeyFromPath(path: string): string {
+  const match = path.match(/repos\/([^/]+\/+[^/'"]+)/)
+  return match ? match[1] : 'uncategorized'
+}
+
 function rateObservationFrom(headers: Map<string, string> | null) {
   if (!headers) return null
   const numberOr = (key: string): number | null => {
@@ -183,7 +189,9 @@ export class GithubRestReader {
     timeoutMs = 30_000,
     mutation?: { method: 'POST' | 'PATCH'; body: unknown },
   ): Promise<IncludedResponse> {
-    return this.owner.serializeRequest(this.minimumIntervalMs, async () => {
+    const repo = repoKeyFromPath(path)
+    return this.owner.submitStep(repo, timeoutMs, this.minimumIntervalMs, async () => {
+      const requestId = this.owner.ambientRequestId()
       // A request queued before another resource trips the circuit must not hit GitHub afterwards.
       this.owner.assertCircuitOpen()
       const command = [
@@ -199,8 +207,6 @@ export class GithubRestReader {
         timeoutMs,
         ...(mutation ? { stdin: JSON.stringify(mutation.body) } : {}),
       })
-      const requestId = this.owner.ambientRequestId()
-      if (requestId) this.owner.noteDispatched(requestId)
       const result = await this.ctx.shell.run(spec)
       const stdout = await this.output(result)
       let response: IncludedResponse
@@ -311,6 +317,11 @@ export class GithubRestReader {
     })
   }
 
+  /** Stamp the ambient operation priority for the admission lanes. */
+  withPriority<T>(priority: 'critical' | 'normal', fn: () => Promise<T>): Promise<T> {
+    return this.owner.withPriority(priority, fn)
+  }
+
   cachedResource<T>(
     key: string,
     version: string | null | undefined,
@@ -326,24 +337,15 @@ export class GithubRestReader {
 }
 
 const readers = new WeakMap<object, GithubRestReader>()
-const ctxOwners = new WeakMap<object, GithubGatewayOwner>()
 
-/** One owner per ctx: the production ctx is created once at route registration,
- *  so per-ctx owners are per-credential in production while tests keep isolation. */
-function ownerForContext(ctx: ShellContext): GithubGatewayOwner {
-  const key = ctx as object
-  const existing = ctxOwners.get(key)
-  if (existing) return existing
-  const created = createGithubGatewayOwner()
-  ctxOwners.set(key, created)
-  return created
-}
-
+/** One reader per ctx, all bound to the PROCESS-level owner — one credential
+ *  scope owns one Gateway runtime regardless of how many ctx objects exist
+ *  (review r2: per-ctx owners split one budget into parallel schedulers). */
 export function githubRest(ctx: ShellContext): GithubRestReader {
   const key = ctx as object
   const existing = readers.get(key)
   if (existing) return existing
-  const created = new GithubRestReader(ctx, { owner: ownerForContext(ctx) })
+  const created = new GithubRestReader(ctx, { owner: githubGatewayOwner() })
   readers.set(key, created)
   return created
 }

@@ -26,9 +26,24 @@ import {
 } from './gateway-lifecycle.ts'
 import { deriveGatewayMetrics } from './gateway-lifecycle.ts'
 
-interface OwnerRequestLane {
-  tail: Promise<void>
-  nextStartAt: number
+/** v0.2 admission numbers — recorded here per ADR-0010 Neutral: values are
+ *  pinned from the #133 frozen scenarios' shapes and must be re-cited when
+ *  the frozen thresholds are rerun on the implementation SHA. */
+const CREDENTIAL_TOTAL_CONCURRENCY = 6
+const REPOSITORY_CONCURRENCY = 3
+const UNKNOWN_BUDGET_PROBE_CAP = 2
+const NORMAL_AGING_MS = 10_000
+
+interface PendingStep {
+  requestId: string
+  repo: string
+  priority: 'critical' | 'normal'
+  deadlineAt: number
+  enqueuedAt: number
+  pacingMs: number
+  run: () => Promise<unknown>
+  settle: (value: unknown) => void
+  fail: (error: unknown) => void
 }
 
 interface CachedValue<T> {
@@ -51,8 +66,6 @@ export interface GithubGatewayOwner {
   /** Ambient logical-request attribution for loader-internal upstream steps. */
   runWithRequest<T>(requestId: string, fn: () => Promise<T>): Promise<T>
   ambientRequestId(): string | null
-  /** One dispatched HTTP step of a logical request. */
-  noteDispatched(requestId: string): void
   /** Settle one HTTP step with the response's real rate fields (null when absent). */
   noteUpstreamSettled(requestId: string, ok: boolean, rate: GatewayRateObservation | null): void
   /** Terminal for a logical request; outcome from the error shape when thrown. */
@@ -64,10 +77,18 @@ export interface GithubGatewayOwner {
   /** The lifecycle stream — the single metric and evidence source (ADR-0010 §10). */
   lifecycleEvents(): GatewayLifecycleEvent[]
   lifecycleMetrics(): GatewayMetrics
-  /** Seal the owner: no new logical requests; recorder stops accepting events. */
-  close(): void
-  /** Serialize one HTTP step across the credential scope with a minimum start interval. */
-  serializeRequest<T>(minimumIntervalMs: number, request: () => Promise<T>): Promise<T>
+  /**
+   * Admit and execute ONE upstream HTTP step (ADR-0010 §6 dispatch loop).
+   * Steps wait in priority lanes (critical first, normal with aging), are
+   * picked by repository round-robin under credential/repo concurrency caps,
+   * pass budget admission (known remaining / reset vs the step deadline) and
+   * start no sooner than the pacing interval. A slow step occupies only its
+   * own execution slot — no scheduler mutex is held while awaiting the network.
+   */
+  submitStep<T>(repo: string, timeoutMs: number, pacingMs: number, run: () => Promise<T>): Promise<T>
+  /** Stamp the ambient operation priority ('critical' only for gate families). */
+  withPriority<T>(priority: 'critical' | 'normal', fn: () => Promise<T>): Promise<T>
+
   rateLimitError(now?: number): GithubRateLimitError | null
   /** Record a rate-limit trip observed on a response (kind from the response shape). */
   noteRateLimitTrip(until: number, kind: GithubRateLimitKind): void
@@ -82,13 +103,24 @@ export interface GithubGatewayOwner {
     options?: CachedResourceOptions<T>,
   ): Promise<T>
   cachedAggregate<T>(key: string, ttlMs: number, force: boolean, loader: () => Promise<T>): Promise<T>
+  /** Resolve when no step is waiting or running (test/evidence quiescence). */
+  idle(): Promise<void>
+  /** Stop admission, interrupt queued steps, drain running to a deadline, seal. */
+  close(options?: { drainMs?: number }): Promise<void>
 }
 
 /** Conservative v0.2 scope: the host's gh auth is one credential. */
 const CONSERVATIVE_CREDENTIAL_SCOPE = 'host-gh-auth:v1'
 
 export function createGithubGatewayOwner(): GithubGatewayOwner {
-  const lane: OwnerRequestLane = { tail: Promise.resolve(), nextStartAt: 0 }
+  const waiting: PendingStep[] = []
+  const running = new Map<number, PendingStep & { runner: Promise<unknown> }>()
+  const lastDispatchPerRepo = new Map<string, number>()
+  let nextStartAt = 0
+  let dispatchScheduled = false
+  let budget: { remaining: number; reset: number | null } | null = null // eslint-disable-line prefer-const
+  let closed = false
+  let idleWaiters: Array<() => void> = []
   const resources = new Map<string, CachedValue<unknown>>()
   const aggregates = new Map<string, CachedValue<unknown>>()
   const inFlight = new Map<string, { promise: Promise<unknown>; requestId: string }>()
@@ -114,36 +146,194 @@ export function createGithubGatewayOwner(): GithubGatewayOwner {
     )
   }
 
+  const requestPriorities = new Map<string, 'critical' | 'normal'>()
+  const priorityAls = new AsyncLocalStorage<'critical' | 'normal'>()
+
+  const flushIdleWaiters = () => {
+    if (waiting.length === 0 && running.size === 0) {
+      const waiters = idleWaiters
+      idleWaiters = []
+      for (const resolve of waiters) resolve()
+    }
+  }
+
+  const scheduleDispatch = () => {
+    flushIdleWaiters()
+    if (dispatchScheduled) return
+    dispatchScheduled = true
+    queueMicrotask(() => {
+      // Release BEFORE running: the loop's finally would otherwise free the
+      // guard only on the next microtask tick, swallowing a submitStep that
+      // shares the caller's synchronous block (the r2 stall).
+      dispatchScheduled = false
+      void dispatchLoop()
+    })
+  }
+
+  /** Atomically REMOVE the next eligible step — the taker owns it exclusively,
+   *  so concurrent dispatch loops can never double-dispatch one step. */
+  const takeCandidate = (): PendingStep | null => {
+    const now = Date.now()
+    const eligible = waiting.filter((step) => {
+      const repoRunning = [...running.values()].filter((entry) => entry.repo === step.repo).length
+      return repoRunning < REPOSITORY_CONCURRENCY
+    })
+    if (eligible.length === 0) return null
+    const critical = eligible.filter((step) => step.priority === 'critical')
+    const aged = eligible.filter((step) => step.priority === 'normal' && now - step.enqueuedAt >= NORMAL_AGING_MS)
+    const lane = critical.length > 0 ? critical : [...eligible.filter((s) => s.priority === 'normal'), ...aged]
+    const pool = lane.length > 0 ? lane : eligible
+    // Repository round-robin inside the lane: prefer the repo least recently
+    // dispatched; ties break by FIFO (array order).
+    let chosen = pool[0]
+    for (const step of pool) {
+      if ((lastDispatchPerRepo.get(step.repo) ?? 0) < (lastDispatchPerRepo.get(chosen.repo) ?? 0)) chosen = step
+    }
+    waiting.splice(waiting.indexOf(chosen), 1)
+    return chosen
+  }
+
+  const dispatchLoop = async () => {
+    for (;;) {
+      const totalCap =
+        budget === null
+          ? Math.min(CREDENTIAL_TOTAL_CONCURRENCY, UNKNOWN_BUDGET_PROBE_CAP)
+          : CREDENTIAL_TOTAL_CONCURRENCY
+      if (running.size >= totalCap) return
+      const candidate = takeCandidate()
+      if (!candidate) {
+        flushIdleWaiters()
+        return
+      }
+      // A queued step whose deadline already passed fails closed as
+      // interrupted — it must never spin or dispatch past its budget of time.
+      if (Date.now() > candidate.deadlineAt) {
+        const error = new Error('GitHub 上游步骤超时(排队超过 deadline)')
+        owner.noteTerminal(candidate.requestId, 'interrupted', error)
+        candidate.fail(error)
+        continue
+      }
+      // Budget admission: a known-exhausted bucket keeps the step queued only
+      // when reset lands before its deadline; otherwise it fails fast with a
+      // retryAt (GithubRateLimitError.resetAt). Keeping it queued MUST return
+      // — nothing in this loop can change the budget, and a `continue` here
+      // would spin synchronously forever (the r2 hang).
+      if (budget !== null && budget.remaining <= 0 && budget.reset !== null) {
+        const resetAt = budget.reset * 1000
+        if (resetAt > Date.now()) {
+          if (resetAt > candidate.deadlineAt) {
+            const error = new GithubRateLimitError(resetAt, 'primary')
+            owner.noteTerminal(candidate.requestId, 'rate-limited', error)
+            candidate.fail(error)
+            continue
+          }
+          waiting.unshift(candidate)
+          const wake = setTimeout(() => scheduleDispatch(), Math.max(resetAt - Date.now(), 1))
+          wake.unref?.()
+          return
+        }
+      }
+      // Pacing between dispatch STARTS — monotonic re-check, no mutex held
+      // across the network (the r2 failure mode of the old lane).
+      while (Date.now() < nextStartAt) {
+        await new Promise((resolve) => setTimeout(resolve, nextStartAt - Date.now()))
+      }
+      if (closed || recorder.sealed) {
+        const error = new Error('Gateway 已关闭,排队步骤被中断')
+        owner.noteTerminal(candidate.requestId, 'interrupted', error)
+        candidate.fail(error)
+        return
+      }
+      nextStartAt = Date.now() + candidate.pacingMs
+      lastDispatchPerRepo.set(candidate.repo, Date.now())
+      recorder.emit({
+        kind: 'dispatched',
+        requestId: candidate.requestId,
+        step: (stepCounts.get(candidate.requestId) ?? 0) + 1,
+        waitedMs: Date.now() - candidate.enqueuedAt,
+        at: Date.now(),
+      })
+      stepCounts.set(candidate.requestId, (stepCounts.get(candidate.requestId) ?? 0) + 1)
+      const ticket = Date.now() + Math.random()
+      const runner = Promise.resolve()
+        .then(() => candidate.run())
+        .then(
+          (value) => {
+            running.delete(ticket)
+            candidate.settle(value)
+            scheduleDispatch()
+          },
+          (error) => {
+            running.delete(ticket)
+            candidate.fail(error)
+            scheduleDispatch()
+          },
+        )
+      running.set(ticket, { ...candidate, runner })
+    }
+  }
+
   const owner: GithubGatewayOwner = {
     credentialScopeId: CONSERVATIVE_CREDENTIAL_SCOPE,
-    serializeRequest<T>(minimumIntervalMs: number, request: () => Promise<T>): Promise<T> {
-      const previous = lane.tail
-      let release = () => {}
-      lane.tail = new Promise<void>((resolve) => {
-        release = resolve
-      })
-      return (async () => {
-        await previous
-        try {
-          // Timers may wake just before their requested deadline. Re-check the
-          // monotonic wall-clock condition so the configured start interval is a
-          // guarantee rather than a best-effort delay.
-          while (Date.now() < lane.nextStartAt) {
-            await new Promise((resolve) => setTimeout(resolve, lane.nextStartAt - Date.now()))
-          }
-          const pending = request()
-          lane.nextStartAt = Date.now() + minimumIntervalMs
-          return await pending
-        } finally {
-          release()
+    submitStep<T>(repo: string, timeoutMs: number, pacingMs: number, run: () => Promise<T>): Promise<T> {
+      const requestId = owner.ambientRequestId()
+      const priority = requestId ? (requestPriorities.get(requestId) ?? 'normal') : 'normal'
+      return new Promise<T>((resolve, reject) => {
+        if (closed || recorder.sealed) {
+          reject(new Error('Gateway 已关闭,拒绝新的上游步骤'))
+          return
         }
-      })()
+        const step: PendingStep = {
+          requestId: requestId ?? 'gh-ambient',
+          repo,
+          priority,
+          deadlineAt: Date.now() + Math.max(timeoutMs, 1),
+          enqueuedAt: Date.now(),
+          pacingMs,
+          run: run as () => Promise<unknown>,
+          settle: (value) => resolve(value as T),
+          fail: reject,
+        }
+        waiting.push(step)
+        recorder.emit({ kind: 'queued', requestId: step.requestId, at: Date.now() })
+        scheduleDispatch()
+      })
+    },
+    withPriority<T>(priority: 'critical' | 'normal', fn: () => Promise<T>): Promise<T> {
+      return priorityAls.run(priority, fn)
+    },
+    idle(): Promise<void> {
+      if (waiting.length === 0 && running.size === 0) return Promise.resolve()
+      return new Promise<void>((resolve) => {
+        idleWaiters.push(resolve)
+      })
+    },
+    async close(options: { drainMs?: number } = {}): Promise<void> {
+      closed = true
+      const drainMs = options.drainMs ?? 5_000
+      // Queued steps are interrupted immediately; running steps get the drain
+      // window, and anything still unsettled at the deadline is terminal
+      // interrupted before the recorder seals (ADR-0010 §10 close ordering).
+      for (const step of waiting.splice(0)) {
+        owner.noteTerminal(step.requestId, 'interrupted', 'Gateway 关闭:排队步骤被中断')
+        step.fail(new Error('Gateway 已关闭,排队步骤被中断'))
+      }
+      if (running.size > 0) {
+        await Promise.race([owner.idle(), new Promise((resolve) => setTimeout(resolve, drainMs))])
+      }
+      for (const step of running.values()) {
+        owner.noteTerminal(step.requestId, 'interrupted', 'Gateway 关闭:运行步骤未在窗口内结算')
+      }
+      recorder.seal()
+      flushIdleWaiters()
     },
     declareLogicalRequest(scope: 'resource' | 'aggregate' | 'direct', key: string): string {
       if (recorder.sealed) throw new Error('Gateway 已关闭,拒绝新的 GitHub 访问申请')
       nextRequestId += 1
       const requestId = `gh-${nextRequestId}`
-      recorder.emit({ kind: 'declared', requestId, scope, key, at: Date.now() })
+      const priority = priorityAls.getStore() ?? 'normal'
+      requestPriorities.set(requestId, priority)
+      recorder.emit({ kind: 'declared', requestId, scope, key, priority, at: Date.now() })
       return requestId
     },
     runWithRequest<T>(requestId: string, fn: () => Promise<T>): Promise<T> {
@@ -152,14 +342,15 @@ export function createGithubGatewayOwner(): GithubGatewayOwner {
     ambientRequestId(): string | null {
       return requestAls.getStore() ?? null
     },
-    noteDispatched(requestId: string): void {
-      const step = (stepCounts.get(requestId) ?? 0) + 1
-      stepCounts.set(requestId, step)
-      recorder.emit({ kind: 'dispatched', requestId, step, at: Date.now() })
-    },
     noteUpstreamSettled(requestId: string, ok: boolean, rate: GatewayRateObservation | null): void {
       const step = stepCounts.get(requestId) ?? 1
       recorder.emit({ kind: 'upstream-settled', requestId, step, ok, rate, at: Date.now() })
+      // The admission budget derives from the same evidence stream — a response
+      // with real rate fields updates the known bucket; observations without
+      // them never fabricate one (ADR-0010 §8).
+      if (rate && rate.remaining !== null) {
+        budget = { remaining: rate.remaining, reset: rate.reset }
+      }
     },
     noteTerminal(
       requestId: string,
@@ -173,9 +364,6 @@ export function createGithubGatewayOwner(): GithubGatewayOwner {
     },
     lifecycleMetrics(): GatewayMetrics {
       return deriveGatewayMetrics(recorder.snapshot())
-    },
-    close(): void {
-      recorder.seal()
     },
     rateLimitError(now = Date.now()): GithubRateLimitError | null {
       return circuitUntil > now ? new GithubRateLimitError(circuitUntil, circuitKind) : null
@@ -328,4 +516,18 @@ export function createGithubGatewayOwner(): GithubGatewayOwner {
   }
 
   return owner
+}
+
+let processOwner: GithubGatewayOwner | null = null
+
+/** The process-level owner for the conservative v0.2 credential scope. */
+export function githubGatewayOwner(): GithubGatewayOwner {
+  if (processOwner) return processOwner
+  processOwner = createGithubGatewayOwner()
+  return processOwner
+}
+
+/** Test isolation: drop the process owner so the next caller gets a fresh one. */
+export function resetGithubGatewayOwnerForTests(): void {
+  processOwner = null
 }

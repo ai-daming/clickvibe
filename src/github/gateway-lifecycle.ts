@@ -24,10 +24,18 @@ export interface GatewayRateObservation {
 }
 
 export type GatewayLifecycleEvent =
-  | { kind: 'declared'; requestId: string; scope: 'resource' | 'aggregate' | 'direct'; key: string; at: number }
+  | {
+      kind: 'declared'
+      requestId: string
+      scope: 'resource' | 'aggregate' | 'direct'
+      key: string
+      priority: 'critical' | 'normal'
+      at: number
+    }
   | { kind: 'cache-hit'; requestId: string; at: number }
   | { kind: 'joined'; requestId: string; leaderId: string; at: number }
-  | { kind: 'dispatched'; requestId: string; step: number; at: number }
+  | { kind: 'queued'; requestId: string; at: number }
+  | { kind: 'dispatched'; requestId: string; step: number; waitedMs: number; at: number }
   | {
       kind: 'upstream-settled'
       requestId: string
@@ -53,6 +61,8 @@ export interface GatewayMetrics {
   rateLimited: number
   interrupted: number
   upstreamRequests: number
+  /** Sum of queued→dispatched wait across steps (#133 waitMs unit). */
+  waitMsTotal: number
 }
 
 const MAX_EVENTS = 2000
@@ -89,11 +99,14 @@ export function deriveGatewayMetrics(events: GatewayLifecycleEvent[]): GatewayMe
   const settledOwn = new Set<string>()
   const terminals = new Map<string, Extract<GatewayLifecycleEvent, { kind: 'terminal' }>>()
   let upstreamRequests = 0
+  let waitMsTotal = 0
 
   for (const event of events) {
     switch (event.kind) {
       case 'declared':
         declared.add(event.requestId)
+        break
+      case 'queued':
         break
       case 'cache-hit':
         hit.add(event.requestId)
@@ -102,6 +115,7 @@ export function deriveGatewayMetrics(events: GatewayLifecycleEvent[]): GatewayMe
         joined.add(event.requestId)
         break
       case 'dispatched':
+        waitMsTotal += event.waitedMs
         break
       case 'upstream-settled':
         upstreamRequests += 1
@@ -152,5 +166,6 @@ export function deriveGatewayMetrics(events: GatewayLifecycleEvent[]): GatewayMe
     rateLimited,
     interrupted,
     upstreamRequests,
+    waitMsTotal,
   }
 }

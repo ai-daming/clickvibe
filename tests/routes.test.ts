@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict'
+import { beforeEach } from 'node:test'
+import { resetGithubGatewayOwnerForTests } from '../src/github/gateway-owner.ts'
+
+beforeEach(() => resetGithubGatewayOwnerForTests())
 import { commitWorkflowFixture } from './workflow-fixture.ts'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer, request, type RequestListener } from 'node:http'
@@ -3201,6 +3205,9 @@ test('/develop automatic mode fails closed before worktree creation for invalid 
   assert.equal(invalidResult.status, 400)
   assert.match(invalidResult.body.error ?? '', /契约缺失: 验收标准/)
 
+  // The two phases simulate DIFFERENT GitHub states in one process; the
+  // process-level Gateway owner would otherwise serve phase 1's aggregate.
+  resetGithubGatewayOwnerForTests()
   const blocked = {
     ...invalid,
     title: 'blocked',

@@ -12,48 +12,89 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createGithubGatewayOwner } from '../src/github/gateway-owner.ts'
 
-test('every owner declares the single conservative v0.2 credential scope', () => {
-  const first = createGithubGatewayOwner()
-  const second = createGithubGatewayOwner()
+test('r2: one process-level owner per credential scope; factories isolate tests', async () => {
+  const { githubGatewayOwner, resetGithubGatewayOwnerForTests } = await import('../src/github/gateway-owner.ts')
+  resetGithubGatewayOwnerForTests()
+  const first = githubGatewayOwner()
+  assert.strictEqual(githubGatewayOwner(), first, 'the process registry returns THE owner (ADR-0010 Decision 1)')
   assert.ok(first.credentialScopeId.length > 0, 'opaque scope identity exists')
-  assert.equal(first.credentialScopeId, second.credentialScopeId, 'one scope: gh host auth cannot be split')
-  assert.notEqual(first, second, 'distinct owner instances (per-ctx resolution keeps tests isolated)')
+  const isolated = createGithubGatewayOwner()
+  assert.equal(isolated.credentialScopeId, first.credentialScopeId, 'one scope: gh host auth cannot be split')
+  assert.notEqual(isolated, first, 'factories remain available for isolated tests')
+  await first.close({ drainMs: 50 })
+  resetGithubGatewayOwnerForTests()
 })
 
-test('owner lane serializes concurrent requests across resources', async () => {
-  const starts: number[] = []
-  let releaseFirst: (() => void) | null = null
-  const firstBlocked = new Promise<void>((resolve) => {
-    releaseFirst = resolve
-  })
+test('r2: a slow step does not block another repository — pacing holds between starts', async () => {
   const owner = createGithubGatewayOwner()
-  const run = (tag: string) =>
-    owner.serializeRequest(20, async () => {
-      starts.push(Date.now())
-      if (tag === 'first') await firstBlocked
-      return tag
+  const starts: Array<{ repo: string; at: number }> = []
+  let releaseSlow: (() => void) | null = null
+  const slowGate = new Promise<void>((resolve) => {
+    releaseSlow = resolve
+  })
+  const step = (repo: string, slow: boolean) =>
+    owner.submitStep(repo, 30_000, 20, async () => {
+      starts.push({ repo, at: Date.now() })
+      if (slow) await slowGate
+      return repo
     })
-  const first = run('first')
-  const second = run('second')
-  for (let attempt = 0; attempt < 100 && starts.length === 0; attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 5))
+  const slow = step('o/slow', true)
+  const other = step('o/other', false)
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  assert.equal(
+    starts.filter((entry) => entry.repo === 'o/other').length,
+    1,
+    'unrelated repo dispatched despite slow step',
+  )
+  assert.equal(starts.filter((entry) => entry.repo === 'o/slow').length, 1, 'slow step started too')
+  releaseSlow?.()
+  assert.deepEqual(await Promise.all([slow, other]), ['o/slow', 'o/other'])
+  if (starts.length >= 2) {
+    const sorted = [...starts].sort((left, right) => left.at - right.at)
+    assert.ok(
+      sorted[1].at - sorted[0].at >= 20,
+      `dispatch starts respect the pacing interval (saw ${sorted[1].at - sorted[0].at}ms)`,
+    )
   }
-  assert.equal(starts.length, 1, 'the second request waits for the first to settle')
-  releaseFirst?.()
-  assert.deepEqual(await Promise.all([first, second]), ['first', 'second'])
-  assert.ok(starts[1] - starts[0] >= 20, `requests started only ${starts[1] - starts[0]}ms apart`)
 })
 
-test('owner lane interval is a guarantee, not best-effort (re-checks the clock after wake)', async () => {
+test('r2: known-exhausted budget before deadline fails fast with retryAt', async () => {
+  const { GithubRateLimitError } = await import('../src/github/rest.ts')
+  const owner = createGithubGatewayOwner()
+  // Prime the budget with a settled response showing remaining=0 and a reset
+  // far in the future (epoch+3600).
+  const farReset = Math.floor(Date.now() / 1000) + 3600
+  owner.noteUpstreamSettled('gh-seed', true, {
+    limit: 5000,
+    remaining: 0,
+    reset: farReset,
+    retryAfterSeconds: null,
+    observedAt: Date.now(),
+  })
+  await assert.rejects(
+    () => owner.submitStep('o/r', 5_000, 1, async () => 'never'),
+    (error: unknown) => {
+      assert.ok(error instanceof GithubRateLimitError, 'rejection carries a retryAt')
+      assert.ok(error.resetAt > Date.now(), 'retryAt points at the bucket reset')
+      return true
+    },
+  )
+  const terminal = owner
+    .lifecycleEvents()
+    .find((event) => event.kind === 'terminal' && event.outcome === 'rate-limited')
+  assert.ok(terminal, 'a rate-limited terminal is recorded for the rejected step')
+})
+
+test('r2: pacing between sequential starts is a guarantee', async () => {
   const owner = createGithubGatewayOwner()
   const starts: number[] = []
-  await owner.serializeRequest(30, async () => {
+  await owner.submitStep('o/r', 5_000, 30, async () => {
     starts.push(Date.now())
   })
-  await owner.serializeRequest(30, async () => {
+  await owner.submitStep('o/r', 5_000, 30, async () => {
     starts.push(Date.now())
   })
-  assert.ok(starts[1] - starts[0] >= 30, 'minimum start interval respected between sequential requests')
+  assert.ok(starts[1] - starts[0] >= 30, `starts only ${starts[1] - starts[0]}ms apart`)
 })
 
 test('c3: owners host the cache — two readers on one owner share facts and singleflight', async () => {

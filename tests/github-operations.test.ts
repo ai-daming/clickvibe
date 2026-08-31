@@ -9,6 +9,10 @@
  */
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { beforeEach } from 'node:test'
+import { resetGithubGatewayOwnerForTests } from '../src/github/gateway-owner.ts'
+
+beforeEach(() => resetGithubGatewayOwnerForTests())
 import type { Context } from '@deepseek-ai/cordis'
 import {
   GITHUB_READ_OPERATIONS,
@@ -136,6 +140,7 @@ test('equivalence: issue-detail via intent issues the same command and cache reu
   await fetchIssueRestDetail(legacy.ctx, 'o/r', 7, false, 5_000)
   assert.equal(legacy.commands.length, 1, 'legacy cached the second read')
 
+  resetGithubGatewayOwnerForTests()
   const typed = recordingContext(issueDetailRoute)
   const typedFirst = await githubRead(typed.ctx, {
     operation: 'issue-detail',
@@ -185,6 +190,7 @@ test('equivalence: repo-snapshot keeps the aggregate cache and singleflight shap
   await fetchGithubRepoSnapshot(legacy.ctx, 'o/r', 45_000, false)
   const legacyCommands = [...legacy.commands]
 
+  resetGithubGatewayOwnerForTests()
   const typed = recordingContext()
   await githubRead(typed.ctx, { operation: 'repo-snapshot', repoKey: 'o/r', ttlMs: 45_000, consistency: 'cache-ok' })
   await githubRead(typed.ctx, { operation: 'repo-snapshot', repoKey: 'o/r', ttlMs: 45_000, consistency: 'cache-ok' })
