@@ -10,12 +10,23 @@
  * + non-success partitions every request exactly once.
  */
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { test } from 'node:test'
 import { beforeEach } from 'node:test'
-import { resetGithubGatewayOwnerForTests } from '../src/github/gateway-owner.ts'
+import {
+  closeGithubGateway,
+  createGithubGatewayOwner,
+  resetGithubGatewayOwnerForTests,
+} from '../src/github/gateway-owner.ts'
+import { createDiagnosticEvidenceSink } from '../src/github/gateway-evidence.ts'
+import { GithubRateLimitError as RestGithubRateLimitError } from '../src/github/rest.ts'
+import { githubRest } from '../src/github/rest.ts'
+import { stateDir } from '../src/infra/state.ts'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 
 beforeEach(() => resetGithubGatewayOwnerForTests())
-import { createGithubGatewayOwner } from '../src/github/gateway-owner.ts'
 import { deriveGatewayMetrics } from '../src/github/gateway-lifecycle.ts'
 import { GithubRestReader } from '../src/github/rest.ts'
 
@@ -271,4 +282,90 @@ test('panel threshold shape: hot refresh round derives zero upstream GitHub requ
   const metrics = deriveGatewayMetrics(owner.lifecycleEvents())
   assert.equal(metrics.upstreamRequests, 1, 'cold round dispatched once')
   assert.equal(metrics.cacheHits, 1, 'hot round answered from the observation')
+})
+
+test('r6/F7 regression: core primary exhaustion pauses only core — search still executes', async () => {
+  const commands: string[] = []
+  const coreExhausted = okBody({ v: 1 }, [
+    'x-ratelimit-limit: 30',
+    'x-ratelimit-remaining: 0',
+    'x-ratelimit-resource: core',
+    `x-ratelimit-reset: ${Math.floor(Date.now() / 1000) + 3600}`,
+  ])
+  const ctx = fakeCtx(async (command) => {
+    commands.push(command)
+    if (/search\//.test(command)) {
+      return { exitCode: 0, stdout: { text: okBody({ total: 1 }) }, stderr: { text: '' } }
+    }
+    return { exitCode: 0, stdout: { text: coreExhausted }, stderr: { text: '' } }
+  })
+  const reader = new GithubRestReader(ctx)
+  await assert.rejects(
+    () => reader.json('repos/o/r/issues/1'),
+    (error: unknown) => {
+      // The core request itself fails with the primary rate limit.
+      assert.ok(error instanceof RestGithubRateLimitError)
+      return true
+    },
+  )
+  // The search bucket has its own budget: the request must REACH the shell,
+  // not be fenced by a global circuit (review r6/F7 reproduction).
+  const result = await reader.json<{ total: number }>('search/issues?q=x')
+  assert.equal(result.total, 1)
+  assert.equal(commands.length, 2, 'the search request must execute, not be globally blocked')
+})
+
+test('r6/F3 regression: drain deadline ends caller promises and draining rejects new logical requests', async () => {
+  const owner = createGithubGatewayOwner()
+  let releaseRunning: (() => void) | null = null
+  let started: () => void = () => {}
+  const startedSignal = new Promise<void>((resolve) => {
+    started = resolve
+  })
+  const running = owner.submitStep('o/r', 60_000, 0, () => {
+    started()
+    return new Promise((resolve) => {
+      releaseRunning = () => resolve('late')
+    })
+  })
+  await startedSignal
+  const closed = owner.close({ drainMs: 0 })
+  // A logical request during draining must be refused at the door.
+  assert.throws(() => owner.declareLogicalRequest('resource', 'repos/o/r'), /已关闭/)
+  await assert.rejects(() => running, /未在窗口内结算/, 'the caller promise must end, not hang')
+  await closed
+  releaseRunning?.()
+})
+
+test('r6/F3 regression: a cached reader never serves a closed owner generation', async () => {
+  const ctx = okCtx([])
+  const first = githubRest(ctx)
+  await closeGithubGateway({ drainMs: 0 })
+  const second = githubRest(ctx)
+  assert.notEqual(second, first, 'reload must rebind to the fresh owner, not the closed one')
+  const result = await second.json('repos/o/r/issues/9')
+  assert.ok(result)
+})
+
+test('r6/F3 regression: the evidence sink persists without flush() and publishes #133 metrics', async () => {
+  const previousHome = process.env.HOME
+  const home = mkdtempSync(join(tmpdir(), 'clickvibe-gw-evidence-'))
+  process.env.HOME = home
+  try {
+    const sink = createDiagnosticEvidenceSink()
+    const requestId = 'gh-e2e'
+    sink.write({ kind: 'declared', requestId, scope: 'resource', key: 'repos/o/r', priority: 'normal', at: Date.now() })
+    sink.write({ kind: 'queued', requestId, at: Date.now() })
+    sink.write({ kind: 'dispatched', requestId, at: Date.now() })
+    sink.write({ kind: 'terminal', requestId, outcome: 'succeeded', at: Date.now() })
+    await sink.flush()
+    const path = join(stateDir(), 'diagnostics.jsonl')
+    const content = await readFile(path, 'utf8')
+    assert.match(content, /github-gateway-lifecycle/)
+    assert.match(content, /github-gateway-metrics/, 'every flush publishes the derived threshold metrics')
+    assert.match(content, /"logicalRequests":1/)
+  } finally {
+    process.env.HOME = previousHome
+    rmSync(home, { recursive: true, force: true })
+  }
 })

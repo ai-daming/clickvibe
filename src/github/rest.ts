@@ -206,8 +206,10 @@ export class GithubRestReader {
       this.minimumIntervalMs,
       async () => {
         const requestId = this.owner.ambientRequestId()
-        // A request queued before another resource trips the circuit must not hit GitHub afterwards.
-        this.owner.assertCircuitOpen()
+        // A request queued before another resource trips the circuit must not
+        // hit GitHub afterwards. Primary pauses are bucket-scoped (review
+        // r6/F7): a dead core bucket must not fence a healthy search call.
+        this.owner.assertCircuitOpen(bucket)
         const command = [
           'gh api --include',
           shellQuote(path),
@@ -249,7 +251,7 @@ export class GithubRestReader {
           const until = resetFrom(response.headers, Date.now())
           const kind: GithubRateLimitKind =
             response.headers.get('x-ratelimit-remaining') === '0' ? 'primary' : 'secondary'
-          this.owner.noteRateLimitTrip(until, kind)
+          this.owner.noteRateLimitTrip(until, kind, kind === 'primary' ? bucket : undefined)
           logTaskDiagnostic('github-rate-circuit-trip', {
             kind,
             path,
@@ -376,17 +378,20 @@ export class GithubRestReader {
   }
 }
 
-const readers = new WeakMap<object, GithubRestReader>()
+const readers = new WeakMap<object, { owner: GithubGatewayOwner; reader: GithubRestReader }>()
 
 /** One reader per ctx, all bound to the PROCESS-level owner — one credential
  *  scope owns one Gateway runtime regardless of how many ctx objects exist
- *  (review r2: per-ctx owners split one budget into parallel schedulers). */
+ *  (review r2: per-ctx owners split one budget into parallel schedulers).
+ * The cache entry carries its owner: close() swaps the process owner, and a
+ * cached reader must never keep serving the closed generation (review r6/F3). */
 export function githubRest(ctx: ShellContext): GithubRestReader {
   const key = ctx as object
+  const owner = githubGatewayOwner()
   const existing = readers.get(key)
-  if (existing) return existing
-  const created = new GithubRestReader(ctx, { owner: githubGatewayOwner() })
-  readers.set(key, created)
+  if (existing && existing.owner === owner) return existing.reader
+  const created = new GithubRestReader(ctx, { owner })
+  readers.set(key, { owner, reader: created })
   return created
 }
 

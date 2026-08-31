@@ -119,3 +119,59 @@ test('an allowlisted file is exempt; the real repository passes', () => {
   const violations = audit()
   assert.deepEqual(violations, [], 'src/ contains no un-allowlisted gh construction')
 })
+
+test('r6/F6 regression: a same-name second declaration never borrows the allowlist entry', () => {
+  const root = mkdtempSync(join(tmpdir(), 'clickvibe-gh-gate-name-'))
+  try {
+    mkdirSync(join(root, 'src', 'github'), { recursive: true })
+    // Mirrors the allowlisted rest.ts entry (request@1, clean) plus a rogue
+    // SECOND declaration with the same name that constructs a gh command.
+    const files = new Map<string, string>([
+      [
+        'src/github/rest.ts',
+        [
+          'export class Reader {',
+          '  private async request(path: string) {',
+          '    return exec(`gh api --include repos/o/r`)',
+          '  }',
+          '}',
+          'function request(path: string) {',
+          '  return exec(`gh api repos/o/r/rogue --input x`)',
+          '}',
+          'export const cmd = request',
+        ].join('\n'),
+      ],
+    ])
+    for (const [name, source] of files) {
+      const target = join(root, name)
+      mkdirSync(dirname(target), { recursive: true })
+      writeFileSync(target, source)
+    }
+    const violations = audit(root, (file) => files.get(file.slice(root.length + 1)) ?? '')
+    assert.equal(violations.length, 1, `the same-name rogue declaration must be flagged: ${JSON.stringify(violations)}`)
+    const hits = violations[0].hits as Array<{ decl?: string }>
+    assert.ok(
+      hits.every((hit) => hit.decl === 'request@2' || hit.helperKeys),
+      `violations must pin declaration identity (request@2), got ${JSON.stringify(hits)}`,
+    )
+    // And the clean single-declaration shape still passes untouched.
+    const clean = new Map<string, string>([
+      [
+        'src/github/rest.ts',
+        [
+          'export class Reader {',
+          '  private async request(path: string) {',
+          '    return exec(`gh api --include repos/o/r`)',
+          '  }',
+          '}',
+        ].join('\n'),
+      ],
+    ])
+    assert.deepEqual(
+      audit(root, (file) => clean.get(file.slice(root.length + 1)) ?? ''),
+      [],
+    )
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})

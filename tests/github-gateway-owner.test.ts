@@ -143,7 +143,13 @@ test('c3: a rate-limit trip on one reader is visible through the shared owner', 
     () => readerOne.json('repos/o/r/x'),
     (error: unknown) => isGithubRateLimitError(error),
   )
-  assert.ok(readerTwo.rateLimitError(), 'the circuit lives on the owner, shared across readers')
+  // r6/F7: a primary trip pauses the hit bucket on the SHARED owner — the
+  // second reader's same-bucket request is fenced without another upstream
+  // call (the per-bucket pause lives on the owner, not the reader).
+  await assert.rejects(
+    () => readerTwo.json('repos/o/r/y'),
+    (error: unknown) => isGithubRateLimitError(error),
+  )
 })
 
 test('c3: githubRest resolves one stable owner per ctx', async () => {

@@ -31,7 +31,7 @@ const ALLOWLIST = new Map(
   Object.entries({
     'src/github/rest.ts': {
       boundary: 'adapter',
-      symbols: ['request'],
+      symbols: ['request@1'],
       reason: 'the Gateway HTTP executor method — the only place a Controller gh command is assembled',
     },
     'src/agent/prompts.ts': {
@@ -41,22 +41,22 @@ const ALLOWLIST = new Map(
     },
     'src/github/review-approval.ts': {
       boundary: 'slice-b-write',
-      symbols: ['approvePassedReview'],
+      symbols: ['approvePassedReview@1'],
       reason: 'Slice B: typed approval write + readback',
     },
     'src/workflow/dev-delivery.ts': {
       boundary: 'slice-b-write',
-      symbols: ['markPreviousReviewFixed'],
+      symbols: ['markPreviousReviewFixed@1'],
       reason: 'Slice B: typed comment edit + readback',
     },
     'src/workflow/delivery-publish.ts': {
       boundary: 'slice-b-write',
-      symbols: ['publishDeliveryComment'],
+      symbols: ['publishDeliveryComment@1'],
       reason: 'Slice B: typed non-repeatable comment publish',
     },
     'src/workflow/merge.ts': {
       boundary: 'slice-b-write',
-      symbols: ['mergeAndCleanupUnlocked'],
+      symbols: ['mergeAndCleanupUnlocked@1'],
       reason: 'Slice B: exclusive merge/close transaction',
     },
   }),
@@ -192,12 +192,21 @@ export function scanSource(source, fileName = 'virtual.ts') {
   const env = collectConstStrings(sourceFile)
   const hits = []
   const reported = new Set()
-  const report = (node, text, resolved, rule, scope, helper) => {
+  const report = (node, text, resolved, rule, scope, helper, helperKeys) => {
     const pos = node.getStart(sourceFile)
     if (reported.has(pos)) return
     reported.add(pos)
     const { line } = sourceFile.getLineAndCharacterOfPosition(pos)
-    hits.push({ line: line + 1, text: text.slice(0, 160), resolved, rule, symbol: scope, helper })
+    hits.push({
+      line: line + 1,
+      text: text.slice(0, 160),
+      resolved,
+      rule,
+      symbol: scope.name,
+      decl: scope.key,
+      helper,
+      ...(helperKeys ? { helperKeys } : {}),
+    })
   }
 
   // Pass 1: construction hits with their enclosing symbols; pass 2 reports
@@ -205,22 +214,37 @@ export function scanSource(source, fileName = 'virtual.ts') {
   const helperBuilders = new Set()
   const scopeOf = new Map()
 
+  // Declaration identity (review r6/F6): the allowlist pins `name@ordinal`
+  // where ordinal is the declaration's position among same-named function
+  // declarations in the file — a second `request` is request@2 and never
+  // matches, so same-name collisions cannot borrow an allowlist entry.
+  const declCount = new Map()
+  let topKey = { name: '(top-level)', key: '(top-level)' }
   const visit = (node, scope) => {
     let inner = scope
     if (ts.isFunctionDeclaration(node) && node.name) {
-      inner = node.name.text
+      const ordinal = (declCount.get(node.name.text) ?? 0) + 1
+      declCount.set(node.name.text, ordinal)
+      inner = { name: node.name.text, key: `${node.name.text}@${ordinal}` }
     } else if (ts.isMethodDeclaration(node) && ts.isIdentifier(node.name)) {
-      inner = node.name.text
+      const ordinal = (declCount.get(node.name.text) ?? 0) + 1
+      declCount.set(node.name.text, ordinal)
+      inner = { name: node.name.text, key: `${node.name.text}@${ordinal}` }
     } else if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
-      if (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer)) inner = node.name.text
+      if (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer)) {
+        const ordinal = (declCount.get(node.name.text) ?? 0) + 1
+        declCount.set(node.name.text, ordinal)
+        inner = { name: node.name.text, key: `${node.name.text}@${ordinal}` }
+      }
       ts.forEachChild(node, (child) => visit(child, inner))
       return
     }
     scopeOf.set(node, inner)
     // A hit inside a named local function makes that function a gh-construction
-    // helper; pass 2 reports its call sites.
+    // helper; pass 2 reports its call sites. Helpers register by declaration
+    // key — a same-name rogue declaration is its own key, not the allowed one.
     const registerHelper = () => {
-      if (inner !== '(top-level)') helperBuilders.add(inner)
+      if (inner !== topKey) helperBuilders.add(inner)
     }
 
     // Only string-builder shapes are evaluated or fail-closed; other node
@@ -272,15 +296,23 @@ export function scanSource(source, fileName = 'virtual.ts') {
   visit(sourceFile, '(top-level)')
 
   // Pass 2: calling a local gh-command builder is a construction site too.
+  const helperKeysByName = new Map()
+  for (const helper of helperBuilders) {
+    const list = helperKeysByName.get(helper.name) ?? []
+    list.push(helper.key)
+    helperKeysByName.set(helper.name, list)
+  }
   const visitCalls = (node, scope) => {
-    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && helperBuilders.has(node.expression.text)) {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && helperKeysByName.has(node.expression.text)) {
+      const keys = helperKeysByName.get(node.expression.text)
       report(
         node,
-        `forwards gh construction via helper ${node.expression.text}()`,
+        `forwards gh construction via helper ${node.expression.text}() [declarations: ${keys.join(', ')}]`,
         false,
         'helper-forward',
         scope,
         node.expression.text,
+        keys,
       )
     }
     ts.forEachChild(node, (child) => visitCalls(child, scope))
@@ -330,9 +362,18 @@ export function audit(root = SRC_ROOT, read = (file) => readFileSync(file, 'utf8
       }
       continue
     }
-    const rogue = hits.filter(
-      (hit) => !entry.symbols.includes(hit.symbol) && !(hit.helper && entry.symbols.includes(hit.helper)),
-    )
+    // Declaration identity (review r6/F6): a hit is allowed only when its
+    // enclosing declaration key (name@ordinal) is pinned by the allowlist.
+    // A helper-forward hit is allowed only when EVERY same-named helper
+    // declaration is allowlisted — a rogue same-name declaration makes the
+    // name ambiguous and the gate fails closed.
+    const rogue = hits.filter((hit) => {
+      if (entry.symbols.includes(hit.decl)) return false
+      if (hit.helperKeys) {
+        return !(hit.helperKeys.length > 0 && hit.helperKeys.every((key) => entry.symbols.includes(key)))
+      }
+      return true
+    })
     if (rogue.length > 0) violations.push({ file: allowKey, hits: rogue, boundary: entry.boundary })
   }
   return violations

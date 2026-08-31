@@ -265,3 +265,67 @@ test('r5/F3: the plugin unload effect closes the process owner', async () => {
   assert.notEqual(githubGatewayOwner(), before, 'a fresh owner owns the next credential generation')
   await githubGatewayOwner().close({ drainMs: 0 })
 })
+
+test('r6/F2 regression: an aged normal executes before NEW critical arrivals (no starvation)', async () => {
+  // Interleaving, not a straight line: the lane is fully occupied, a normal
+  // ages past the threshold while queued, then criticals keep arriving.
+  const owner = createGithubGatewayOwner({ agingMs: 20 })
+  const order: string[] = []
+  const occupy = async (name: string) =>
+    owner.submitStep(name, 30_000, 0, () => {
+      order.push(`start:${name}`)
+      return new Promise<string>((resolve) => {
+        setTimeout(() => resolve(name), 30)
+      })
+    })
+  const releases: Array<Promise<unknown>> = []
+  for (let index = 0; index < 6; index += 1) {
+    await owner.runWithAdmission({ priority: 'normal', deadlineMs: 30_000, maxPages: 1 }, async () => {
+      releases.push(await occupy(`filler-${index}`))
+      return 'ok'
+    })
+  }
+  // The aged-to-be normal waits behind a full lane.
+  const agedNormal = owner.runWithAdmission({ priority: 'normal', deadlineMs: 30_000, maxPages: 1 }, async () => {
+    const value = await owner.submitStep('aged-repo', 30_000, 0, () => {
+      order.push('run:aged-normal')
+      return 'aged'
+    })
+    return value
+  })
+  await new Promise((resolve) => setTimeout(resolve, 40))
+  // A NEW critical arrives while the normal has already aged.
+  const newCritical = owner.runWithAdmission({ priority: 'critical', deadlineMs: 30_000, maxPages: 1 }, async () => {
+    return owner.submitStep('critical-repo', 30_000, 0, () => {
+      order.push('run:new-critical')
+      return 'critical'
+    })
+  })
+  await Promise.all([...releases, agedNormal, newCritical])
+  const agedIndex = order.indexOf('run:aged-normal')
+  const criticalIndex = order.indexOf('run:new-critical')
+  assert.ok(agedIndex >= 0 && criticalIndex >= 0, `both ran: ${order.join(',')}`)
+  assert.ok(agedIndex < criticalIndex, `the aged normal must win its turn: ${order.join(',')}`)
+})
+
+test('r6/F2 regression: pacing that crosses the deadline fails the request without executing', async () => {
+  const owner = createGithubGatewayOwner()
+  let executed = 0
+  // The first dispatch sets a long pacing gap; the second request's absolute
+  // deadline expires inside that wait — it must fail, never reach the executor.
+  await owner.submitStep('pacer', 10_000, 120, () => {
+    executed += 1
+    return 'paced'
+  })
+  await assert.rejects(
+    () =>
+      owner.runWithAdmission({ priority: 'normal', deadlineMs: 20, maxPages: 1 }, async () => {
+        return owner.submitStep('victim', 10_000, 0, () => {
+          executed += 1
+          return 'must-not-run'
+        })
+      }),
+    /等待 pacing 超过 deadline/,
+  )
+  assert.equal(executed, 1, 'the expired request must not spend a GitHub call')
+})

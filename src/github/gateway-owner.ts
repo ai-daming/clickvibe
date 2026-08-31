@@ -154,8 +154,12 @@ export interface GithubGatewayOwner {
 
   rateLimitError(now?: number): GithubRateLimitError | null
   /** Record a rate-limit trip observed on a response (kind from the response shape). */
-  noteRateLimitTrip(until: number, kind: GithubRateLimitKind): void
-  assertCircuitOpen(): void
+  /**
+   * Primary exhaustion pauses ONLY the hit resource bucket (ADR-0010 §3);
+   * secondary/Retry-After pauses the whole credential (review r6/F7).
+   */
+  noteRateLimitTrip(until: number, kind: GithubRateLimitKind, bucket?: string): void
+  assertCircuitOpen(bucket?: string): void
   rememberVersion(key: string, version: string | null | undefined): void
   resourceVersion(key: string): string | null
   invalidate(prefix: string): void
@@ -182,8 +186,11 @@ export interface GithubGatewayOwner {
 /** Conservative v0.2 scope: the host's gh auth is one credential. */
 const CONSERVATIVE_CREDENTIAL_SCOPE = 'host-gh-auth:v1'
 
-export function createGithubGatewayOwner(options: { sink?: GatewayEvidenceSink } = {}): GithubGatewayOwner {
+export function createGithubGatewayOwner(
+  options: { sink?: GatewayEvidenceSink; agingMs?: number } = {},
+): GithubGatewayOwner {
   const evidenceSink = options.sink
+  const agingMs = options.agingMs ?? NORMAL_AGING_MS
   const waiting: PendingStep[] = []
   const running = new Map<number, PendingStep & { runner: Promise<unknown> }>()
   const lastDispatchPerRepo = new Map<string, number>()
@@ -253,8 +260,13 @@ export function createGithubGatewayOwner(options: { sink?: GatewayEvidenceSink }
     })
     if (eligible.length === 0) return null
     const critical = eligible.filter((step) => step.priority === 'critical')
-    const aged = eligible.filter((step) => step.priority === 'normal' && now - step.enqueuedAt >= NORMAL_AGING_MS)
-    const lane = critical.length > 0 ? critical : [...eligible.filter((s) => s.priority === 'normal'), ...aged]
+    const aged = eligible.filter((step) => step.priority === 'normal' && now - step.enqueuedAt >= agingMs)
+    // ADR-0010: normal aging is a scheduling dimension, not a tie-breaker —
+    // a request that already waited past the aging threshold gets its
+    // execution turn before NEW critical arrivals (review r6/F2: without
+    // this, a steady critical stream starves panel refreshes forever).
+    const lane =
+      aged.length > 0 ? aged : critical.length > 0 ? critical : eligible.filter((s) => s.priority === 'normal')
     const pool = lane.length > 0 ? lane : eligible
     // Repository round-robin inside the lane: prefer the repo least recently
     // dispatched; ties break by FIFO (array order).
@@ -363,6 +375,15 @@ export function createGithubGatewayOwner(options: { sink?: GatewayEvidenceSink }
       // across the network (the r2 failure mode of the old lane).
       while (Date.now() < nextStartAt) {
         await new Promise((resolve) => setTimeout(resolve, nextStartAt - Date.now()))
+      }
+      // The deadline is absolute for the whole logical request: pacing may
+      // have crossed it while this step waited its turn — an expired request
+      // must fail, never spend a GitHub call (review r6/F2).
+      if (Date.now() > candidate.deadlineAt) {
+        const error = new Error('GitHub 上游步骤超时(等待 pacing 超过 deadline)')
+        owner.noteTerminal(candidate.requestId, 'interrupted', error)
+        candidate.fail(error)
+        continue
       }
       if (closed || recorder.sealed) {
         const error = new Error('Gateway 已关闭,排队步骤被中断')
@@ -498,7 +519,12 @@ export function createGithubGatewayOwner(options: { sink?: GatewayEvidenceSink }
         await Promise.race([owner.idle(), new Promise((resolve) => setTimeout(resolve, drainMs))])
       }
       for (const step of running.values()) {
-        owner.noteTerminal(step.requestId, 'interrupted', 'Gateway 关闭:运行步骤未在窗口内结算')
+        const error = new Error('Gateway 已关闭,运行步骤未在窗口内结算')
+        owner.noteTerminal(step.requestId, 'interrupted', error)
+        // The caller's promise must end — a terminal event alone leaves the
+        // panel spinner hanging forever (review r6/F3). First-terminal-wins
+        // already fences any late settlement.
+        step.fail(error)
       }
       // Fence every still-in-flight settlement: from here on a late response
       // is diagnostic-only — no caller resolution, no cache publish, no
@@ -509,7 +535,7 @@ export function createGithubGatewayOwner(options: { sink?: GatewayEvidenceSink }
       flushIdleWaiters()
     },
     declareLogicalRequest(scope: 'resource' | 'aggregate' | 'direct', key: string): string {
-      if (recorder.sealed) throw new Error('Gateway 已关闭,拒绝新的 GitHub 访问申请')
+      if (closed || recorder.sealed) throw new Error('Gateway 已关闭,拒绝新的 GitHub 访问申请')
       nextRequestId += 1
       const requestId = `gh-${nextRequestId}`
       const priority = admissionAls.getStore()?.priority ?? 'normal'
@@ -569,13 +595,34 @@ export function createGithubGatewayOwner(options: { sink?: GatewayEvidenceSink }
     rateLimitError(now = Date.now()): GithubRateLimitError | null {
       return circuitUntil > now ? new GithubRateLimitError(circuitUntil, circuitKind) : null
     },
-    noteRateLimitTrip(until: number, kind: GithubRateLimitKind): void {
+    noteRateLimitTrip(until: number, kind: GithubRateLimitKind, bucket?: string): void {
+      if (kind === 'primary' && bucket) {
+        // Publish the paused bucket through the same ledger the admission
+        // path already consumes: remaining 0 + reset re-uses the existing
+        // wait-or-fail semantics instead of a second circuit mechanism.
+        const previous = buckets.get(bucket)
+        buckets.set(bucket, {
+          limit: previous?.limit ?? null,
+          remaining: 0,
+          used: previous?.used ?? null,
+          reset: Math.floor(until / 1000),
+          observedAt: Date.now(),
+          evidenceSeq: (previous?.evidenceSeq ?? 0) + 1,
+        })
+        return
+      }
       circuitUntil = until
       circuitKind = kind
     },
-    assertCircuitOpen(): void {
-      const error = owner.rateLimitError()
-      if (error) throw error
+    assertCircuitOpen(bucket?: string): void {
+      const global = owner.rateLimitError()
+      if (global) throw global
+      if (bucket) {
+        const ledger = buckets.get(bucket)
+        if (ledger && ledger.remaining === 0 && ledger.reset !== null && ledger.reset * 1000 > Date.now()) {
+          throw new GithubRateLimitError(ledger.reset * 1000, 'primary')
+        }
+      }
     },
     rememberVersion(key: string, version: string | null | undefined): void {
       if (version) versions.set(key, version)
