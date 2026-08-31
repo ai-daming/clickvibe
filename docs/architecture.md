@@ -78,6 +78,7 @@ v0.1 已验证部分事实推导、Agent 流程和持久化能力，但它没有
 - [可观测性与复盘](architecture/observability.md)：日志、事件、错误、证据与架构版本绑定。
 - [架构决策记录](architecture/decisions/README.md)：Accepted、Superseded 和 Draft 决策。
 - [三访问平面决策](architecture/decisions/0007-three-git-github-access-planes.md)：Local Git、Remote Git、GitHub REST 与 Agent 直接调用的治理边界。
+- [GitHub REST Gateway 准入与生命周期](architecture/decisions/0010-github-rest-gateway-admission-and-lifecycle.md)：#131 的类型化申请、调度、缓存、限流、写回读和证据所有权。
 
 ## 代码结构
 

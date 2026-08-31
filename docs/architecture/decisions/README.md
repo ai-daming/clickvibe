@@ -26,3 +26,4 @@ ADR 记录长期有效的架构取舍，不记录普通实现步骤。每个 ADR
 | [0007](0007-three-git-github-access-planes.md) | Accepted | Local Git、Remote Git 与 GitHub REST 三访问平面及 Agent 调用边界 |
 | [0008](0008-deterministic-loop-guard-and-optional-runtime-observer.md) | Accepted | Loop Guard 独立停机，Runtime Observer 按数据与策略可选启用 |
 | [0009](0009-v02-clean-break-local-state-and-config.md) | Accepted | v0.2 本地 state/config cold-backup clean break 与显式升级边界 |
+| [0010](0010-github-rest-gateway-admission-and-lifecycle.md) | Accepted | GitHub REST Gateway 的准入调度、写回读与证据生命周期 |
