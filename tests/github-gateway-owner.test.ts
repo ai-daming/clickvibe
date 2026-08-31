@@ -49,13 +49,18 @@ test('r2: a slow step does not block another repository — pacing holds between
   assert.equal(starts.filter((entry) => entry.repo === 'o/slow').length, 1, 'slow step started too')
   releaseSlow?.()
   assert.deepEqual(await Promise.all([slow, other]), ['o/slow', 'o/other'])
-  if (starts.length >= 2) {
-    const sorted = [...starts].sort((left, right) => left.at - right.at)
-    assert.ok(
-      sorted[1].at - sorted[0].at >= 20,
-      `dispatch starts respect the pacing interval (saw ${sorted[1].at - sorted[0].at}ms)`,
-    )
-  }
+  // The pacing guarantee applies at the dispatch DECISION point; measuring
+  // inside run() is subject to event-loop delay on loaded CI (the 29ms<30ms
+  // lesson at 23d03b9) — the decisions are the scheduler's own timestamps.
+  const decisions = owner
+    .lifecycleEvents()
+    .filter((event) => event.kind === 'dispatched')
+    .map((event) => (event.kind === 'dispatched' ? event.at : 0))
+  assert.equal(decisions.length, 2)
+  assert.ok(
+    decisions[1] - decisions[0] >= 20,
+    `dispatch decisions respect the pacing interval (saw ${decisions[1] - decisions[0]}ms)`,
+  )
 })
 
 test('r2: known-exhausted budget before deadline fails fast with retryAt', async () => {
