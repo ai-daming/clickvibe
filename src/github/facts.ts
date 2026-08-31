@@ -186,13 +186,18 @@ export async function fetchEnrichmentSnapshot(
   force = false,
 ): Promise<EnrichmentSnapshot> {
   const rest = githubRest(ctx)
-  const load = async () =>
-    (await githubRead(ctx, {
-      operation: 'repo-snapshot',
-      repoKey,
-      ttlMs,
-      consistency: consistencyFromForce(force),
-    })) as RepositoryGithubSnapshot
+  // OPEN-only issues keep the aggregate to one page for repos with long
+  // closed histories (review r9: state=all priced page 2 on the first poll).
+  // The REST shapes are the same list rows the repo snapshot consumes.
+  const load = async () => {
+    const rest = githubRest(ctx)
+    const [issues, pulls] = await Promise.all([
+      rest.paginate<RepositoryIssueRest>(`repos/${repoKey}/issues?state=open`),
+      rest.paginate<RepositoryPrRest>(`repos/${repoKey}/pulls?state=all`),
+    ])
+    return { issues, pulls } satisfies RepositoryGithubSnapshot
+  }
+  void rest
   const snapshot = await rest.cachedAggregate(`enrichment:${repoKey}`, ttlMs, force, load)
   const issueByNumber = new Map<number, RepositoryIssueRest>()
   for (const issue of snapshot.issues ?? []) issueByNumber.set(issue.number, issue)

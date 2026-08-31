@@ -197,7 +197,17 @@ function workflowFixture(number) {
 }
 
 function metricsOf(owner, sinceIndex) {
-  const events = owner.lifecycleEvents().slice(sinceIndex)
+  // Complete-request derivation: only requests DECLARED inside this round
+  // contribute, with all their events — slicing by index split requests
+  // across rounds and fabricated interrupted counts (review r9).
+  const all = owner.lifecycleEvents()
+  const declaredInRound = new Set(
+    all
+      .slice(sinceIndex)
+      .filter((event) => event.kind === 'declared')
+      .map((event) => event.requestId),
+  )
+  const events = all.filter((event) => declaredInRound.has(event.requestId))
   return { derived: deriveMetrics(events), eventCount: events.length }
 }
 
@@ -335,7 +345,11 @@ async function rateScenario() {
         rateBefore: before.resources?.core ?? null,
         rateAfter: after.resources?.core ?? null,
         metrics: derived,
-        checks: thresholdChecks('rate', derived, 0),
+        checks: thresholdChecks(
+          'rate',
+          derived,
+          commands.filter((entry) => isGh(entry.command) && !/rate_limit/.test(entry.command)).length,
+        ),
       },
     ],
     commands,
