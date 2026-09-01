@@ -96,9 +96,14 @@ test('/state enrichment checks configured branches while the host serializes Git
       worktreeRoot: root,
     })
     assert.equal(maxGithub, 1)
-    // r9 composition: one shared repo-snapshot aggregate page (30s budget)
-    // precedes the per-branch head lookups; serial lane keeps maxGithub at 1.
-    assert.deepEqual(githubTimeouts, [30_000, 5000, 5000])
+    // r9 composition: one shared aggregate page (30s budget) plus the two
+    // per-branch head lookups (5s). Their DISPATCH ORDER is the scheduler's
+    // business (priority/aging may legally reorder independent requests —
+    // review r10 CI flake), so the contract is the multiset, not the order.
+    assert.deepEqual(
+      [...githubTimeouts].sort((a, b) => a - b),
+      [5000, 5000, 30_000],
+    )
     assert.deepEqual(
       enriched.map((item) => item.derived.nextAction.label),
       ['恢复 worktree 继续开发', '恢复 worktree 继续开发'],
