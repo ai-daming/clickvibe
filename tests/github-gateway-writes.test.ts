@@ -9,7 +9,12 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createGithubGatewayOwner, type GithubGatewayOwner } from '../src/github/gateway-owner.ts'
 import { GithubRestReader } from '../src/github/rest.ts'
-import { type GithubWriteSpec, githubWriteRecover, runWriteTransaction } from '../src/github/writes.ts'
+import {
+  GITHUB_WRITE_OPERATIONS,
+  type GithubWriteSpec,
+  githubWriteRecover,
+  runWriteTransaction,
+} from '../src/github/writes.ts'
 
 interface CannedStep {
   command: string
@@ -330,4 +335,86 @@ test('restart recovery runs the readback ONLY — zero write dispatch, ever', as
   assert.equal(unknown.outcome, 'unknown')
   assert.equal(calls2.filter((call) => call.command.includes('--method POST')).length, 0)
   void reader
+})
+
+// ---------------------------------------------------------------------------
+// Family specs (slice B c2): declarative policies exercised end to end.
+
+test('family pr-merge: PUT head-CAS merge, readback confirms merged_at', async () => {
+  const { reader, owner, calls } = makeReader(async (step) => {
+    if (step.command.includes('--method PUT')) return { exitCode: 0, text: ok({ merged: true }, 200) }
+    return { exitCode: 0, text: ok({ state: 'closed', merged_at: '2026-09-01T00:00:00Z' }) }
+  })
+  const spec = GITHUB_WRITE_OPERATIONS['pr-merge'] as GithubWriteSpec<
+    { repoKey: string; number: number; headRefOid: string; issueNumber: number },
+    unknown
+  >
+  const outcome = await runWriteTransaction(owner, reader, spec, {
+    repoKey: 'o/r',
+    number: 7,
+    headRefOid: 'deadbee',
+    issueNumber: 122,
+  })
+  assert.equal(outcome.outcome, 'confirmed')
+  const put = calls.find((call) => call.command.includes('--method PUT'))
+  assert.ok(put, 'merge dispatches as a REST PUT')
+  assert.match(put?.command ?? '', /repos\/o\/r\/pulls\/7\/merge/)
+  const body = JSON.parse(put?.stdin ?? '{}') as Record<string, unknown>
+  assert.equal(body.sha, 'deadbee', 'the head CAS travels in the body')
+  assert.equal(body.merge_method, 'merge')
+  assert.equal(body.commit_message, 'Closes #122')
+  // An unmerged readback is unknown, never confirmed.
+  const unmerged = makeReader(async () => ({ exitCode: 0, text: ok({ state: 'open' }) }))
+  const second = await runWriteTransaction(unmerged.owner, unmerged.reader, spec, {
+    repoKey: 'o/r',
+    number: 7,
+    headRefOid: 'deadbee',
+    issueNumber: 122,
+  })
+  assert.equal(second.outcome, 'unknown')
+})
+
+test('family issue-close: PATCH state, readback confirms CLOSED', async () => {
+  const { reader, owner, calls } = makeReader(async (step) => {
+    if (step.command.includes('--method PATCH')) return { exitCode: 0, text: ok({ state: 'closed' }) }
+    return { exitCode: 0, text: ok({ state: 'closed', number: 122 }) }
+  })
+  const spec = GITHUB_WRITE_OPERATIONS['issue-close'] as GithubWriteSpec<{ repoKey: string; number: number }, unknown>
+  const outcome = await runWriteTransaction(owner, reader, spec, { repoKey: 'o/r', number: 122 })
+  assert.equal(outcome.outcome, 'confirmed')
+  const patch = calls.find((call) => call.command.includes('--method PATCH'))
+  assert.match(patch?.command ?? '', /repos\/o\/r\/issues\/122/)
+  assert.deepEqual(JSON.parse(patch?.stdin ?? '{}'), { state: 'closed' })
+})
+
+test('family issue-comment-create: POST body, readback finds the exact comment', async () => {
+  const { reader, owner, calls } = makeReader(async (step) => {
+    if (step.command.includes('--method POST')) return { exitCode: 0, text: ok({ id: 5 }, 201) }
+    return {
+      exitCode: 0,
+      text: ok([
+        { id: 1, body: 'noise' },
+        { id: 5, body: 'exact-body' },
+      ]),
+    }
+  })
+  const spec = GITHUB_WRITE_OPERATIONS['issue-comment-create'] as GithubWriteSpec<
+    { repoKey: string; number: number; body: string },
+    unknown
+  >
+  const outcome = await runWriteTransaction(
+    owner,
+    reader,
+    spec,
+    {
+      repoKey: 'o/r',
+      number: 9,
+      body: 'exact-body',
+    },
+    { persistMarker: () => Promise.resolve() },
+  )
+  assert.equal(outcome.outcome, 'confirmed')
+  const post = calls.find((call) => call.command.includes('--method POST'))
+  assert.match(post?.command ?? '', /repos\/o\/r\/issues\/9\/comments/)
+  assert.equal(spec.repeatable, false, 'comment creation is non-repeatable: marker required')
 })

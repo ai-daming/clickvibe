@@ -4,6 +4,8 @@ import { existsSync } from 'node:fs'
 import { userInfo } from 'node:os'
 import { isAbsolute, relative, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import { githubWrite, githubWriteOutcomeError } from '../github/writes.ts'
+import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
 import { notifyLocalGitMutation } from '../infra/local-git-snapshot.ts'
 import { parseWorktreeList } from '../agent/worktree.ts'
 import { fetchGithubIssueState, fetchGithubPrFact } from '../github/facts.ts'
@@ -373,27 +375,27 @@ export async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): P
       )
     }
     if (pr.state !== 'MERGED') {
-      const command = [
-        'gh pr merge',
-        shellQuote(pr.number),
-        '--repo',
-        shellQuote(repoKey),
-        '--merge',
-        '--match-head-commit',
-        shellQuote(pr.headRefOid),
-        '--body',
-        shellQuote(`Closes #${parsed.number}`),
-      ].join(' ')
-      try {
-        await runCommand(ctx, command, { timeoutMs: 120_000 })
-        githubRest(ctx).invalidate(`${repoKey}/pulls/${pr.number}`)
-        githubRest(ctx).invalidate(`repo:${repoKey}`)
-      } catch (error) {
-        return { ok: false, error: `PR 合并失败: ${String(error instanceof Error ? error.message : error)}` }
+      // Typed write transaction (issue #131 slice B): the Gateway owns the
+      // head-CAS merge attempt, the invalidation and the authoritative
+      // merged-state readback — a confirmed outcome is the only path forward.
+      const merge = await githubWrite(ctx, {
+        operation: 'pr-merge',
+        input: {
+          repoKey,
+          number: Number(pr.number),
+          headRefOid: pr.headRefOid ?? '',
+          issueNumber: Number(parsed.number),
+        },
+      })
+      if (merge.outcome !== 'confirmed') {
+        return {
+          ok: false,
+          error: `PR 合并失败: ${githubWriteOutcomeError(merge)}`,
+        }
       }
       lookup = await fetchGithubPrFact(ctx, repoKey, workflow.branch, workflow.prNumber, true, true)
       if (!lookup.known || !lookup.pr || lookup.pr.state !== 'MERGED') {
-        return { ok: false, error: 'gh pr merge 已返回,但实时 PR 状态尚未确认 MERGED;未开始清理' }
+        return { ok: false, error: 'PR 合并事务已确认,但实时 PR 状态尚未确认 MERGED;未开始清理' }
       }
       pr = lookup.pr
     }
@@ -504,13 +506,33 @@ export async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): P
       const issueState = await fetchGithubIssueState(ctx, url)
       if (issueState === null) throw new Error('无法读取实时 Issue 状态')
       if (issueState === 'OPEN') {
-        await runCommand(
-          ctx,
-          `gh issue close ${shellQuote(parsed.number)} --repo ${shellQuote(repoKey)} --comment ${shellQuote(`由 PR #${pr.number} 以 merge commit 合并交付。`)}`,
-          { timeoutMs: 30_000 },
-        )
-        githubRest(ctx).invalidate(`${repoKey}/issues/${parsed.number}`)
-        githubRest(ctx).invalidate(`repo:${repoKey}`)
+        // The closing comment is a separate non-repeatable write: its marker
+        // is the cleanup step ledger itself (persistStep below), and the
+        // exact-body readback makes a retry after an uncertain outcome safe.
+        const comment = await githubWrite(ctx, {
+          operation: 'issue-comment-create',
+          input: {
+            repoKey,
+            number: Number(parsed.number),
+            body: `由 PR #${pr.number} 以 merge commit 合并交付。`,
+          },
+        })
+        if (comment.outcome !== 'confirmed') {
+          logTaskDiagnostic('merge-close-comment-unconfirmed', {
+            workflowKey: issueKey(repoKey, parsed.number),
+            repoKey,
+            issue: Number(parsed.number),
+            outcome: comment.outcome,
+            error: githubWriteOutcomeError(comment),
+          })
+        }
+        const close = await githubWrite(ctx, {
+          operation: 'issue-close',
+          input: { repoKey, number: Number(parsed.number) },
+        })
+        if (close.outcome !== 'confirmed') {
+          throw new Error(`Issue 关闭事务未确认(${close.outcome}): ${githubWriteOutcomeError(close)}`)
+        }
       }
       workflow.issueState = 'CLOSED'
       delivery.cleanup.issue = true

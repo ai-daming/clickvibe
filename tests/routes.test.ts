@@ -82,7 +82,9 @@ function githubApi(
     failRepoIssues?: string
   } = {},
 ): { exitCode: number; stdout: { text: string }; stderr: { text: string } } | null {
-  if (!command.startsWith('gh api ')) return null
+  // Mutations are writes (slice B): the shared GET helper never answers them —
+  // each test's write branches (PUT merge / POST comment / PATCH state) own them.
+  if (!command.startsWith('gh api ') || command.includes('--method')) return null
   let body: unknown = []
   let exitCode = 0
   let stderr = ''
@@ -964,8 +966,10 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
     let merged = false
     let issueClosed = false
     const commands: string[] = []
+    const writeBodies: string[] = []
     const handler = createHandler(async (spec) => {
       commands.push(spec.command)
+      if (spec.command.includes('--method PUT') && spec.command.includes('/merge')) writeBodies.push(spec.stdin ?? '')
       const api = githubApi(spec.command, {
         item: {
           url: workflow.url,
@@ -986,19 +990,23 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
         reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
       })
       if (api) return api
-      if (spec.command.startsWith('gh pr merge')) {
+      if (spec.command.includes('--method PUT') && spec.command.includes('/merge')) {
         merged = true
-        return { exitCode: 0, stdout: { text: 'merged' }, stderr: { text: '' } }
+        return { exitCode: 0, stdout: { text: 'HTTP/1.1 200\n\n{"merged":true}' }, stderr: { text: '' } }
+      }
+      if (spec.command.includes('--method POST') && spec.command.includes('/comments')) {
+        return { exitCode: 0, stdout: { text: 'HTTP/1.1 201\n\n{"id":77}' }, stderr: { text: '' } }
+      }
+      if (spec.command.includes('--method PATCH') && spec.command.includes('/issues/')) {
+        issueClosed = true
+        return { exitCode: 0, stdout: { text: 'HTTP/1.1 200\n\n{"state":"closed"}' }, stderr: { text: '' } }
       }
       if (spec.command === 'git worktree list --porcelain')
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       if (spec.command.startsWith('if git show-ref')) return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       if (spec.command.startsWith('if git ls-remote'))
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-      if (spec.command.startsWith('gh issue close')) {
-        issueClosed = true
-        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-      }
+
       throw new Error(`unexpected command: ${spec.command}`)
     })
     const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
@@ -1044,7 +1052,7 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
     )
     assert.equal(tampered.status, 403)
     assert.equal(
-      commands.some((command) => command.startsWith('gh pr merge')),
+      commands.some((command) => command.includes('/merge') && command.includes('--method PUT')),
       false,
     )
     const executionAuthorization = (await post(
@@ -1071,11 +1079,13 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
     )) as { status: number; body: { ok: boolean; archived?: boolean } }
     assert.equal(response.status, 200, JSON.stringify(response.body))
     assert.equal(response.body.archived, true)
-    const mergeCommand = commands.find((command) => command.startsWith('gh pr merge')) ?? ''
-    assert.match(mergeCommand, / --merge /)
-    assert.match(mergeCommand, /--match-head-commit 'abcdef1234567890'/)
-    assert.match(mergeCommand, /--body 'Closes #23'/)
-    assert.doesNotMatch(mergeCommand, /--squash|--rebase|--delete-branch/)
+    const mergeCommand =
+      commands.find((command) => command.includes('/merge') && command.includes('--method PUT')) ?? ''
+    assert.match(mergeCommand, /repos\/o\/r\/pulls\/29\/merge/)
+    const mergeBody = JSON.parse(writeBodies[0] ?? '{}') as Record<string, unknown>
+    assert.equal(mergeBody.merge_method, 'merge', 'merge commit strategy, not squash/rebase')
+    assert.equal(mergeBody.sha, 'abcdef1234567890', 'the head CAS pins the exact reviewed commit')
+    assert.equal(mergeBody.commit_message, 'Closes #23')
     assert.equal(await loadWorkflow(workflow.key), null)
     const archived = await loadAllArchivedWorkflows()
     assert.equal(archived.length, 1)
@@ -1111,7 +1121,7 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
   }
 })
 
-test('/merge rejects a stale review hash before invoking gh pr merge', async () => {
+test('/merge rejects a stale review hash before invoking the merge write', async () => {
   const previousHome = process.env.HOME
   const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-merge-stale-'))
   process.env.HOME = tempHome
@@ -1160,7 +1170,7 @@ test('/merge rejects a stale review hash before invoking gh pr merge', async () 
     assert.equal(authorized.status, 400)
     assert.match(authorized.body.error ?? '', /review.*哈希不一致/)
     assert.equal(
-      commands.some((command) => command.startsWith('gh pr merge')),
+      commands.some((command) => command.includes('/merge') && command.includes('--method PUT')),
       false,
     )
     assert.equal((await loadWorkflow(workflow.key))?.delivery, undefined)
@@ -1231,7 +1241,7 @@ test('/merge authorization rejects a changed acceptance contract with the same P
     assert.equal(result.status, 400)
     assert.match(result.body.error ?? '', /验收契约已变更.*重新 Review/)
     assert.equal(
-      commands.some((command) => command.startsWith('gh pr merge')),
+      commands.some((command) => command.includes('/merge') && command.includes('--method PUT')),
       false,
     )
   } finally {
@@ -1275,8 +1285,10 @@ test('/merge gate rejection offers manual override that merges once and audits t
     let merged = false
     let issueClosed = false
     const commands: string[] = []
+    const writeBodies: string[] = []
     const handler = createHandler(async (spec) => {
       commands.push(spec.command)
+      if (spec.command.includes('--method PUT') && spec.command.includes('/merge')) writeBodies.push(spec.stdin ?? '')
       const api = githubApi(spec.command, {
         item: {
           url: workflow.url,
@@ -1297,19 +1309,23 @@ test('/merge gate rejection offers manual override that merges once and audits t
         reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
       })
       if (api) return api
-      if (spec.command.startsWith('gh pr merge')) {
+      if (spec.command.includes('--method PUT') && spec.command.includes('/merge')) {
         merged = true
-        return { exitCode: 0, stdout: { text: 'merged' }, stderr: { text: '' } }
+        return { exitCode: 0, stdout: { text: 'HTTP/1.1 200\n\n{"merged":true}' }, stderr: { text: '' } }
+      }
+      if (spec.command.includes('--method POST') && spec.command.includes('/comments')) {
+        return { exitCode: 0, stdout: { text: 'HTTP/1.1 201\n\n{"id":77}' }, stderr: { text: '' } }
+      }
+      if (spec.command.includes('--method PATCH') && spec.command.includes('/issues/')) {
+        issueClosed = true
+        return { exitCode: 0, stdout: { text: 'HTTP/1.1 200\n\n{"state":"closed"}' }, stderr: { text: '' } }
       }
       if (spec.command === 'git worktree list --porcelain')
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       if (spec.command.startsWith('if git show-ref')) return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       if (spec.command.startsWith('if git ls-remote'))
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-      if (spec.command.startsWith('gh issue close')) {
-        issueClosed = true
-        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-      }
+
       throw new Error(`unexpected command: ${spec.command}`)
     })
     const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
@@ -1361,7 +1377,7 @@ test('/merge gate rejection offers manual override that merges once and audits t
     assert.deepEqual(overrideAuthorize.body.override, { skipped: ['review-hash'], reason: overrideReason })
     assert.equal(overrideAuthorize.body.preview?.override?.gates.length, 1)
     assert.equal(
-      commands.some((command) => command.startsWith('gh pr merge')),
+      commands.some((command) => command.includes('/merge') && command.includes('--method PUT')),
       false,
     )
 
@@ -1380,8 +1396,14 @@ test('/merge gate rejection offers manual override that merges once and audits t
     )) as { status: number; body: { ok: boolean; archived?: boolean } }
     assert.equal(mergedResponse.status, 200, JSON.stringify(mergedResponse.body))
     assert.equal(mergedResponse.body.archived, true)
-    const mergeCommand = commands.find((command) => command.startsWith('gh pr merge')) ?? ''
-    assert.match(mergeCommand, /--match-head-commit '2222222222222222'/)
+    const mergeCommand =
+      commands.find((command) => command.includes('/merge') && command.includes('--method PUT')) ?? ''
+    assert.match(mergeCommand, /repos\/o\/r\/pulls\/29\/merge/)
+    assert.equal(
+      (JSON.parse(writeBodies[0] ?? '{}') as { sha?: string }).sha,
+      '2222222222222222',
+      'the head CAS pins the exact reviewed commit',
+    )
     assert.equal(await loadWorkflow(workflow.key), null)
     const archivedWorkflows = await loadAllArchivedWorkflows()
     assert.equal(archivedWorkflows.length, 1)
@@ -1513,7 +1535,7 @@ test('/merge manual override refuses gate failures not covered by the confirmati
     assert.equal(response.status, 400)
     assert.match(response.body.error ?? '', /无法读取当前验收契约.*请重新确认/)
     assert.equal(
-      commands.some((command) => command.startsWith('gh pr merge')),
+      commands.some((command) => command.includes('/merge') && command.includes('--method PUT')),
       false,
     )
     const persisted = await loadWorkflow(workflow.key)
@@ -1585,9 +1607,15 @@ test('cleanup failure keeps merged terminal state and retries without merging ag
         reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
       })
       if (api) return api
-      if (spec.command.startsWith('gh pr merge')) {
+      if (spec.command.includes('--method PUT') && spec.command.includes('/merge')) {
         merged = true
-        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+        return { exitCode: 0, stdout: { text: 'HTTP/1.1 200\n\n{"merged":true}' }, stderr: { text: '' } }
+      }
+      if (spec.command.includes('--method POST') && spec.command.includes('/comments')) {
+        return { exitCode: 0, stdout: { text: 'HTTP/1.1 201\n\n{"id":78}' }, stderr: { text: '' } }
+      }
+      if (spec.command.includes('--method PATCH') && spec.command.includes('/issues/')) {
+        return { exitCode: 0, stdout: { text: 'HTTP/1.1 200\n\n{"state":"closed"}' }, stderr: { text: '' } }
       }
       if (spec.command === 'git worktree list --porcelain')
         return {
@@ -1646,7 +1674,7 @@ test('cleanup failure keeps merged terminal state and retries without merging ag
       headers,
     )
     assert.equal(second.status, 200, JSON.stringify(second.body))
-    assert.equal(commands.filter((command) => command.startsWith('gh pr merge')).length, 1)
+    assert.equal(commands.filter((command) => command.includes('/merge') && command.includes('--method PUT')).length, 1)
     assert.equal((await loadAllArchivedWorkflows())[0]?.delivery?.status, 'archived')
   } finally {
     if (previousHome === undefined) delete process.env.HOME

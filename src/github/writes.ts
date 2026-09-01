@@ -173,7 +173,11 @@ async function settleUncertain<TInput, TDispatch>(
   }
 }
 
-/** Slice B family registry entry point — populated as call sites migrate. */
+// ---------------------------------------------------------------------------
+// Family registry (slice B). Each spec is the design §11 migration row for
+// its call sites: dispatch REST shape, affected resources (lease +
+// invalidation), readback source and the predicate that alone confirms.
+
 export type GithubWriteOperationId =
   | 'issue-comment-create'
   | 'comment-edit'
@@ -183,7 +187,123 @@ export type GithubWriteOperationId =
   | 'pr-merge'
   | 'pr-create'
 
-export const GITHUB_WRITE_OPERATIONS: Partial<Record<GithubWriteOperationId, GithubWriteSpec<never, never>>> = {}
+const issueKeys = (repoKey: string, number: number) => [`${repoKey}/issues/${number}`, `repo:${repoKey}`]
+
+interface CommentCreateInput {
+  repoKey: string
+  number: number
+  body: string
+}
+interface CommentEditInput {
+  repoKey: string
+  commentId: number
+  body: string
+  /** Issue number owning the comment (invalidation scope). */
+  issueNumber: number
+}
+interface IssueCloseInput {
+  repoKey: string
+  number: number
+}
+interface PrMergeInput {
+  repoKey: string
+  number: number
+  headRefOid: string
+  issueNumber: number
+}
+
+const commentCreateSpec: GithubWriteSpec<CommentCreateInput, { id: number }> = {
+  id: 'issue-comment-create',
+  keys: (input) => issueKeys(input.repoKey, input.number),
+  priority: 'normal',
+  deadlineMs: 30_000,
+  maxPages: 2,
+  repeatable: false,
+  dispatch: (reader, input) =>
+    reader.mutate<{ id: number }>(`repos/${input.repoKey}/issues/${input.number}/comments`, 'POST', {
+      body: input.body,
+    }),
+  readback: {
+    run: (reader, input) =>
+      reader.json<Array<{ id: number; body: string }>>(`repos/${input.repoKey}/issues/${input.number}/comments`),
+    confirms: (input, observation) =>
+      Array.isArray(observation) && observation.some((entry) => entry.body === input.body),
+  },
+}
+
+const commentEditSpec: GithubWriteSpec<CommentEditInput, unknown> = {
+  id: 'comment-edit',
+  keys: (input) => issueKeys(input.repoKey, input.issueNumber),
+  priority: 'normal',
+  deadlineMs: 30_000,
+  maxPages: 2,
+  // Setting the full comment body is idempotent: a re-dispatch converges to
+  // the same content instead of duplicating anything.
+  repeatable: true,
+  dispatch: (reader, input) =>
+    reader.mutate(`repos/${input.repoKey}/issues/comments/${input.commentId}`, 'PATCH', {
+      body: input.body,
+    }),
+  readback: {
+    run: (reader, input) => reader.json<{ body: string }>(`repos/${input.repoKey}/issues/comments/${input.commentId}`),
+    confirms: (input, observation) =>
+      !!observation && typeof observation === 'object' && (observation as { body?: unknown }).body === input.body,
+  },
+}
+
+const issueCloseSpec: GithubWriteSpec<IssueCloseInput, unknown> = {
+  id: 'issue-close',
+  keys: (input) => issueKeys(input.repoKey, input.number),
+  priority: 'critical',
+  deadlineMs: 30_000,
+  maxPages: 2,
+  // Closing an already-closed issue converges on the same terminal state.
+  repeatable: true,
+  dispatch: (reader, input) =>
+    reader.mutate(`repos/${input.repoKey}/issues/${input.number}`, 'PATCH', { state: 'closed' }),
+  readback: {
+    run: (reader, input) => reader.json<{ state?: string }>(`repos/${input.repoKey}/issues/${input.number}`),
+    confirms: (_input, observation) =>
+      String((observation as { state?: unknown } | null)?.state ?? '').toUpperCase() === 'CLOSED',
+  },
+}
+
+const prMergeSpec: GithubWriteSpec<PrMergeInput, { merged?: boolean }> = {
+  id: 'pr-merge',
+  keys: (input) => [`${input.repoKey}/pulls/${input.number}`, `repo:${input.repoKey}`],
+  priority: 'critical',
+  deadlineMs: 120_000,
+  maxPages: 2,
+  // The head SHA is a compare-and-swap: re-dispatching the same head either
+  // merges it or reports it already merged — never a second merge.
+  repeatable: true,
+  dispatch: (reader, input) =>
+    reader.mutate<{ merged?: boolean }>(`repos/${input.repoKey}/pulls/${input.number}/merge`, 'PUT', {
+      merge_method: 'merge',
+      commit_message: `Closes #${input.issueNumber}`,
+      sha: input.headRefOid,
+    }),
+  readback: {
+    run: (reader, input) => reader.json<{ merged_at?: string }>(`repos/${input.repoKey}/pulls/${input.number}`),
+    confirms: (_input, observation) => (observation as { merged_at?: unknown } | null)?.merged_at != null,
+  },
+}
+
+/** Families migrate slice by slice; unregistered ids are a configuration
+ *  error at submit time (githubWrite throws). */
+export const GITHUB_WRITE_OPERATIONS: Partial<Record<GithubWriteOperationId, GithubWriteSpec<never, never>>> = {
+  'issue-comment-create': commentCreateSpec as unknown as GithubWriteSpec<never, never>,
+  'comment-edit': commentEditSpec as unknown as GithubWriteSpec<never, never>,
+  'issue-close': issueCloseSpec as unknown as GithubWriteSpec<never, never>,
+  'pr-merge': prMergeSpec as unknown as GithubWriteSpec<never, never>,
+}
+
+/** Human-readable error text for a non-confirmed write outcome. */
+export function githubWriteOutcomeError(outcome: { outcome: string; error?: unknown }): string {
+  const text =
+    outcome.error instanceof Error ? outcome.error.message : outcome.error === undefined ? '' : String(outcome.error)
+  return text || `outcome=${outcome.outcome}`
+}
 
 /** Submit one typed write through the ctx-bound reader (family migrations). */
 export async function githubWrite<TInput, TDispatch>(
