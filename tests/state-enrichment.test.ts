@@ -46,6 +46,19 @@ test('/state enrichment checks configured branches while the host serializes Git
         return spec
       },
       async run(spec: { command: string; timeoutMs?: number }) {
+        if (spec.command.startsWith('gh api ') && spec.command.includes('/issues?state=all')) {
+          // Both aggregate pages must dispatch before the aggregate fails:
+          // a mid-parallel page failure lets the scheduler legitimately drop
+          // the orphaned sibling page (the logical request already
+          // terminaled), which made the dispatch multiset microtask-order
+          // flaky in CI. A non-list issues body fails the index build only
+          // AFTER both pages ran.
+          activeGithub += 1
+          maxGithub = Math.max(maxGithub, activeGithub)
+          await new Promise((resolve) => setTimeout(resolve, 40))
+          activeGithub -= 1
+          return { exitCode: 0, stdout: { text: 'HTTP/2.0 200 OK\n\n{}' }, stderr: { text: '' } }
+        }
         if (spec.command.startsWith('gh api ') && spec.command.includes('/pulls?state=all')) {
           githubTimeouts.push(spec.timeoutMs ?? 0)
           activeGithub += 1

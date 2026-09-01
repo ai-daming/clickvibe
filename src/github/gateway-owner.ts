@@ -34,7 +34,7 @@ import {
   type GatewayMetrics,
   type GatewayRateObservation,
 } from './gateway-lifecycle.ts'
-import { deriveGatewayMetrics } from './gateway-lifecycle.ts'
+import { deriveGatewayMetrics, noteLateResponseDiagnostic } from './gateway-lifecycle.ts'
 
 /** v0.2 admission numbers — recorded here per ADR-0010 Neutral: values are
  *  pinned from the #133 frozen scenarios' shapes and must be re-cited when
@@ -121,8 +121,7 @@ export function createGithubGatewayOwner(
   const pageCounts = new Map<string, number>()
   const requestPriorities = new Map<string, 'critical' | 'normal'>()
   const terminaledRequests = new Set<string>()
-  // Logical write transactions in flight (CF1): drained at close, then
-  // swept by dispatch phase — see the tracker module.
+  // Logical write transactions in flight (CF1) — see the tracker module.
   const activeWrites = createActiveWriteTracker({
     noteTerminal: (requestId, outcome, error) => owner.noteTerminal(requestId, outcome, error),
   })
@@ -218,16 +217,6 @@ export function createGithubGatewayOwner(
     releaseReservation(step.bucket)
   }
 
-  const noteLateResponse = (step: PendingStep, phase: 'settled' | 'rejected') => {
-    logTaskDiagnostic('github-gateway-late-response', {
-      requestId: step.requestId,
-      repo: step.repo,
-      bucket: step.bucket,
-      phase,
-      note: '迟到响应被 owner generation 隔离:调用方保留 interrupted terminal,缓存不回填',
-    })
-  }
-
   const admitCandidate = (candidate: PendingStep): 'dispatch' | 'requeue' | 'rejected' =>
     admitCandidatePure(candidate, {
       running,
@@ -287,7 +276,7 @@ export function createGithubGatewayOwner(
       }
       pacing.delete(candidate.requestId)
       if (closed || recorder.sealed) {
-        const error = new Error('Gateway 已关闭,排队步骤被中断')
+        const error = new GatewayClosedError('Gateway 已关闭:pacing 后关闭,步骤未派发')
         owner.noteTerminal(candidate.requestId, 'interrupted', error)
         candidate.fail(error)
         return
@@ -336,7 +325,7 @@ export function createGithubGatewayOwner(
             // deadline must not resolve its caller or publish anything — the
             // caller already owns its interrupted terminal.
             if (ownerGeneration !== dispatchGeneration) {
-              noteLateResponse(candidate, 'settled')
+              noteLateResponseDiagnostic(candidate.requestId, candidate.repo, candidate.bucket, 'settled')
               candidate.fail(new Error('GitHub 网关已关闭:迟到响应被丢弃'))
             } else {
               candidate.settle(value)
@@ -348,7 +337,7 @@ export function createGithubGatewayOwner(
             settleReservation(candidate, observedResourceByTicket.get(ticket) ?? null)
             observedResourceByTicket.delete(ticket)
             if (ownerGeneration !== dispatchGeneration) {
-              noteLateResponse(candidate, 'rejected')
+              noteLateResponseDiagnostic(candidate.requestId, candidate.repo, candidate.bucket, 'rejected')
               candidate.fail(new Error('GitHub 网关已关闭:迟到响应被丢弃'))
             } else {
               candidate.fail(error)
@@ -465,9 +454,15 @@ export function createGithubGatewayOwner(
         // already fences any late settlement.
         step.fail(error)
       }
-      // Fence every still-in-flight settlement: from here on a late response
-      // is diagnostic-only — no caller resolution, no cache publish, no
-      // second terminal.
+      // Late settlements are diagnostic-only from here on. First, let every
+      // transaction whose step just failed settle ITS OWN terminal (CF1:
+      // settlement is the source of truth; the sweep only classifies
+      // transactions parked in a user hook). The drain resolves in microtask
+      // time; the timer only guards a genuinely parked hook.
+      await Promise.race([
+        activeWrites.drain(),
+        new Promise<void>((resolve) => setTimeout(resolve, Math.max(drainMs, 1))),
+      ])
       // Sweep: every declared request leaves exactly one terminal. Reads
       // close out interrupted; still-unsettled writes by phase (CF1: never
       // dispatched → interrupted, dispatch attempted → unknown).

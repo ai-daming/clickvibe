@@ -84,6 +84,13 @@ export async function githubWriteRecover<TInput, TDispatch>(
         : { outcome: 'unknown', error: new Error('回读未证实预期事实') }
     } catch (error) {
       owner.noteReadbackSettled(requestId, false)
+      if (error instanceof GatewayClosedError) {
+        // The authoritative read provably never dispatched: one interrupted
+        // terminal, caller failed — recovery simply retries at the next
+        // claim (review CF1: settlement maps to both answers).
+        owner.noteTerminal(requestId, 'interrupted', errorText(error))
+        return { outcome: 'failed', error }
+      }
       owner.noteTerminal(requestId, 'unknown', errorText(error))
       return { outcome: 'unknown', error }
     }

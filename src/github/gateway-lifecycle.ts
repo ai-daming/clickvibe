@@ -15,6 +15,8 @@
  * never a fabricated core bucket (#149 rounds 4-6).
  */
 
+import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
+
 export interface GatewayRateObservation {
   /** Real bucket name from the response (`x-ratelimit-resource`); null never
    *  falls back to a fabricated core bucket (#149 rounds 4-6). */
@@ -203,4 +205,21 @@ export function deriveGatewayMetrics(events: GatewayLifecycleEvent[]): GatewayMe
     upstreamRequests,
     waitMsTotal,
   }
+}
+
+/** Diagnostic for a late response fenced out by the owner generation: the
+ *  caller keeps its interrupted terminal and the cache never republishes. */
+export function noteLateResponseDiagnostic(
+  requestId: string,
+  repo: string,
+  bucket: string,
+  phase: 'settled' | 'rejected',
+): void {
+  logTaskDiagnostic('github-gateway-late-response', {
+    requestId,
+    repo,
+    bucket,
+    phase,
+    note: '迟到响应被 owner generation 隔离:调用方保留 interrupted terminal,缓存不回填',
+  })
 }
