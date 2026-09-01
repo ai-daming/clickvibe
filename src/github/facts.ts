@@ -142,7 +142,12 @@ export interface RepositoryPrRest {
   merged_at: string | null
   updated_at?: string
   html_url: string
-  head?: { ref?: string }
+  head?: {
+    ref?: string
+    /** owner:ref label — survives head-repo deletion when repo becomes null. */
+    label?: string
+    repo?: { full_name?: string; name?: string; owner?: { login?: string } } | null
+  }
 }
 
 export interface RepositoryGithubSnapshot {
@@ -168,14 +173,44 @@ export async function fetchGithubRepoSnapshot(
   })
 }
 
+/** The branch-lookup identity for the shared enrichment snapshot: the same
+ *  owner:ref the exact per-item query uses (pulls?head=owner:branch). A fork
+ *  PR whose head branch merely shares the ref name is a DIFFERENT key (review
+ *  r10/F1) — the aggregate must not weaken the identity the old path had. */
+export function snapshotPrKey(repoKey: string, branch: string): string {
+  return `${repoKey.split('/')[0]}:${branch}`
+}
+
+function headOwnerOf(pull: RepositoryPrRest): string | null {
+  const head = pull.head
+  if (!head?.ref) return null
+  return head.repo?.owner?.login ?? head.repo?.full_name?.split('/')[0] ?? head.label?.split(':')[0] ?? null
+}
+
+/** Index a repo snapshot for enrichment lookups (pure): issues by number, PRs
+ *  by head owner:ref. Same-owner historical duplicates keep the FIRST row —
+ *  the lists are created-desc, matching the exact query's per_page=1. */
+export function buildEnrichmentIndex(snapshot: RepositoryGithubSnapshot): EnrichmentSnapshot {
+  const issueByNumber = new Map<number, RepositoryIssueRest>()
+  for (const issue of snapshot.issues ?? []) issueByNumber.set(issue.number, issue)
+  const prByHeadBranch = new Map<string, RepositoryPrRest>()
+  for (const pull of snapshot.pulls ?? []) {
+    const owner = headOwnerOf(pull)
+    if (owner === null) continue
+    const key = `${owner}:${pull.head?.ref}`
+    if (!prByHeadBranch.has(key)) prByHeadBranch.set(key, pull)
+  }
+  return { issueByNumber, prByHeadBranch }
+}
+
 /** Per-repo enrichment inputs resolved from ONE shared snapshot per TTL
  *  window (issue #131 review r9: five same-repo items must cost ≤2 aggregate
  *  pages cold and 0 hot — per-item fan-out priced 15 logical requests and
  *  blew the 5s deadlines under pacing). */
 export interface EnrichmentSnapshot {
-  /** Open issue list item by issue number (body included → contract hash). */
+  /** Issue list item by issue number (body included → contract hash). */
   issueByNumber: Map<number, RepositoryIssueRest>
-  /** PR by head branch from the state=all pulls list (one page typical). */
+  /** PR by head owner:ref from the state=all pulls list (one page typical). */
   prByHeadBranch: Map<string, RepositoryPrRest>
 }
 
@@ -186,27 +221,22 @@ export async function fetchEnrichmentSnapshot(
   force = false,
 ): Promise<EnrichmentSnapshot> {
   const rest = githubRest(ctx)
-  // OPEN-only issues keep the aggregate to one page for repos with long
-  // closed histories (review r9: state=all priced page 2 on the first poll).
-  // The REST shapes are the same list rows the repo snapshot consumes.
+  // ONE bounded page per list, any state (review r10/F3): the frozen multi
+  // population mixes open and closed work items, and a page walk would price
+  // continuation pages on repos with long histories. The aggregate is a
+  // recent-page cache, not a guarantee of completeness — misses fall back to
+  // the exact per-item reads.
   const load = async () => {
-    const rest = githubRest(ctx)
     const [issues, pulls] = await Promise.all([
-      rest.paginate<RepositoryIssueRest>(`repos/${repoKey}/issues?state=open`),
-      rest.paginate<RepositoryPrRest>(`repos/${repoKey}/pulls?state=all`),
+      rest.json<RepositoryIssueRest[]>(
+        `repos/${repoKey}/issues?state=all&sort=created&direction=desc&per_page=100&page=1`,
+      ),
+      rest.json<RepositoryPrRest[]>(`repos/${repoKey}/pulls?state=all&sort=created&direction=desc&per_page=100&page=1`),
     ])
     return { issues, pulls } satisfies RepositoryGithubSnapshot
   }
-  void rest
   const snapshot = await rest.cachedAggregate(`enrichment:${repoKey}`, ttlMs, force, load)
-  const issueByNumber = new Map<number, RepositoryIssueRest>()
-  for (const issue of snapshot.issues ?? []) issueByNumber.set(issue.number, issue)
-  const prByHeadBranch = new Map<string, RepositoryPrRest>()
-  for (const pull of snapshot.pulls ?? []) {
-    const head = (pull as { head?: { ref?: string } }).head?.ref
-    if (head) prByHeadBranch.set(head, pull)
-  }
-  return { issueByNumber, prByHeadBranch }
+  return buildEnrichmentIndex(snapshot)
 }
 
 /** Adapt a snapshot PR row into the fact shape derive consumes (no review

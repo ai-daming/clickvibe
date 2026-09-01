@@ -108,8 +108,11 @@ async function collectEnvironment(head) {
   }
 }
 
-/** Frozen #133 thresholds for the GitHub rows this harness measures. */
-export function thresholdChecks(kind, metrics, ghChildren) {
+/** Frozen #133 thresholds for the GitHub rows this harness measures. The rate
+ *  rows are STRICT (review r10/F4): exactly five single executions, and every
+ *  settled response must carry a real resource observation — a gh subprocess
+ *  count is not resource evidence. */
+export function thresholdChecks(kind, metrics, ghChildren, events = []) {
   switch (kind) {
     case 'panel-first': {
       const noLinkedPr = true // fixture workflows carry no PR
@@ -146,12 +149,15 @@ export function thresholdChecks(kind, metrics, ghChildren) {
             metrics.cacheHits + metrics.singleflightJoins + metrics.executions + metrics.failures,
         },
       ]
-    case 'rate':
+    case 'rate': {
+      const settled = events.filter((event) => event.kind === 'upstream-settled')
       return [
         {
-          row: 'every workload read executed exactly once upstream (5 reads → ≥5 executions, all succeeded)',
+          row: 'every workload read executed exactly once upstream (5 reads → exactly 5 executions, all succeeded)',
           pass:
-            metrics.executions >= 5 &&
+            metrics.logicalRequests === 5 &&
+            metrics.executions === 5 &&
+            metrics.upstreamRequests === 5 &&
             metrics.failures === 0 &&
             (metrics.rateLimited ?? 0) === 0 &&
             (metrics.interrupted ?? 0) === 0,
@@ -162,8 +168,12 @@ export function thresholdChecks(kind, metrics, ghChildren) {
             metrics.logicalRequests ===
             metrics.cacheHits + metrics.singleflightJoins + metrics.executions + metrics.failures,
         },
-        { row: 'each response carried a real resource observation (no fabricated buckets)', pass: ghChildren > 0 },
+        {
+          row: 'every settled response carried a real resource observation (no fabricated buckets)',
+          pass: settled.length > 0 && settled.every((event) => event.rate?.resource != null),
+        },
       ]
+    }
     default:
       return []
   }
@@ -196,19 +206,20 @@ function workflowFixture(number) {
   }
 }
 
-function metricsOf(owner, sinceIndex) {
-  // Complete-request derivation: only requests DECLARED inside this round
-  // contribute, with all their events — slicing by index split requests
-  // across rounds and fabricated interrupted counts (review r9).
-  const all = owner.lifecycleEvents()
+/** Complete-request derivation (pure): only requests DECLARED inside this
+ *  round contribute, with all their events — slicing by index split requests
+ *  across rounds and fabricated interrupted counts (review r9). Requests
+ *  declared in-round but still unterminated carry to the next window. */
+export async function roundMetrics(events, sinceIndex) {
+  await ensureImports()
   const declaredInRound = new Set(
-    all
+    events
       .slice(sinceIndex)
       .filter((event) => event.kind === 'declared')
       .map((event) => event.requestId),
   )
-  const events = all.filter((event) => declaredInRound.has(event.requestId))
-  return { derived: deriveMetrics(events), eventCount: events.length }
+  const inRound = events.filter((event) => declaredInRound.has(event.requestId))
+  return { derived: deriveMetrics(inRound), eventCount: inRound.length, events: inRound }
 }
 
 // deriveGatewayMetrics imported lazily to keep this module import-light for tests
@@ -234,7 +245,7 @@ async function panelScenario() {
     const before = commands.length
     await enrichWorkflowStates(ctx, [structuredClone(item)], config)
     const ghChildren = commands.slice(before).filter((entry) => isGh(entry.command)).length
-    const { derived } = metricsOf(githubGatewayOwner(), mark)
+    const { derived } = await roundMetrics(githubGatewayOwner().lifecycleEvents(), mark)
     rounds.push({
       round,
       ghSubprocesses: ghChildren,
@@ -263,14 +274,17 @@ async function multiScenario() {
   resetGithubGatewayOwnerForTests()
   const { ctx, commands } = recordingContext()
   const config = { repos: { [REPO_KEY]: process.cwd() }, worktreeRoot: '/tmp' }
-  const items = [135, 136, 137, 132, 116].map(workflowFixture)
+  // The ORIGINAL frozen population (#133–#137, mixed open/closed — review
+  // r10/F3): the multi threshold is priced for five same-repo work items of
+  // ANY state, not an open-only subset.
+  const items = [133, 134, 135, 136, 137].map(workflowFixture)
   const rounds = []
   for (let round = 1; round <= 2; round += 1) {
     const mark = githubGatewayOwner().lifecycleEvents().length
     const before = commands.length
     await enrichWorkflowStates(ctx, structuredClone(items), config)
     const ghChildren = commands.slice(before).filter((entry) => isGh(entry.command)).length
-    const { derived } = metricsOf(githubGatewayOwner(), mark)
+    const { derived } = await roundMetrics(githubGatewayOwner().lifecycleEvents(), mark)
     rounds.push({
       round,
       ghSubprocesses: ghChildren,
@@ -305,7 +319,7 @@ async function reviewScenario() {
     fetchGithubPrFact(ctx, REPO_KEY, 'codex/issue-137-gateway-evidence', null),
   ])
   const ghChildren = commands.slice(before).filter((entry) => isGh(entry.command)).length
-  const { derived } = metricsOf(githubGatewayOwner(), mark)
+  const { derived } = await roundMetrics(githubGatewayOwner().lifecycleEvents(), mark)
   return {
     scenario: 'review-dense-gateway',
     parameters: { workItems: 3, concurrency: 3, note: 'GitHub plane only; Remote Git fetch rows are #135 scope' },
@@ -331,11 +345,17 @@ async function rateScenario() {
   const reader = githubRest(ctx)
   const before = await reader.json('rate_limit')
   const mark = githubGatewayOwner().lifecycleEvents().length
+  const beforeWorkload = commands.length
   for (let index = 0; index < 5; index += 1) {
     await reader.json(`repos/${REPO_KEY}/issues/135`)
   }
+  // The metrics window closes BEFORE the closing rate_limit sample: the window
+  // must contain exactly the five workload reads (review r10/F4 strictness).
+  const ghChildren = commands
+    .slice(beforeWorkload)
+    .filter((entry) => isGh(entry.command) && !/rate_limit/.test(entry.command)).length
+  const { derived, events } = await roundMetrics(githubGatewayOwner().lifecycleEvents(), mark)
   const after = await reader.json('rate_limit')
-  const { derived } = metricsOf(githubGatewayOwner(), mark)
   return {
     scenario: 'rate-sample-gateway',
     parameters: { reads: 5, note: 'shared credential: consumption marked contaminated per #133 protocol' },
@@ -345,11 +365,7 @@ async function rateScenario() {
         rateBefore: before.resources?.core ?? null,
         rateAfter: after.resources?.core ?? null,
         metrics: derived,
-        checks: thresholdChecks(
-          'rate',
-          derived,
-          commands.filter((entry) => isGh(entry.command) && !/rate_limit/.test(entry.command)).length,
-        ),
+        checks: thresholdChecks('rate', derived, ghChildren, events),
       },
     ],
     commands,

@@ -284,11 +284,32 @@ test('r9/F7 regression: a learned special-resource bucket blocks its own path wi
   // this request fails, the bucket pauses, and a subsequent core read still
   // executes (identity learned; core never polluted).
   const commandsBeforeCore = commands.length
-  await reader.json('repos/o/r/code-scanning/alerts').catch((error: unknown) => {
-    assert.ok(isGithubRateLimitError(error), 'the exhausted special bucket rate-limits its own path')
-  })
+  await assert.rejects(
+    () => reader.json('repos/o/r/code-scanning/alerts'),
+    (error: unknown) => {
+      assert.ok(isGithubRateLimitError(error), 'the exhausted special bucket rate-limits its own path')
+      return true
+    },
+  )
   await reader.json('repos/o/r/issues/9')
   assert.ok(commands.length > commandsBeforeCore, 'the healthy core bucket still reaches the executor')
+  assert.equal(
+    commands.filter((command) => /code-scanning/.test(command)).length,
+    2,
+    'the special path reached the shell exactly twice: learned once, exhausted once',
+  )
+  // The THIRD same-path request is rejected BEFORE the shell — the learned
+  // identity must fence its own exhausted bucket without a network call
+  // (review r10/F2).
+  await assert.rejects(
+    () => reader.json('repos/o/r/code-scanning/alerts'),
+    (error: unknown) => isGithubRateLimitError(error),
+  )
+  assert.equal(
+    commands.filter((command) => /code-scanning/.test(command)).length,
+    2,
+    'the pre-shell rejection spawns no gh subprocess',
+  )
 })
 
 test('r9/F7 regression: a successful special-resource call never deducts the core ledger', async () => {
@@ -325,6 +346,58 @@ test('r9/F7 regression: a successful special-resource call never deducts the cor
     1,
     'core executes after the special call',
   )
+})
+
+test('r10/F2 regression: every REST settlement exit wires path→resource learning', async () => {
+  const { GithubRestReader } = await import('../src/github/rest.ts')
+  const reset = Math.floor(Date.now() / 1000) + 3600
+  // One scripted response per settlement exit; each subcase gets a FRESH
+  // owner+reader so a learned identity from one exit never masks another.
+  const cases = [
+    {
+      path: 'repos/o/r/code-scanning/success',
+      response: `HTTP/2.0 200 OK\nx-ratelimit-limit: 100\nx-ratelimit-remaining: 50\nx-ratelimit-resource: code_scanning_upload\nx-ratelimit-reset: ${reset}\n\n{"v":1}`,
+      learned: 'code_scanning_upload',
+    },
+    {
+      path: 'repos/o/r/code-scanning/http-error',
+      response: `HTTP/2.0 404 Not Found\nx-ratelimit-limit: 100\nx-ratelimit-remaining: 50\nx-ratelimit-resource: code_scanning_upload\nx-ratelimit-reset: ${reset}\n\n{"message":"Not Found"}`,
+      learned: 'code_scanning_upload',
+    },
+    {
+      path: 'repos/o/r/code-scanning/rate-limited',
+      response: `HTTP/2.0 429 Too Many Requests\nx-ratelimit-limit: 100\nx-ratelimit-remaining: 0\nx-ratelimit-resource: code_scanning_upload\nx-ratelimit-reset: ${reset}\n\n{"message":"rate limited"}`,
+      learned: 'code_scanning_upload',
+    },
+    {
+      path: 'repos/o/r/code-scanning/shape-error',
+      response: `HTTP/2.0 200 OK\nx-ratelimit-limit: 100\nx-ratelimit-remaining: 50\nx-ratelimit-resource: dependency_graph\nx-ratelimit-reset: ${reset}\n\nnot-json`,
+      learned: 'dependency_graph',
+    },
+    {
+      path: 'repos/o/r/code-scanning/parse-error',
+      // No HTTP status line at all → no headers parsed → no evidence: the
+      // identity must stay the URL fallback, never a fabricated resource.
+      response: 'total garbage from a broken proxy',
+      learned: null,
+    },
+  ]
+  for (const item of cases) {
+    const owner = createGithubGatewayOwner()
+    const ctx = {
+      shell: {
+        resolve: (spec: unknown) => spec,
+        run: async () => ({ exitCode: 0, stdout: { text: item.response }, stderr: { text: '' } }),
+      },
+    } as never
+    const reader = new GithubRestReader(ctx, { owner, minimumIntervalMs: 1 })
+    await reader.json(item.path).catch(() => {})
+    assert.equal(
+      owner.resolveResourceIdentity(item.path, 'core'),
+      item.learned ?? 'core',
+      `${item.path}: settlement must ${item.learned ? `learn ${item.learned}` : 'keep the URL fallback'}`,
+    )
+  }
 })
 
 test('r9/idle regression: quiescence after deadline-fail, rate-limited fail, and mid-pacing settle', async () => {

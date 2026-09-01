@@ -30,6 +30,7 @@ import {
   type RepositoryIssueRest,
   readConfiguredBranchFacts,
   snapshotPrFact,
+  snapshotPrKey,
 } from '../github/facts.ts'
 import { githubErrorMessage, githubRest } from '../github/rest.ts'
 import { githubRead } from '../github/operations.ts'
@@ -208,7 +209,9 @@ export async function enrichWorkflowStates(
       const snapshot = await snapshotFor(workflow.repoKey)
       const issueNumber = Number(workflow.key.split('#').pop())
       const snapshotIssue = snapshot?.issueByNumber.get(issueNumber) ?? null
-      const snapshotPull = snapshot?.prByHeadBranch.get(workflow.branch) ?? null
+      // owner:ref identity (review r10/F1): a same-name fork branch must
+      // never stand in for the same-repo PR the exact query would return.
+      const snapshotPull = snapshot?.prByHeadBranch.get(snapshotPrKey(workflow.repoKey, workflow.branch)) ?? null
       const [prLookup, currentIssue, liveIssueState] = await Promise.all([
         // A PR found in the shared snapshot may still need its live review
         // state (verdict binding) — the number-keyed read is cached per PR,

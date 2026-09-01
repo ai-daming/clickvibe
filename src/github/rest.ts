@@ -232,7 +232,7 @@ export class GithubRestReader {
           response = parseIncludedResponse(stdout)
         } catch (parseError) {
           const detail = [result.stderr?.text, stdout].filter(Boolean).join('\n').trim()
-          if (requestId) this.owner.noteUpstreamSettled(requestId, false, null)
+          if (requestId) this.owner.noteUpstreamSettled(requestId, false, null, path)
           if (result.exitCode !== 0 && /(?:rate limit|secondary rate)/i.test(detail)) {
             const until = Date.now() + 60 * 60_000
             this.owner.noteRateLimitTrip(until, 'unknown')
@@ -249,7 +249,7 @@ export class GithubRestReader {
         }
         const detail = [result.stderr?.text, response.body].filter(Boolean).join('\n')
         if (isRateLimited(response, detail)) {
-          if (requestId) this.owner.noteUpstreamSettled(requestId, false, rateObservationFrom(response.headers))
+          if (requestId) this.owner.noteUpstreamSettled(requestId, false, rateObservationFrom(response.headers), path)
           const until = resetFrom(response.headers, Date.now())
           const kind: GithubRateLimitKind =
             response.headers.get('x-ratelimit-remaining') === '0' ? 'primary' : 'secondary'
@@ -270,7 +270,7 @@ export class GithubRestReader {
           throw new GithubRateLimitError(until, kind)
         }
         if (result.exitCode !== 0 || response.status < 200 || response.status >= 300) {
-          if (requestId) this.owner.noteUpstreamSettled(requestId, false, rateObservationFrom(response.headers))
+          if (requestId) this.owner.noteUpstreamSettled(requestId, false, rateObservationFrom(response.headers), path)
           let message = response.body.trim()
           try {
             const parsed = JSON.parse(response.body) as { message?: unknown }
@@ -324,14 +324,13 @@ export class GithubRestReader {
     validate?: (value: T) => void,
   ): Promise<T> {
     const requestId = this.owner.ambientRequestId()
-    const bucket = bucketFromPath(path)
     try {
       const value = JSON.parse(response.body || 'null') as T
       validate?.(value)
-      if (requestId) this.owner.noteUpstreamSettled(requestId, true, rateObservationFrom(response.headers))
+      if (requestId) this.owner.noteUpstreamSettled(requestId, true, rateObservationFrom(response.headers), path)
       return value
     } catch (error) {
-      if (requestId) this.owner.noteUpstreamSettled(requestId, false, rateObservationFrom(response.headers))
+      if (requestId) this.owner.noteUpstreamSettled(requestId, false, rateObservationFrom(response.headers), path)
       if (error instanceof SyntaxError) throw new Error(`GitHub REST 返回了无效 JSON: ${path}`)
       throw error
     }
