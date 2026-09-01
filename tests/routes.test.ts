@@ -383,6 +383,66 @@ test('/create-pr uses a one-use privileged authorization before the shared handl
   }
 })
 
+test('/create-pr recovers a pending PR-create marker by readback and never re-creates', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-create-pr-recover-'))
+  process.env.HOME = tempHome
+  try {
+    const worktree = join(tempHome, 'worktree')
+    await mkdir(worktree, { recursive: true })
+    const workflow = interruptedWorkflow('o-r-74', 'https://github.com/o/r/issues/74', worktree)
+    workflow.prCreate = { status: 'pending', at: '2026-08-22T00:00:00Z' }
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
+    let writes = 0
+    const handler = createHandler(async (spec) => {
+      if (spec.command.includes('/pulls?state=open')) {
+        return {
+          exitCode: 0,
+          stdout: { text: included([{ number: 31, head: { ref: workflow.branch } }]) },
+          stderr: { text: '' },
+        }
+      }
+      if (spec.command.includes('--method')) {
+        writes += 1
+        throw new Error(`unexpected write: ${spec.command}`)
+      }
+      return { exitCode: 0, stdout: { text: included({}) }, stderr: { text: '' } }
+    })
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+    const preview = (await post(
+      handler,
+      '/clickvibe/api/authorize',
+      { action: 'create-pr', url: workflow.url },
+      headers,
+    )) as {
+      status: number
+      body: { authorizationId?: string; authorizationDigest?: string }
+    }
+    assert.equal(preview.status, 200)
+    const result = (await post(
+      handler,
+      '/clickvibe/api/create-pr',
+      {
+        url: workflow.url,
+        authorizationId: preview.body.authorizationId,
+        authorizationDigest: preview.body.authorizationDigest,
+      },
+      headers,
+    )) as { status: number; body: { ok?: boolean; prNumber?: string; created?: boolean; error?: string } }
+    assert.equal(result.status, 200, JSON.stringify(result.body))
+    assert.equal(result.body.prNumber, '31')
+    assert.equal(result.body.created, false)
+    assert.equal(writes, 0, 'pending marker recovery settles by readback, never a second create')
+    const reloaded = await loadWorkflow('o-r-74')
+    assert.equal(reloaded?.prNumber, '31')
+    assert.equal(reloaded?.prCreate, undefined, 'the marker is resolved once the PR is adopted')
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
 test('/authorize rejects cross-origin requests before fetching issue content', async () => {
   const result = await post(
     createHandler(),
@@ -965,6 +1025,7 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
     let issueClosed = false
     const commands: string[] = []
     const writeBodies: string[] = []
+    const closeComments: Array<{ body: string }> = []
     const handler = createHandler(async (spec) => {
       commands.push(spec.command)
       if (spec.command.includes('--method PUT') && spec.command.includes('/merge')) writeBodies.push(spec.stdin ?? '')
@@ -975,6 +1036,7 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
           title: 'merge issue',
           body: reviewedBody,
           state: issueClosed ? 'CLOSED' : 'OPEN',
+          comments: closeComments,
           updatedAt: '2026-08-22T00:00:00Z',
         },
         pr: {
@@ -993,6 +1055,7 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
         return { exitCode: 0, stdout: { text: 'HTTP/1.1 200\n\n{"merged":true}' }, stderr: { text: '' } }
       }
       if (spec.command.includes('--method POST') && spec.command.includes('/comments')) {
+        closeComments.push({ body: JSON.parse(spec.stdin ?? '{}').body ?? '' })
         return { exitCode: 0, stdout: { text: 'HTTP/1.1 201\n\n{"id":77}' }, stderr: { text: '' } }
       }
       if (spec.command.includes('--method PATCH') && spec.command.includes('/issues/')) {
@@ -1084,6 +1147,10 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
     assert.equal(mergeBody.merge_method, 'merge', 'merge commit strategy, not squash/rebase')
     assert.equal(mergeBody.sha, 'abcdef1234567890', 'the head CAS pins the exact reviewed commit')
     assert.equal(mergeBody.commit_message, 'Closes #23')
+    // The closing comment is its own confirmed write transaction: exactly one
+    // POST with the exact body, proven by the comments readback.
+    assert.equal(closeComments.length, 1)
+    assert.equal(closeComments[0].body, '由 PR #29 以 merge commit 合并交付。')
     assert.equal(await loadWorkflow(workflow.key), null)
     const archived = await loadAllArchivedWorkflows()
     assert.equal(archived.length, 1)
@@ -1098,6 +1165,7 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
       localBranch: true,
       remoteBranch: true,
       issue: true,
+      issueComment: 'confirmed',
     })
 
     const replay = await post(
@@ -1284,6 +1352,7 @@ test('/merge gate rejection offers manual override that merges once and audits t
     let issueClosed = false
     const commands: string[] = []
     const writeBodies: string[] = []
+    const closeComments: Array<{ body: string }> = []
     const handler = createHandler(async (spec) => {
       commands.push(spec.command)
       if (spec.command.includes('--method PUT') && spec.command.includes('/merge')) writeBodies.push(spec.stdin ?? '')
@@ -1295,6 +1364,7 @@ test('/merge gate rejection offers manual override that merges once and audits t
           body: reviewedBody,
           state: issueClosed ? 'CLOSED' : 'OPEN',
           updatedAt: '2026-08-22T00:00:00Z',
+          comments: closeComments,
         },
         pr: {
           number: 29,
@@ -1312,6 +1382,7 @@ test('/merge gate rejection offers manual override that merges once and audits t
         return { exitCode: 0, stdout: { text: 'HTTP/1.1 200\n\n{"merged":true}' }, stderr: { text: '' } }
       }
       if (spec.command.includes('--method POST') && spec.command.includes('/comments')) {
+        closeComments.push({ body: JSON.parse(spec.stdin ?? '{}').body ?? '' })
         return { exitCode: 0, stdout: { text: 'HTTP/1.1 201\n\n{"id":77}' }, stderr: { text: '' } }
       }
       if (spec.command.includes('--method PATCH') && spec.command.includes('/issues/')) {
@@ -3623,6 +3694,8 @@ test('repo aggregation unlocks closed dependencies with an idempotent comment be
     milestone: null,
   }
   const writes: Array<{ command: string; stdin?: string }> = []
+  const postedComments: Array<{ body: string }> = []
+  let issueBody = issue.body
   const ctx = {
     shell: {
       resolve(spec: unknown) {
@@ -3633,15 +3706,24 @@ test('repo aggregation unlocks closed dependencies with an idempotent comment be
           return { exitCode: 0, stdout: { text: included([issue, dependency]) }, stderr: { text: '' } }
         if (spec.command.includes('/pulls?'))
           return { exitCode: 0, stdout: { text: included([]) }, stderr: { text: '' } }
+        // The unlock comment write transaction scans comments before posting
+        // and reads them back afterwards — serve the posted bodies.
         if (spec.command.includes('/issues/9/comments') && !spec.command.includes('--method')) {
-          return { exitCode: 0, stdout: { text: included([]) }, stderr: { text: '' } }
+          return { exitCode: 0, stdout: { text: included(postedComments) }, stderr: { text: '' } }
+        }
+        // The issue body PATCH transaction reads the issue back for its
+        // predicate — serve the rewritten body.
+        if (spec.command.includes('/issues/9') && !spec.command.includes('--method')) {
+          return { exitCode: 0, stdout: { text: included({ ...issue, body: issueBody }) }, stderr: { text: '' } }
         }
         if (spec.command.includes('--method POST')) {
           writes.push(spec)
+          postedComments.push({ body: JSON.parse(spec.stdin ?? '{}').body ?? '' })
           return { exitCode: 0, stdout: { text: included({ id: 1 }) }, stderr: { text: '' } }
         }
         if (spec.command.includes('--method PATCH')) {
           writes.push(spec)
+          issueBody = JSON.parse(spec.stdin ?? '{}').body ?? issueBody
           return {
             exitCode: 0,
             stdout: { text: included({ updated_at: '2026-08-22T08:00:00Z' }) },
@@ -3732,7 +3814,10 @@ test('repo aggregation cools down failed dependency-ledger writes across forced 
   }
   assert.match(firstLedger.dependencyLedger.error ?? '', /更新失败;冷却至/)
   assert.match(secondLedger.dependencyLedger.error ?? '', /更新冷却至/)
-  assert.equal(commentReads, 1, 'refreshes inside the cooldown must not retry GitHub writes')
+  // Slice B: one failed transaction reads comments twice — the marker scan
+  // and the mandatory authoritative readback — then the cooldown gate keeps
+  // the second forced refresh entirely offline.
+  assert.equal(commentReads, 2, 'refreshes inside the cooldown must not retry GitHub writes')
 })
 
 test('repo aggregation keeps a closed issue visible while merged cleanup is pending', async () => {

@@ -183,6 +183,7 @@ export type GithubWriteOperationId =
   | 'comment-edit'
   | 'issue-update'
   | 'issue-close'
+  | 'dependency-unlock-comment'
   | 'pr-review-approve'
   | 'pr-merge'
   | 'pr-create'
@@ -204,6 +205,25 @@ interface CommentEditInput {
 interface IssueCloseInput {
   repoKey: string
   number: number
+}
+interface IssueUpdateInput {
+  repoKey: string
+  number: number
+  body: string
+}
+interface DependencyUnlockCommentInput {
+  repoKey: string
+  number: number
+  /** Substring identifying the unlock comment family (dependency numbers). */
+  marker: string
+  body: string
+}
+interface PrCreateInput {
+  repoKey: string
+  branch: string
+  base: string
+  title: string
+  body: string
 }
 interface PrMergeInput {
   repoKey: string
@@ -318,14 +338,101 @@ const approvalSpec: GithubWriteSpec<ApprovalInput, { id: number }> = {
   },
 }
 
+/** Issue body rewrite: setting the full body converges on the same content,
+ *  so a re-dispatch is safe without a durable marker. */
+const issueUpdateSpec: GithubWriteSpec<IssueUpdateInput, { updated_at?: string }> = {
+  id: 'issue-update',
+  keys: (input) => issueKeys(input.repoKey, input.number),
+  priority: 'normal',
+  deadlineMs: 30_000,
+  maxPages: 2,
+  repeatable: true,
+  dispatch: (reader, input) =>
+    reader.mutate<{ updated_at?: string }>(`repos/${input.repoKey}/issues/${input.number}`, 'PATCH', {
+      body: input.body,
+    }),
+  readback: {
+    run: (reader, input) => reader.json<{ body?: string }>(`repos/${input.repoKey}/issues/${input.number}`),
+    confirms: (input, observation) =>
+      !!observation && typeof observation === 'object' && (observation as { body?: unknown }).body === input.body,
+  },
+}
+
+/** Dependency-unlock comment: convergent — the dispatch itself re-checks for
+ *  the marker text under the resource lease (check-then-write inside the
+ *  serialized section, not before it) and skips the POST when one already
+ *  exists, so a re-dispatch converges instead of duplicating. */
+const dependencyUnlockCommentSpec: GithubWriteSpec<DependencyUnlockCommentInput, { id: number; posted: boolean }> = {
+  id: 'dependency-unlock-comment',
+  keys: (input) => issueKeys(input.repoKey, input.number),
+  priority: 'normal',
+  deadlineMs: 30_000,
+  maxPages: 2,
+  repeatable: true,
+  dispatch: async (reader, input) => {
+    const comments = await reader.json<Array<{ id?: number; body?: string | null }>>(
+      `repos/${input.repoKey}/issues/${input.number}/comments`,
+    )
+    const existing = comments.find((entry) => String(entry.body ?? '').includes(input.marker))
+    if (existing) return { id: existing.id ?? 0, posted: false }
+    const created = await reader.mutate<{ id: number }>(
+      `repos/${input.repoKey}/issues/${input.number}/comments`,
+      'POST',
+      {
+        body: input.body,
+      },
+    )
+    return { id: created.id, posted: true }
+  },
+  readback: {
+    run: (reader, input) =>
+      reader.json<Array<{ body?: string | null }>>(`repos/${input.repoKey}/issues/${input.number}/comments`),
+    confirms: (input, observation) =>
+      Array.isArray(observation) && observation.some((entry) => String(entry.body ?? '').includes(input.marker)),
+  },
+}
+
+/** PR creation is non-repeatable: re-dispatching forks a duplicate PR, so the
+ *  caller persists an attempt marker first; restart recovery re-reads the
+ *  open-PR-by-head list and never re-creates. */
+const prCreateSpec: GithubWriteSpec<PrCreateInput, { number?: number }> = {
+  id: 'pr-create',
+  keys: (input) => [`repo:${input.repoKey}`, `${input.repoKey}/pulls/head/${input.branch}`],
+  priority: 'normal',
+  deadlineMs: 60_000,
+  maxPages: 2,
+  repeatable: false,
+  dispatch: (reader, input) =>
+    reader.mutate<{ number?: number }>(`repos/${input.repoKey}/pulls`, 'POST', {
+      title: input.title,
+      head: input.branch,
+      base: input.base,
+      body: input.body,
+    }),
+  readback: {
+    run: (reader, input) =>
+      reader.json<Array<{ number?: number; head?: { ref?: string } | null }>>(
+        `repos/${input.repoKey}/pulls?state=open&head=${encodeURIComponent(
+          `${input.repoKey.split('/')[0]}:${input.branch}`,
+        )}&per_page=1`,
+      ),
+    confirms: (input, observation) =>
+      Array.isArray(observation) &&
+      observation.some((entry) => entry.number !== undefined && entry.head?.ref === input.branch),
+  },
+}
+
 /** Families migrate slice by slice; unregistered ids are a configuration
  *  error at submit time (githubWrite throws). */
 export const GITHUB_WRITE_OPERATIONS: Partial<Record<GithubWriteOperationId, GithubWriteSpec<never, never>>> = {
   'issue-comment-create': commentCreateSpec as unknown as GithubWriteSpec<never, never>,
   'comment-edit': commentEditSpec as unknown as GithubWriteSpec<never, never>,
   'issue-close': issueCloseSpec as unknown as GithubWriteSpec<never, never>,
+  'issue-update': issueUpdateSpec as unknown as GithubWriteSpec<never, never>,
+  'dependency-unlock-comment': dependencyUnlockCommentSpec as unknown as GithubWriteSpec<never, never>,
   'pr-merge': prMergeSpec as unknown as GithubWriteSpec<never, never>,
   'pr-review-approve': approvalSpec as unknown as GithubWriteSpec<never, never>,
+  'pr-create': prCreateSpec as unknown as GithubWriteSpec<never, never>,
 }
 
 /** Human-readable error text for a non-confirmed write outcome. */
@@ -350,4 +457,18 @@ export async function githubWrite<TInput, TDispatch>(
   const reader = githubRest(ctx)
   const owner = reader.boundOwner()
   return runWriteTransaction(owner, reader, spec, intent.input, { persistMarker: intent.persistMarker })
+}
+
+/** Restart recovery for a family whose attempt marker survived: readback
+ *  ONLY, zero write dispatch (ADR-0010 §9). Callers invoke this when their
+ *  durable action state still carries a pending marker. */
+export async function githubWriteRecoverOperation<TInput, TDispatch>(
+  ctx: Context,
+  intent: { operation: GithubWriteOperationId; input: TInput },
+): Promise<GithubWriteOutcome<TDispatch>> {
+  const spec = GITHUB_WRITE_OPERATIONS[intent.operation] as GithubWriteSpec<TInput, TDispatch> | undefined
+  if (!spec) throw new Error(`未声明的 GitHub 写操作: ${intent.operation}`)
+  const { githubRest } = await import('./rest.ts')
+  const reader = githubRest(ctx)
+  return githubWriteRecover(reader.boundOwner(), reader, spec, intent.input)
 }

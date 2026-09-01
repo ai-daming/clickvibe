@@ -405,6 +405,18 @@ export async function startReview(
             })
           },
         )
+        // Resolve the attempt marker into the workflow's durable answer for
+        // the approval write (ADR-0010 §9): pending → confirmed/failed/unknown.
+        await mutateLiveTaskWorkflow(live, reloaded, (latest) => {
+          const reviewEvent = [...(latest.events ?? [])]
+            .reverse()
+            .find((candidate) => candidate.kind === 'review' && candidate.taskId === event.taskId)
+          if (reviewEvent?.approvalAttempt) {
+            reviewEvent.approvalAttempt = {
+              status: approval === 'approved' ? 'confirmed' : approval === 'failed' ? 'failed' : 'unknown',
+            }
+          }
+        })
         if (approval === 'approved') {
           pushTaskLine(live, '[clickvibe] 已提交 GitHub 原生 Approve (LGTM)')
         } else if (approval === 'failed') {

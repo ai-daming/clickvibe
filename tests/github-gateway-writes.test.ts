@@ -418,3 +418,127 @@ test('family issue-comment-create: POST body, readback finds the exact comment',
   assert.match(post?.command ?? '', /repos\/o\/r\/issues\/9\/comments/)
   assert.equal(spec.repeatable, false, 'comment creation is non-repeatable: marker required')
 })
+
+test('family issue-update: PATCH body, readback confirms the rewritten body', async () => {
+  const { reader, owner, calls } = makeReader(async (step) => {
+    if (step.command.includes('--method PATCH'))
+      return { exitCode: 0, text: ok({ updated_at: '2026-09-01T00:00:00Z' }) }
+    return { exitCode: 0, text: ok({ body: 'rewritten-ledger' }) }
+  })
+  const spec = GITHUB_WRITE_OPERATIONS['issue-update'] as GithubWriteSpec<
+    { repoKey: string; number: number; body: string },
+    unknown
+  >
+  const outcome = await runWriteTransaction(owner, reader, spec, {
+    repoKey: 'o/r',
+    number: 9,
+    body: 'rewritten-ledger',
+  })
+  assert.equal(outcome.outcome, 'confirmed')
+  const patch = calls.find((call) => call.command.includes('--method PATCH'))
+  assert.match(patch?.command ?? '', /repos\/o\/r\/issues\/9' --method PATCH/)
+  assert.deepEqual(JSON.parse(patch?.stdin ?? '{}'), { body: 'rewritten-ledger' })
+  assert.equal(spec.repeatable, true, 'body rewrite converges: repeatable without a marker')
+  // A readback with a stale body proves nothing.
+  const stale = makeReader(async (step) => {
+    if (step.command.includes('--method PATCH')) return { exitCode: 0, text: ok({ updated_at: '' }) }
+    return { exitCode: 0, text: ok({ body: 'old-body' }) }
+  })
+  const second = await runWriteTransaction(stale.owner, stale.reader, spec, {
+    repoKey: 'o/r',
+    number: 9,
+    body: 'rewritten-ledger',
+  })
+  assert.equal(second.outcome, 'unknown')
+})
+
+test('family dependency-unlock-comment: skip the POST when the marker comment already exists', async () => {
+  const posted: Array<{ body: string }> = []
+  const { reader, owner, calls } = makeReader(async (step) => {
+    if (step.command.includes('--method POST')) {
+      const body = JSON.parse(step.stdin ?? '{}').body as string
+      posted.push({ body })
+      return { exitCode: 0, text: ok({ id: 1 }, 201) }
+    }
+    return { exitCode: 0, text: ok(posted) }
+  })
+  const spec = GITHUB_WRITE_OPERATIONS['dependency-unlock-comment'] as GithubWriteSpec<
+    { repoKey: string; number: number; marker: string; body: string },
+    unknown
+  >
+  const input = {
+    repoKey: 'o/r',
+    number: 9,
+    marker: 'clickvibe:dependency-unlock:8',
+    body: 'clickvibe:dependency-unlock:8 — 依赖已完成,自动更新',
+  }
+  const first = await runWriteTransaction(owner, reader, spec, input)
+  assert.equal(first.outcome, 'confirmed')
+  const second = await runWriteTransaction(owner, reader, spec, input)
+  assert.equal(second.outcome, 'confirmed', 'the second run converges on the existing comment')
+  assert.equal(
+    calls.filter((call) => call.command.includes('--method POST')).length,
+    1,
+    'check-then-POST under the lease posts at most once',
+  )
+  assert.equal(spec.repeatable, true, 'convergent family: no durable marker required')
+})
+
+test('family pr-create: POST pulls with PR-by-head readback', async () => {
+  const { reader, owner, calls } = makeReader(async (step) => {
+    if (step.command.includes('--method POST')) return { exitCode: 0, text: ok({ number: 31 }, 201) }
+    if (step.command.includes('/pulls?state=open')) {
+      return { exitCode: 0, text: ok([{ number: 31, head: { ref: 'r-issue-17' } }]) }
+    }
+    return { exitCode: 0, text: ok({}) }
+  })
+  const spec = GITHUB_WRITE_OPERATIONS['pr-create'] as GithubWriteSpec<
+    { repoKey: string; branch: string; base: string; title: string; body: string },
+    unknown
+  >
+  const input = {
+    repoKey: 'o/r',
+    branch: 'r-issue-17',
+    base: 'main',
+    title: 'Deliver issue #17',
+    body: 'Closes #17',
+  }
+  const outcome = await runWriteTransaction(owner, reader, spec, input, {
+    persistMarker: () => Promise.resolve(),
+  })
+  assert.equal(outcome.outcome, 'confirmed')
+  const post = calls.find((call) => call.command.includes('--method POST'))
+  assert.match(post?.command ?? '', /repos\/o\/r\/pulls/)
+  const body = JSON.parse(post?.stdin ?? '{}') as Record<string, unknown>
+  assert.equal(body.head, 'r-issue-17')
+  assert.equal(body.base, 'main')
+  assert.equal(body.title, 'Deliver issue #17')
+  assert.equal(spec.repeatable, false, 'PR creation is non-repeatable: marker required')
+  // A PR list without the branch head proves nothing.
+  const missing = makeReader(async (step) => {
+    if (step.command.includes('--method POST')) return { exitCode: 0, text: ok({ number: 31 }, 201) }
+    if (step.command.includes('/pulls?state=open')) return { exitCode: 0, text: ok([]) }
+    return { exitCode: 0, text: ok({}) }
+  })
+  const second = await runWriteTransaction(missing.owner, missing.reader, spec, input, {
+    persistMarker: () => Promise.resolve(),
+  })
+  assert.equal(second.outcome, 'unknown')
+})
+
+test('family pr-create without a marker hook fails before any dispatch', async () => {
+  const { reader, owner, calls } = makeReader(async () => ({ exitCode: 0, text: ok({ number: 31 }, 201) }))
+  const spec = GITHUB_WRITE_OPERATIONS['pr-create'] as GithubWriteSpec<
+    { repoKey: string; branch: string; base: string; title: string; body: string },
+    unknown
+  >
+  const outcome = await runWriteTransaction(owner, reader, spec, {
+    repoKey: 'o/r',
+    branch: 'r-issue-17',
+    base: 'main',
+    title: 't',
+    body: 'b',
+  })
+  assert.equal(outcome.outcome, 'failed')
+  assert.equal(calls.length, 0, 'zero dispatch without the durable marker')
+})

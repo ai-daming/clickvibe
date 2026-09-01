@@ -43,6 +43,7 @@ const WORKFLOW_METADATA_FIELDS = new Set<WorkflowMetadataField>([
   'issueSnapshot',
   'autoRun',
   'events',
+  'prCreate',
 ])
 
 export function applyWorkflowMetadataPatch(

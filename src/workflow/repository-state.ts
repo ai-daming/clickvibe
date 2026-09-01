@@ -25,15 +25,13 @@ import {
   fetchGithubIssueState,
   fetchGithubPrFact,
   issueContractFrom,
-  type IssueCommentRest,
   type RepositoryIssueItem,
-  type RepositoryIssueRest,
   readConfiguredBranchFacts,
   snapshotPrFact,
   snapshotPrKey,
 } from '../github/facts.ts'
-import { githubErrorMessage, githubRest } from '../github/rest.ts'
-import { githubRead } from '../github/operations.ts'
+import { githubErrorMessage } from '../github/rest.ts'
+import { githubWrite, githubWriteOutcomeError } from '../github/writes.ts'
 import { existsSync } from 'node:fs'
 import { type ClickVibeConfig, loadConfig } from '../infra/runtime.ts'
 import { observeTaskOwnership, type TaskOwnershipContext } from '../infra/task-ownership.ts'
@@ -295,38 +293,46 @@ export async function maintainCompletedDependencyLedger(
       error: `依赖账本更新冷却至 ${new Date(blocked.retryAt).toISOString()}: ${blocked.error}`,
     }
   }
-  const rest = githubRest(ctx)
   const marker = dependencyUnlockMarker(dependencyNumbers)
   try {
-    const comments = (await githubRead(ctx, {
-      operation: 'issue-comments',
-      repoKey,
-      number: issue.number,
-      consistency: 'cache-ok',
-    })) as IssueCommentRest[]
-    if (!comments.some((comment) => String(comment.body ?? '').includes(marker))) {
-      await rest.mutate(`repos/${repoKey}/issues/${issue.number}/comments`, 'POST', {
+    // Typed writes (slice B): the unlock comment converges under the
+    // resource lease (check-then-POST inside the transaction, not before
+    // it), and the body PATCH is idempotent. Both carry their own
+    // invalidation and authoritative readback.
+    const comment = await githubWrite(ctx, {
+      operation: 'dependency-unlock-comment',
+      input: {
+        repoKey,
+        number: issue.number,
+        marker,
         body: buildDependencyUnlockComment({
           issueNumber: issue.number,
           dependencyNumbers,
           at: new Date().toISOString(),
         }),
-      })
+      },
+    })
+    if (comment.outcome !== 'confirmed') {
+      throw new Error(`依赖解锁评论未确认: ${githubWriteOutcomeError(comment)}`)
     }
     const body = rewriteCompletedDependencySection(issue.body, dependencyNumbers)
     if (body === issue.body) {
       dependencyLedgerRetryGate.succeed(retryKey)
       return { issue, updated: false }
     }
-    const updated = await rest.mutate<RepositoryIssueRest>(`repos/${repoKey}/issues/${issue.number}`, 'PATCH', { body })
-    rest.invalidate(`repo:${repoKey}`)
-    rest.invalidate(`${repoKey}/issues/${issue.number}`)
+    const updated = await githubWrite(ctx, {
+      operation: 'issue-update',
+      input: { repoKey, number: issue.number, body },
+    })
+    if (updated.outcome !== 'confirmed') {
+      throw new Error(`依赖账本更新未确认: ${githubWriteOutcomeError(updated)}`)
+    }
     dependencyLedgerRetryGate.succeed(retryKey)
     return {
       issue: {
         ...issue,
         body,
-        updatedAt: updated.updated_at ?? issue.updatedAt,
+        updatedAt: (updated.value as { updated_at?: string } | undefined)?.updated_at ?? issue.updatedAt,
         contract: checkIssueContract(body),
       },
       updated: true,

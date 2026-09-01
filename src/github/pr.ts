@@ -4,6 +4,7 @@ import { notifyLocalGitMutation } from '../infra/local-git-snapshot.ts'
 import { shellQuote } from '../infra/develop-core.ts'
 import { runCommand } from '../infra/runtime.ts'
 import { githubRest } from './rest.ts'
+import { githubWrite, githubWriteOutcomeError } from './writes.ts'
 
 async function readOpenLinkedPr(ctx: Context, repoKey: string, branch: string): Promise<string | null> {
   const owner = repoKey.split('/')[0]
@@ -33,6 +34,11 @@ export async function ensurePullRequest(
     issueNumber: string
     title: string
   },
+  options: {
+    /** Durable attempt marker hook: the caller persists the pending intent
+     *  into its workflow state BEFORE the PR-create dispatch. */
+    persistMarker?: () => Promise<void>
+  } = {},
 ): Promise<{ number: string; created: boolean }> {
   // PR creation is a mutating action: a failed authoritative lookup must stop,
   // not be interpreted as "there is no PR" and create a duplicate.
@@ -64,12 +70,27 @@ export async function ensurePullRequest(
     'pr-create-push',
     'ensurePullRequest',
   )
-  const created = await githubRest(ctx).mutate<{ number?: number }>(`repos/${input.repoKey}/pulls`, 'POST', {
-    title: input.title,
-    head: input.branch,
-    base: input.base,
-    body: `Closes #${input.issueNumber}`,
+  // Slice B: PR creation is a non-repeatable typed write with a PR-by-head
+  // authoritative readback. The attempt marker lands in the caller's
+  // workflow state before dispatch; a lost response settles by re-reading
+  // the open-PR-by-head list (the readback has proven it exists).
+  const outcome = await githubWrite(ctx, {
+    operation: 'pr-create',
+    input: {
+      repoKey: input.repoKey,
+      branch: input.branch,
+      base: input.base,
+      title: input.title,
+      body: `Closes #${input.issueNumber}`,
+    },
+    persistMarker: options.persistMarker,
   })
-  if (!created.number) throw new Error('GitHub 创建 PR 后未返回 PR 编号')
-  return { number: String(created.number), created: true }
+  if (outcome.outcome !== 'confirmed') {
+    throw new Error(`PR 创建未确认: ${githubWriteOutcomeError(outcome)}`)
+  }
+  const created = outcome.value as { number?: number } | undefined
+  const number =
+    created?.number !== undefined ? String(created.number) : await readOpenLinkedPr(ctx, input.repoKey, input.branch)
+  if (!number) throw new Error('GitHub 创建 PR 后未返回 PR 编号')
+  return { number, created: true }
 }

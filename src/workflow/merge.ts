@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs'
 import { userInfo } from 'node:os'
 import { isAbsolute, relative, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { githubWrite, githubWriteOutcomeError } from '../github/writes.ts'
+import { githubWrite, githubWriteOutcomeError, githubWriteRecoverOperation } from '../github/writes.ts'
 import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
 import { notifyLocalGitMutation } from '../infra/local-git-snapshot.ts'
 import { parseWorktreeList } from '../agent/worktree.ts'
@@ -506,25 +506,40 @@ export async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): P
       const issueState = await fetchGithubIssueState(ctx, url)
       if (issueState === null) throw new Error('无法读取实时 Issue 状态')
       if (issueState === 'OPEN') {
-        // The closing comment is a separate non-repeatable write: its marker
-        // is the cleanup step ledger itself (persistStep below), and the
-        // exact-body readback makes a retry after an uncertain outcome safe.
-        const comment = await githubWrite(ctx, {
-          operation: 'issue-comment-create',
-          input: {
-            repoKey,
-            number: Number(parsed.number),
-            body: `由 PR #${pr.number} 以 merge commit 合并交付。`,
-          },
-        })
-        if (comment.outcome !== 'confirmed') {
-          logTaskDiagnostic('merge-close-comment-unconfirmed', {
-            workflowKey: issueKey(repoKey, parsed.number),
-            repoKey,
-            issue: Number(parsed.number),
-            outcome: comment.outcome,
-            error: githubWriteOutcomeError(comment),
-          })
+        // The closing comment is a separate non-repeatable write whose durable
+        // attempt marker is the cleanup step ledger: 'pending' is persisted
+        // before dispatch, 'confirmed' once the readback proves the body. A
+        // re-run that finds 'pending' settles by readback ONLY — a non-
+        // repeatable comment is never re-dispatched. The comment stays
+        // diagnostic and non-blocking for the critical issue-close.
+        const closingBody = `由 PR #${pr.number} 以 merge commit 合并交付。`
+        if (delivery.cleanup.issueComment !== 'confirmed') {
+          const comment =
+            delivery.cleanup.issueComment === 'pending'
+              ? await githubWriteRecoverOperation(ctx, {
+                  operation: 'issue-comment-create',
+                  input: { repoKey, number: Number(parsed.number), body: closingBody },
+                })
+              : await githubWrite(ctx, {
+                  operation: 'issue-comment-create',
+                  input: { repoKey, number: Number(parsed.number), body: closingBody },
+                  persistMarker: async () => {
+                    delivery.cleanup.issueComment = 'pending'
+                    await persistStep()
+                  },
+                })
+          if (comment.outcome === 'confirmed') {
+            delivery.cleanup.issueComment = 'confirmed'
+            await persistStep()
+          } else {
+            logTaskDiagnostic('merge-close-comment-unconfirmed', {
+              workflowKey: issueKey(repoKey, parsed.number),
+              repoKey,
+              issue: Number(parsed.number),
+              outcome: comment.outcome,
+              error: githubWriteOutcomeError(comment),
+            })
+          }
         }
         const close = await githubWrite(ctx, {
           operation: 'issue-close',
