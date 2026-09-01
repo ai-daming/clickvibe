@@ -21,6 +21,8 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { GatewayClosedError } from './gateway-contracts.ts'
+import { createActiveWriteTracker } from './gateway-write-tracker.ts'
 import { createWriteLeaseRegistry } from './gateway-write-leases.ts'
 import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
 import { GithubRateLimitError, type GithubRateLimitKind } from './rest.ts'
@@ -97,6 +99,16 @@ export function createGithubGatewayOwner(
   // a set, granted whole from a FIFO queue; reads of covered keys wait for
   // release; the transaction's own readback runs exempt. Queued entries carry
   // their logical request id so close() settles them with one terminal.
+  const errorText = (error: unknown): string | null =>
+    error instanceof Error ? error.message : error === undefined ? null : String(error)
+  const settleTerminalOn = (promise: Promise<unknown>, requestId: string): void => {
+    void promise.then(
+      () => owner.noteTerminal(requestId, 'succeeded'),
+      (error: unknown) =>
+        owner.noteTerminal(requestId, error instanceof GithubRateLimitError ? 'rate-limited' : 'failed', error),
+    )
+  }
+
   const writeLeases = createWriteLeaseRegistry({
     noteInterruptedTerminal: (requestId, error) => owner.noteTerminal(requestId, 'interrupted', error),
   })
@@ -109,25 +121,25 @@ export function createGithubGatewayOwner(
   const pageCounts = new Map<string, number>()
   const requestPriorities = new Map<string, 'critical' | 'normal'>()
   const terminaledRequests = new Set<string>()
+  // Logical write transactions in flight (CF1): drained at close, then
+  // swept by dispatch phase — see the tracker module.
+  const activeWrites = createActiveWriteTracker({
+    noteTerminal: (requestId, outcome, error) => owner.noteTerminal(requestId, outcome, error),
+  })
   let nextRequestId = 0
-
-  const errorText = (error: unknown): string | null =>
-    error instanceof Error ? error.message : error === undefined ? null : String(error)
-  const isRateLimit = (error: unknown): boolean => error instanceof GithubRateLimitError
-
-  const settleTerminalOn = (promise: Promise<unknown>, requestId: string): void => {
-    void promise.then(
-      () => owner.noteTerminal(requestId, 'succeeded'),
-      (error: unknown) => owner.noteTerminal(requestId, isRateLimit(error) ? 'rate-limited' : 'failed', error),
-    )
-  }
 
   const flushIdleWaiters = () => {
     // Quiescence = nothing waiting, nothing pacing, nothing running (review
     // r9: waiting+running-only resolved idle() while a step still paced) —
     // and no write-lease waiter: a queued write or a lease-blocked read is
     // live work the owner still owes a settlement to (review F2).
-    if (waiting.length === 0 && running.size === 0 && pacing.size === 0 && writeLeases.pendingWaiters() === 0) {
+    if (
+      waiting.length === 0 &&
+      running.size === 0 &&
+      pacing.size === 0 &&
+      writeLeases.pendingWaiters() === 0 &&
+      activeWrites.size() === 0
+    ) {
       const waiters = idleWaiters
       idleWaiters = []
       for (const resolve of waiters) resolve()
@@ -362,7 +374,7 @@ export function createGithubGatewayOwner(
       const priority = ambient?.priority ?? (requestId ? (requestPriorities.get(requestId) ?? 'normal') : 'normal')
       return new Promise<T>((resolve, reject) => {
         if (closed || recorder.sealed) {
-          reject(new Error('Gateway 已关闭,拒绝新的上游步骤'))
+          reject(new GatewayClosedError('Gateway 已关闭,拒绝新的上游步骤'))
           return
         }
         const step: PendingStep = {
@@ -419,31 +431,35 @@ export function createGithubGatewayOwner(
     async close(options: { drainMs?: number } = {}): Promise<void> {
       closed = true
       const drainMs = options.drainMs ?? 5_000
-      // Queued write-lease acquisitions and reads waiting behind a lease are
-      // part of the write machinery close() must settle (review F2): a waiter
-      // that survives the seal would either hang forever or wake up inside a
-      // closed Gateway. The registry emits one interrupted terminal per
-      // queued write; a waiting read has not declared yet and simply fails.
+      // The write machinery settles first (review F2): one interrupted
+      // terminal per queued write; lease-blocked reads have not declared.
       writeLeases.interruptAll()
-      // Queued steps are interrupted immediately; running steps get the drain
-      // window, and anything still unsettled at the deadline is terminal
-      // interrupted before the recorder seals (ADR-0010 §10 close ordering).
+      // Queued steps interrupt immediately; running steps get the drain
+      // window (ADR-0010 §10). Active WRITE requests leave their terminal to
+      // the phase-aware sweep below — a step-level interrupted here could
+      // contradict a dispatch that already went out (review CF1).
       for (const step of waiting.splice(0)) {
-        owner.noteTerminal(step.requestId, 'interrupted', 'Gateway 关闭:排队步骤被中断')
-        step.fail(new Error('Gateway 已关闭,排队步骤被中断'))
+        const queued = new GatewayClosedError('Gateway 已关闭:排队步骤被中断')
+        if (!activeWrites.has(step.requestId)) owner.noteTerminal(step.requestId, 'interrupted', queued)
+        step.fail(queued)
       }
       for (const step of pacing.values()) {
         pacing.delete(step.requestId)
-        const error = new Error('Gateway 已关闭:节流等待中的步骤被中断')
-        owner.noteTerminal(step.requestId, 'interrupted', error)
+        const error = new GatewayClosedError('Gateway 已关闭:节流等待中的步骤被中断')
+        if (!activeWrites.has(step.requestId)) owner.noteTerminal(step.requestId, 'interrupted', error)
         step.fail(error)
       }
-      if (running.size > 0) {
-        await Promise.race([owner.idle(), new Promise((resolve) => setTimeout(resolve, drainMs))])
+      // Drain running steps AND whole logical write transactions (CF1): one
+      // parked in its marker is live work close() must wait for.
+      if (running.size > 0 || activeWrites.size() > 0) {
+        await Promise.race([
+          Promise.all([owner.idle(), activeWrites.drain()]).then(() => {}),
+          new Promise((resolve) => setTimeout(resolve, drainMs)),
+        ])
       }
       for (const step of running.values()) {
         const error = new Error('Gateway 已关闭,运行步骤未在窗口内结算')
-        owner.noteTerminal(step.requestId, 'interrupted', error)
+        if (!activeWrites.has(step.requestId)) owner.noteTerminal(step.requestId, 'interrupted', error)
         // The caller's promise must end — a terminal event alone leaves the
         // panel spinner hanging forever (review r6/F3). First-terminal-wins
         // already fences any late settlement.
@@ -452,14 +468,14 @@ export function createGithubGatewayOwner(
       // Fence every still-in-flight settlement: from here on a late response
       // is diagnostic-only — no caller resolution, no cache publish, no
       // second terminal.
-      // Sweep first: every DECLARED request leaves exactly one terminal —
-      // a write whose readback would only settle after the seal (or an
-      // in-flight singleflight leader) is closed out here as interrupted
-      // (review F2: 已登记请求必须有 terminal).
+      // Sweep: every declared request leaves exactly one terminal. Reads
+      // close out interrupted; still-unsettled writes by phase (CF1: never
+      // dispatched → interrupted, dispatch attempted → unknown).
+      activeWrites.sweepAtDeadline()
       for (const requestId of requestPriorities.keys()) {
-        if (!terminaledRequests.has(requestId)) {
-          owner.noteTerminal(requestId, 'interrupted', 'Gateway 关闭:未决请求被中断')
-        }
+        if (terminaledRequests.has(requestId)) continue
+        if (activeWrites.has(requestId)) continue
+        owner.noteTerminal(requestId, 'interrupted', 'Gateway 关闭:未决请求被中断')
       }
       ownerGeneration += 1
       recorder.seal()
@@ -467,7 +483,7 @@ export function createGithubGatewayOwner(
       flushIdleWaiters()
     },
     declareLogicalRequest(scope: 'resource' | 'aggregate' | 'direct', key: string): string {
-      if (closed || recorder.sealed) throw new Error('Gateway 已关闭,拒绝新的 GitHub 访问申请')
+      if (closed || recorder.sealed) throw new GatewayClosedError('Gateway 已关闭,拒绝新的 GitHub 访问申请')
       nextRequestId += 1
       const requestId = `gh-${nextRequestId}`
       const priority = admissionAls.getStore()?.priority ?? 'normal'
@@ -555,6 +571,14 @@ export function createGithubGatewayOwner(
     },
     noteReadbackSettled(requestId: string, confirmed: boolean): void {
       recorder.emit({ kind: 'readback-settled', requestId, confirmed, at: Date.now() })
+    },
+    runLogicalWrite<T>(requestId: string, run: () => Promise<T>): Promise<T> {
+      return activeWrites.run(requestId, run).finally(() => {
+        flushIdleWaiters()
+      })
+    },
+    noteWriteDispatchAttempted(requestId: string): void {
+      activeWrites.noteDispatchAttempted(requestId)
     },
     rateLimitError(now = Date.now()): GithubRateLimitError | null {
       return circuitUntil > now ? new GithubRateLimitError(circuitUntil, circuitKind) : null

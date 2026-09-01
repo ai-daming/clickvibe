@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { GatewayClosedError } from './gateway-contracts.ts'
 
 /**
  * Write-lease registry (ADR-0010 §9) — the owner's exclusive-write machinery,
@@ -91,12 +92,12 @@ export function createWriteLeaseRegistry(hooks: WriteLeaseHooks): WriteLeaseRegi
     },
     interruptAll(): void {
       for (const queued of writeQueue.splice(0)) {
-        const error = new Error('Gateway 已关闭:排队写请求被中断')
+        const error = new GatewayClosedError('Gateway 已关闭:排队写请求被中断')
         hooks.noteInterruptedTerminal(queued.requestId, error)
         queued.reject(error)
       }
       for (const waiter of readableWaiters.splice(0)) {
-        waiter.reject(new Error('Gateway 已关闭:资源读等待被中断'))
+        waiter.reject(new GatewayClosedError('Gateway 已关闭:资源读等待被中断'))
       }
     },
     pendingWaiters(): number {

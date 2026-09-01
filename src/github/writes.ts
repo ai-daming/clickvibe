@@ -17,7 +17,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { GithubGatewayOwner } from './gateway-contracts.ts'
+import { type GithubGatewayOwner, GatewayClosedError } from './gateway-contracts.ts'
 import { GithubRestHttpError, GithubRestReader } from './rest.ts'
 
 export type GithubWriteOutcome<T> =
@@ -69,22 +69,25 @@ export async function githubWriteRecover<TInput, TDispatch>(
   input: TInput,
 ): Promise<GithubWriteOutcome<TDispatch>> {
   const requestId = owner.declareLogicalRequest('write', `${spec.id}:recover`)
-  try {
-    const observation = await owner.runWithAdmission(
-      { priority: spec.priority, deadlineMs: spec.deadlineMs, maxPages: spec.maxPages },
-      () => owner.runWithRequest(requestId, () => owner.runWithLeaseExemption(() => spec.readback.run(reader, input))),
-    )
-    const confirmed = spec.readback.confirms(input, observation)
-    owner.noteReadbackSettled(requestId, confirmed)
-    owner.noteTerminal(requestId, confirmed ? 'succeeded' : 'unknown', confirmed ? undefined : '回读未证实预期事实')
-    return confirmed
-      ? ({ outcome: 'confirmed', value: undefined as TDispatch } as { outcome: 'confirmed'; value: TDispatch })
-      : { outcome: 'unknown', error: new Error('回读未证实预期事实') }
-  } catch (error) {
-    owner.noteReadbackSettled(requestId, false)
-    owner.noteTerminal(requestId, 'unknown', errorText(error))
-    return { outcome: 'unknown', error }
-  }
+  return owner.runLogicalWrite(requestId, async () => {
+    try {
+      const observation = await owner.runWithAdmission(
+        { priority: spec.priority, deadlineMs: spec.deadlineMs, maxPages: spec.maxPages },
+        () =>
+          owner.runWithRequest(requestId, () => owner.runWithLeaseExemption(() => spec.readback.run(reader, input))),
+      )
+      const confirmed = spec.readback.confirms(input, observation)
+      owner.noteReadbackSettled(requestId, confirmed)
+      owner.noteTerminal(requestId, confirmed ? 'succeeded' : 'unknown', confirmed ? undefined : '回读未证实预期事实')
+      return confirmed
+        ? ({ outcome: 'confirmed', value: undefined as TDispatch } as { outcome: 'confirmed'; value: TDispatch })
+        : { outcome: 'unknown', error: new Error('回读未证实预期事实') }
+    } catch (error) {
+      owner.noteReadbackSettled(requestId, false)
+      owner.noteTerminal(requestId, 'unknown', errorText(error))
+      return { outcome: 'unknown', error }
+    }
+  })
 }
 
 /** The write confirmation transaction (ADR-0010 §9). */
@@ -102,53 +105,66 @@ export async function runWriteTransaction<TInput, TDispatch>(
   // Every path after a successful acquisition runs inside the finally that
   // releases the lease — no reject path may strand it.
   const requestId = owner.declareLogicalRequest('write', `${spec.id}:${leaseKeys[0] ?? spec.id}`)
-  let release: (() => void) | null = null
-  try {
+  // The whole transaction is tracked as one logical write (review CF1):
+  // close() drains it within its window, and an unsettled transaction at the
+  // deadline is swept unknown once its dispatch was attempted.
+  return owner.runLogicalWrite(requestId, async () => {
+    let release: (() => void) | null = null
     try {
-      release = await owner.acquireWriteLeases(leaseKeys, requestId)
-    } catch (queuedError) {
-      // close() interrupted the queued acquisition and already emitted the
-      // single interrupted terminal — only propagate.
-      throw queuedError
-    }
-    if (!spec.repeatable) {
-      if (!options.persistMarker) {
-        const error = new Error(`写操作 ${spec.id} 不可重复,必须提供 attempt marker 持久化钩子`)
-        owner.noteTerminal(requestId, 'failed', error.message)
-        return { outcome: 'failed', error }
-      }
       try {
-        await options.persistMarker()
-      } catch (markerError) {
-        // Marker persistence failed before any dispatch: the write provably
-        // never happened (ADR-0010 §9 — marker 落盘前不得派发).
-        owner.noteTerminal(requestId, 'failed', errorText(markerError))
-        return { outcome: 'failed', error: markerError }
+        release = await owner.acquireWriteLeases(leaseKeys, requestId)
+      } catch (queuedError) {
+        // close() interrupted the queued acquisition and already emitted the
+        // single interrupted terminal — only propagate.
+        throw queuedError
       }
-    }
-
-    let dispatched: TDispatch
-    try {
-      dispatched = await owner.runWithAdmission(
-        { priority: spec.priority, deadlineMs: spec.deadlineMs, maxPages: spec.maxPages },
-        () => owner.runWithRequest(requestId, () => spec.dispatch(reader, input)),
-      )
-    } catch (dispatchError) {
-      if (isProvableRejection(dispatchError)) {
-        owner.noteTerminal(requestId, 'failed', errorText(dispatchError))
-        return { outcome: 'failed', error: dispatchError }
+      if (!spec.repeatable) {
+        if (!options.persistMarker) {
+          const error = new Error(`写操作 ${spec.id} 不可重复,必须提供 attempt marker 持久化钩子`)
+          owner.noteTerminal(requestId, 'failed', error.message)
+          return { outcome: 'failed', error }
+        }
+        try {
+          await options.persistMarker()
+        } catch (markerError) {
+          // Marker persistence failed before any dispatch: the write provably
+          // never happened (ADR-0010 §9 — marker 落盘前不得派发).
+          owner.noteTerminal(requestId, 'failed', errorText(markerError))
+          return { outcome: 'failed', error: markerError }
+        }
       }
-      // Uncertain outcome: the write may or may not have executed on GitHub.
-      // Invalidate, then let the authoritative readback alone decide.
-      return await settleUncertain(owner, reader, spec, input, requestId, dispatchError)
-    }
 
-    // Even a successful response is not confirmation by itself — the
-    // invalidation and readback always run (design §9).
-    return await settleUncertain(owner, reader, spec, input, requestId, null, dispatched)
-  } finally {
-    release?.()
-  }
+      let dispatched: TDispatch
+      try {
+        owner.noteWriteDispatchAttempted(requestId)
+        dispatched = await owner.runWithAdmission(
+          { priority: spec.priority, deadlineMs: spec.deadlineMs, maxPages: spec.maxPages },
+          () => owner.runWithRequest(requestId, () => spec.dispatch(reader, input)),
+        )
+      } catch (dispatchError) {
+        if (dispatchError instanceof GatewayClosedError) {
+          // The rejection provably never dispatched (submit-time or queue
+          // interrupt): one interrupted terminal, caller sees the write did
+          // not happen (review CF1 alignment).
+          owner.noteTerminal(requestId, 'interrupted', errorText(dispatchError))
+          return { outcome: 'failed', error: dispatchError }
+        }
+        if (isProvableRejection(dispatchError)) {
+          owner.noteTerminal(requestId, 'failed', errorText(dispatchError))
+          return { outcome: 'failed', error: dispatchError }
+        }
+        // Uncertain outcome: the write may or may not have executed on GitHub.
+        // Invalidate, then let the authoritative readback alone decide.
+        return await settleUncertain(owner, reader, spec, input, requestId, dispatchError)
+      }
+
+      // Even a successful response is not confirmation by itself — the
+      // invalidation and readback always run (design §9).
+      return await settleUncertain(owner, reader, spec, input, requestId, null, dispatched)
+    } finally {
+      release?.()
+    }
+  })
 }
 
 async function settleUncertain<TInput, TDispatch>(
@@ -324,8 +340,16 @@ const prMergeSpec: GithubWriteSpec<PrMergeInput, { merged?: boolean }> = {
       sha: input.headRefOid,
     }),
   readback: {
-    run: (reader, input) => reader.json<{ merged_at?: string }>(`repos/${input.repoKey}/pulls/${input.number}`),
-    confirms: (_input, observation) => (observation as { merged_at?: unknown } | null)?.merged_at != null,
+    run: (reader, input) =>
+      reader.json<{ merged_at?: string; head?: { sha?: string } | null }>(
+        `repos/${input.repoKey}/pulls/${input.number}`,
+      ),
+    // Version-bound (review CF2): merged_at alone would confirm a DIFFERENT
+    // head's merge — the readback must see the exact CAS'd head merged.
+    confirms: (input, observation) => {
+      const pr = observation as { merged_at?: unknown; head?: { sha?: unknown } | null } | null
+      return pr?.merged_at != null && String(pr.head?.sha ?? '') === input.headRefOid
+    },
   },
 }
 
@@ -333,6 +357,18 @@ interface ApprovalInput {
   repoKey: string
   prNumber: number
   body: string
+  /** The reviewed commit identity the approval is bound to (review CF2). */
+  reviewedHead: string
+}
+
+/** The reviewed short hash must be a prefix of the review's full commit_id —
+ *  the approval confirms the commit the review covered, never another head. */
+const bindsReviewedCommit = (commitId: string | null | undefined, reviewedHead: string): boolean => {
+  const full = String(commitId ?? '')
+    .trim()
+    .toLowerCase()
+  const short = reviewedHead.trim().toLowerCase()
+  return short.length >= 4 && full.startsWith(short)
 }
 
 const approvalSpec: GithubWriteSpec<ApprovalInput, { id: number }> = {
@@ -350,12 +386,33 @@ const approvalSpec: GithubWriteSpec<ApprovalInput, { id: number }> = {
       body: input.body,
     }),
   readback: {
-    // Paginated: PRs accumulate reviews beyond one default page.
-    run: (reader, input) =>
-      reader.paginate<{ state?: string; body?: string }>(`repos/${input.repoKey}/pulls/${input.prNumber}/reviews`),
-    confirms: (input, observation) =>
-      Array.isArray(observation) &&
-      observation.some((entry) => String(entry.state ?? '').toUpperCase() === 'APPROVED' && entry.body === input.body),
+    // Paginated: PRs accumulate reviews beyond one default page. The viewer
+    // login pins the authenticated actor: an APPROVED entry by someone else
+    // with the same body must not confirm OUR approval (review CF2).
+    run: async (reader, input) => {
+      const [reviews, viewer] = await Promise.all([
+        reader.paginate<{ state?: string; body?: string; commit_id?: string; user?: { login?: string } | null }>(
+          `repos/${input.repoKey}/pulls/${input.prNumber}/reviews`,
+        ),
+        reader.json<{ login?: string }>('user'),
+      ])
+      return { reviews, viewerLogin: viewer?.login ?? null }
+    },
+    confirms: (input, observation) => {
+      const result = observation as {
+        reviews?: Array<{ state?: string; body?: string; commit_id?: string; user?: { login?: string } | null }>
+      } | null
+      if (!result || !Array.isArray(result.reviews)) return false
+      const viewerLogin = (observation as { viewerLogin?: string | null } | null)?.viewerLogin
+      if (!viewerLogin) return false
+      return result.reviews.some(
+        (entry) =>
+          String(entry.state ?? '').toUpperCase() === 'APPROVED' &&
+          entry.body === input.body &&
+          bindsReviewedCommit(entry.commit_id, input.reviewedHead) &&
+          entry.user?.login === viewerLogin,
+      )
+    },
   },
 }
 

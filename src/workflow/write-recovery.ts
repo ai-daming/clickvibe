@@ -104,10 +104,15 @@ export async function recoverUnsettledWrites(ctx: Context, live: LiveTask, workf
           })
         }
       }
-      if (unsettledApproval(event) && event.approvalAttempt && workflow.prNumber) {
+      if (unsettledApproval(event) && event.approvalAttempt && workflow.prNumber && event.hash) {
         const recovered = await githubWriteRecoverOperation(ctx, {
           operation: 'pr-review-approve',
-          input: { repoKey: workflow.repoKey, prNumber: Number(workflow.prNumber), body: REVIEW_APPROVAL_BODY },
+          input: {
+            repoKey: workflow.repoKey,
+            prNumber: Number(workflow.prNumber),
+            body: REVIEW_APPROVAL_BODY,
+            reviewedHead: event.hash,
+          },
         })
         if (recovered.outcome === 'confirmed') {
           resolutions.push({

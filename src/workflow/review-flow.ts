@@ -397,6 +397,7 @@ export async function startReview(
             repoKey: reloaded.repoKey,
             prNumber: reloaded.prNumber,
             passed,
+            reviewedHead,
           },
           async () => {
             // The review event's approvalAttempt is the durable marker. It is

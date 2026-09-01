@@ -343,7 +343,10 @@ test('restart recovery runs the readback ONLY — zero write dispatch, ever', as
 test('family pr-merge: PUT head-CAS merge, readback confirms merged_at', async () => {
   const { reader, owner, calls } = makeReader(async (step) => {
     if (step.command.includes('--method PUT')) return { exitCode: 0, text: ok({ merged: true }, 200) }
-    return { exitCode: 0, text: ok({ state: 'closed', merged_at: '2026-09-01T00:00:00Z' }) }
+    return {
+      exitCode: 0,
+      text: ok({ state: 'closed', merged_at: '2026-09-01T00:00:00Z', head: { sha: 'deadbee' } }),
+    }
   })
   const spec = GITHUB_WRITE_OPERATIONS['pr-merge'] as GithubWriteSpec<
     { repoKey: string; number: number; headRefOid: string; issueNumber: number },
@@ -372,6 +375,22 @@ test('family pr-merge: PUT head-CAS merge, readback confirms merged_at', async (
     issueNumber: 122,
   })
   assert.equal(second.outcome, 'unknown')
+  // review CF2: a merged PR whose head is NOT the CAS'd head is someone
+  // else's merge — it must not confirm ours.
+  const differentHead = makeReader(async (step) => {
+    if (step.command.includes('--method PUT')) return { exitCode: 0, text: ok({ merged: true }, 200) }
+    return {
+      exitCode: 0,
+      text: ok({ state: 'closed', merged_at: '2026-09-01T00:00:00Z', head: { sha: 'cafebabecafebabe' } }),
+    }
+  })
+  const third = await runWriteTransaction(differentHead.owner, differentHead.reader, spec, {
+    repoKey: 'o/r',
+    number: 7,
+    headRefOid: 'deadbee',
+    issueNumber: 122,
+  })
+  assert.equal(third.outcome, 'unknown', 'a different head merged is not our merge')
 })
 
 test('family issue-close: PATCH state, readback confirms CLOSED', async () => {
@@ -664,7 +683,100 @@ test('review F2: close() settles a queued write with one interrupted terminal an
   const outcomes = terminals.map((event) => (event as { outcome: string }).outcome).sort()
   assert.deepEqual(
     outcomes,
-    ['interrupted', 'interrupted'],
-    'the queued write and the still-settling write each leave one interrupted terminal',
+    ['interrupted', 'unknown'],
+    'the queued write is interrupted; the dispatch-attempted write is swept unknown (it may have executed)',
   )
+})
+
+test('review CF1: a transaction parked in its marker is swept interrupted and later fails with zero dispatch', async () => {
+  const owner = createGithubGatewayOwner()
+  const ctx = {
+    shell: {
+      resolve: (spec: unknown) => spec,
+      run: async () => {
+        throw new Error('must not dispatch — the gateway closed before the marker resolved')
+      },
+    },
+  }
+  const reader = new GithubRestReader(ctx as never, { owner, minimumIntervalMs: 0 })
+  let releaseMarker: (() => void) | null = null
+  const markerGate = new Promise<void>((resolve) => {
+    releaseMarker = resolve
+  })
+  const spec: GithubWriteSpec<{ repoKey: string }, unknown> = {
+    id: 'test-marker-parked',
+    keys: () => ['o/r/issues/5', 'repo:o/r'],
+    priority: 'normal',
+    deadlineMs: 5_000,
+    maxPages: 2,
+    repeatable: false,
+    dispatch: (read) => read.mutate('repos/o/r/issues/5/comments', 'POST', { body: 'x' }),
+    readback: {
+      run: (read) => read.json('repos/o/r/issues/5'),
+      confirms: () => true,
+    },
+  }
+  const transaction = runWriteTransaction(
+    owner,
+    reader,
+    spec,
+    { repoKey: 'o/r' },
+    {
+      persistMarker: async () => {
+        await markerGate
+      },
+    },
+  )
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  await owner.close({ drainMs: 50 })
+  const terminals = owner.lifecycleEvents().filter((event) => event.kind === 'terminal')
+  assert.equal(terminals.length, 1, 'the swept terminal is the only answer')
+  assert.equal((terminals[0] as { outcome: string }).outcome, 'interrupted', 'pre-dispatch writes are interrupted')
+  releaseMarker?.()
+  const outcome = await transaction
+  assert.equal(outcome.outcome, 'failed', 'the caller sees the write provably never happened')
+  assert.equal(owner.lifecycleEvents().filter((event) => event.kind === 'terminal').length, 1)
+})
+
+test('review CF1: a transaction parked in its readback is swept unknown — it may have executed', async () => {
+  const owner = createGithubGatewayOwner()
+  let releaseReadback: (() => void) | null = null
+  const readbackGate = new Promise<void>((resolve) => {
+    releaseReadback = resolve
+  })
+  const ctx = {
+    shell: {
+      resolve: (spec: unknown) => spec,
+      run: async (spec: { command: string }) => {
+        if (spec.command.includes('--method POST'))
+          return { exitCode: 0, stdout: { text: 'HTTP/1.1 201\n\n{"id":1}' }, stderr: { text: '' } }
+        await readbackGate
+        return { exitCode: 0, stdout: { text: 'HTTP/1.1 200\n\n{}' }, stderr: { text: '' } }
+      },
+    },
+  }
+  const reader = new GithubRestReader(ctx as never, { owner, minimumIntervalMs: 0 })
+  const spec: GithubWriteSpec<{ repoKey: string }, unknown> = {
+    id: 'test-readback-parked',
+    keys: () => ['o/r/issues/5', 'repo:o/r'],
+    priority: 'normal',
+    deadlineMs: 5_000,
+    maxPages: 2,
+    repeatable: true,
+    dispatch: (read) => read.mutate('repos/o/r/issues/5/comments', 'POST', { body: 'x' }),
+    readback: {
+      run: (read) => read.json('repos/o/r/issues/5'),
+      confirms: () => true,
+    },
+  }
+  const transaction = runWriteTransaction(owner, reader, spec, { repoKey: 'o/r' })
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  await owner.close({ drainMs: 50 })
+  const terminals = owner.lifecycleEvents().filter((event) => event.kind === 'terminal')
+  assert.equal(terminals.length, 1)
+  assert.equal((terminals[0] as { outcome: string }).outcome, 'unknown', 'a dispatched write is never guessed closed')
+  releaseReadback?.()
+  const outcome = await transaction
+  assert.equal(outcome.outcome, 'unknown', 'caller and lifecycle agree on the single unknown answer')
+  assert.equal(owner.lifecycleEvents().filter((event) => event.kind === 'terminal').length, 1)
 })

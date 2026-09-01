@@ -195,6 +195,7 @@ test('review F4: an unprovable publication escalates pending to unknown — stil
     const { ctx, commands } = shellContext(async (step) => {
       if (step.command.includes('--method')) throw new Error(`recovery must never dispatch: ${step.command}`)
       // Comments readback: the body is absent; reviews readback: no APPROVED.
+      if (step.command.includes("'user'")) return { exitCode: 0, text: ok({ login: 'me' }) }
       if (step.command.includes('/reviews')) return { exitCode: 0, text: ok([{ state: 'COMMENTED', body: 'x' }]) }
       return { exitCode: 0, text: ok([{ id: 1, body: 'someone else' }]) }
     })
@@ -238,14 +239,20 @@ test('review F4: a pending approval settles confirmed when the reviews readback 
     await commitWorkflowFixture(workflow, null)
     const { ctx, commands } = shellContext(async (step) => {
       if (step.command.includes('--method')) throw new Error(`recovery must never dispatch: ${step.command}`)
+      if (step.command.includes("'user'")) return { exitCode: 0, text: ok({ login: 'me' }) }
       assert.match(step.command, /repos\/o\/r\/pulls\/29\/reviews/)
-      return { exitCode: 0, text: ok([{ state: 'APPROVED', body: REVIEW_APPROVAL_BODY }]) }
+      return {
+        exitCode: 0,
+        text: ok([
+          { state: 'APPROVED', body: REVIEW_APPROVAL_BODY, commit_id: 'abc1234deadbeef', user: { login: 'me' } },
+        ]),
+      }
     })
     const live = liveFor(workflow)
 
     await recoverUnsettledWrites(ctx, live, workflow)
 
-    assert.equal(commands.length, 1, 'readback only')
+    assert.equal(commands.length, 2, 'readback only: the reviews list and the viewer identity')
     const reloaded = await loadWorkflow(workflow.key)
     assert.equal(reloaded?.events[0].approvalAttempt?.status, 'confirmed')
   } finally {

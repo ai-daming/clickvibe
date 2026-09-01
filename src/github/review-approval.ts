@@ -11,6 +11,8 @@ export interface ReviewApprovalInput {
   repoKey: string
   prNumber: string | number | null
   passed: boolean
+  /** The reviewed commit the approval must bind to (review CF2). */
+  reviewedHead: string | null
 }
 
 export type ReviewApprovalResult = 'approved' | 'skipped' | 'failed' | 'unknown'
@@ -31,10 +33,15 @@ export async function approvePassedReview(
   input: ReviewApprovalInput,
   persistMarker: () => Promise<void>,
 ): Promise<ReviewApprovalResult> {
-  if (!input.passed || !input.prNumber) return 'skipped'
+  if (!input.passed || !input.prNumber || !input.reviewedHead) return 'skipped'
   const outcome = await githubWrite(ctx, {
     operation: 'pr-review-approve',
-    input: { repoKey: input.repoKey, prNumber: Number(input.prNumber), body: REVIEW_APPROVAL_BODY },
+    input: {
+      repoKey: input.repoKey,
+      prNumber: Number(input.prNumber),
+      body: REVIEW_APPROVAL_BODY,
+      reviewedHead: input.reviewedHead,
+    },
     persistMarker,
   })
   if (outcome.outcome === 'confirmed') return 'approved'

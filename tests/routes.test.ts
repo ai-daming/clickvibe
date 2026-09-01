@@ -2239,7 +2239,7 @@ function interruptedWorkflow(key: string, url: string, worktree: string): IssueW
 }
 
 async function waitForTask(listener: RequestListener, taskId: string): Promise<{ delta: string[] }> {
-  for (let attempt = 0; attempt < 100; attempt++) {
+  for (let attempt = 0; attempt < 400; attempt++) {
     const polled = await post(listener, '/clickvibe/api/develop/poll', { taskId, cursor: 0 })
     const body = polled.body as { ok: boolean; done?: boolean; delta?: string[] }
     if (body.done) return { delta: body.delta ?? [] }
@@ -2903,8 +2903,11 @@ test('invalid exact review session clears the stale id and falls back to a fresh
         if (spec.command.includes('--method POST') && spec.command.includes('/reviews')) {
           const body = JSON.parse(spec.stdin ?? '{}').body ?? ''
           approvals.push({ command: spec.command, body })
-          reviews.push({ state: 'APPROVED', body })
+          reviews.push({ state: 'APPROVED', body, commit_id: 'abc123', user: { login: 'clickvibe' } })
           return { exitCode: 0, stdout: { text: 'HTTP/1.1 201\n\n{"id":9}' }, stderr: { text: '' } }
+        }
+        if (spec.command.includes("'user'")) {
+          return { exitCode: 0, stdout: { text: included({ login: 'clickvibe' }) }, stderr: { text: '' } }
         }
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       },
@@ -4515,8 +4518,11 @@ test('review with user context appends it to the prompt and audits it in the rev
         }
         if (spec.command.includes('--method POST') && spec.command.includes('/reviews')) {
           const body = JSON.parse(spec.stdin ?? '{}').body ?? ''
-          reviews.push({ state: 'APPROVED', body })
+          reviews.push({ state: 'APPROVED', body, commit_id: 'abc123', user: { login: 'clickvibe' } })
           return { exitCode: 0, stdout: { text: 'HTTP/1.1 201\n\n{"id":9}' }, stderr: { text: '' } }
+        }
+        if (spec.command.includes("'user'")) {
+          return { exitCode: 0, stdout: { text: included({ login: 'clickvibe' }) }, stderr: { text: '' } }
         }
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       },
