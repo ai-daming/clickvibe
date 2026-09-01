@@ -78,6 +78,32 @@ test('rate rows demand EXACTLY five single executions (negative oracle)', () => 
   assert.equal(interrupted[0].pass, false, 'an interrupted read must fail the rate row')
 })
 
+test('rate rows fail when settlements are redistributed 2/0/1/1/1 (negative oracle)', () => {
+  // Totals stay 5/5/5 and every settlement carries a resource — only the
+  // PER-REQUEST ownership exposes that one read settled twice and another
+  // never settled (review r10 re-review, REPRO-6).
+  const events: Array<Record<string, unknown>> = [
+    { kind: 'declared', requestId: 'gh-1' },
+    { kind: 'dispatched', requestId: 'gh-1', waitedMs: 0 },
+    { kind: 'upstream-settled', requestId: 'gh-1', ok: true, rate: { resource: 'core' } },
+    { kind: 'upstream-settled', requestId: 'gh-1', ok: true, rate: { resource: 'core' } },
+    { kind: 'terminal', requestId: 'gh-1', outcome: 'succeeded' },
+    { kind: 'declared', requestId: 'gh-2' },
+    { kind: 'dispatched', requestId: 'gh-2', waitedMs: 0 },
+    { kind: 'terminal', requestId: 'gh-2', outcome: 'succeeded' },
+  ]
+  for (const id of ['gh-3', 'gh-4', 'gh-5']) {
+    events.push({ kind: 'declared', requestId: id })
+    events.push({ kind: 'dispatched', requestId: id, waitedMs: 0 })
+    events.push({ kind: 'upstream-settled', requestId: id, ok: true, rate: { resource: 'core' } })
+    events.push({ kind: 'terminal', requestId: id, outcome: 'succeeded' })
+  }
+  const metrics = { ...base, logicalRequests: 5, executions: 5, upstreamRequests: 5 }
+  const checks = thresholdChecks('rate', metrics, 5, events)
+  assert.equal(checks[0].pass, false, 'redistributed settlements must fail the per-request row')
+  assert.equal(checks[2].pass, true, 'the per-event resource row alone cannot catch ownership — it is not the guard')
+})
+
 test('rate rows require a real resource observation on every settled response (negative oracle)', () => {
   const missing = thresholdChecks(
     'rate',

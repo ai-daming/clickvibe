@@ -151,10 +151,32 @@ export function thresholdChecks(kind, metrics, ghChildren, events = []) {
       ]
     case 'rate': {
       const settled = events.filter((event) => event.kind === 'upstream-settled')
+      // Per-request ownership (review r10 re-review): aggregate totals cannot
+      // distinguish 1/1/1/1/1 from a 2/0/1/1/1 redistribution — each of the
+      // five declared requests must own exactly one dispatch, one settlement
+      // with a real resource, and one success terminal.
+      const declaredIds = events.filter((event) => event.kind === 'declared').map((event) => event.requestId)
+      const of = (id, kind) => events.filter((event) => event.requestId === id && event.kind === kind)
+      const perRequestOk =
+        declaredIds.length === 5 &&
+        new Set(declaredIds).size === 5 &&
+        declaredIds.every((id) => {
+          const settledOf = of(id, 'upstream-settled')
+          const terminals = of(id, 'terminal')
+          return (
+            of(id, 'dispatched').length === 1 &&
+            settledOf.length === 1 &&
+            settledOf[0].ok === true &&
+            settledOf[0].rate?.resource != null &&
+            terminals.length === 1 &&
+            terminals[0].outcome === 'succeeded'
+          )
+        })
       return [
         {
-          row: 'every workload read executed exactly once upstream (5 reads → exactly 5 executions, all succeeded)',
+          row: 'five reads, each dispatched once, settled once with a real resource, succeeded once (2/0/1/1/1 fails)',
           pass:
+            perRequestOk &&
             metrics.logicalRequests === 5 &&
             metrics.executions === 5 &&
             metrics.upstreamRequests === 5 &&

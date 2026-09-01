@@ -220,11 +220,16 @@ export async function enrichWorkflowStates(
           ? workflow.reviewResult
             ? Promise.resolve({ known: true, pr: snapshotPrFact(snapshotPull) })
             : fetchGithubPrFact(ctx, workflow.repoKey, workflow.branch, String(snapshotPull.number))
-          : snapshot && workflow.prNumber === null
-            ? // No PR anywhere in the shared snapshot and none claimed: a
-              // definite miss, priced 0 extra upstream (review r9).
+          : snapshot && workflow.prNumber === null && snapshot.pullsComplete
+            ? // PROVEN absence (review r11): the pulls page held the repo's
+              // ENTIRE PR list, so the branch miss is evidence. An incomplete
+              // page can never convert "not seen" into "no PR" — it falls to
+              // the exact owner-qualified query below.
               Promise.resolve({ known: true, pr: null })
-            : fetchGithubPrFact(ctx, workflow.repoKey, workflow.branch, workflow.prNumber),
+            : // Verdict-bound lookups read PR facts only (same rule as the
+              // snapshot-hit branch above): a local review result binds the
+              // review state, the upstream reviews fan-out is needless.
+              fetchGithubPrFact(ctx, workflow.repoKey, workflow.branch, workflow.prNumber, !workflow.reviewResult),
         snapshotIssue
           ? Promise.resolve(issueContractFrom(snapshotIssue))
           : fetchIssueContract(ctx, workflow.url).catch(() => null),
