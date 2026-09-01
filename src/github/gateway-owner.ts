@@ -92,6 +92,13 @@ export function createGithubGatewayOwner(
   let circuitUntil = 0
   let circuitKind: GithubRateLimitKind = 'unknown'
   const recorder = new GatewayLifecycleRecorder(options.sink)
+  // Write leases (ADR-0010 §9): held as a set, granted whole from a FIFO
+  // queue; reads of covered keys wait for release. The transaction's own
+  // readback runs exempt (it must never queue behind its own lease).
+  const heldWriteLeases = new Set<string>()
+  const writeQueue: Array<{ keys: string[]; resolve: () => void }> = []
+  const readableWaiters: Array<{ key: string; resolve: () => void }> = []
+  const leaseExemptAls = new AsyncLocalStorage<boolean>()
   const requestAls = new AsyncLocalStorage<string>()
   const admissionAls = new AsyncLocalStorage<GatewayAdmission>()
   const stepCounts = new Map<string, number>()
@@ -334,6 +341,33 @@ export function createGithubGatewayOwner(
     }
   }
 
+  const coversKey = (readKey: string, leaseKey: string): boolean =>
+    readKey === leaseKey || readKey.startsWith(`${leaseKey}/`)
+
+  const pumpWriteQueue = () => {
+    while (writeQueue.length > 0) {
+      const head = writeQueue[0]
+      if (head.keys.some((key) => heldWriteLeases.has(key))) break
+      writeQueue.shift()
+      for (const key of head.keys) heldWriteLeases.add(key)
+      head.resolve()
+    }
+  }
+
+  const waitReadableResource = async (key: string): Promise<void> => {
+    if (leaseExemptAls.getStore() === true) return
+    for (;;) {
+      const held = [...heldWriteLeases].some((leaseKey) => coversKey(key, leaseKey))
+      if (!held) return
+      await new Promise<void>((resolve) => readableWaiters.push({ key, resolve }))
+    }
+  }
+
+  const notifyReadableWaiters = () => {
+    const pending = readableWaiters.splice(0, readableWaiters.length)
+    for (const waiter of pending) waiter.resolve()
+  }
+
   const owner: GithubGatewayOwner = {
     credentialScopeId: CONSERVATIVE_CREDENTIAL_SCOPE,
     submitStep<T>(
@@ -508,6 +542,32 @@ export function createGithubGatewayOwner(
     lifecycleMetrics(): GatewayMetrics {
       return deriveGatewayMetrics(recorder.snapshot())
     },
+    acquireWriteLeases(keys: string[]): Promise<() => void> {
+      const sorted = [...new Set(keys)].sort()
+      return new Promise((resolve) => {
+        writeQueue.push({
+          keys: sorted,
+          resolve: () => {
+            resolve(() => {
+              for (const key of sorted) heldWriteLeases.delete(key)
+              pumpWriteQueue()
+              notifyReadableWaiters()
+            })
+          },
+        })
+        pumpWriteQueue()
+      })
+    },
+    waitReadableResource: (key: string) => waitReadableResource(key),
+    runWithLeaseExemption<T>(fn: () => Promise<T>): Promise<T> {
+      return leaseExemptAls.run(true, fn)
+    },
+    noteWriteInvalidated(requestId: string, keys: string[]): void {
+      recorder.emit({ kind: 'write-invalidated', requestId, keys, at: Date.now() })
+    },
+    noteReadbackSettled(requestId: string, confirmed: boolean): void {
+      recorder.emit({ kind: 'readback-settled', requestId, confirmed, at: Date.now() })
+    },
     rateLimitError(now = Date.now()): GithubRateLimitError | null {
       return circuitUntil > now ? new GithubRateLimitError(circuitUntil, circuitKind) : null
     },
@@ -572,6 +632,9 @@ export function createGithubGatewayOwner(
       loader: () => Promise<T>,
       options: CachedResourceOptions<T> = {},
     ): Promise<T> {
+      // Reads of a lease-held resource queue behind the write transaction
+      // (ADR-0010 §9) — including cache hits, which may predate the write.
+      await waitReadableResource(key)
       const requestId = owner.declareLogicalRequest('resource', key)
       try {
         owner.assertCircuitOpen()
@@ -639,6 +702,7 @@ export function createGithubGatewayOwner(
       loader: () => Promise<T>,
       options: CachedAggregateOptions<T> = {},
     ): Promise<T> {
+      await waitReadableResource(key)
       const requestId = owner.declareLogicalRequest('aggregate', key)
       try {
         owner.assertCircuitOpen()

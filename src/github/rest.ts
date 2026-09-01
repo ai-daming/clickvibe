@@ -157,6 +157,19 @@ function rateObservationFrom(headers: Map<string, string> | null) {
 }
 
 /** One ctx-scoped REST reader: rate-limit circuit, request parsing and read caches. */
+/** A non-2xx GitHub REST response carrying its HTTP status (issue #131
+ *  slice B): the write transaction distinguishes a provable 4xx rejection
+ *  (write not performed) from uncertain transport/5xx outcomes. */
+export class GithubRestHttpError extends Error {
+  readonly status: number
+
+  constructor(status: number, message: string) {
+    super(message)
+    this.name = 'GithubRestHttpError'
+    this.status = status
+  }
+}
+
 export class GithubRestReader {
   private readonly ctx: ShellContext
   private readonly minimumIntervalMs: number
@@ -171,6 +184,11 @@ export class GithubRestReader {
 
   rateLimitError(now = Date.now()): GithubRateLimitError | null {
     return this.owner.rateLimitError(now)
+  }
+
+  /** The owner this reader is bound to (write transactions need both). */
+  boundOwner(): GithubGatewayOwner {
+    return this.owner
   }
 
   rememberVersion(key: string, version: string | null | undefined): void {
@@ -198,7 +216,7 @@ export class GithubRestReader {
     path: string,
     accept?: string,
     timeoutMs = 30_000,
-    mutation?: { method: 'POST' | 'PATCH'; body: unknown },
+    mutation?: { method: 'POST' | 'PATCH' | 'PUT'; body: unknown },
   ): Promise<IncludedResponse> {
     const repo = repoKeyFromPath(path)
     const bucket = this.owner.resolveResourceIdentity(path, bucketFromPath(path))
@@ -278,7 +296,10 @@ export class GithubRestReader {
           } catch {
             /* retain raw response body */
           }
-          throw new Error(`GitHub REST ${response.status}: ${message || result.stderr?.text || '请求失败'}`)
+          throw new GithubRestHttpError(
+            response.status,
+            `GitHub REST ${response.status}: ${message || result.stderr?.text || '请求失败'}`,
+          )
         }
         return response
       },
@@ -307,7 +328,12 @@ export class GithubRestReader {
     })
   }
 
-  async mutate<T = unknown>(path: string, method: 'POST' | 'PATCH', body: unknown, timeoutMs?: number): Promise<T> {
+  async mutate<T = unknown>(
+    path: string,
+    method: 'POST' | 'PATCH' | 'PUT',
+    body: unknown,
+    timeoutMs?: number,
+  ): Promise<T> {
     return this.direct(path, async () => {
       const response = await this.request(path, undefined, timeoutMs, { method, body })
       return this.settleAfterParse<T>(response, path)

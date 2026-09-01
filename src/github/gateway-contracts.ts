@@ -30,7 +30,7 @@ export interface GithubGatewayOwner {
   /** Opaque identity; never contains token material. */
   readonly credentialScopeId: string
   /** Declare one logical request; throws once the owner is closed. */
-  declareLogicalRequest(scope: 'resource' | 'aggregate' | 'direct', key: string): string
+  declareLogicalRequest(scope: 'resource' | 'aggregate' | 'direct' | 'write', key: string): string
   /** Ambient logical-request attribution for loader-internal upstream steps. */
   runWithRequest<T>(requestId: string, fn: () => Promise<T>): Promise<T>
   ambientRequestId(): string | null
@@ -51,7 +51,7 @@ export interface GithubGatewayOwner {
    *  outcome is recorded as a late diagnostic and never rewrites the first. */
   noteTerminal(
     requestId: string,
-    outcome: 'succeeded' | 'failed' | 'rate-limited' | 'interrupted',
+    outcome: 'succeeded' | 'failed' | 'rate-limited' | 'interrupted' | 'unknown',
     error?: unknown,
   ): void
   /** The lifecycle stream — the single metric and evidence source (ADR-0010 §10). */
@@ -99,6 +99,24 @@ export interface GithubGatewayOwner {
     loader: () => Promise<T>,
     options?: CachedAggregateOptions<T>,
   ): Promise<T>
+  /**
+   * Acquire the exclusive write lease for a sorted key set ATOMICALLY
+   * (ADR-0010 §9): leases are granted as a whole from a FIFO queue, so two
+   * overlapping write transactions can never deadlock or interleave.
+   * Returns the release function; the transaction's invalidation and
+   * readback both happen while held.
+   */
+  acquireWriteLeases(keys: string[]): Promise<() => void>
+  /** Wait until no held write lease covers this read key (child paths included). */
+  waitReadableResource(key: string): Promise<void>
+  /** Run a composition exempt from read-side lease waiting (the write
+   *  transaction's own authoritative readback — it must not queue behind
+   *  itself). */
+  runWithLeaseExemption<T>(fn: () => Promise<T>): Promise<T>
+  /** Record the write-side invalidation in the lifecycle stream. */
+  noteWriteInvalidated(requestId: string, keys: string[]): void
+  /** Record the authoritative post-write readback settlement. */
+  noteReadbackSettled(requestId: string, confirmed: boolean): void
   /** Resolve when no step is waiting or running (test/evidence quiescence). */
   idle(): Promise<void>
   /** Stop admission, interrupt queued steps, drain running to a deadline, fence
