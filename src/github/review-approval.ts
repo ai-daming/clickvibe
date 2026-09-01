@@ -15,7 +15,9 @@ export interface ReviewApprovalInput {
 
 export type ReviewApprovalResult = 'approved' | 'skipped' | 'failed' | 'unknown'
 
-const REVIEW_APPROVAL_BODY = '**身份：Review Agent**\n\nLGTM'
+/** The exact approval body — the readback predicate and restart recovery both
+ *  rebuild the dispatched body from this single constant. */
+export const REVIEW_APPROVAL_BODY = '**身份：Review Agent**\n\nLGTM'
 
 /** Submit a native GitHub approval only for a passing PR review.
  *

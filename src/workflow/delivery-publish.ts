@@ -20,13 +20,26 @@ export async function publishDeliveryComment(
   // double-posting. The transaction owns invalidation.
   const number = workflow.prNumber ?? parseUrl(workflow.url)?.number
   const persistPendingMarker = async () => {
-    event.publication = { target, status: 'pending' }
-    await mutateLiveTaskWorkflow(live, workflow, (latest) => {
+    let stored = false
+    const saved = await mutateLiveTaskWorkflow(live, workflow, (latest) => {
       const storedEvent = latest.events.find(
         (candidate) => candidate.kind === event.kind && candidate.taskId === event.taskId && candidate.at === event.at,
       )
-      if (storedEvent) storedEvent.publication = { target, status: 'pending' }
+      if (storedEvent) {
+        storedEvent.publication = { target, status: 'pending' }
+        stored = true
+      }
     })
+    // A marker that did not durably land proves nothing (review F3): a task
+    // that lost workflow ownership — or an event the workflow no longer
+    // carries — must fail the transaction BEFORE any GitHub dispatch.
+    if (saved.status !== 'committed') {
+      throw new Error(`attempt marker 未落盘(${saved.status}),评论零派发`)
+    }
+    if (!stored) {
+      throw new Error('目标事件不在 workflow 中,attempt marker 未落盘,评论零派发')
+    }
+    event.publication = { target, status: 'pending' }
   }
   const outcome = number
     ? await githubWrite(ctx, {
@@ -49,12 +62,23 @@ export async function publishDeliveryComment(
     )
   } else {
     const message = githubWriteOutcomeError(outcome).slice(0, 500)
-    event.publication = { target, status: 'failed', error: message }
-    await appendLog(
-      workflow.key,
-      event.kind === 'review' ? 'review' : 'dev',
-      `[clickvibe] GitHub 评论发布失败: ${message}`,
-    )
+    // An unprovable write is 'unknown', never folded into 'failed' — the
+    // comment may exist upstream and recovery settles it by readback (review F4).
+    if (outcome.outcome === 'unknown') {
+      event.publication = { target, status: 'unknown', error: message }
+      await appendLog(
+        workflow.key,
+        event.kind === 'review' ? 'review' : 'dev',
+        `[clickvibe] GitHub 评论结果未确认: ${message}`,
+      )
+    } else {
+      event.publication = { target, status: 'failed', error: message }
+      await appendLog(
+        workflow.key,
+        event.kind === 'review' ? 'review' : 'dev',
+        `[clickvibe] GitHub 评论发布失败: ${message}`,
+      )
+    }
   }
   const publication = event.publication
   const saved = await mutateLiveTaskWorkflow(live, workflow, (latest) => {

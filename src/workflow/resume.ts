@@ -40,6 +40,7 @@ import {
 } from '../infra/task-ownership.ts'
 import { recordDevDelivery } from './dev-delivery.ts'
 import { establishTaskClaim } from './task-claim.ts'
+import { recoverUnsettledWrites } from './write-recovery.ts'
 import { finalizeDevRun } from './dev-completion.ts'
 import { mutateLiveTaskWorkflow } from './task-lease.ts'
 import { deriveFreshSessionAvailability, selectSessionLaunch } from './fresh-session.ts'
@@ -178,6 +179,9 @@ export async function resumeDevelop(
     }
   }
   if (!claim.claimed) return { ok: true, taskId: claim.taskId }
+  // Fresh claim: settle any pending/unknown write markers a crashed
+  // predecessor left behind — readback only, never a re-dispatch (review F4).
+  await recoverUnsettledWrites(ctx, live, workflow)
 
   pushTaskLine(
     live,

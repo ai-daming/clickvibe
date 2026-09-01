@@ -64,8 +64,10 @@ export interface PromptSnapshot {
 
 export interface DeliveryPublication {
   target: 'pr' | 'issue'
-  /** 'pending' is the durable write-attempt marker (issue #131 slice B). */
-  status: 'pending' | 'posted' | 'failed'
+  /** 'pending' is the durable write-attempt marker (issue #131 slice B);
+   *  'unknown' means the readback could not prove the comment — never folded
+   *  into 'failed' (missing ≠ dead). */
+  status: 'pending' | 'posted' | 'failed' | 'unknown'
   url?: string
   error?: string
 }

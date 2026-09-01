@@ -2814,7 +2814,9 @@ test('comment publication failure keeps the delivery event and stores a bounded 
     assert.equal(reloaded?.events[0].hash, '987abcd')
     assert.equal(reloaded?.events[0].fixed, 1)
     assert.equal(reloaded?.events[0].publication?.target, 'pr')
-    assert.equal(reloaded?.events[0].publication?.status, 'failed')
+    // A lost transport response with an unproving readback is 'unknown' —
+    // the comment may exist upstream; recovery settles it by readback (F4).
+    assert.equal(reloaded?.events[0].publication?.status, 'unknown')
     assert.equal(reloaded?.events[0].publication?.error?.length, 500)
     assert.match(reloaded?.events[0].publication?.error ?? '', /offline-/)
   } finally {

@@ -542,3 +542,129 @@ test('family pr-create without a marker hook fails before any dispatch', async (
   assert.equal(outcome.outcome, 'failed')
   assert.equal(calls.length, 0, 'zero dispatch without the durable marker')
 })
+
+test('review F1: a comment beyond the first page is still confirmed by the paginated readback', async () => {
+  const noise = Array.from({ length: 100 }, (_, index) => ({ id: index + 1, body: `noise-${index}` }))
+  const pages: Array<Array<{ id: number; body: string }>> = [noise, [{ id: 101, body: 'exact-body' }]]
+  const fetchedPages: number[] = []
+  const { reader, owner } = makeReader(async (step) => {
+    if (step.command.includes('--method POST')) return { exitCode: 0, text: ok({ id: 101 }, 201) }
+    const page = Number(step.command.match(/[?&]page=(\d+)/)?.[1] ?? 1)
+    fetchedPages.push(page)
+    return { exitCode: 0, text: ok(pages[page - 1] ?? []) }
+  })
+  const spec = GITHUB_WRITE_OPERATIONS['issue-comment-create'] as GithubWriteSpec<
+    { repoKey: string; number: number; body: string },
+    unknown
+  >
+  const outcome = await runWriteTransaction(
+    owner,
+    reader,
+    spec,
+    { repoKey: 'o/r', number: 9, body: 'exact-body' },
+    { persistMarker: () => Promise.resolve() },
+  )
+  assert.equal(outcome.outcome, 'confirmed', 'the record on page 2 must not read as unknown')
+  assert.deepEqual(fetchedPages, [1, 2], 'the readback pages through the whole in-budget result set')
+})
+
+test('review F1: a record beyond the declared page budget settles unknown, not failed', async () => {
+  const page = Array.from({ length: 100 }, (_, index) => ({ id: index + 1, body: `noise-${index}` }))
+  const { reader, owner } = makeReader(async (step) => {
+    if (step.command.includes('--method POST')) return { exitCode: 0, text: ok({ id: 201 }, 201) }
+    return { exitCode: 0, text: ok(page) }
+  })
+  const spec = GITHUB_WRITE_OPERATIONS['issue-comment-create'] as GithubWriteSpec<
+    { repoKey: string; number: number; body: string },
+    unknown
+  >
+  const outcome = await runWriteTransaction(
+    owner,
+    reader,
+    spec,
+    { repoKey: 'o/r', number: 9, body: 'beyond-budget' },
+    { persistMarker: () => Promise.resolve() },
+  )
+  assert.equal(outcome.outcome, 'unknown', 'a cost-bound breach is unprovable, never a provable failure')
+})
+
+test('review F1: the dependency-unlock marker scan finds an existing comment on page 2 and skips the POST', async () => {
+  const markerComment = { id: 5, body: 'clickvibe:dependency-unlock:8 — done' }
+  const noise = Array.from({ length: 100 }, (_, index) => ({ id: index + 1, body: `noise-${index}` }))
+  const pages = [noise, [markerComment]]
+  let posts = 0
+  const { reader, owner } = makeReader(async (step) => {
+    if (step.command.includes('--method POST')) {
+      posts += 1
+      return { exitCode: 0, text: ok({ id: 9 }, 201) }
+    }
+    const page = Number(step.command.match(/[?&]page=(\d+)/)?.[1] ?? 1)
+    return { exitCode: 0, text: ok(pages[page - 1] ?? []) }
+  })
+  const spec = GITHUB_WRITE_OPERATIONS['dependency-unlock-comment'] as GithubWriteSpec<
+    { repoKey: string; number: number; marker: string; body: string },
+    unknown
+  >
+  const input = { repoKey: 'o/r', number: 9, marker: 'clickvibe:dependency-unlock:8', body: markerComment.body }
+  const outcome = await runWriteTransaction(owner, reader, spec, input)
+  assert.equal(outcome.outcome, 'confirmed')
+  assert.equal(posts, 0, 'a marker beyond page 1 must still suppress the duplicate POST')
+})
+
+test('review F2: close() settles a queued write with one interrupted terminal and never strands the lease', async () => {
+  const owner = createGithubGatewayOwner()
+  const ctx = {
+    shell: {
+      resolve: (spec: unknown) => spec,
+      run: async () => {
+        throw new Error('must not dispatch — the gateway is closed')
+      },
+    },
+  }
+  const reader = new GithubRestReader(ctx as never, { owner, minimumIntervalMs: 0 })
+  let releaseA: (() => void) | null = null
+  const gateA = new Promise<void>((resolve) => {
+    releaseA = resolve
+  })
+  const spec: GithubWriteSpec<{ repoKey: string }, unknown> = {
+    id: 'test-gated-write',
+    keys: () => ['o/r/issues/5', 'repo:o/r'],
+    priority: 'normal',
+    deadlineMs: 5_000,
+    maxPages: 2,
+    repeatable: true,
+    dispatch: async () => {
+      await gateA
+      return {}
+    },
+    readback: {
+      run: (read) => read.json('repos/o/r/issues/5'),
+      confirms: () => true,
+    },
+  }
+  const writeA = runWriteTransaction(owner, reader, spec, { repoKey: 'o/r' })
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  const writeB = runWriteTransaction(owner, reader, spec, { repoKey: 'o/r' })
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  const closing = owner.close({ drainMs: 100 })
+  await assert.rejects(() => writeB, /排队写请求被中断/, 'the queued write is interrupted, not hanging')
+  releaseA?.()
+  const outcomeA = await writeA
+  assert.equal(
+    outcomeA.outcome,
+    'unknown',
+    'the running write settles unknown once its readback hits the closed gateway',
+  )
+  await closing
+  const events = owner.lifecycleEvents()
+  const bDeclared = events.filter((event) => event.kind === 'declared')
+  assert.equal(bDeclared.length, 2, 'both writes are lifecycle-visible before they block')
+  const terminals = events.filter((event) => event.kind === 'terminal')
+  assert.equal(terminals.length, 2, 'exactly one terminal per logical request')
+  const outcomes = terminals.map((event) => (event as { outcome: string }).outcome).sort()
+  assert.deepEqual(
+    outcomes,
+    ['interrupted', 'interrupted'],
+    'the queued write and the still-settling write each leave one interrupted terminal',
+  )
+})

@@ -104,9 +104,12 @@ export interface GithubGatewayOwner {
    * (ADR-0010 §9): leases are granted as a whole from a FIFO queue, so two
    * overlapping write transactions can never deadlock or interleave.
    * Returns the release function; the transaction's invalidation and
-   * readback both happen while held.
+   * readback both happen while held. The caller passes the ALREADY declared
+   * logical request id: the request must be visible to the lifecycle stream
+   * before it blocks on the queue, and close() settles a queued acquisition
+   * with exactly one interrupted terminal.
    */
-  acquireWriteLeases(keys: string[]): Promise<() => void>
+  acquireWriteLeases(keys: string[], requestId: string): Promise<() => void>
   /** Wait until no held write lease covers this read key (child paths included). */
   waitReadableResource(key: string): Promise<void>
   /** Run a composition exempt from read-side lease waiting (the write

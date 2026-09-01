@@ -25,5 +25,6 @@ export function deliveryPublicationLabel(publication: DeliveryPublication | unde
   if (!publication) return '本地事件'
   if (publication.status === 'pending') return 'GitHub 评论发布中(未确认)'
   if (publication.status === 'failed') return 'GitHub 评论发布失败'
+  if (publication.status === 'unknown') return 'GitHub 评论结果未确认'
   return `GitHub ${publication.target === 'pr' ? 'PR' : 'Issue'} 评论${publication.url ? ' ↗' : '已发布'}`
 }

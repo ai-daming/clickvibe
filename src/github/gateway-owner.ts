@@ -21,6 +21,7 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { createWriteLeaseRegistry } from './gateway-write-leases.ts'
 import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
 import { GithubRateLimitError, type GithubRateLimitKind } from './rest.ts'
 import { createDiagnosticEvidenceSink } from './gateway-evidence.ts'
@@ -92,16 +93,20 @@ export function createGithubGatewayOwner(
   let circuitUntil = 0
   let circuitKind: GithubRateLimitKind = 'unknown'
   const recorder = new GatewayLifecycleRecorder(options.sink)
-  // Write leases (ADR-0010 §9): held as a set, granted whole from a FIFO
-  // queue; reads of covered keys wait for release. The transaction's own
-  // readback runs exempt (it must never queue behind its own lease).
-  const heldWriteLeases = new Set<string>()
-  const writeQueue: Array<{ keys: string[]; resolve: () => void }> = []
-  const readableWaiters: Array<{ key: string; resolve: () => void }> = []
-  const leaseExemptAls = new AsyncLocalStorage<boolean>()
+  // Write leases (ADR-0010 §9) live in their own module (pure move): held as
+  // a set, granted whole from a FIFO queue; reads of covered keys wait for
+  // release; the transaction's own readback runs exempt. Queued entries carry
+  // their logical request id so close() settles them with one terminal.
+  const writeLeases = createWriteLeaseRegistry({
+    noteInterruptedTerminal: (requestId, error) => owner.noteTerminal(requestId, 'interrupted', error),
+  })
   const requestAls = new AsyncLocalStorage<string>()
   const admissionAls = new AsyncLocalStorage<GatewayAdmission>()
   const stepCounts = new Map<string, number>()
+  // Continuation-page counter per logical request: maxPages bounds PAGES
+  // (admitNextPage), not every step — a write transaction's POST/PATCH steps
+  // must not silently consume the readback's page budget (review F1).
+  const pageCounts = new Map<string, number>()
   const requestPriorities = new Map<string, 'critical' | 'normal'>()
   const terminaledRequests = new Set<string>()
   let nextRequestId = 0
@@ -119,8 +124,10 @@ export function createGithubGatewayOwner(
 
   const flushIdleWaiters = () => {
     // Quiescence = nothing waiting, nothing pacing, nothing running (review
-    // r9: waiting+running-only resolved idle() while a step still paced).
-    if (waiting.length === 0 && running.size === 0 && pacing.size === 0) {
+    // r9: waiting+running-only resolved idle() while a step still paced) —
+    // and no write-lease waiter: a queued write or a lease-blocked read is
+    // live work the owner still owes a settlement to (review F2).
+    if (waiting.length === 0 && running.size === 0 && pacing.size === 0 && writeLeases.pendingWaiters() === 0) {
       const waiters = idleWaiters
       idleWaiters = []
       for (const resolve of waiters) resolve()
@@ -341,33 +348,6 @@ export function createGithubGatewayOwner(
     }
   }
 
-  const coversKey = (readKey: string, leaseKey: string): boolean =>
-    readKey === leaseKey || readKey.startsWith(`${leaseKey}/`)
-
-  const pumpWriteQueue = () => {
-    while (writeQueue.length > 0) {
-      const head = writeQueue[0]
-      if (head.keys.some((key) => heldWriteLeases.has(key))) break
-      writeQueue.shift()
-      for (const key of head.keys) heldWriteLeases.add(key)
-      head.resolve()
-    }
-  }
-
-  const waitReadableResource = async (key: string): Promise<void> => {
-    if (leaseExemptAls.getStore() === true) return
-    for (;;) {
-      const held = [...heldWriteLeases].some((leaseKey) => coversKey(key, leaseKey))
-      if (!held) return
-      await new Promise<void>((resolve) => readableWaiters.push({ key, resolve }))
-    }
-  }
-
-  const notifyReadableWaiters = () => {
-    const pending = readableWaiters.splice(0, readableWaiters.length)
-    for (const waiter of pending) waiter.resolve()
-  }
-
   const owner: GithubGatewayOwner = {
     credentialScopeId: CONSERVATIVE_CREDENTIAL_SCOPE,
     submitStep<T>(
@@ -422,12 +402,13 @@ export function createGithubGatewayOwner(
       if (!admission) return
       const requestId = requestAls.getStore()
       if (!requestId) return
-      const dispatched = stepCounts.get(requestId) ?? 0
-      if (dispatched + 1 > admission.maxPages) {
+      const pages = pageCounts.get(requestId) ?? 0
+      if (pages + 1 > admission.maxPages) {
         throw new Error(
-          `GitHub 读取超出声明的成本上界:请求 ${requestId} 已派发 ${dispatched} 次,声明上界 ${admission.maxPages} 次`,
+          `GitHub 读取超出声明的成本上界:请求 ${requestId} 已派发 ${pages} 页,声明上界 ${admission.maxPages} 页`,
         )
       }
+      pageCounts.set(requestId, pages + 1)
     },
     idle(): Promise<void> {
       if (waiting.length === 0 && running.size === 0 && pacing.size === 0) return Promise.resolve()
@@ -438,6 +419,12 @@ export function createGithubGatewayOwner(
     async close(options: { drainMs?: number } = {}): Promise<void> {
       closed = true
       const drainMs = options.drainMs ?? 5_000
+      // Queued write-lease acquisitions and reads waiting behind a lease are
+      // part of the write machinery close() must settle (review F2): a waiter
+      // that survives the seal would either hang forever or wake up inside a
+      // closed Gateway. The registry emits one interrupted terminal per
+      // queued write; a waiting read has not declared yet and simply fails.
+      writeLeases.interruptAll()
       // Queued steps are interrupted immediately; running steps get the drain
       // window, and anything still unsettled at the deadline is terminal
       // interrupted before the recorder seals (ADR-0010 §10 close ordering).
@@ -465,6 +452,15 @@ export function createGithubGatewayOwner(
       // Fence every still-in-flight settlement: from here on a late response
       // is diagnostic-only — no caller resolution, no cache publish, no
       // second terminal.
+      // Sweep first: every DECLARED request leaves exactly one terminal —
+      // a write whose readback would only settle after the seal (or an
+      // in-flight singleflight leader) is closed out here as interrupted
+      // (review F2: 已登记请求必须有 terminal).
+      for (const requestId of requestPriorities.keys()) {
+        if (!terminaledRequests.has(requestId)) {
+          owner.noteTerminal(requestId, 'interrupted', 'Gateway 关闭:未决请求被中断')
+        }
+      }
       ownerGeneration += 1
       recorder.seal()
       await evidenceSink?.flush()
@@ -519,7 +515,7 @@ export function createGithubGatewayOwner(
     },
     noteTerminal(
       requestId: string,
-      outcome: 'succeeded' | 'failed' | 'rate-limited' | 'interrupted',
+      outcome: 'succeeded' | 'failed' | 'rate-limited' | 'interrupted' | 'unknown',
       error?: unknown,
     ): void {
       if (terminaledRequests.has(requestId)) {
@@ -542,25 +538,17 @@ export function createGithubGatewayOwner(
     lifecycleMetrics(): GatewayMetrics {
       return deriveGatewayMetrics(recorder.snapshot())
     },
-    acquireWriteLeases(keys: string[]): Promise<() => void> {
-      const sorted = [...new Set(keys)].sort()
-      return new Promise((resolve) => {
-        writeQueue.push({
-          keys: sorted,
-          resolve: () => {
-            resolve(() => {
-              for (const key of sorted) heldWriteLeases.delete(key)
-              pumpWriteQueue()
-              notifyReadableWaiters()
-            })
-          },
-        })
-        pumpWriteQueue()
+    acquireWriteLeases(keys: string[], requestId: string): Promise<() => void> {
+      return writeLeases.acquire(keys, requestId).then((release) => () => {
+        release()
+        // Lease transitions are quiescence-relevant: a released write may
+        // have been the last live work (review F2).
+        flushIdleWaiters()
       })
     },
-    waitReadableResource: (key: string) => waitReadableResource(key),
+    waitReadableResource: (key: string) => writeLeases.waitReadable(key),
     runWithLeaseExemption<T>(fn: () => Promise<T>): Promise<T> {
-      return leaseExemptAls.run(true, fn)
+      return writeLeases.runExempt(fn)
     },
     noteWriteInvalidated(requestId: string, keys: string[]): void {
       recorder.emit({ kind: 'write-invalidated', requestId, keys, at: Date.now() })
@@ -634,7 +622,7 @@ export function createGithubGatewayOwner(
     ): Promise<T> {
       // Reads of a lease-held resource queue behind the write transaction
       // (ADR-0010 §9) — including cache hits, which may predate the write.
-      await waitReadableResource(key)
+      await writeLeases.waitReadable(key)
       const requestId = owner.declareLogicalRequest('resource', key)
       try {
         owner.assertCircuitOpen()
@@ -702,7 +690,7 @@ export function createGithubGatewayOwner(
       loader: () => Promise<T>,
       options: CachedAggregateOptions<T> = {},
     ): Promise<T> {
-      await waitReadableResource(key)
+      await writeLeases.waitReadable(key)
       const requestId = owner.declareLogicalRequest('aggregate', key)
       try {
         owner.assertCircuitOpen()

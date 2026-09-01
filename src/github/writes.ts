@@ -60,7 +60,8 @@ const isProvableRejection = (error: unknown): boolean =>
   error instanceof GithubRestHttpError && error.status >= 400 && error.status < 500 && error.status !== 429
 
 /** Run the readback half alone and classify confirmed/unknown (design §9
- *  restart recovery: readback ONLY, zero write dispatch). */
+ *  restart recovery: readback ONLY, zero write dispatch). The readback is
+ *  jointly admitted with the write's own budget (design §9). */
 export async function githubWriteRecover<TInput, TDispatch>(
   owner: GithubGatewayOwner,
   reader: GithubRestReader,
@@ -69,8 +70,9 @@ export async function githubWriteRecover<TInput, TDispatch>(
 ): Promise<GithubWriteOutcome<TDispatch>> {
   const requestId = owner.declareLogicalRequest('write', `${spec.id}:recover`)
   try {
-    const observation = await owner.runWithRequest(requestId, () =>
-      owner.runWithLeaseExemption(() => spec.readback.run(reader, input)),
+    const observation = await owner.runWithAdmission(
+      { priority: spec.priority, deadlineMs: spec.deadlineMs, maxPages: spec.maxPages },
+      () => owner.runWithRequest(requestId, () => owner.runWithLeaseExemption(() => spec.readback.run(reader, input))),
     )
     const confirmed = spec.readback.confirms(input, observation)
     owner.noteReadbackSettled(requestId, confirmed)
@@ -94,9 +96,21 @@ export async function runWriteTransaction<TInput, TDispatch>(
   options: GithubWriteOptions = {},
 ): Promise<GithubWriteOutcome<TDispatch>> {
   const leaseKeys = [...new Set(spec.keys(input))].sort()
-  const release = await owner.acquireWriteLeases(leaseKeys)
+  // The logical request is declared BEFORE blocking on the lease queue: the
+  // write is visible to the lifecycle stream while it waits, and close()
+  // settles a queued acquisition with one interrupted terminal (review F2).
+  // Every path after a successful acquisition runs inside the finally that
+  // releases the lease — no reject path may strand it.
   const requestId = owner.declareLogicalRequest('write', `${spec.id}:${leaseKeys[0] ?? spec.id}`)
+  let release: (() => void) | null = null
   try {
+    try {
+      release = await owner.acquireWriteLeases(leaseKeys, requestId)
+    } catch (queuedError) {
+      // close() interrupted the queued acquisition and already emitted the
+      // single interrupted terminal — only propagate.
+      throw queuedError
+    }
     if (!spec.repeatable) {
       if (!options.persistMarker) {
         const error = new Error(`写操作 ${spec.id} 不可重复,必须提供 attempt marker 持久化钩子`)
@@ -133,7 +147,7 @@ export async function runWriteTransaction<TInput, TDispatch>(
     // invalidation and readback always run (design §9).
     return await settleUncertain(owner, reader, spec, input, requestId, null, dispatched)
   } finally {
-    release()
+    release?.()
   }
 }
 
@@ -150,8 +164,12 @@ async function settleUncertain<TInput, TDispatch>(
   for (const key of leaseKeys) owner.invalidate(key)
   owner.noteWriteInvalidated(requestId, leaseKeys)
   try {
-    const observation = await owner.runWithRequest(requestId, () =>
-      owner.runWithLeaseExemption(() => spec.readback.run(reader, input)),
+    // The mandatory readback shares the write's declared admission budget
+    // (design §9: 写 step 与强制 readback 共同准入) — a paginated readback
+    // honors the same cost bound instead of streaming unbounded pages.
+    const observation = await owner.runWithAdmission(
+      { priority: spec.priority, deadlineMs: spec.deadlineMs, maxPages: spec.maxPages },
+      () => owner.runWithRequest(requestId, () => owner.runWithLeaseExemption(() => spec.readback.run(reader, input))),
     )
     const confirmed = spec.readback.confirms(input, observation)
     owner.noteReadbackSettled(requestId, confirmed)
@@ -244,8 +262,10 @@ const commentCreateSpec: GithubWriteSpec<CommentCreateInput, { id: number; html_
       body: input.body,
     }),
   readback: {
+    // Paginated: issues accumulate comments beyond one default page — the
+    // authoritative result set is read within the declared page budget.
     run: (reader, input) =>
-      reader.json<Array<{ id: number; body: string }>>(`repos/${input.repoKey}/issues/${input.number}/comments`),
+      reader.paginate<{ id: number; body: string }>(`repos/${input.repoKey}/issues/${input.number}/comments`),
     confirms: (input, observation) =>
       Array.isArray(observation) && observation.some((entry) => entry.body === input.body),
   },
@@ -330,8 +350,9 @@ const approvalSpec: GithubWriteSpec<ApprovalInput, { id: number }> = {
       body: input.body,
     }),
   readback: {
+    // Paginated: PRs accumulate reviews beyond one default page.
     run: (reader, input) =>
-      reader.json<Array<{ state?: string; body?: string }>>(`repos/${input.repoKey}/pulls/${input.prNumber}/reviews`),
+      reader.paginate<{ state?: string; body?: string }>(`repos/${input.repoKey}/pulls/${input.prNumber}/reviews`),
     confirms: (input, observation) =>
       Array.isArray(observation) &&
       observation.some((entry) => String(entry.state ?? '').toUpperCase() === 'APPROVED' && entry.body === input.body),
@@ -367,10 +388,14 @@ const dependencyUnlockCommentSpec: GithubWriteSpec<DependencyUnlockCommentInput,
   keys: (input) => issueKeys(input.repoKey, input.number),
   priority: 'normal',
   deadlineMs: 30_000,
-  maxPages: 2,
+  // The page budget is shared by the whole logical request: up to two pages
+  // for the marker scan plus two for the authoritative readback.
+  maxPages: 4,
   repeatable: true,
   dispatch: async (reader, input) => {
-    const comments = await reader.json<Array<{ id?: number; body?: string | null }>>(
+    // The marker scan is paginated: a marker comment beyond the first page
+    // must still be found, or the convergent skip would double-post.
+    const comments = await reader.paginate<{ id?: number; body?: string | null }>(
       `repos/${input.repoKey}/issues/${input.number}/comments`,
     )
     const existing = comments.find((entry) => String(entry.body ?? '').includes(input.marker))
@@ -386,7 +411,7 @@ const dependencyUnlockCommentSpec: GithubWriteSpec<DependencyUnlockCommentInput,
   },
   readback: {
     run: (reader, input) =>
-      reader.json<Array<{ body?: string | null }>>(`repos/${input.repoKey}/issues/${input.number}/comments`),
+      reader.paginate<{ body?: string | null }>(`repos/${input.repoKey}/issues/${input.number}/comments`),
     confirms: (input, observation) =>
       Array.isArray(observation) && observation.some((entry) => String(entry.body ?? '').includes(input.marker)),
   },

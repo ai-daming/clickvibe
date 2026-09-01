@@ -59,6 +59,7 @@ import { type ReviewIssueContract } from './merge-gates.ts'
 import { resolveReviewStartWorkflow } from './review-start.ts'
 import { workflowBaseBranch } from './state-view.ts'
 import { establishTaskClaim } from './task-claim.ts'
+import { recoverUnsettledWrites } from './write-recovery.ts'
 import { mutateLiveTaskWorkflow } from './task-lease.ts'
 import { notifyAutoRunCompletion } from './auto-run-signal.ts'
 
@@ -250,6 +251,9 @@ export async function startReview(
     }
   }
   if (!claim.claimed) return { ok: true, taskId: claim.taskId }
+  // Fresh claim: settle any pending/unknown write markers a crashed
+  // predecessor left behind — readback only, never a re-dispatch (review F4).
+  await recoverUnsettledWrites(ctx, live, workflow)
 
   // A prior run's file must never become the next run's verdict. This side
   // effect is after the cross-process claim, so a losing controller cannot
@@ -395,14 +399,22 @@ export async function startReview(
             passed,
           },
           async () => {
-            // The event publication record doubles as the durable marker: mark
-            // the approval attempt in the persisted review event before dispatch.
-            await mutateLiveTaskWorkflow(live, reloaded, (latest) => {
+            // The review event's approvalAttempt is the durable marker. It is
+            // only a marker once it COMMITTED — a task that lost workflow
+            // ownership must fail the approval before any dispatch (review F3).
+            let stored = false
+            const saved = await mutateLiveTaskWorkflow(live, reloaded, (latest) => {
               const reviewEvent = [...(latest.events ?? [])]
                 .reverse()
                 .find((candidate) => candidate.kind === 'review' && candidate.taskId === event.taskId)
-              if (reviewEvent && !reviewEvent.approvalAttempt) reviewEvent.approvalAttempt = { status: 'pending' }
+              if (reviewEvent) {
+                if (!reviewEvent.approvalAttempt) reviewEvent.approvalAttempt = { status: 'pending' }
+                stored = true
+              }
             })
+            if (saved.status !== 'committed' || !stored) {
+              throw new Error(`approval attempt marker 未落盘(${saved.status}),Approve 零派发`)
+            }
           },
         )
         // Resolve the attempt marker into the workflow's durable answer for
