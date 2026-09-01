@@ -1,0 +1,92 @@
+{
+  "scenario": "github-rest-rate-sample",
+  "measuredAt": "2026-08-31T12:40:34.758Z",
+  "acceptedBaselineSha": "dbf16ad26c04fc9fed3a101f10d536e843180c1e",
+  "head": "dbf16ad26c04fc9fed3a101f10d536e843180c1e",
+  "sourceMatchesBaseline": true,
+  "untrackedSourcePaths": [],
+  "ignoredSourcePaths": [],
+  "dirtyPaths": [
+    "?? docs/baselines/v0.2-gateway-evidence-r7-rate.json"
+  ],
+  "platform": "Darwin 25.6.0 arm64",
+  "node": "v26.4.0",
+  "git": "git version 2.50.1 (Apple Git-155)",
+  "gh": {
+    "available": true,
+    "version": "gh version 2.72.0 (2025-04-30)",
+    "error": null
+  },
+  "measurementTool": {
+    "path": "scripts/measure-access-baseline.mjs",
+    "sha256": "5558b3d386a1b723d09c5d009832c706b269be61a32d86828685bb2ceaddc358"
+  },
+  "resourceBucket": "core",
+  "logicalRequests": 5,
+  "measurementRequests": 2,
+  "physicalSubprocesses": 7,
+  "upstreamRequests": 7,
+  "commands": [
+    {
+      "command": "gh api rate_limit",
+      "ms": 1616.65,
+      "exitCode": 0
+    },
+    {
+      "command": "gh api repos/ai-daming/clickvibe/issues/133",
+      "ms": 2283.97,
+      "exitCode": 0
+    },
+    {
+      "command": "gh api repos/ai-daming/clickvibe/issues/133",
+      "ms": 2081.37,
+      "exitCode": 0
+    },
+    {
+      "command": "gh api repos/ai-daming/clickvibe/issues/133",
+      "ms": 2875.44,
+      "exitCode": 0
+    },
+    {
+      "command": "gh api repos/ai-daming/clickvibe/issues/133",
+      "ms": 1682.06,
+      "exitCode": 0
+    },
+    {
+      "command": "gh api repos/ai-daming/clickvibe/issues/133",
+      "ms": 1587.51,
+      "exitCode": 0
+    },
+    {
+      "command": "gh api rate_limit",
+      "ms": 2081.27,
+      "exitCode": 0
+    }
+  ],
+  "samplesMs": [
+    2283.97,
+    2081.37,
+    2875.44,
+    1682.06,
+    1587.51
+  ],
+  "p50Ms": 2081.37,
+  "p95Ms": 2875.44,
+  "rateLimit": {
+    "before": {
+      "limit": 5000,
+      "used": 0,
+      "remaining": 5000,
+      "reset": 1788183636
+    },
+    "after": {
+      "limit": 5000,
+      "used": 0,
+      "remaining": 5000,
+      "reset": 1788183649
+    },
+    "observedUsedDelta": 0,
+    "contaminated": true,
+    "reason": "same credential may have concurrent traffic; snapshots are not transactionally isolated"
+  }
+}

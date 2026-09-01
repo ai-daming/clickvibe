@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict'
+import { beforeEach } from 'node:test'
+import { resetGithubGatewayOwnerForTests } from '../src/github/gateway-owner.ts'
+
+beforeEach(() => resetGithubGatewayOwnerForTests())
 import { commitWorkflowFixture } from './workflow-fixture.ts'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer, request, type RequestListener } from 'node:http'
@@ -133,6 +137,9 @@ function createHandler(
         return () => {}
       },
     },
+    // cordis fiber lifecycle api: the gateway close effect registers here and
+    // is torn down with the plugin (never invoked by this unit harness).
+    effect: () => () => {},
     shell: {
       resolve(spec: unknown) {
         return spec
@@ -3201,6 +3208,9 @@ test('/develop automatic mode fails closed before worktree creation for invalid 
   assert.equal(invalidResult.status, 400)
   assert.match(invalidResult.body.error ?? '', /契约缺失: 验收标准/)
 
+  // The two phases simulate DIFFERENT GitHub states in one process; the
+  // process-level Gateway owner would otherwise serve phase 1's aggregate.
+  resetGithubGatewayOwnerForTests()
   const blocked = {
     ...invalid,
     title: 'blocked',
@@ -3377,7 +3387,11 @@ test('rate-limit response opens a circuit and returns the friendly recovery time
     })
 
     const first = await post(handler, '/clickvibe/api/fetch', { url: 'https://github.com/o/r/issues/41' })
-    const second = await post(handler, '/clickvibe/api/state', { repoKey: 'o/r' })
+    // r3 declared behavior change: the pre-probe bypass is gone, so a route
+    // with ZERO GitHub operations (empty-repo /state) no longer 429s by
+    // side effect. The circuit protection is asserted on a route that
+    // actually submits operations — its admission must reject pre-dispatch.
+    const second = await post(handler, '/clickvibe/api/fetch', { url: 'https://github.com/o/r/issues/41' })
     assert.equal(first.status, 429)
     assert.equal(second.status, 429)
     assert.match(first.body.error ?? '', /^GitHub 额度已用完,约 \d{2}:\d{2} 恢复$/)

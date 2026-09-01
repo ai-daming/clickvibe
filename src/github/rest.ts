@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises'
 import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
+import { createGithubGatewayOwner, githubGatewayOwner, type GithubGatewayOwner } from './gateway-owner.ts'
 
 interface ShellContext {
   shell: {
@@ -10,12 +11,6 @@ interface ShellContext {
       stderr?: { text?: string }
     }>
   }
-}
-
-interface CachedValue<T> {
-  value: T
-  version: string | null
-  expiresAt: number
 }
 
 interface GithubReviewRest {
@@ -31,45 +26,7 @@ interface IncludedResponse {
   body: string
 }
 
-interface HostGithubRequestLane {
-  tail: Promise<void>
-  nextStartAt: number
-}
-
 const HOST_GITHUB_MINIMUM_INTERVAL_MS = 250
-const hostGithubLaneSymbol = Symbol.for('clickvibe.github-request-lane')
-
-function hostGithubLane(): HostGithubRequestLane {
-  const root = globalThis as unknown as Record<PropertyKey, unknown>
-  const existing = root[hostGithubLaneSymbol] as HostGithubRequestLane | undefined
-  if (existing) return existing
-  const created = { tail: Promise.resolve(), nextStartAt: 0 }
-  root[hostGithubLaneSymbol] = created
-  return created
-}
-
-async function serializeGithubRequest<T>(minimumIntervalMs: number, request: () => Promise<T>): Promise<T> {
-  const lane = hostGithubLane()
-  const previous = lane.tail
-  let release = () => {}
-  lane.tail = new Promise<void>((resolve) => {
-    release = resolve
-  })
-  await previous
-  try {
-    // Timers may wake just before their requested deadline. Re-check the
-    // monotonic wall-clock condition so the configured start interval is a
-    // guarantee rather than a best-effort delay.
-    while (Date.now() < lane.nextStartAt) {
-      await new Promise((resolve) => setTimeout(resolve, lane.nextStartAt - Date.now()))
-    }
-    const pending = request()
-    lane.nextStartAt = Date.now() + minimumIntervalMs
-    return await pending
-  } finally {
-    release()
-  }
-}
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`
@@ -159,57 +116,73 @@ export function deriveReviewDecision(reviews: GithubReviewRest[]): 'APPROVED' | 
   return [...latest.values()].some((review) => String(review.state).toUpperCase() === 'APPROVED') ? 'APPROVED' : null
 }
 
+/** Extract `owner/repo` from a REST path for per-repository admission; unknown paths share one bucket. */
+function repoKeyFromPath(path: string): string {
+  const match = path.match(/repos\/([^/]+\/+[^/'"]+)/)
+  return match ? match[1] : 'uncategorized'
+}
+
+/** The real resource bucket a path draws from: search endpoints have their own
+ *  limit, everything else shares core (design §8 per-bucket isolation). */
+function bucketFromPath(path: string): string {
+  return path.startsWith('search/') ? 'search' : 'core'
+}
+
+function rateObservationFrom(headers: Map<string, string> | null) {
+  if (!headers) return null
+  const numberOr = (key: string): number | null => {
+    const raw = headers.get(key)
+    if (raw === undefined) return null
+    const value = Number(raw)
+    return Number.isFinite(value) ? value : null
+  }
+  // No rate headers at all → no bucket observation (unknown), never a
+  // fabricated core bucket (#149 rounds 4-6).
+  const hasAnyRateHeader = ['x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset', 'retry-after'].some(
+    (key) => headers.get(key) !== undefined,
+  )
+  if (!hasAnyRateHeader) return null
+  const resource = headers.get('x-ratelimit-resource')
+  return {
+    // A missing resource stays null — a URL guess never impersonates
+    // response evidence (review r8/F7).
+    resource: resource !== undefined ? resource : null,
+    limit: numberOr('x-ratelimit-limit'),
+    remaining: numberOr('x-ratelimit-remaining'),
+    used: numberOr('x-ratelimit-used'),
+    reset: numberOr('x-ratelimit-reset'),
+    retryAfterSeconds: numberOr('retry-after'),
+    observedAt: Date.now(),
+  }
+}
+
 /** One ctx-scoped REST reader: rate-limit circuit, request parsing and read caches. */
 export class GithubRestReader {
   private readonly ctx: ShellContext
   private readonly minimumIntervalMs: number
-  private readonly resources = new Map<string, CachedValue<unknown>>()
-  private readonly aggregates = new Map<string, CachedValue<unknown>>()
-  private readonly inFlight = new Map<string, Promise<unknown>>()
-  private readonly forcedResources = new Map<string, Promise<unknown>>()
-  private readonly versions = new Map<string, string>()
-  private readonly resourceLoadSequence = new Map<string, number>()
-  private circuitUntil = 0
-  private circuitKind: GithubRateLimitKind = 'unknown'
+  /** Gateway state host (caches, singleflight, versions, circuit); the reader keeps shell I/O only. */
+  private readonly owner: GithubGatewayOwner
 
-  constructor(ctx: ShellContext, options: { minimumIntervalMs?: number } = {}) {
+  constructor(ctx: ShellContext, options: { minimumIntervalMs?: number; owner?: GithubGatewayOwner } = {}) {
     this.ctx = ctx
     this.minimumIntervalMs = Math.max(0, options.minimumIntervalMs ?? HOST_GITHUB_MINIMUM_INTERVAL_MS)
+    this.owner = options.owner ?? createGithubGatewayOwner()
   }
 
   rateLimitError(now = Date.now()): GithubRateLimitError | null {
-    return this.circuitUntil > now ? new GithubRateLimitError(this.circuitUntil, this.circuitKind) : null
+    return this.owner.rateLimitError(now)
   }
 
   rememberVersion(key: string, version: string | null | undefined): void {
-    if (version) this.versions.set(key, version)
+    this.owner.rememberVersion(key, version)
   }
 
   resourceVersion(key: string): string | null {
-    return this.versions.get(key) ?? null
+    return this.owner.resourceVersion(key)
   }
 
   invalidate(prefix: string): void {
-    for (const key of this.resources.keys()) {
-      if (key === prefix || key.startsWith(`${prefix}/`)) this.resources.delete(key)
-    }
-    for (const key of this.aggregates.keys()) {
-      if (key === prefix || key.startsWith(`${prefix}/`)) this.aggregates.delete(key)
-    }
-    this.versions.delete(prefix)
-    for (const key of this.forcedResources.keys()) {
-      if (key === prefix || key.startsWith(`${prefix}/`)) this.forcedResources.delete(key)
-    }
-    for (const key of this.resourceLoadSequence.keys()) {
-      if (key === prefix || key.startsWith(`${prefix}/`)) {
-        this.resourceLoadSequence.set(key, (this.resourceLoadSequence.get(key) ?? 0) + 1)
-      }
-    }
-  }
-
-  private assertCircuitOpen(): void {
-    const error = this.rateLimitError()
-    if (error) throw error
+    this.owner.invalidate(prefix)
   }
 
   private async output(result: Awaited<ReturnType<ShellContext['shell']['run']>>): Promise<string> {
@@ -227,179 +200,204 @@ export class GithubRestReader {
     timeoutMs = 30_000,
     mutation?: { method: 'POST' | 'PATCH'; body: unknown },
   ): Promise<IncludedResponse> {
-    return serializeGithubRequest(this.minimumIntervalMs, async () => {
-      // A request queued before another resource trips the circuit must not hit GitHub afterwards.
-      this.assertCircuitOpen()
-      const command = [
-        'gh api --include',
-        shellQuote(path),
-        mutation ? `--method ${mutation.method} --input -` : '',
-        accept ? `-H ${shellQuote(`Accept: ${accept}`)}` : '',
-      ]
-        .filter(Boolean)
-        .join(' ')
-      const spec = this.ctx.shell.resolve({
-        command,
-        timeoutMs,
-        ...(mutation ? { stdin: JSON.stringify(mutation.body) } : {}),
-      })
-      const result = await this.ctx.shell.run(spec)
-      const stdout = await this.output(result)
-      let response: IncludedResponse
-      try {
-        response = parseIncludedResponse(stdout)
-      } catch (parseError) {
-        const detail = [result.stderr?.text, stdout].filter(Boolean).join('\n').trim()
-        if (result.exitCode !== 0 && /(?:rate limit|secondary rate)/i.test(detail)) {
-          this.circuitUntil = Date.now() + 60 * 60_000
-          this.circuitKind = 'unknown'
-          logTaskDiagnostic('github-rate-circuit-trip', {
-            kind: 'unknown' as const,
-            path,
-            until: this.circuitUntil,
-            note: 'gh CLI 失败且无响应头,按 60 分钟保守熔断',
-          })
-          throw new GithubRateLimitError(this.circuitUntil, 'unknown')
-        }
-        if (result.exitCode !== 0) throw new Error(detail || `gh api 执行失败(exit ${result.exitCode})`)
-        throw parseError
-      }
-      const detail = [result.stderr?.text, response.body].filter(Boolean).join('\n')
-      if (isRateLimited(response, detail)) {
-        this.circuitUntil = resetFrom(response.headers, Date.now())
-        const kind: GithubRateLimitKind =
-          response.headers.get('x-ratelimit-remaining') === '0' ? 'primary' : 'secondary'
-        this.circuitKind = kind
-        logTaskDiagnostic('github-rate-circuit-trip', {
-          kind,
-          path,
-          remaining: response.headers.get('x-ratelimit-remaining'),
-          reset: response.headers.get('x-ratelimit-reset'),
-          retryAfter: response.headers.get('retry-after'),
-          until: this.circuitUntil,
+    const repo = repoKeyFromPath(path)
+    const bucket = this.owner.resolveResourceIdentity(path, bucketFromPath(path))
+    return this.owner.submitStep(
+      repo,
+      timeoutMs,
+      this.minimumIntervalMs,
+      async () => {
+        const requestId = this.owner.ambientRequestId()
+        // A request queued before another resource trips the circuit must not
+        // hit GitHub afterwards. Primary pauses are bucket-scoped (review
+        // r6/F7): a dead core bucket must not fence a healthy search call.
+        this.owner.assertCircuitOpen(bucket)
+        const command = [
+          'gh api --include',
+          shellQuote(path),
+          mutation ? `--method ${mutation.method} --input -` : '',
+          accept ? `-H ${shellQuote(`Accept: ${accept}`)}` : '',
+        ]
+          .filter(Boolean)
+          .join(' ')
+        const spec = this.ctx.shell.resolve({
+          command,
+          timeoutMs,
+          ...(mutation ? { stdin: JSON.stringify(mutation.body) } : {}),
         })
-        throw new GithubRateLimitError(this.circuitUntil, kind)
-      }
-      if (result.exitCode !== 0 || response.status < 200 || response.status >= 300) {
-        let message = response.body.trim()
+        const result = await this.ctx.shell.run(spec)
+        const stdout = await this.output(result)
+        let response: IncludedResponse
         try {
-          const parsed = JSON.parse(response.body) as { message?: unknown }
-          message = String(parsed.message ?? message)
-        } catch {
-          /* retain raw response body */
+          response = parseIncludedResponse(stdout)
+        } catch (parseError) {
+          const detail = [result.stderr?.text, stdout].filter(Boolean).join('\n').trim()
+          if (requestId) this.owner.noteUpstreamSettled(requestId, false, null, path)
+          if (result.exitCode !== 0 && /(?:rate limit|secondary rate)/i.test(detail)) {
+            const until = Date.now() + 60 * 60_000
+            this.owner.noteRateLimitTrip(until, 'unknown')
+            logTaskDiagnostic('github-rate-circuit-trip', {
+              kind: 'unknown' as const,
+              path,
+              until,
+              note: 'gh CLI 失败且无响应头,按 60 分钟保守熔断',
+            })
+            throw new GithubRateLimitError(until, 'unknown')
+          }
+          if (result.exitCode !== 0) throw new Error(detail || `gh api 执行失败(exit ${result.exitCode})`)
+          throw parseError
         }
-        throw new Error(`GitHub REST ${response.status}: ${message || result.stderr?.text || '请求失败'}`)
-      }
-      return response
-    })
+        const detail = [result.stderr?.text, response.body].filter(Boolean).join('\n')
+        if (isRateLimited(response, detail)) {
+          if (requestId) this.owner.noteUpstreamSettled(requestId, false, rateObservationFrom(response.headers), path)
+          const until = resetFrom(response.headers, Date.now())
+          const kind: GithubRateLimitKind =
+            response.headers.get('x-ratelimit-remaining') === '0' ? 'primary' : 'secondary'
+          // The pause targets the bucket the RESPONSE says it consumed
+          // (x-ratelimit-resource), never the URL guess; a primary response
+          // without a resource stays credential-wide unknown — a path guess
+          // must never impersonate response evidence (review r7/F7).
+          const observedResource = response.headers.get('x-ratelimit-resource')
+          this.owner.noteRateLimitTrip(until, kind, kind === 'primary' ? (observedResource ?? undefined) : undefined)
+          logTaskDiagnostic('github-rate-circuit-trip', {
+            kind,
+            path,
+            remaining: response.headers.get('x-ratelimit-remaining'),
+            reset: response.headers.get('x-ratelimit-reset'),
+            retryAfter: response.headers.get('retry-after'),
+            until,
+          })
+          throw new GithubRateLimitError(until, kind)
+        }
+        if (result.exitCode !== 0 || response.status < 200 || response.status >= 300) {
+          if (requestId) this.owner.noteUpstreamSettled(requestId, false, rateObservationFrom(response.headers), path)
+          let message = response.body.trim()
+          try {
+            const parsed = JSON.parse(response.body) as { message?: unknown }
+            message = String(parsed.message ?? message)
+          } catch {
+            /* retain raw response body */
+          }
+          throw new Error(`GitHub REST ${response.status}: ${message || result.stderr?.text || '请求失败'}`)
+        }
+        return response
+      },
+      { bucket },
+    )
   }
 
-  async json<T = unknown>(path: string, accept?: string, timeoutMs?: number): Promise<T> {
-    const response = await this.request(path, accept, timeoutMs)
+  /** A top-level (non-loader) request is its own logical request in the lifecycle stream. */
+  private async direct<T>(path: string, run: () => Promise<T>): Promise<T> {
+    if (this.owner.ambientRequestId()) return run()
+    const requestId = this.owner.declareLogicalRequest('direct', path)
     try {
-      return JSON.parse(response.body || 'null') as T
-    } catch {
-      throw new Error(`GitHub REST 返回了无效 JSON: ${path}`)
+      const value = await this.owner.runWithRequest(requestId, run)
+      this.owner.noteTerminal(requestId, 'succeeded')
+      return value
+    } catch (error) {
+      this.owner.noteTerminal(requestId, error instanceof GithubRateLimitError ? 'rate-limited' : 'failed', error)
+      throw error
     }
   }
 
+  async json<T = unknown>(path: string, accept?: string, timeoutMs?: number): Promise<T> {
+    return this.direct(path, async () => {
+      const response = await this.request(path, accept, timeoutMs)
+      return this.settleAfterParse<T>(response, path)
+    })
+  }
+
   async mutate<T = unknown>(path: string, method: 'POST' | 'PATCH', body: unknown, timeoutMs?: number): Promise<T> {
-    const response = await this.request(path, undefined, timeoutMs, { method, body })
+    return this.direct(path, async () => {
+      const response = await this.request(path, undefined, timeoutMs, { method, body })
+      return this.settleAfterParse<T>(response, path)
+    })
+  }
+
+  /** Settle the upstream step only once the payload actually parsed AND passed
+   *  its shape validation — an HTTP 200 with a garbage or wrong-shape body is
+   *  a failed step, never a successful settlement followed by a terminal
+   *  failure (review r1; r5 pagination shape gap). */
+  private async settleAfterParse<T>(
+    response: IncludedResponse,
+    path: string,
+    validate?: (value: T) => void,
+  ): Promise<T> {
+    const requestId = this.owner.ambientRequestId()
     try {
-      return JSON.parse(response.body || 'null') as T
-    } catch {
-      throw new Error(`GitHub REST 返回了无效 JSON: ${path}`)
+      const value = JSON.parse(response.body || 'null') as T
+      validate?.(value)
+      if (requestId) this.owner.noteUpstreamSettled(requestId, true, rateObservationFrom(response.headers), path)
+      return value
+    } catch (error) {
+      if (requestId) this.owner.noteUpstreamSettled(requestId, false, rateObservationFrom(response.headers), path)
+      if (error instanceof SyntaxError) throw new Error(`GitHub REST 返回了无效 JSON: ${path}`)
+      throw error
     }
   }
 
   async paginate<T>(path: string, accept?: string, timeoutMs?: number): Promise<T[]> {
-    const values: T[] = []
-    for (let page = 1; ; page++) {
-      const separator = path.includes('?') ? '&' : '?'
-      const batch = await this.json<T[]>(`${path}${separator}per_page=100&page=${page}`, accept, timeoutMs)
-      if (!Array.isArray(batch)) throw new Error('GitHub REST 分页返回格式无效')
-      values.push(...batch)
-      if (batch.length < 100) return values
-    }
+    return this.direct(path, async () => {
+      const values: T[] = []
+      for (let page = 1; ; page++) {
+        // Cost-bound admission: continuation pages re-enter admission under
+        // the SAME logical deadline and declared dispatch bound (design §6.2).
+        this.owner.admitNextPage()
+        const separator = path.includes('?') ? '&' : '?'
+        const response = await this.request(`${path}${separator}per_page=100&page=${page}`, accept, timeoutMs)
+        const batch = await this.settleAfterParse<T[]>(response, path, (value) => {
+          if (!Array.isArray(value)) throw new Error('GitHub REST 分页返回格式无效')
+        })
+        values.push(...batch)
+        if (batch.length < 100) return values
+      }
+    })
   }
 
-  async cachedResource<T>(
+  /** Stamp the operation policy's admission attributes around a composition. */
+  withAdmission<T>(
+    priority: 'critical' | 'normal',
+    deadlineMs: number,
+    maxPages: number,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    return this.owner.runWithAdmission({ priority, deadlineMs, maxPages }, fn)
+  }
+
+  cachedResource<T>(
     key: string,
     version: string | null | undefined,
     loader: () => Promise<T>,
     options: { ttlMs?: number; force?: boolean; versionOf?: (value: T) => string | null | undefined } = {},
   ): Promise<T> {
-    this.assertCircuitOpen()
-    const forcedPending = this.forcedResources.get(key) as Promise<T> | undefined
-    if (!options.force && forcedPending) return forcedPending
-    const knownVersion = version || null
-    const cached = this.resources.get(key) as CachedValue<T> | undefined
-    const now = Date.now()
-    if (
-      !options.force &&
-      cached &&
-      cached.expiresAt > now &&
-      (knownVersion === null || cached.version === knownVersion)
-    )
-      return cached.value
-    const load = async () => {
-      const sequence = (this.resourceLoadSequence.get(key) ?? 0) + 1
-      this.resourceLoadSequence.set(key, sequence)
-      const value = await loader()
-      const loadedVersion = options.versionOf?.(value) || knownVersion
-      // A later-started force read is authoritative. An older ordinary request
-      // may still resolve for its caller, but must never overwrite that result.
-      if (this.resourceLoadSequence.get(key) === sequence) {
-        this.resources.set(key, {
-          value,
-          version: loadedVersion,
-          expiresAt: Date.now() + (options.ttlMs ?? 30_000),
-        })
-        if (loadedVersion) this.versions.set(key, loadedVersion)
-      }
-      return value
-    }
-    if (!options.force) return this.deduplicate(`resource:ordinary:${key}`, load)
-
-    // `force` means fresh from this invocation point. It must not coalesce
-    // with an earlier force call whose GitHub fact may already be obsolete.
-    const forced = load()
-    this.forcedResources.set(key, forced)
-    const clear = () => {
-      if (this.forcedResources.get(key) === forced) this.forcedResources.delete(key)
-    }
-    void forced.then(clear, clear)
-    return forced
+    return this.owner.cachedResource(key, version, loader, options)
   }
 
-  async cachedAggregate<T>(key: string, ttlMs: number, force: boolean, loader: () => Promise<T>): Promise<T> {
-    this.assertCircuitOpen()
-    const cached = this.aggregates.get(key) as CachedValue<T> | undefined
-    if (!force && cached && cached.expiresAt > Date.now()) return cached.value
-    return this.deduplicate(`aggregate:${key}`, async () => {
-      const value = await loader()
-      this.aggregates.set(key, { value, version: null, expiresAt: Date.now() + ttlMs })
-      return value
-    })
-  }
-
-  private async deduplicate<T>(key: string, loader: () => Promise<T>): Promise<T> {
-    const pending = this.inFlight.get(key) as Promise<T> | undefined
-    if (pending) return pending
-    const created = loader().finally(() => this.inFlight.delete(key))
-    this.inFlight.set(key, created)
-    return created
+  async cachedAggregate<T>(
+    key: string,
+    ttlMs: number,
+    force: boolean,
+    loader: () => Promise<T>,
+    options?: { derivedVersions?: (value: T) => Array<[key: string, version: string | null | undefined]> },
+  ): Promise<T> {
+    return this.owner.cachedAggregate(key, ttlMs, force, loader, options)
   }
 }
 
-const readers = new WeakMap<object, GithubRestReader>()
+const readers = new WeakMap<object, { owner: GithubGatewayOwner; reader: GithubRestReader }>()
 
+/** One reader per ctx, all bound to the PROCESS-level owner — one credential
+ *  scope owns one Gateway runtime regardless of how many ctx objects exist
+ *  (review r2: per-ctx owners split one budget into parallel schedulers).
+ * The cache entry carries its owner: close() swaps the process owner, and a
+ * cached reader must never keep serving the closed generation (review r6/F3). */
 export function githubRest(ctx: ShellContext): GithubRestReader {
   const key = ctx as object
+  const owner = githubGatewayOwner()
   const existing = readers.get(key)
-  if (existing) return existing
-  const created = new GithubRestReader(ctx)
-  readers.set(key, created)
+  if (existing && existing.owner === owner) return existing.reader
+  const created = new GithubRestReader(ctx, { owner })
+  readers.set(key, { owner, reader: created })
   return created
 }
 

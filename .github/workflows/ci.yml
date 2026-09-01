@@ -34,3 +34,4 @@ jobs:
       - run: pnpm run check:layers
       - run: pnpm run check:state-writes
       - run: pnpm run check:local-git-writes
+      - run: pnpm run check:github-access

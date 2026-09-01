@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict'
+import { beforeEach } from 'node:test'
+import { resetGithubGatewayOwnerForTests } from '../src/github/gateway-owner.ts'
+
+beforeEach(() => resetGithubGatewayOwnerForTests())
 import { commitWorkflowFixture } from './workflow-fixture.ts'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer, request, type RequestListener } from 'node:http'
@@ -61,6 +65,9 @@ function createHandler(
         return () => {}
       },
     },
+    // cordis fiber lifecycle api; the gateway close effect is never torn down
+    // by this unit harness.
+    effect: () => () => {},
     shell: {
       resolve(spec: unknown) {
         return spec

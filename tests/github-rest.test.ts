@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createGithubGatewayOwner } from '../src/github/gateway-owner.ts'
 import test from 'node:test'
 
 import { fetchGithubPrFact } from '../src/github/facts.ts'
@@ -298,37 +299,46 @@ test('an open secondary-rate circuit preserves retry-after classification on que
 })
 
 test('host REST requests are serialized across resources and respect a minimum start interval', async () => {
-  const starts: number[] = []
   let releaseFirst: (() => void) | null = null
   const firstBlocked = new Promise<void>((resolve) => {
     releaseFirst = resolve
   })
+  let runs = 0
   const fake = {
     shell: {
       resolve(spec: unknown) {
         return spec
       },
       async run() {
-        starts.push(Date.now())
-        if (starts.length === 1) await firstBlocked
+        runs += 1
+        if (runs === 1) await firstBlocked
         return { exitCode: 0, stdout: { text: included({ ok: true }) }, stderr: { text: '' } }
       },
     },
   }
-  const reader = new GithubRestReader(fake as never, { minimumIntervalMs: 20 })
+  const owner = createGithubGatewayOwner()
+  const reader = new GithubRestReader(fake as never, { minimumIntervalMs: 20, owner })
   const first = reader.json('repos/o/r/issues/1')
   const second = reader.json('repos/o/r/issues/2')
   try {
-    for (let attempt = 0; attempt < 100 && starts.length === 0; attempt += 1) {
+    for (let attempt = 0; attempt < 100 && runs === 0; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 5))
     }
-    assert.equal(starts.length, 1, 'the second resource must wait for the first request to settle')
+    assert.equal(runs, 1, 'the second resource must wait for the first request to settle')
   } finally {
     releaseFirst?.()
   }
   await Promise.all([first, second])
-  assert.equal(starts.length, 2)
-  assert.ok(starts[1] - starts[0] >= 20, `requests started only ${starts[1] - starts[0]}ms apart`)
+  assert.equal(runs, 2)
+  // Under the admission scheduler the pacing guarantee applies at the
+  // dispatch DECISION (the lifecycle dispatched `at`); the shell run sits a
+  // microtask hop downstream and can read under the interval on slow CI.
+  const decisions = owner
+    .lifecycleEvents()
+    .filter((event) => event.kind === 'dispatched')
+    .map((event) => (event.kind === 'dispatched' ? event.at : 0))
+  assert.equal(decisions.length, 2)
+  assert.ok(decisions[1] - decisions[0] >= 20, `dispatch decisions only ${decisions[1] - decisions[0]}ms apart`)
 })
 
 test('review decision uses each reviewer latest decisive review', () => {
@@ -370,4 +380,53 @@ test('REST mutation sends JSON on stdin instead of interpolating issue content i
   assert.match(resolved?.command ?? '', /--method PATCH --input -/)
   assert.doesNotMatch(resolved?.command ?? '', /do-not-expand/)
   assert.equal(resolved?.stdin, JSON.stringify({ body: '$(do-not-expand)' }))
+})
+
+test('r5/F3: a 2xx non-array page settles ok=false — shape validation precedes the upstream settlement', async () => {
+  const owner = createGithubGatewayOwner()
+  const ctx = {
+    shell: {
+      resolve: (spec: unknown) => spec,
+      run: async () => ({
+        exitCode: 0,
+        stdout: { text: 'HTTP/1.1 200\n\n{"message":"not-a-list"}' },
+        stderr: { text: '' },
+      }),
+    },
+  } as never
+  const reader = new GithubRestReader(ctx, { owner, minimumIntervalMs: 0 })
+  await assert.rejects(() => reader.paginate('repos/o/r/issues/1/comments'), /分页返回格式无效/)
+  const settled = owner
+    .lifecycleEvents()
+    .filter((event) => event.kind === 'upstream-settled')
+    .at(-1)
+  assert.equal(
+    settled?.kind === 'upstream-settled' ? settled.ok : null,
+    false,
+    'a bad-shape page is a failed settlement',
+  )
+})
+
+test('r5/F2: pagination runs inside the declared cost bound and fails closed past it', async () => {
+  const owner = createGithubGatewayOwner()
+  const commands: string[] = []
+  const fullPage = Array.from({ length: 100 }, (_, index) => ({ id: index + 1 }))
+  const ctx = {
+    shell: {
+      resolve: (spec: unknown) => spec,
+      run: async (spec: { command: string }) => {
+        commands.push(spec.command)
+        return { exitCode: 0, stdout: { text: included(fullPage) }, stderr: { text: '' } }
+      },
+    },
+  } as never
+  const reader = new GithubRestReader(ctx, { owner, minimumIntervalMs: 0 })
+  await owner.runWithAdmission({ priority: 'normal', deadlineMs: 300_000, maxPages: 3 }, async () => {
+    await assert.rejects(
+      () => reader.paginate('repos/o/r/issues/1/comments'),
+      /成本上界/,
+      'page 4 is beyond the declared bound and must fail the logical request',
+    )
+  })
+  assert.equal(commands.length, 3, 'exactly maxPages pages dispatched before the bound failed the request')
 })

@@ -20,14 +20,20 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import {
+  type EnrichmentSnapshot,
+  fetchEnrichmentSnapshot,
   fetchGithubIssueState,
   fetchGithubPrFact,
+  issueContractFrom,
   type IssueCommentRest,
   type RepositoryIssueItem,
   type RepositoryIssueRest,
   readConfiguredBranchFacts,
+  snapshotPrFact,
+  snapshotPrKey,
 } from '../github/facts.ts'
 import { githubErrorMessage, githubRest } from '../github/rest.ts'
+import { githubRead } from '../github/operations.ts'
 import { existsSync } from 'node:fs'
 import { type ClickVibeConfig, loadConfig } from '../infra/runtime.ts'
 import { observeTaskOwnership, type TaskOwnershipContext } from '../infra/task-ownership.ts'
@@ -133,6 +139,18 @@ export async function enrichWorkflowStates(
   >
 > {
   const config = configOverride ?? (await loadConfig())
+  // One shared GitHub snapshot per repo per TTL window (review r9): the
+  // per-item PR/contract/state fan-out priced 15 logical requests for five
+  // items and blew 5s deadlines under pacing — the aggregate is ≤2 pages
+  // cold and 0 hot, which is what the frozen multi threshold prices.
+  const snapshots = new Map<string, Promise<EnrichmentSnapshot | null>>()
+  const snapshotFor = (repoKey: string) => {
+    const cached = snapshots.get(repoKey)
+    if (cached) return cached
+    const promise = fetchEnrichmentSnapshot(ctx, repoKey, 30_000).catch(() => null)
+    snapshots.set(repoKey, promise)
+    return promise
+  }
   return Promise.all(
     workflows.map(async (workflow) => {
       const attempt = observation ? await observeWorktreeFor(ctx, observation, config, workflow) : null
@@ -188,10 +206,40 @@ export async function enrichWorkflowStates(
             workflow,
             workflow.baseRef ? workflowBaseBranch(workflow.baseRef) : undefined,
           )
+      const snapshot = await snapshotFor(workflow.repoKey)
+      const issueNumber = Number(workflow.key.split('#').pop())
+      const snapshotIssue = snapshot?.issueByNumber.get(issueNumber) ?? null
+      // owner:ref identity (review r10/F1): a same-name fork branch must
+      // never stand in for the same-repo PR the exact query would return.
+      const snapshotPull = snapshot?.prByHeadBranch.get(snapshotPrKey(workflow.repoKey, workflow.branch)) ?? null
       const [prLookup, currentIssue, liveIssueState] = await Promise.all([
-        fetchGithubPrFact(ctx, workflow.repoKey, workflow.branch, workflow.prNumber),
-        fetchIssueContract(ctx, workflow.url).catch(() => null),
-        fetchGithubIssueState(ctx, workflow.url),
+        // A PR found in the shared snapshot may still need its live review
+        // state (verdict binding) — the number-keyed read is cached per PR,
+        // so a snapshot hit without local verdict costs one detail read.
+        snapshotPull
+          ? workflow.reviewResult
+            ? Promise.resolve({ known: true, pr: snapshotPrFact(snapshotPull) })
+            : fetchGithubPrFact(ctx, workflow.repoKey, workflow.branch, String(snapshotPull.number))
+          : snapshot && workflow.prNumber === null && snapshot.pullsComplete
+            ? // PROVEN absence (review r11): the pulls page held the repo's
+              // ENTIRE PR list, so the branch miss is evidence. An incomplete
+              // page can never convert "not seen" into "no PR" — it falls to
+              // the exact owner-qualified query below.
+              Promise.resolve({ known: true, pr: null })
+            : // Verdict-bound lookups read PR facts only (same rule as the
+              // snapshot-hit branch above): a local review result binds the
+              // review state, the upstream reviews fan-out is needless.
+              fetchGithubPrFact(ctx, workflow.repoKey, workflow.branch, workflow.prNumber, !workflow.reviewResult),
+        snapshotIssue
+          ? Promise.resolve(issueContractFrom(snapshotIssue))
+          : fetchIssueContract(ctx, workflow.url).catch(() => null),
+        snapshotIssue
+          ? Promise.resolve(
+              String(snapshotIssue.state).toUpperCase() === 'CLOSED' ? ('CLOSED' as const) : ('OPEN' as const),
+            )
+          : snapshot
+            ? Promise.resolve(null)
+            : fetchGithubIssueState(ctx, workflow.url),
       ])
       const enriched = await deriveWorkflowState(
         ctx,
@@ -250,7 +298,12 @@ export async function maintainCompletedDependencyLedger(
   const rest = githubRest(ctx)
   const marker = dependencyUnlockMarker(dependencyNumbers)
   try {
-    const comments = await rest.paginate<IssueCommentRest>(`repos/${repoKey}/issues/${issue.number}/comments`)
+    const comments = (await githubRead(ctx, {
+      operation: 'issue-comments',
+      repoKey,
+      number: issue.number,
+      consistency: 'cache-ok',
+    })) as IssueCommentRest[]
     if (!comments.some((comment) => String(comment.body ?? '').includes(marker))) {
       await rest.mutate(`repos/${repoKey}/issues/${issue.number}/comments`, 'POST', {
         body: buildDependencyUnlockComment({

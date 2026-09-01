@@ -104,8 +104,6 @@ export async function fetchRepositoryIssues(
       url: pr.html_url,
       reviewDecision: null,
     }))
-    for (const issue of allIssues) rest.rememberVersion(`${repoKey}/issues/${issue.number}`, issue.updatedAt)
-    for (const pr of githubSnapshot.pulls) rest.rememberVersion(`${repoKey}/pulls/${pr.number}`, pr.updated_at)
 
     const issueByNumber = new Map(allIssues.map((issue) => [issue.number, issue]))
     const workflowByNumber = new Map(

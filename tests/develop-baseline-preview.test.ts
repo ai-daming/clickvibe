@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { resetGithubGatewayOwnerForTests } from '../src/github/gateway-owner.ts'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -173,6 +174,9 @@ test('frozen issue-branch preview skips self-dependencies and ignores a closed p
     assert.equal(closed.baselineDependencyIssue, null)
 
     await saveWorkflow(workflow('7', 'origin/clickvibe-issue-5 @ abc123'))
+    // Phase 3 simulates a rate-limited fresh read; reset so the process owner
+    // does not serve phase 2's cached issue detail across the ctx switch.
+    resetGithubGatewayOwnerForTests()
     const rateLimited = {
       shell: {
         resolve(spec: unknown) {

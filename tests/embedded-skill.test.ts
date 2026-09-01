@@ -23,6 +23,9 @@ test('host apply registers the embedded gh-issue runtime skill', () => {
       },
     },
     webServer: { register: () => () => {} },
+    // cordis fiber lifecycle api; the gateway close effect is never torn down
+    // by this unit harness.
+    effect: () => () => {},
     shell: {},
   } as never)
 

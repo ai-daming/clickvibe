@@ -31,7 +31,10 @@ import {
   type GithubPrDetailRest,
   type GithubPrFact,
 } from './reads.ts'
-import { deriveReviewDecision, githubRest, isGithubRateLimitError } from './rest.ts'
+import { isGithubRateLimitError } from './rest.ts'
+import { consistencyFromForce, githubRead } from './operations.ts'
+import { githubRest } from './rest.ts'
+import { issueBodyHash } from '../infra/state.ts'
 
 export interface GithubPrLookup {
   known: boolean
@@ -46,47 +49,15 @@ export async function fetchGithubPrFact(
   includeReviews = true,
   force = false,
 ): Promise<GithubPrLookup> {
-  const hasPrNumber = prNumber !== null && prNumber !== undefined
   try {
-    const rest = githubRest(ctx)
-    let raw: GithubPrDetailRest | undefined
-    if (hasPrNumber) {
-      raw = await fetchPrRestDetail(ctx, repoKey, String(prNumber), force, 5_000)
-    } else {
-      const owner = repoKey.split('/')[0]
-      raw = await rest.cachedResource(
-        `${repoKey}/pulls/head/${branch}`,
-        null,
-        async () =>
-          (
-            await rest.json<GithubPrDetailRest[]>(
-              `repos/${repoKey}/pulls?state=all&head=${encodeURIComponent(`${owner}:${branch}`)}&per_page=1`,
-              undefined,
-              5_000,
-            )
-          )[0],
-        { force },
-      )
-    }
-    if (!raw) return { known: true, pr: null }
-    rest.rememberVersion(`${repoKey}/pulls/${raw.number}`, raw.updated_at)
-    // lists 之外的回源刷新默认带 reviews 推导 reviewDecision;已有本地 verdict 时
-    // 跳过,省掉一轮 pulls/{n}/reviews 请求(列表路径由调用方按需传入)。
-    const reviews = includeReviews ? await fetchPrRestReviews(ctx, repoKey, raw.number, 5_000) : []
-    return {
-      known: true,
-      pr: {
-        number: String(raw.number),
-        state: raw.merged_at ? 'MERGED' : String(raw.state).toUpperCase() === 'CLOSED' ? 'CLOSED' : 'OPEN',
-        mergedAt: raw.merged_at ?? null,
-        headRefName: String(raw.head?.ref ?? branch),
-        url: String(raw.html_url ?? `https://github.com/${repoKey}/pull/${raw.number}`),
-        reviewDecision: deriveReviewDecision(reviews),
-        headRefOid: raw.head?.sha ? String(raw.head.sha) : undefined,
-        baseRefName: raw.base?.ref ? String(raw.base.ref) : undefined,
-        baseRefOid: raw.base?.sha ? String(raw.base.sha) : undefined,
-      },
-    }
+    const pr = await githubRead<GithubPrFact | null>(ctx, {
+      operation: force ? 'gate-pr-fact' : 'pr-fact',
+      repoKey,
+      ...(prNumber === null || prNumber === undefined ? { branch } : { number: prNumber }),
+      includeReviews,
+      consistency: consistencyFromForce(force),
+    })
+    return { known: true, pr }
   } catch (error) {
     if (isGithubRateLimitError(error)) throw error
     return { known: false, pr: null }
@@ -171,7 +142,12 @@ export interface RepositoryPrRest {
   merged_at: string | null
   updated_at?: string
   html_url: string
-  head?: { ref?: string }
+  head?: {
+    ref?: string
+    /** owner:ref label — survives head-repo deletion when repo becomes null. */
+    label?: string
+    repo?: { full_name?: string; name?: string; owner?: { login?: string } } | null
+  }
 }
 
 export interface RepositoryGithubSnapshot {
@@ -189,12 +165,130 @@ export async function fetchGithubRepoSnapshot(
   ttlMs: number,
   force: boolean,
 ): Promise<RepositoryGithubSnapshot> {
-  const rest = githubRest(ctx)
-  return rest.cachedAggregate(`repo:${repoKey}`, ttlMs, force, async () => {
-    const [issues, pulls] = await Promise.all([
-      rest.paginate<RepositoryIssueRest>(`repos/${repoKey}/issues?state=all`),
-      rest.paginate<RepositoryPrRest>(`repos/${repoKey}/pulls?state=all`),
-    ])
-    return { issues, pulls }
+  return githubRead(ctx, {
+    operation: 'repo-snapshot',
+    repoKey,
+    ttlMs,
+    consistency: consistencyFromForce(force),
   })
+}
+
+/** The branch-lookup identity for the shared enrichment snapshot: the same
+ *  owner:ref the exact per-item query uses (pulls?head=owner:branch). A fork
+ *  PR whose head branch merely shares the ref name is a DIFFERENT key (review
+ *  r10/F1) — the aggregate must not weaken the identity the old path had. */
+export function snapshotPrKey(repoKey: string, branch: string): string {
+  return `${repoKey.split('/')[0]}:${branch}`
+}
+
+function headOwnerOf(pull: RepositoryPrRest): string | null {
+  const head = pull.head
+  if (!head?.ref) return null
+  return head.repo?.owner?.login ?? head.repo?.full_name?.split('/')[0] ?? head.label?.split(':')[0] ?? null
+}
+
+/** The aggregate page size — both the URL parameter and the completeness
+ *  proof: a SHORT page (< size) means the server had no more rows, so the
+ *  page IS the repo's full PR list; a full-length page proves nothing (review
+ *  r11: a first-page miss must never convert "not seen" into "no PR"). */
+const ENRICHMENT_PAGE_SIZE = 100
+
+/** Index a repo snapshot for enrichment lookups (pure): issues by number, PRs
+ *  by head owner:ref. Same-owner historical duplicates keep the FIRST row —
+ *  the lists are created-desc, matching the exact query's per_page=1. */
+export function buildEnrichmentIndex(snapshot: RepositoryGithubSnapshot): EnrichmentSnapshot {
+  const issueByNumber = new Map<number, RepositoryIssueRest>()
+  for (const issue of snapshot.issues ?? []) issueByNumber.set(issue.number, issue)
+  const pulls = Array.isArray(snapshot.pulls) ? snapshot.pulls : []
+  const prByHeadBranch = new Map<string, RepositoryPrRest>()
+  for (const pull of pulls) {
+    const owner = headOwnerOf(pull)
+    if (owner === null) continue
+    const key = `${owner}:${pull.head?.ref}`
+    if (!prByHeadBranch.has(key)) prByHeadBranch.set(key, pull)
+  }
+  // Completeness is a property of the page itself: only a provably complete
+  // list may turn a branch miss into proven absence downstream. A missing or
+  // non-array pulls list is NOT completeness — fail open to the exact query.
+  return {
+    issueByNumber,
+    prByHeadBranch,
+    pullsComplete: Array.isArray(snapshot.pulls) && pulls.length < ENRICHMENT_PAGE_SIZE,
+  }
+}
+
+/** Per-repo enrichment inputs resolved from ONE shared snapshot per TTL
+ *  window (issue #131 review r9: five same-repo items must cost ≤2 aggregate
+ *  pages cold and 0 hot — per-item fan-out priced 15 logical requests and
+ *  blew the 5s deadlines under pacing). */
+export interface EnrichmentSnapshot {
+  /** Issue list item by issue number (body included → contract hash). */
+  issueByNumber: Map<number, RepositoryIssueRest>
+  /** PR by head owner:ref from the state=all pulls list (one page typical). */
+  prByHeadBranch: Map<string, RepositoryPrRest>
+  /** The pulls page held the repo's ENTIRE PR list (short page ⇒ no
+   *  continuation exists) — only then is a branch miss a proven absence. */
+  pullsComplete: boolean
+}
+
+export async function fetchEnrichmentSnapshot(
+  ctx: Context,
+  repoKey: string,
+  ttlMs: number,
+  force = false,
+): Promise<EnrichmentSnapshot> {
+  const rest = githubRest(ctx)
+  // ONE bounded page per list, any state (review r10/F3): the frozen multi
+  // population mixes open and closed work items, and a page walk would price
+  // continuation pages on repos with long histories. The aggregate is a
+  // recent-page cache, not a guarantee of completeness — misses fall back to
+  // the exact per-item reads.
+  const load = async () => {
+    const [issues, pulls] = await Promise.all([
+      rest.json<RepositoryIssueRest[]>(
+        `repos/${repoKey}/issues?state=all&sort=created&direction=desc&per_page=${ENRICHMENT_PAGE_SIZE}&page=1`,
+      ),
+      rest.json<RepositoryPrRest[]>(
+        `repos/${repoKey}/pulls?state=all&sort=created&direction=desc&per_page=${ENRICHMENT_PAGE_SIZE}&page=1`,
+      ),
+    ])
+    return { issues, pulls } satisfies RepositoryGithubSnapshot
+  }
+  const snapshot = await rest.cachedAggregate(`enrichment:${repoKey}`, ttlMs, force, load)
+  return buildEnrichmentIndex(snapshot)
+}
+
+/** Adapt a snapshot PR row into the fact shape derive consumes (no review
+ *  decision — callers wanting the live verdict use the number-keyed read). */
+export function snapshotPrFact(
+  pull: RepositoryPrRest & { head?: { sha?: string }; base?: { ref?: string; sha?: string } },
+): GithubPrFact {
+  const state = String(pull.state).toUpperCase()
+  return {
+    number: String(pull.number),
+    state: state === 'MERGED' || pull.merged_at ? 'MERGED' : state === 'CLOSED' ? 'CLOSED' : 'OPEN',
+    mergedAt: pull.merged_at ?? null,
+    headRefName: pull.head?.ref ?? '',
+    url: pull.html_url,
+    reviewDecision: null,
+    headRefOid: pull.head?.sha,
+    baseRefName: pull.base?.ref,
+    baseRefOid: pull.base?.sha,
+  }
+}
+
+/** Derive the review contract fields from a snapshot issue row. */
+export function issueContractFrom(issue: RepositoryIssueRest): {
+  title: string
+  body: string
+  state: string
+  contract: { bodyHash: string; updatedAt: string }
+} {
+  const body = String(issue.body ?? '')
+  return {
+    title: String(issue.title ?? ''),
+    body,
+    state: String(issue.state ?? '').toUpperCase(),
+    contract: { bodyHash: issueBodyHash(body), updatedAt: String(issue.updated_at ?? '') },
+  }
 }
