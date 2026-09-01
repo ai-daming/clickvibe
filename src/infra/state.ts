@@ -118,6 +118,8 @@ export interface WorkflowEvent {
   /** 人工放行审计(仅 merge-override 事件):用户填写的放行原因。 */
   reason?: string
   /** 人工放行审计(仅 merge-override 事件):执行放行的本机用户。 */
+  /** 原生 Approve 尝试凭证(仅 review 事件,slice B):派发前落盘,回读谓词安全恢复。 */
+  approvalAttempt?: { status: 'pending' | 'confirmed' | 'failed' | 'unknown' }
   operator?: string
 }
 

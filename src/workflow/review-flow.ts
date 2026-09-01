@@ -383,18 +383,34 @@ export async function startReview(
             if (latest.reviewResult) latest.reviewResult.commentUrl = commentUrl
           })
         }
+        // Attempt marker (slice B): the review event is already persisted
+        // before this point — re-approving after an uncertain outcome is
+        // guarded by the exact-body readback predicate, and an unconfirmed
+        // approval stays best-effort (non-blocking) exactly as before.
         const approval = await approvePassedReview(
+          ctx,
           {
             repoKey: reloaded.repoKey,
             prNumber: reloaded.prNumber,
             passed,
           },
-          (command) => runCommand(ctx, command, { timeoutMs: 30000 }),
+          async () => {
+            // The event publication record doubles as the durable marker: mark
+            // the approval attempt in the persisted review event before dispatch.
+            await mutateLiveTaskWorkflow(live, reloaded, (latest) => {
+              const reviewEvent = [...(latest.events ?? [])]
+                .reverse()
+                .find((candidate) => candidate.kind === 'review' && candidate.taskId === event.taskId)
+              if (reviewEvent && !reviewEvent.approvalAttempt) reviewEvent.approvalAttempt = { status: 'pending' }
+            })
+          },
         )
         if (approval === 'approved') {
           pushTaskLine(live, '[clickvibe] 已提交 GitHub 原生 Approve (LGTM)')
         } else if (approval === 'failed') {
           pushTaskLine(live, '[clickvibe] GitHub 原生 Approve 失败(继续,不影响 Review 结论与评论)')
+        } else if (approval === 'unknown') {
+          pushTaskLine(live, '[clickvibe] GitHub 原生 Approve 结果未确认(继续,不影响 Review 结论与评论)')
         }
       }
       notifyAutoRunCompletion(ctx, workflow.key, 'done')

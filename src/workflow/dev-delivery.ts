@@ -12,6 +12,7 @@ import { extractGithubCommentId } from './delivery-publication.ts'
 import { publishDeliveryComment } from './delivery-publish.ts'
 import { workflowBaseBranch } from './state-view.ts'
 import { mutateLiveTaskWorkflow } from './task-lease.ts'
+import { githubWrite, githubWriteOutcomeError } from '../github/writes.ts'
 
 /** Record one dev/rework delivery and publish its matching GitHub node. */
 export async function recordDevDelivery(
@@ -93,15 +94,22 @@ async function markPreviousReviewFixed(
     stats: reviewEvent.stats,
     at: reviewEvent.at,
   })
-  try {
-    await runCommand(
-      ctx,
-      `gh api ${shellQuote(`repos/${workflow.repoKey}/issues/comments/${commentId}`)} --method PATCH --input -`,
-      { stdin: JSON.stringify({ body }), timeoutMs: 30000 },
-    )
+  // Slice B: typed comment-edit write (idempotent full-body PATCH, no marker
+  // needed) with the comment-body readback predicate.
+  const issueNumber = parseUrl(workflow.url)?.number
+  const outcome = await githubWrite(ctx, {
+    operation: 'comment-edit',
+    input: {
+      repoKey: workflow.repoKey,
+      commentId: Number(commentId),
+      body,
+      issueNumber: issueNumber ? Number(issueNumber) : 0,
+    },
+  })
+  if (outcome.outcome === 'confirmed') {
     await appendLog(workflow.key, 'dev', `[clickvibe] 已标注上一轮 Review 评论:第 ${fixedRound} 轮已修复`)
-  } catch (error) {
-    const message = String(error instanceof Error ? error.message : error).slice(0, 500)
+  } else {
+    const message = githubWriteOutcomeError(outcome).slice(0, 500)
     await appendLog(workflow.key, 'dev', `[clickvibe] Review 评论修复标注失败(不影响交付): ${message}`)
   }
 }

@@ -64,7 +64,8 @@ export interface PromptSnapshot {
 
 export interface DeliveryPublication {
   target: 'pr' | 'issue'
-  status: 'posted' | 'failed'
+  /** 'pending' is the durable write-attempt marker (issue #131 slice B). */
+  status: 'pending' | 'posted' | 'failed'
   url?: string
   error?: string
 }

@@ -44,7 +44,7 @@ export interface LiveLogEvent {
 
 export interface DeliveryPublication {
   target: 'pr' | 'issue'
-  status: 'posted' | 'failed'
+  status: 'pending' | 'posted' | 'failed'
   url?: string
   error?: string
 }
@@ -89,6 +89,7 @@ export function latestTokenUsage(events: LiveLogEvent[]): TokenUsage | undefined
 
 export function deliveryPublicationLabel(publication: DeliveryPublication | undefined): string {
   if (!publication) return '本地事件'
+  if (publication.status === 'pending') return 'GitHub 评论发布中(未确认)'
   if (publication.status === 'failed') return 'GitHub 评论发布失败'
   return `GitHub ${publication.target === 'pr' ? 'PR' : 'Issue'} 评论${publication.url ? ' ↗' : '已发布'}`
 }

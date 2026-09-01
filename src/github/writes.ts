@@ -212,7 +212,7 @@ interface PrMergeInput {
   issueNumber: number
 }
 
-const commentCreateSpec: GithubWriteSpec<CommentCreateInput, { id: number }> = {
+const commentCreateSpec: GithubWriteSpec<CommentCreateInput, { id: number; html_url?: string }> = {
   id: 'issue-comment-create',
   keys: (input) => issueKeys(input.repoKey, input.number),
   priority: 'normal',
@@ -220,7 +220,7 @@ const commentCreateSpec: GithubWriteSpec<CommentCreateInput, { id: number }> = {
   maxPages: 2,
   repeatable: false,
   dispatch: (reader, input) =>
-    reader.mutate<{ id: number }>(`repos/${input.repoKey}/issues/${input.number}/comments`, 'POST', {
+    reader.mutate<{ id: number; html_url?: string }>(`repos/${input.repoKey}/issues/${input.number}/comments`, 'POST', {
       body: input.body,
     }),
   readback: {
@@ -289,6 +289,35 @@ const prMergeSpec: GithubWriteSpec<PrMergeInput, { merged?: boolean }> = {
   },
 }
 
+interface ApprovalInput {
+  repoKey: string
+  prNumber: number
+  body: string
+}
+
+const approvalSpec: GithubWriteSpec<ApprovalInput, { id: number }> = {
+  id: 'pr-review-approve',
+  keys: (input) => [`${input.repoKey}/pulls/${input.prNumber}`, `repo:${input.repoKey}`],
+  priority: 'normal',
+  deadlineMs: 30_000,
+  maxPages: 2,
+  // Approving twice accumulates two APPROVED reviews on the PR — the write
+  // is non-repeatable, so callers persist the attempt marker first.
+  repeatable: false,
+  dispatch: (reader, input) =>
+    reader.mutate<{ id: number }>(`repos/${input.repoKey}/pulls/${input.prNumber}/reviews`, 'POST', {
+      event: 'APPROVE',
+      body: input.body,
+    }),
+  readback: {
+    run: (reader, input) =>
+      reader.json<Array<{ state?: string; body?: string }>>(`repos/${input.repoKey}/pulls/${input.prNumber}/reviews`),
+    confirms: (input, observation) =>
+      Array.isArray(observation) &&
+      observation.some((entry) => String(entry.state ?? '').toUpperCase() === 'APPROVED' && entry.body === input.body),
+  },
+}
+
 /** Families migrate slice by slice; unregistered ids are a configuration
  *  error at submit time (githubWrite throws). */
 export const GITHUB_WRITE_OPERATIONS: Partial<Record<GithubWriteOperationId, GithubWriteSpec<never, never>>> = {
@@ -296,6 +325,7 @@ export const GITHUB_WRITE_OPERATIONS: Partial<Record<GithubWriteOperationId, Git
   'comment-edit': commentEditSpec as unknown as GithubWriteSpec<never, never>,
   'issue-close': issueCloseSpec as unknown as GithubWriteSpec<never, never>,
   'pr-merge': prMergeSpec as unknown as GithubWriteSpec<never, never>,
+  'pr-review-approve': approvalSpec as unknown as GithubWriteSpec<never, never>,
 }
 
 /** Human-readable error text for a non-confirmed write outcome. */
