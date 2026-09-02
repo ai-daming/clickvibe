@@ -4,13 +4,15 @@
 
 可观测性不是面板上“有日志”就完成。ClickVibe 必须能够回答：某个 Issue 在什么事实下、按哪版架构、由谁决定了什么、执行了什么、结果是否被重新观察到。
 
-## 三类记录
+## 三类记录，一条 v0.2 diagnostics transport
 
 | 记录 | 内容 | 用途 |
 |---|---|---|
 | Task log | Agent 原始结构化输出、命令、stdout/stderr、exit、token/时长 | 看施工过程和复现失败 |
 | Workflow event | observe/decision/action/result、HEAD、契约指纹、actor、task generation | 重建 Issue 生命周期 |
 | Diagnostic event | 原始异常、stack、fingerprint、retry、rate limit、runtime instance | 解释控制器和基础设施故障 |
+
+“三类”是语义类型，不是三套 writer、文件索引或面板入口。v0.2 的 GatewayLifecycleEvent 和 RemoteGitLifecycleEvent 分别保持各自访问平面的唯一计量来源；DiagnosticRecord 是同一 diagnostics JSONL transport 上的规范错误记录，通过 `diagnosticId/correlationId` 与失败 lifecycle 关联，不重新编码 declared/queued/dispatched/terminal，也不从中重复计算 #133 指标。共享 writer、原子轮转、索引与面板读取关系由 [ADR-0012 §7](decisions/0012-work-item-contract-canonicalization-and-evidence.md) 固定。
 
 ## 统一事件信封
 
@@ -53,7 +55,7 @@
 }
 ```
 
-这是目标契约，不等于 v0.2 一次实现全部事件。v0.2 先统一新 state 的 DiagnosticRecord、ArtifactRef 和请求指标；v0.3 为自主决策链写入完整判别式 EventEnvelope；v0.4 才以恢复和复盘为退出标准补齐全因果链。v0.1 日志随 state 整体冷备份，不进入 v0.2 active runtime；需要复盘时只读人工提取，不为旧格式建立兼容层。
+这是目标契约，不等于 v0.2 一次实现全部事件。v0.2 先统一新 state 的 DiagnosticRecord、ArtifactRef 和两条访问平面 lifecycle 指标，并复用同一 diagnostics transport；v0.3 为自主决策链写入完整判别式 EventEnvelope；v0.4 才以恢复和复盘为退出标准补齐全因果链。v0.1 日志随 state 整体冷备份，不进入 v0.2 active runtime；需要复盘时只读人工提取，不为旧格式建立兼容层。
 
 ## 复盘必须回答的问题
 

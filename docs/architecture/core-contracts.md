@@ -109,31 +109,42 @@ interface WorkflowIdentity {
 ```ts
 interface WorkItemContractSnapshot {
   schemaVersion: 1
+  canonicalizationVersion: 1
   workItem: WorkItemIdentity
   sourceVersion: string
-  goal: string
-  acceptanceCriteria: string[]
-  nonGoals: string[]
-  dependencies: WorkItemIdentity[]
+  goal: ContractField<string>
+  acceptanceCriteria: ContractField<AcceptanceCriterion[]>
+  nonGoals: ContractField<string[]>
+  constraints: ContractField<string[]>
+  dependencies: ContractField<WorkItemIdentity[]>
   architectureImpact: 'L0' | 'L1' | 'L2' | 'L3' | 'unknown'
   fingerprint: string
   capturedAt: string
   rawArtifact: ArtifactRef
 }
-```
 
+type ContractUnknownReason = 'missing' | 'conflicting' | 'unparseable'
+type ContractField<T> =
+  | { state: 'known'; value: T }
+  | { state: 'unknown'; reason: ContractUnknownReason }
+interface AcceptanceCriterion {
+  description: string
+  verificationAuthority: 'agent' | 'human' | 'external'
+}
+```
 | 字段 | 说人话 |
 |---|---|
 | `sourceVersion` | Provider 告诉我们的版本标识，例如 `updated_at`/etag；用于判断是否需要重抓 |
-| `goal` | 这张工单最终要改变什么 |
-| `acceptanceCriteria` | 怎样算交付完成 |
-| `nonGoals` | 本次明确不做什么，防止 Agent 自行扩张范围 |
-| `dependencies` | 哪些 Work Item 未完成时不能启动或交付 |
+| `goal` | 这张工单最终要改变什么；缺失/冲突不可变成空字符串 |
+| `acceptanceCriteria` | 条款描述和谁有权验证；checkbox 完成状态不在这里 |
+| `nonGoals` | 本次明确不做什么；缺章节是 unknown，显式“无”才是 known empty |
+| `constraints` | 不得突破的产品、架构、安全或兼容边界；同样区分 unknown 与 empty |
+| `dependencies` | 直接前置 Work Item；原生关系与正文冲突时是 unknown |
 | `architectureImpact` | 是否需要先做架构设计 |
 | `fingerprint` | 对规范化合同计算的指纹；需求变化时让旧 Review/Observer 失效 |
 | `rawArtifact` | 原始 Issue/评论快照的本地证据引用；摘要不能替代原文 |
 
-`fingerprint` 不应直接对未规范化的 Markdown 原文计算，否则空格或排版变化会制造无意义失效。
+`fingerprint` 不直接对 Markdown body 计算。v1 只覆盖 WorkItemIdentity、goal、AC 的 description/verificationAuthority、直接 dependencies、nonGoals、constraints 及其 known/unknown 状态；title、state、问题证据、架构影响、checkbox、评论、标签和时间戳明确排除。规范化字节、`wic1_` 格式、排序、原子 capture bundle、失效和未知版本规则由 [ADR-0012](decisions/0012-work-item-contract-canonicalization-and-evidence.md) 定义；该 ADR 在 Accepted 并合入 main 前不能作为 Coding baseline。
 
 ## 5. DeliveryBasis
 
@@ -420,11 +431,14 @@ interface EventEnvelope<TType extends string, TPayload> {
 interface DiagnosticRecord {
   schemaVersion: 1
   diagnosticId: string
+  recordType: 'diagnostic'
+  source: 'clickvibe' | 'github-gateway' | 'remote-git'
   workflow: WorkflowIdentity | null
   operation: string
   classification: string
   message: string
   stack: string | null
+  correlationId: string | null
   rawArtifact: ArtifactRef | null
   occurredAt: string
 }
@@ -455,7 +469,7 @@ type WorkflowEvent =
 | `observer.completed` | 必须非空 | 诊断只能作用于触发它的 generation 与 evidence |
 | `delivery.merged` | 必须非空 | 交付记录必须证明合并的是通过门禁的 exact head |
 
-DiagnosticRecord 不使用 EventEnvelope 的 `basis` 表达前置基础设施错误；它通过可空 workflow、operation、原始错误和 ArtifactRef 保存证据。v0.1 legacy event 不进入 active projection；需要复盘时只从只读冷备份人工提取，不能授权当前动作。
+DiagnosticRecord 不使用 EventEnvelope 的 `basis` 表达前置基础设施错误；它通过 source、可空 workflow、operation、correlation、原始错误和 ArtifactRef 保存证据。它与 GatewayLifecycleEvent、RemoteGitLifecycleEvent 共用 v0.2 diagnostics JSONL transport 和索引，但不替代两者，也不从错误记录重复推导请求指标；关系与物理通道见 [ADR-0012 §7](decisions/0012-work-item-contract-canonicalization-and-evidence.md)。v0.1 legacy event 不进入 active projection；需要复盘时只从只读冷备份人工提取，不能授权当前动作。
 
 事件用于审计与投影，不意味着所有当前状态都必须从零重放。WorkflowControlState 仍由串行命令域原子持久化，事件追加失败必须作为明确错误处理，不能静默丢失因果链。
 

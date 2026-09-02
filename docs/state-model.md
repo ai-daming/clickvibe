@@ -2,7 +2,7 @@
 
 > 2026-08-22 讨论沉淀。回答一个问题:**"这个 issue 现在处于什么状态,下一步该做什么、显示什么按钮"** —— 判断必须只依赖客观、保证存在的事实,任何"可能缺失"的东西都只能当增强器,不能当门槛。
 >
-> 2026-08-22 增补(吸收 gh-issue 轻量版):review 结论额外绑定**契约指纹**(issue 目标/验收正文),正文被改 → 结论过期;自动写动作后**回读验证**。
+> 2026-09-03 增补：review 结论绑定仓库权威 `WorkItemContractSnapshot.fingerprint`，不再把整个 Issue body hash 当契约；canonical 字段变化 → 结论过期，非契约元数据变化不误失效。算法与发布边界见 ADR-0012；自动写动作后仍须回读验证。
 
 ## 一、核心原则
 
@@ -122,7 +122,7 @@ workflow 每次提交都携带持久化 revision;所有普通写要求 expected 
 1. **去掉 workflow 门槛**:状态推导入口从"已持久化 workflow"改为"GitHub 枚举的每个 open issue"。对无 workflow 的 issue,用约定算候选 worktree/分支,直接查 git 填事实(worktree 无 → head=null;分支无 → 无内容;PR 用 `gh pr list --head <branch>` 查)。`deriveNextAction` 纯函数已支持 idle 分支,缺的只是入口。**回归示例**:本次 "#5 后从未开发过的 issue 不显示开发按钮" 就是 workflow 门槛的症状。
 2. **PR / Issue 实时状态与合并执行**:`/state` 实时读取 GitHub PR / Issue 状态；「合并 PR」经单次特权授权后执行 `gh pr merge --merge --match-head-commit <HEAD>`，确认 MERGED 后进入可重入清理链并归档 workflow。清理未完成的 closed Issue 仍保留在活跃列表，避免失去重试入口。
 3. **comment 流水带 meta**(关联 #4):开发完成 / review 完成 / 合并都要发评论,meta 至少含:事件类型、绑定的 HEAD、结论(passed + 问题列表)、issue 号。写入是尽力而为,失败时本地事件照记,状态不倒退。
-4. **结论绑定契约指纹**:review 结论的 meta 增加 issue 契约指纹(目标/验收正文 hash);保存结论与合并前都校验。issue 正文目标/验收被改 → 旧结论自动过期,按钮回到「重新 Review」,与 HEAD 过期走同一条路径。
+4. **结论绑定契约指纹**：review 结论保存 `WorkItemContractSnapshot.fingerprint`；保存结论与合并前都通过唯一 current-contract reader 校验。目标、AC 描述/验证权、直接依赖、非目标或约束变化 → 旧结论自动过期，按钮回到「重新 Review」；comment、updatedAt、title、label、问题证据、architectureImpact 和 AC checkbox 单独变化不改变 fingerprint。未知 schema/canonicalization 或当前 capture 不可读时显示 unknown 并暂停，不退回 body hash。
 5. **自动写动作回读验证**:建 PR / 发评论 / 更新 issue 状态后,立即用 `gh pr view` / `gh api` 回读确认落盘;回读失败只记录,不得把写动作当成功(原则同"写死状态实时查")。
 
 ## 五、关联
