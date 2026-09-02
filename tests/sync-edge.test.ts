@@ -70,11 +70,18 @@ test('concurrent sync requests serialize one workflow baseline-tip update', asyn
           if (spec.command.includes('MERGE_HEAD')) {
             return { exitCode: 1, stdout: { text: '' }, stderr: { text: '' } }
           }
+          const pushed = 'd'.repeat(40)
           const stdout = spec.command.includes('origin/main^{commit}')
             ? 'aaa1111'
             : spec.command === 'git rev-parse --short HEAD'
               ? 'bbb2222'
-              : ''
+              : spec.command === 'git branch --show-current'
+                ? 'r-issue-9'
+                : spec.command === 'git rev-parse --verify HEAD^{commit}'
+                  ? pushed
+                  : spec.command.startsWith('git ls-remote --heads')
+                    ? `${pushed}\trefs/heads/r-issue-9`
+                    : ''
           return { exitCode: 0, stdout: { text: stdout }, stderr: { text: '' } }
         },
       },
@@ -206,6 +213,19 @@ test('sync merges the sampled immutable baseline commit instead of the mutable r
           }
           if (spec.command === 'git rev-parse --short HEAD') {
             return { exitCode: 0, stdout: { text: 'head333' }, stderr: { text: '' } }
+          }
+          if (spec.command === 'git branch --show-current') {
+            return { exitCode: 0, stdout: { text: 'r-issue-13' }, stderr: { text: '' } }
+          }
+          if (spec.command === 'git rev-parse --verify HEAD^{commit}') {
+            return { exitCode: 0, stdout: { text: 'd'.repeat(40) }, stderr: { text: '' } }
+          }
+          if (spec.command.startsWith('git ls-remote --heads')) {
+            return {
+              exitCode: 0,
+              stdout: { text: `${'d'.repeat(40)}\trefs/heads/r-issue-13` },
+              stderr: { text: '' },
+            }
           }
           return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
         },

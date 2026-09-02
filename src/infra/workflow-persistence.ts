@@ -7,22 +7,17 @@ import type { IssueWorkflow } from './state.ts'
 import { workflowPath, type WorkflowStorageIdentity } from './state-layout.ts'
 import { applyWorkflowMetadataPatch, TASK_STATE_FIELDS, type WorkflowMetadataPatch } from './workflow-metadata.ts'
 import { assertLegacyStateWriteAllowed } from './v02-generation-fence.ts'
-
 export type { WorkflowMetadataPatch } from './workflow-metadata.ts'
-
 export interface WorkflowTaskCredential {
   kind: 'dev' | 'review'
   taskId: string
 }
-
 declare const workflowTaskLeaseBrand: unique symbol
-
 /** Opaque lifecycle capability signed by a successful task claim/commit. */
 export interface WorkflowTaskLease extends WorkflowTaskCredential {
   readonly taskStateRevision: number
   readonly [workflowTaskLeaseBrand]: true
 }
-
 export interface WorkflowTaskClaim extends WorkflowTaskCredential {
   agent: 'codex' | 'claude'
   hostJobId: string
@@ -439,19 +434,29 @@ export function commitWorkflowMetadataCommand(
   return enqueueWorkflowCommand(identity, () => commitWorkflowMetadata(identity, expectedRevision, patch))
 }
 
-/**
- * Hold the same durable workflow locks used by every metadata/task command.
- * Baseline recovery uses this read-side transaction while it validates and
- * restores one remote branch shared by several workflows.
- */
+type BaselineRestoreWorkflowTransaction = {
+  commitMetadata(identity: WorkflowStorageIdentity, patch: WorkflowMetadataPatch): Promise<IssueWorkflow>
+}
+/** Hold all related durable workflow locks through baseline validation and restoration. */
 export function withBaselineRestoreWorkflowLocksCommand<T>(
   identities: WorkflowStorageIdentity[],
-  operation: () => Promise<T>,
+  operation: (transaction: BaselineRestoreWorkflowTransaction) => Promise<T>,
 ): Promise<T> {
   const unique = new Map(identities.map((identity) => [workflowStatePath(identity), identity]))
   const ordered = [...unique.entries()].sort(([left], [right]) => left.localeCompare(right))
   const acquire = (index: number): Promise<T> => {
-    if (index >= ordered.length) return operation()
+    if (index >= ordered.length) {
+      const lockedPaths = new Set(ordered.map(([path]) => path))
+      return operation({
+        commitMetadata: async (identity, patch) => {
+          const path = workflowStatePath(identity)
+          if (!lockedPaths.has(path)) throw new Error(`baseline restore transaction does not own ${path}`)
+          const current = await readCurrent(path)
+          const next = applyWorkflowMetadataPatch(identity, current, patch)
+          return (await commit(path, current, next, current ? storedRevision(current) : 0)).workflow
+        },
+      })
+    }
     const [path, identity] = ordered[index]
     return enqueueWorkflowCommand(identity, async () => {
       const release = await acquireLock(path)

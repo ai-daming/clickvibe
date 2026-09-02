@@ -36,6 +36,7 @@ import {
 } from '../infra/state.ts'
 import { observeWorkflowTask, type TaskOwnershipContext } from '../infra/task-ownership.ts'
 import { withWorkflowLock } from '../infra/workflow-lock.ts'
+import { persistRemoteGitAttempt, recoverWorkflowRemotePush } from './remote-git-attempt.ts'
 import { workflowBaseBranch } from './state-view.ts'
 
 type SyncResult =
@@ -69,6 +70,12 @@ async function syncWorktreeLocked(ctx: Context, key: string): Promise<SyncResult
   const policy = { mode: 'danger-full-access' as const, workspaceRoot: workflow.worktree }
   const remoteBase = `origin/${workflowBaseBranch(workflow.baseRef)}`
   try {
+    const recovered = await recoverWorkflowRemotePush(ctx, workflow, 'sync', workflow.worktree, policy)
+    if (recovered?.status === 'confirmed') {
+      const recoveredHead = await readWorktreeHead(ctx, workflow.worktree)
+      await appendLog(workflow.key, 'dev', `[clickvibe] 已回读确认上次同步 push，HEAD ${recoveredHead ?? '未知'}`)
+      return { ok: true, worktree: workflow.worktree, branch: workflow.branch, head: recoveredHead }
+    }
     // Do not rely on git merge to reject a dirty tree:Git permits unrelated
     // local changes, which would otherwise let the merge commit be pushed.
     // An existing conflicted merge keeps following the conflict-preservation
@@ -148,7 +155,7 @@ async function syncWorktreeLocked(ctx: Context, key: string): Promise<SyncResult
       const current = await loadWorkflow(workflow.key)
       if (!current) throw new Error('同步期间 workflow 已不存在')
       Object.assign(
-        current,
+        workflow,
         await commitWorkflowMetadata(current, workflowRevision(current), {
           baseRef: updateBaseTip(current.baseRef, remoteBase, baseTip),
         }),
@@ -174,13 +181,60 @@ async function syncWorktreeLocked(ctx: Context, key: string): Promise<SyncResult
       )
     }
     const head = await readWorktreeHead(ctx, workflow.worktree)
+    const candidateOid = await runCommand(ctx, 'git rev-parse --verify HEAD^{commit}', {
+      workdir: workflow.worktree,
+      timeoutMs: 10_000,
+      sandboxPolicy: policy,
+    })
     await appendLog(workflow.key, 'dev', `[clickvibe] 同步:推送 ${workflow.branch} 到 origin…`)
     await remotePush(ctx, {
       repoKey: workflow.repoKey,
       workdir: workflow.worktree,
-      timeoutMs: 60_000,
+      timeoutMs: 120_000,
       sandboxPolicy: policy,
-      refspec: shellQuote(workflow.branch),
+      prepare: async () => {
+        const current = await loadWorkflow(workflow.key)
+        if (!current || workflowRevision(current) !== workflowRevision(workflow)) {
+          throw new Error('同步 push 凭证已过期: workflow revision 已变化')
+        }
+        if (current.worktree !== workflow.worktree || current.branch !== workflow.branch) {
+          throw new Error('同步 push 凭证已过期: worktree/branch 已变化')
+        }
+        const currentOwnership = observeWorkflowTask(ctx as unknown as TaskOwnershipContext, current)
+        if (currentOwnership.state === 'running' || currentOwnership.state === 'unknown') {
+          throw new Error('同步 push 凭证已过期: Agent 任务运行中或状态未知')
+        }
+        const branch = await runCommand(ctx, 'git branch --show-current', {
+          workdir: current.worktree,
+          timeoutMs: 10_000,
+          sandboxPolicy: policy,
+        })
+        const dirty = await runCommand(ctx, 'git status --porcelain', {
+          workdir: current.worktree,
+          timeoutMs: 10_000,
+          sandboxPolicy: policy,
+        })
+        const expectedOid = await runCommand(ctx, 'git rev-parse --verify HEAD^{commit}', {
+          workdir: current.worktree,
+          timeoutMs: 10_000,
+          sandboxPolicy: policy,
+        })
+        if (branch !== current.branch || dirty !== '' || expectedOid !== candidateOid) {
+          throw new Error('同步 push 凭证已过期: branch/HEAD/工作区已变化')
+        }
+        return {
+          operationKind: 'push' as const,
+          destinationRef: `refs/heads/${current.branch}`,
+          expectedOid,
+          expectedRemoteOid: null,
+        }
+      },
+      persistAttempt: async (attempt) => {
+        await persistRemoteGitAttempt(workflow, 'sync', attempt)
+      },
+      settleAttempt: async (attempt) => {
+        await persistRemoteGitAttempt(workflow, 'sync', attempt)
+      },
     })
     await appendLog(workflow.key, 'dev', `[clickvibe] 同步并推送完成,HEAD ${head ?? '未知'}`)
     // 记录同步事件到权威时间线(不改变开发/审查语义)

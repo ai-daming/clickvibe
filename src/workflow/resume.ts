@@ -19,7 +19,6 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { remoteFetch } from '../infra/remote-git.ts'
-import { notifyLocalGitMutation } from '../infra/local-git-snapshot.ts'
 import { buildResumePrompt, resolvePromptSnapshot } from '../agent/prompts.ts'
 import {
   attachAgentProcess,
@@ -94,7 +93,7 @@ export async function resumeDevelop(
   const sessionId = launch.sessionId
   // Reserve synchronously before the snapshot's GitHub awaits. This is the
   // per-workflow invariant preventing double-clicked resume requests from
-  // launching multiple agents against the same git worktree.
+  // launching multiple agents against the same checked-out workspace.
   let reservation: { task: LiveTask; created: boolean }
   try {
     reservation = resumeTaskGate.reserve(workflow.key, () => {
@@ -129,14 +128,9 @@ export async function resumeDevelop(
     })
     pushTaskLine(live, `[clickvibe] 已同步远端(origin)`)
   } catch (e) {
-    pushTaskLine(live, `[clickvibe] git fetch 失败(继续): ${String(e instanceof Error ? e.message : e)}`)
+    pushTaskLine(live, `[clickvibe] 远端 fetch 失败(继续): ${String(e instanceof Error ? e.message : e)}`)
   }
 
-  notifyLocalGitMutation(
-    { repoKey: workflow.repoKey, worktreePath: workflow.worktree },
-    'remote-fetch',
-    'resumeDevelopment',
-  )
   // issue #26:worktree 落后基线或处于冲突合并中时,把「合并 main、解决冲突」
   // 作为前置指令交给 agent(danger-full-access 有能力处理),review 意见不再
   // 被同步门禁挡住送不进来。

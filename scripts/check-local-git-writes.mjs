@@ -37,8 +37,6 @@ export const ALLOWLIST = new Map(
     'src/agent/develop.ts': 'command construction only; executed via ensureWorktree which invalidates',
     'src/agent/prompts.ts':
       'prompt text only: instructs the Agent (Agent-owned calls), Controller executes nothing here',
-    'src/infra/remote-git.ts':
-      'low-level remote adapter (issue #135 slice A); call-site invalidation today, Coordinator owns it in slice B',
   }),
 )
 

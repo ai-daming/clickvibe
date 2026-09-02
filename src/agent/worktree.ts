@@ -104,7 +104,6 @@ export async function ensureWorktree(
     sandboxPolicy: policy,
     timeoutMs: 60_000,
   })
-  notifyLocalGitMutation({ repoKey, worktreePath: worktree }, 'remote-fetch', 'ensureWorktree')
   let defaultRemoteBase = await runCommand(ctx, 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD', {
     workdir: expandedRepo,
     sandboxPolicy: policy,

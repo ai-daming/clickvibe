@@ -53,6 +53,7 @@ function fakeShell(scenario: Scenario, commands: string[]) {
       )
     }
     if (command === 'git fetch origin --prune') return shellResult()
+    if (command.startsWith('git for-each-ref')) return shellResult()
     if (command === 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD') return shellResult('origin/main')
     if (command === 'git branch --show-current') return shellResult(scenario.branch ?? '')
     if (command === 'git status --porcelain') return shellResult(scenario.dirty ? ' M local.txt' : '')

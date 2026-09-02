@@ -8,6 +8,8 @@ import { restoreBaseBranch } from '../src/workflow/baseline-restore.ts'
 import { commitWorkflowFixture } from './workflow-fixture.ts'
 
 const saveWorkflow = (workflow: IssueWorkflow) => commitWorkflowFixture(workflow, workflow.revision ?? null)
+const OLDER_HASH = 'a'.repeat(40)
+const LATEST_HASH = 'b'.repeat(40)
 
 function sharedWorkflow(root: string, number: string, hash: string, updatedAt: number): IssueWorkflow {
   return {
@@ -47,8 +49,8 @@ async function sharedFixture() {
     join(home, '.clickvibe', 'config.yaml'),
     ['repos:', `  o/r: ${repo}`, `worktreeRoot: ${join(root, 'worktrees')}`, ''].join('\n'),
   )
-  const older = sharedWorkflow(root, '1', 'aaa1111', 1)
-  const latest = sharedWorkflow(root, '2', 'bbb2222', 2)
+  const older = sharedWorkflow(root, '1', OLDER_HASH, 1)
+  const latest = sharedWorkflow(root, '2', LATEST_HASH, 2)
   await saveWorkflow(older)
   await saveWorkflow(latest)
   return {
@@ -63,7 +65,7 @@ async function sharedFixture() {
 }
 
 function ancestorResult(command: string) {
-  const reversed = command.includes("'bbb2222^{commit}' 'aaa1111^{commit}'")
+  const reversed = command.includes(`'${LATEST_HASH}^{commit}' '${OLDER_HASH}^{commit}'`)
   return { exitCode: reversed ? 1 : 0, stdout: { text: '' }, stderr: { text: reversed ? 'no' : '' } }
 }
 
@@ -85,7 +87,7 @@ test('restore rejects an older shared-baseline authorization recorded by another
   try {
     const restored = await restoreBaseBranch(ctx as never, {
       url: fixture.older.url,
-      restoreTarget: { branch: 'release/shared', hash: 'aaa1111' },
+      restoreTarget: { branch: 'release/shared', hash: OLDER_HASH },
     })
     assert.equal(restored.ok, false)
     if (!restored.ok) assert.match(restored.error, /目标已变化/)
@@ -124,7 +126,7 @@ test('restore includes an archived workflow when selecting the latest shared bas
   try {
     const restored = await restoreBaseBranch(ctx as never, {
       url: fixture.older.url,
-      restoreTarget: { branch: 'release/shared', hash: 'aaa1111' },
+      restoreTarget: { branch: 'release/shared', hash: OLDER_HASH },
     })
     assert.equal(restored.ok, false)
     if (!restored.ok) assert.match(restored.error, /目标已变化/)
@@ -147,6 +149,7 @@ test('restore holds every workflow sharing the baseline until the exact push fin
   const fetchStarted = new Promise<void>((resolve) => {
     markFetchStarted = resolve
   })
+  let pushed = false
   const ctx = {
     shell: {
       resolve(spec: unknown) {
@@ -161,6 +164,17 @@ test('restore holds every workflow sharing the baseline until the exact push fin
         if (spec.command.startsWith('git rev-parse --verify refs/remotes/origin/')) {
           return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'missing' } }
         }
+        if (spec.command.startsWith('git rev-parse --verify')) {
+          return { exitCode: 0, stdout: { text: LATEST_HASH }, stderr: { text: '' } }
+        }
+        if (spec.command.startsWith('git push ')) pushed = true
+        if (spec.command.startsWith('git ls-remote --heads')) {
+          return {
+            exitCode: 0,
+            stdout: { text: pushed ? `${LATEST_HASH}\trefs/heads/release/shared\n` : '' },
+            stderr: { text: '' },
+          }
+        }
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       },
     },
@@ -168,7 +182,7 @@ test('restore holds every workflow sharing the baseline until the exact push fin
   try {
     const restoring = restoreBaseBranch(ctx as never, {
       url: fixture.older.url,
-      restoreTarget: { branch: 'release/shared', hash: 'bbb2222' },
+      restoreTarget: { branch: 'release/shared', hash: LATEST_HASH },
     })
     await fetchStarted
     const mutation = commitWorkflowMetadata(fixture.latest, fixture.latest.revision ?? null, { issueState: 'CLOSED' })
