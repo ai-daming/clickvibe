@@ -15,6 +15,8 @@
  * never a fabricated core bucket (#149 rounds 4-6).
  */
 
+import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
+
 export interface GatewayRateObservation {
   /** Real bucket name from the response (`x-ratelimit-resource`); null never
    *  falls back to a fabricated core bucket (#149 rounds 4-6). */
@@ -31,7 +33,7 @@ export type GatewayLifecycleEvent =
   | {
       kind: 'declared'
       requestId: string
-      scope: 'resource' | 'aggregate' | 'direct'
+      scope: 'resource' | 'aggregate' | 'direct' | 'write'
       key: string
       priority: 'critical' | 'normal'
       at: number
@@ -48,10 +50,12 @@ export type GatewayLifecycleEvent =
       rate: GatewayRateObservation | null
       at: number
     }
+  | { kind: 'write-invalidated'; requestId: string; keys: string[]; at: number }
+  | { kind: 'readback-settled'; requestId: string; confirmed: boolean; at: number }
   | {
       kind: 'terminal'
       requestId: string
-      outcome: 'succeeded' | 'failed' | 'rate-limited' | 'interrupted'
+      outcome: 'succeeded' | 'failed' | 'rate-limited' | 'interrupted' | 'unknown'
       error: string | null
       at: number
     }
@@ -64,6 +68,10 @@ export interface GatewayMetrics {
   failures: number
   rateLimited: number
   interrupted: number
+  /** Write transactions whose readback could not prove the expected fact. */
+  unknowns: number
+  /** Authoritative post-write readbacks settled (issue #131 slice B, #133 unit). */
+  writeReadbacks: number
   upstreamRequests: number
   /** Sum of queued→dispatched wait across steps (#133 waitMs unit). */
   waitMsTotal: number
@@ -119,6 +127,7 @@ export function deriveGatewayMetrics(events: GatewayLifecycleEvent[]): GatewayMe
   const terminals = new Map<string, Extract<GatewayLifecycleEvent, { kind: 'terminal' }>>()
   let upstreamRequests = 0
   let waitMsTotal = 0
+  let writeReadbacks = 0
 
   for (const event of events) {
     switch (event.kind) {
@@ -140,6 +149,11 @@ export function deriveGatewayMetrics(events: GatewayLifecycleEvent[]): GatewayMe
         upstreamRequests += 1
         settledOwn.add(event.requestId)
         break
+      case 'write-invalidated':
+        break
+      case 'readback-settled':
+        writeReadbacks += 1
+        break
       case 'terminal':
         terminals.set(event.requestId, event)
         break
@@ -152,6 +166,7 @@ export function deriveGatewayMetrics(events: GatewayLifecycleEvent[]): GatewayMe
   let failures = 0
   let rateLimited = 0
   let interrupted = 0
+  let unknowns = 0
   for (const requestId of declared) {
     const terminal = terminals.get(requestId)
     // Non-success terminals partition into their own buckets first — a failed
@@ -159,6 +174,7 @@ export function deriveGatewayMetrics(events: GatewayLifecycleEvent[]): GatewayMe
     if (terminal && terminal.outcome !== 'succeeded') {
       if (terminal.outcome === 'rate-limited') rateLimited += 1
       else if (terminal.outcome === 'interrupted') interrupted += 1
+      else if (terminal.outcome === 'unknown') unknowns += 1
       else failures += 1
       continue
     }
@@ -184,7 +200,26 @@ export function deriveGatewayMetrics(events: GatewayLifecycleEvent[]): GatewayMe
     failures,
     rateLimited,
     interrupted,
+    unknowns,
+    writeReadbacks,
     upstreamRequests,
     waitMsTotal,
   }
+}
+
+/** Diagnostic for a late response fenced out by the owner generation: the
+ *  caller keeps its interrupted terminal and the cache never republishes. */
+export function noteLateResponseDiagnostic(
+  requestId: string,
+  repo: string,
+  bucket: string,
+  phase: 'settled' | 'rejected',
+): void {
+  logTaskDiagnostic('github-gateway-late-response', {
+    requestId,
+    repo,
+    bucket,
+    phase,
+    note: '迟到响应被 owner generation 隔离:调用方保留 interrupted terminal,缓存不回填',
+  })
 }

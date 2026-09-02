@@ -42,6 +42,8 @@ export interface DeliveryCleanup {
   localBranch: boolean
   remoteBranch: boolean
   issue: boolean
+  /** 关闭评论写事务的 attempt marker(merge 清理步骤账本):'pending' 表示已准备派发,重启恢复只回读;'confirmed' 表示已发布。 */
+  issueComment?: 'pending' | 'confirmed'
 }
 export interface WorkflowDelivery {
   status: 'merged' | 'cleanup-pending' | 'archived'
@@ -72,6 +74,8 @@ export interface IssueWorkflow {
   reviewResult: { passed: boolean; issues: string[]; commentUrl?: string } | null
   /** 关联的 PR 号(开发分支的代码产物);issue 为 key,PR 记录在这里。 */
   prNumber: string | null
+  /** PR 创建写事务的 attempt marker:派发前落盘,重启恢复只回读不再创建。 */
+  prCreate?: { status: 'pending'; at: string }
   /** 最近一次从 GitHub 看到的 issue 状态(推导『已关闭→无动作』,issue #5)。 */
   issueState: 'OPEN' | 'CLOSED'
   /** 开发基线:不可变远端分支 + 最近一次成功合入 worktree 并持久化的 tip。 */
@@ -118,6 +122,8 @@ export interface WorkflowEvent {
   /** 人工放行审计(仅 merge-override 事件):用户填写的放行原因。 */
   reason?: string
   /** 人工放行审计(仅 merge-override 事件):执行放行的本机用户。 */
+  /** 原生 Approve 尝试凭证(仅 review 事件,slice B):派发前落盘,回读谓词安全恢复。 */
+  approvalAttempt?: { status: 'pending' | 'confirmed' | 'failed' | 'unknown' }
   operator?: string
 }
 

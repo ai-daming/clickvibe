@@ -39,26 +39,6 @@ const ALLOWLIST = new Map(
       symbols: [],
       reason: 'Agent-owned prompt text (ADR-0007 exclusion) — allowed only while the module stays execution-free',
     },
-    'src/github/review-approval.ts': {
-      boundary: 'slice-b-write',
-      symbols: ['approvePassedReview@1'],
-      reason: 'Slice B: typed approval write + readback',
-    },
-    'src/workflow/dev-delivery.ts': {
-      boundary: 'slice-b-write',
-      symbols: ['markPreviousReviewFixed@1'],
-      reason: 'Slice B: typed comment edit + readback',
-    },
-    'src/workflow/delivery-publish.ts': {
-      boundary: 'slice-b-write',
-      symbols: ['publishDeliveryComment@1'],
-      reason: 'Slice B: typed non-repeatable comment publish',
-    },
-    'src/workflow/merge.ts': {
-      boundary: 'slice-b-write',
-      symbols: ['mergeAndCleanupUnlocked@1'],
-      reason: 'Slice B: exclusive merge/close transaction',
-    },
   }),
 )
 

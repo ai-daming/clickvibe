@@ -39,5 +39,20 @@
     "path": "src/github/gateway-owner.ts",
     "reason": "Issue #131: the owner hosts the admission/lifecycle/close state machine whose pieces share closure state (waiting/pacing/running, buckets, generation fence); the pure selection policy is split into gateway-scheduling.ts. Further splitting is deferred from the L3 gateway slice.",
     "issueRef": "#131"
+  },
+  {
+    "path": "src/infra/state.ts",
+    "reason": "Issue #131 slice B adds the typed-write event fields (approvalAttempt marker, delivery publication pending status) to the v0.2 workflow event schema, crossing 500 by 1 line; splitting infra/state is the pre-existing #61 structural-split scope, not this feature.",
+    "issueRef": "#131"
+  },
+  {
+    "path": "tests/github-gateway-writes.test.ts",
+    "reason": "Issue #131 slice B: the transaction interleaving matrix and every write family's dispatch/readback/predicate contract live in one suite (each test is a design §9/§13 interleaving over the shared fake-reader harness); splitting the matrix from the family specs is deferred.",
+    "issueRef": "#131"
+  },
+  {
+    "path": "src/github/writes.ts",
+    "reason": "Issue #131 slice B: the write confirmation transaction engine and the full family registry (nine dispatch/readback/predicate specs) share one module by design — a spec is only meaningful next to the transaction that executes it. Splitting families from the engine is deferred.",
+    "issueRef": "#131"
   }
 ]

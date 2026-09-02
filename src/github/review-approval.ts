@@ -1,31 +1,50 @@
-import { shellQuote } from '../infra/develop-core.ts'
+/**
+ * Typed review approval (issue #131 slice B, c3): the best-effort native
+ * approval becomes a write confirmation transaction. The attempt marker is
+ * persisted by the caller before dispatch, and the reviews readback
+ * predicate confirms the APPROVED entry.
+ */
+import type { Context } from '@deepseek-ai/cordis'
+import { githubWrite } from './writes.ts'
 
 export interface ReviewApprovalInput {
   repoKey: string
   prNumber: string | number | null
   passed: boolean
+  /** The reviewed commit the approval must bind to (review CF2). */
+  reviewedHead: string | null
 }
 
-export type ReviewApprovalResult = 'approved' | 'skipped' | 'failed'
+export type ReviewApprovalResult = 'approved' | 'skipped' | 'failed' | 'unknown'
 
-const REVIEW_APPROVAL_BODY = '**身份：Review Agent**\n\nLGTM'
+/** The exact approval body — the readback predicate and restart recovery both
+ *  rebuild the dispatched body from this single constant. */
+export const REVIEW_APPROVAL_BODY = '**身份：Review Agent**\n\nLGTM'
 
 /** Submit a native GitHub approval only for a passing PR review.
  *
  * GitHub can reject this write (notably when the authenticated user authored
- * the PR), so approval is deliberately best-effort and never escapes errors.
+ * the PR) — a provable 4xx rejection is 'failed'. An approval the readback
+ * could not settle is 'unknown'; both remain non-blocking for the review
+ * verdict exactly as before (best-effort).
  */
 export async function approvePassedReview(
+  ctx: Context,
   input: ReviewApprovalInput,
-  run: (command: string) => Promise<unknown>,
+  persistMarker: () => Promise<void>,
 ): Promise<ReviewApprovalResult> {
-  if (!input.passed || !input.prNumber) return 'skipped'
-
-  const prUrl = `https://github.com/${input.repoKey}/pull/${input.prNumber}`
-  try {
-    await run(`gh pr review ${shellQuote(prUrl)} --approve --body ${shellQuote(REVIEW_APPROVAL_BODY)}`)
-    return 'approved'
-  } catch {
-    return 'failed'
-  }
+  if (!input.passed || !input.prNumber || !input.reviewedHead) return 'skipped'
+  const outcome = await githubWrite(ctx, {
+    operation: 'pr-review-approve',
+    input: {
+      repoKey: input.repoKey,
+      prNumber: Number(input.prNumber),
+      body: REVIEW_APPROVAL_BODY,
+      reviewedHead: input.reviewedHead,
+    },
+    persistMarker,
+  })
+  if (outcome.outcome === 'confirmed') return 'approved'
+  if (outcome.outcome === 'failed') return 'failed'
+  return 'unknown'
 }

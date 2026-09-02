@@ -1,9 +1,23 @@
 /** The Gateway owner public contract (issue #131, ADR-0010). Types-only
  *  module: the implementation lives in gateway-owner.ts; this header is the
  *  surface the REST adapter and consumers code against (review r9 size split).
+ *  GatewayClosedError is the one runtime value: every rejection path that
+ *  provably never dispatched throws it (review CF1).
  */
 import type { GatewayLifecycleEvent, GatewayMetrics, GatewayRateObservation } from './gateway-lifecycle.ts'
 import type { GithubRateLimitError, GithubRateLimitKind } from './rest.ts'
+
+/** Rejection raised on paths that provably never dispatched: submissions
+ *  after close, queue/pacing interrupts, and interrupted lease waits. A write
+ *  transaction seeing this knows zero upstream execution happened. The
+ *  drain-timeout of an already-RUNNING step deliberately stays a plain Error
+ *  — the step may have reached GitHub. */
+export class GatewayClosedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'GatewayClosedError'
+  }
+}
 
 export interface GatewayAdmissionAttributes {
   priority: 'critical' | 'normal'
@@ -30,7 +44,7 @@ export interface GithubGatewayOwner {
   /** Opaque identity; never contains token material. */
   readonly credentialScopeId: string
   /** Declare one logical request; throws once the owner is closed. */
-  declareLogicalRequest(scope: 'resource' | 'aggregate' | 'direct', key: string): string
+  declareLogicalRequest(scope: 'resource' | 'aggregate' | 'direct' | 'write', key: string): string
   /** Ambient logical-request attribution for loader-internal upstream steps. */
   runWithRequest<T>(requestId: string, fn: () => Promise<T>): Promise<T>
   ambientRequestId(): string | null
@@ -51,7 +65,7 @@ export interface GithubGatewayOwner {
    *  outcome is recorded as a late diagnostic and never rewrites the first. */
   noteTerminal(
     requestId: string,
-    outcome: 'succeeded' | 'failed' | 'rate-limited' | 'interrupted',
+    outcome: 'succeeded' | 'failed' | 'rate-limited' | 'interrupted' | 'unknown',
     error?: unknown,
   ): void
   /** The lifecycle stream — the single metric and evidence source (ADR-0010 §10). */
@@ -99,6 +113,40 @@ export interface GithubGatewayOwner {
     loader: () => Promise<T>,
     options?: CachedAggregateOptions<T>,
   ): Promise<T>
+  /**
+   * Acquire the exclusive write lease for a sorted key set ATOMICALLY
+   * (ADR-0010 §9): leases are granted as a whole from a FIFO queue, so two
+   * overlapping write transactions can never deadlock or interleave.
+   * Returns the release function; the transaction's invalidation and
+   * readback both happen while held. The caller passes the ALREADY declared
+   * logical request id: the request must be visible to the lifecycle stream
+   * before it blocks on the queue, and close() settles a queued acquisition
+   * with exactly one interrupted terminal.
+   */
+  acquireWriteLeases(keys: string[], requestId: string): Promise<() => void>
+  /** Wait until no held write lease covers this read key (child paths included). */
+  waitReadableResource(key: string): Promise<void>
+  /** Run a composition exempt from read-side lease waiting (the write
+   *  transaction's own authoritative readback — it must not queue behind
+   *  itself). */
+  runWithLeaseExemption<T>(fn: () => Promise<T>): Promise<T>
+  /** Record the write-side invalidation in the lifecycle stream. */
+  noteWriteInvalidated(requestId: string, keys: string[]): void
+  /** Record the authoritative post-write readback settlement. */
+  noteReadbackSettled(requestId: string, confirmed: boolean): void
+  /**
+   * Track one whole logical write transaction for close() (review CF1): the
+   * owner waits within its drain window for the transaction to settle its own
+   * single terminal. Not a second state machine — a join on the existing
+   * transaction promise.
+   */
+  runLogicalWrite<T>(requestId: string, run: () => Promise<T>): Promise<T>
+  /**
+   * Mark that this write's dispatch has been attempted. A transaction still
+   * unsettled at the close deadline MAY have executed upstream once this is
+   * set — its sweep terminal is unknown, never interrupted.
+   */
+  noteWriteDispatchAttempted(requestId: string): void
   /** Resolve when no step is waiting or running (test/evidence quiescence). */
   idle(): Promise<void>
   /** Stop admission, interrupt queued steps, drain running to a deadline, fence

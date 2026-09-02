@@ -82,7 +82,9 @@ function githubApi(
     failRepoIssues?: string
   } = {},
 ): { exitCode: number; stdout: { text: string }; stderr: { text: string } } | null {
-  if (!command.startsWith('gh api ')) return null
+  // Mutations are writes (slice B): the shared GET helper never answers them —
+  // each test's write branches (PUT merge / POST comment / PATCH state) own them.
+  if (!command.startsWith('gh api ') || command.includes('--method')) return null
   let body: unknown = []
   let exitCode = 0
   let stderr = ''
@@ -381,6 +383,66 @@ test('/create-pr uses a one-use privileged authorization before the shared handl
   }
 })
 
+test('/create-pr recovers a pending PR-create marker by readback and never re-creates', async () => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-create-pr-recover-'))
+  process.env.HOME = tempHome
+  try {
+    const worktree = join(tempHome, 'worktree')
+    await mkdir(worktree, { recursive: true })
+    const workflow = interruptedWorkflow('o-r-74', 'https://github.com/o/r/issues/74', worktree)
+    workflow.prCreate = { status: 'pending', at: '2026-08-22T00:00:00Z' }
+    await commitWorkflowFixture(workflow, workflow.revision ?? null)
+    let writes = 0
+    const handler = createHandler(async (spec) => {
+      if (spec.command.includes('/pulls?state=open')) {
+        return {
+          exitCode: 0,
+          stdout: { text: included([{ number: 31, head: { ref: workflow.branch } }]) },
+          stderr: { text: '' },
+        }
+      }
+      if (spec.command.includes('--method')) {
+        writes += 1
+        throw new Error(`unexpected write: ${spec.command}`)
+      }
+      return { exitCode: 0, stdout: { text: included({}) }, stderr: { text: '' } }
+    })
+    const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+    const preview = (await post(
+      handler,
+      '/clickvibe/api/authorize',
+      { action: 'create-pr', url: workflow.url },
+      headers,
+    )) as {
+      status: number
+      body: { authorizationId?: string; authorizationDigest?: string }
+    }
+    assert.equal(preview.status, 200)
+    const result = (await post(
+      handler,
+      '/clickvibe/api/create-pr',
+      {
+        url: workflow.url,
+        authorizationId: preview.body.authorizationId,
+        authorizationDigest: preview.body.authorizationDigest,
+      },
+      headers,
+    )) as { status: number; body: { ok?: boolean; prNumber?: string; created?: boolean; error?: string } }
+    assert.equal(result.status, 200, JSON.stringify(result.body))
+    assert.equal(result.body.prNumber, '31')
+    assert.equal(result.body.created, false)
+    assert.equal(writes, 0, 'pending marker recovery settles by readback, never a second create')
+    const reloaded = await loadWorkflow('o-r-74')
+    assert.equal(reloaded?.prNumber, '31')
+    assert.equal(reloaded?.prCreate, undefined, 'the marker is resolved once the PR is adopted')
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
 test('/authorize rejects cross-origin requests before fetching issue content', async () => {
   const result = await post(
     createHandler(),
@@ -648,12 +710,10 @@ test('concurrent first-development authorizations freeze exactly one baseline an
           return { exitCode: 0, stdout: { text: '1' }, stderr: { text: '' } }
         if (spec.command.startsWith('git worktree add'))
           return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-        if (spec.command.startsWith('gh issue comment'))
-          return {
-            exitCode: 0,
-            stdout: { text: 'https://github.com/o/r/issues/601#issuecomment-1' },
-            stderr: { text: '' },
-          }
+        if (spec.command.includes('--method POST') && spec.command.includes('/comments')) {
+          item.comments.push({ author: { login: 'clickvibe' }, body: JSON.parse(spec.stdin ?? '{}').body ?? '' })
+          return { exitCode: 0, stdout: { text: 'HTTP/1.1 201\n\n{"id":1}' }, stderr: { text: '' } }
+        }
         throw new Error(`unexpected command: ${spec.command}`)
       },
       () => {
@@ -964,8 +1024,11 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
     let merged = false
     let issueClosed = false
     const commands: string[] = []
+    const writeBodies: string[] = []
+    const closeComments: Array<{ body: string }> = []
     const handler = createHandler(async (spec) => {
       commands.push(spec.command)
+      if (spec.command.includes('--method PUT') && spec.command.includes('/merge')) writeBodies.push(spec.stdin ?? '')
       const api = githubApi(spec.command, {
         item: {
           url: workflow.url,
@@ -973,6 +1036,7 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
           title: 'merge issue',
           body: reviewedBody,
           state: issueClosed ? 'CLOSED' : 'OPEN',
+          comments: closeComments,
           updatedAt: '2026-08-22T00:00:00Z',
         },
         pr: {
@@ -986,19 +1050,24 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
         reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
       })
       if (api) return api
-      if (spec.command.startsWith('gh pr merge')) {
+      if (spec.command.includes('--method PUT') && spec.command.includes('/merge')) {
         merged = true
-        return { exitCode: 0, stdout: { text: 'merged' }, stderr: { text: '' } }
+        return { exitCode: 0, stdout: { text: 'HTTP/1.1 200\n\n{"merged":true}' }, stderr: { text: '' } }
+      }
+      if (spec.command.includes('--method POST') && spec.command.includes('/comments')) {
+        closeComments.push({ body: JSON.parse(spec.stdin ?? '{}').body ?? '' })
+        return { exitCode: 0, stdout: { text: 'HTTP/1.1 201\n\n{"id":77}' }, stderr: { text: '' } }
+      }
+      if (spec.command.includes('--method PATCH') && spec.command.includes('/issues/')) {
+        issueClosed = true
+        return { exitCode: 0, stdout: { text: 'HTTP/1.1 200\n\n{"state":"closed"}' }, stderr: { text: '' } }
       }
       if (spec.command === 'git worktree list --porcelain')
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       if (spec.command.startsWith('if git show-ref')) return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       if (spec.command.startsWith('if git ls-remote'))
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-      if (spec.command.startsWith('gh issue close')) {
-        issueClosed = true
-        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-      }
+
       throw new Error(`unexpected command: ${spec.command}`)
     })
     const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
@@ -1044,7 +1113,7 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
     )
     assert.equal(tampered.status, 403)
     assert.equal(
-      commands.some((command) => command.startsWith('gh pr merge')),
+      commands.some((command) => command.includes('/merge') && command.includes('--method PUT')),
       false,
     )
     const executionAuthorization = (await post(
@@ -1071,11 +1140,17 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
     )) as { status: number; body: { ok: boolean; archived?: boolean } }
     assert.equal(response.status, 200, JSON.stringify(response.body))
     assert.equal(response.body.archived, true)
-    const mergeCommand = commands.find((command) => command.startsWith('gh pr merge')) ?? ''
-    assert.match(mergeCommand, / --merge /)
-    assert.match(mergeCommand, /--match-head-commit 'abcdef1234567890'/)
-    assert.match(mergeCommand, /--body 'Closes #23'/)
-    assert.doesNotMatch(mergeCommand, /--squash|--rebase|--delete-branch/)
+    const mergeCommand =
+      commands.find((command) => command.includes('/merge') && command.includes('--method PUT')) ?? ''
+    assert.match(mergeCommand, /repos\/o\/r\/pulls\/29\/merge/)
+    const mergeBody = JSON.parse(writeBodies[0] ?? '{}') as Record<string, unknown>
+    assert.equal(mergeBody.merge_method, 'merge', 'merge commit strategy, not squash/rebase')
+    assert.equal(mergeBody.sha, 'abcdef1234567890', 'the head CAS pins the exact reviewed commit')
+    assert.equal(mergeBody.commit_message, 'Closes #23')
+    // The closing comment is its own confirmed write transaction: exactly one
+    // POST with the exact body, proven by the comments readback.
+    assert.equal(closeComments.length, 1)
+    assert.equal(closeComments[0].body, '由 PR #29 以 merge commit 合并交付。')
     assert.equal(await loadWorkflow(workflow.key), null)
     const archived = await loadAllArchivedWorkflows()
     assert.equal(archived.length, 1)
@@ -1090,6 +1165,7 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
       localBranch: true,
       remoteBranch: true,
       issue: true,
+      issueComment: 'confirmed',
     })
 
     const replay = await post(
@@ -1111,7 +1187,7 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
   }
 })
 
-test('/merge rejects a stale review hash before invoking gh pr merge', async () => {
+test('/merge rejects a stale review hash before invoking the merge write', async () => {
   const previousHome = process.env.HOME
   const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-merge-stale-'))
   process.env.HOME = tempHome
@@ -1160,7 +1236,7 @@ test('/merge rejects a stale review hash before invoking gh pr merge', async () 
     assert.equal(authorized.status, 400)
     assert.match(authorized.body.error ?? '', /review.*哈希不一致/)
     assert.equal(
-      commands.some((command) => command.startsWith('gh pr merge')),
+      commands.some((command) => command.includes('/merge') && command.includes('--method PUT')),
       false,
     )
     assert.equal((await loadWorkflow(workflow.key))?.delivery, undefined)
@@ -1231,7 +1307,7 @@ test('/merge authorization rejects a changed acceptance contract with the same P
     assert.equal(result.status, 400)
     assert.match(result.body.error ?? '', /验收契约已变更.*重新 Review/)
     assert.equal(
-      commands.some((command) => command.startsWith('gh pr merge')),
+      commands.some((command) => command.includes('/merge') && command.includes('--method PUT')),
       false,
     )
   } finally {
@@ -1275,8 +1351,11 @@ test('/merge gate rejection offers manual override that merges once and audits t
     let merged = false
     let issueClosed = false
     const commands: string[] = []
+    const writeBodies: string[] = []
+    const closeComments: Array<{ body: string }> = []
     const handler = createHandler(async (spec) => {
       commands.push(spec.command)
+      if (spec.command.includes('--method PUT') && spec.command.includes('/merge')) writeBodies.push(spec.stdin ?? '')
       const api = githubApi(spec.command, {
         item: {
           url: workflow.url,
@@ -1285,6 +1364,7 @@ test('/merge gate rejection offers manual override that merges once and audits t
           body: reviewedBody,
           state: issueClosed ? 'CLOSED' : 'OPEN',
           updatedAt: '2026-08-22T00:00:00Z',
+          comments: closeComments,
         },
         pr: {
           number: 29,
@@ -1297,19 +1377,24 @@ test('/merge gate rejection offers manual override that merges once and audits t
         reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
       })
       if (api) return api
-      if (spec.command.startsWith('gh pr merge')) {
+      if (spec.command.includes('--method PUT') && spec.command.includes('/merge')) {
         merged = true
-        return { exitCode: 0, stdout: { text: 'merged' }, stderr: { text: '' } }
+        return { exitCode: 0, stdout: { text: 'HTTP/1.1 200\n\n{"merged":true}' }, stderr: { text: '' } }
+      }
+      if (spec.command.includes('--method POST') && spec.command.includes('/comments')) {
+        closeComments.push({ body: JSON.parse(spec.stdin ?? '{}').body ?? '' })
+        return { exitCode: 0, stdout: { text: 'HTTP/1.1 201\n\n{"id":77}' }, stderr: { text: '' } }
+      }
+      if (spec.command.includes('--method PATCH') && spec.command.includes('/issues/')) {
+        issueClosed = true
+        return { exitCode: 0, stdout: { text: 'HTTP/1.1 200\n\n{"state":"closed"}' }, stderr: { text: '' } }
       }
       if (spec.command === 'git worktree list --porcelain')
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       if (spec.command.startsWith('if git show-ref')) return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       if (spec.command.startsWith('if git ls-remote'))
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-      if (spec.command.startsWith('gh issue close')) {
-        issueClosed = true
-        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-      }
+
       throw new Error(`unexpected command: ${spec.command}`)
     })
     const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
@@ -1361,7 +1446,7 @@ test('/merge gate rejection offers manual override that merges once and audits t
     assert.deepEqual(overrideAuthorize.body.override, { skipped: ['review-hash'], reason: overrideReason })
     assert.equal(overrideAuthorize.body.preview?.override?.gates.length, 1)
     assert.equal(
-      commands.some((command) => command.startsWith('gh pr merge')),
+      commands.some((command) => command.includes('/merge') && command.includes('--method PUT')),
       false,
     )
 
@@ -1380,8 +1465,14 @@ test('/merge gate rejection offers manual override that merges once and audits t
     )) as { status: number; body: { ok: boolean; archived?: boolean } }
     assert.equal(mergedResponse.status, 200, JSON.stringify(mergedResponse.body))
     assert.equal(mergedResponse.body.archived, true)
-    const mergeCommand = commands.find((command) => command.startsWith('gh pr merge')) ?? ''
-    assert.match(mergeCommand, /--match-head-commit '2222222222222222'/)
+    const mergeCommand =
+      commands.find((command) => command.includes('/merge') && command.includes('--method PUT')) ?? ''
+    assert.match(mergeCommand, /repos\/o\/r\/pulls\/29\/merge/)
+    assert.equal(
+      (JSON.parse(writeBodies[0] ?? '{}') as { sha?: string }).sha,
+      '2222222222222222',
+      'the head CAS pins the exact reviewed commit',
+    )
     assert.equal(await loadWorkflow(workflow.key), null)
     const archivedWorkflows = await loadAllArchivedWorkflows()
     assert.equal(archivedWorkflows.length, 1)
@@ -1513,7 +1604,7 @@ test('/merge manual override refuses gate failures not covered by the confirmati
     assert.equal(response.status, 400)
     assert.match(response.body.error ?? '', /无法读取当前验收契约.*请重新确认/)
     assert.equal(
-      commands.some((command) => command.startsWith('gh pr merge')),
+      commands.some((command) => command.includes('/merge') && command.includes('--method PUT')),
       false,
     )
     const persisted = await loadWorkflow(workflow.key)
@@ -1585,9 +1676,15 @@ test('cleanup failure keeps merged terminal state and retries without merging ag
         reviews: [{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-08-22T00:00:00Z' }],
       })
       if (api) return api
-      if (spec.command.startsWith('gh pr merge')) {
+      if (spec.command.includes('--method PUT') && spec.command.includes('/merge')) {
         merged = true
-        return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+        return { exitCode: 0, stdout: { text: 'HTTP/1.1 200\n\n{"merged":true}' }, stderr: { text: '' } }
+      }
+      if (spec.command.includes('--method POST') && spec.command.includes('/comments')) {
+        return { exitCode: 0, stdout: { text: 'HTTP/1.1 201\n\n{"id":78}' }, stderr: { text: '' } }
+      }
+      if (spec.command.includes('--method PATCH') && spec.command.includes('/issues/')) {
+        return { exitCode: 0, stdout: { text: 'HTTP/1.1 200\n\n{"state":"closed"}' }, stderr: { text: '' } }
       }
       if (spec.command === 'git worktree list --porcelain')
         return {
@@ -1646,7 +1743,7 @@ test('cleanup failure keeps merged terminal state and retries without merging ag
       headers,
     )
     assert.equal(second.status, 200, JSON.stringify(second.body))
-    assert.equal(commands.filter((command) => command.startsWith('gh pr merge')).length, 1)
+    assert.equal(commands.filter((command) => command.includes('/merge') && command.includes('--method PUT')).length, 1)
     assert.equal((await loadAllArchivedWorkflows())[0]?.delivery?.status, 'archived')
   } finally {
     if (previousHome === undefined) delete process.env.HOME
@@ -2142,7 +2239,7 @@ function interruptedWorkflow(key: string, url: string, worktree: string): IssueW
 }
 
 async function waitForTask(listener: RequestListener, taskId: string): Promise<{ delta: string[] }> {
-  for (let attempt = 0; attempt < 100; attempt++) {
+  for (let attempt = 0; attempt < 400; attempt++) {
     const polled = await post(listener, '/clickvibe/api/develop/poll', { taskId, cursor: 0 })
     const body = polled.body as { ok: boolean; done?: boolean; delta?: string[] }
     if (body.done) return { delta: body.delta ?? [] }
@@ -2208,11 +2305,13 @@ test('invalid exact dev session falls back once to a fresh session on the same t
           return { exitCode: 0, stdout: { text: 'abc123\u001f修复 review 意见\n' }, stderr: { text: '' } }
         if (spec.command.startsWith('git diff --numstat '))
           return { exitCode: 0, stdout: { text: '12\t3\tsrc/fix.ts\n' }, stderr: { text: '' } }
-        if (spec.command.startsWith('gh issue comment')) {
-          comments.push({ command: spec.command, body: spec.stdin ?? '' })
+        if (spec.command.includes('--method POST') && spec.command.includes('/comments')) {
+          const body = JSON.parse(spec.stdin ?? '{}').body ?? ''
+          comments.push({ command: spec.command, body })
+          reviewComments.push({ author: { login: 'clickvibe' }, body })
           return {
             exitCode: 0,
-            stdout: { text: 'https://github.com/o/r/pull/29#issuecomment-1' },
+            stdout: { text: 'HTTP/1.1 201\n\n{"id":1,"html_url":"https://github.com/o/r/pull/29#issuecomment-1"}' },
             stderr: { text: '' },
           }
         }
@@ -2292,7 +2391,7 @@ test('invalid exact dev session falls back once to a fresh session on the same t
     assert.equal(reviewUpdates.length, 1)
     assert.match(JSON.parse(reviewUpdates[0].body).body, /- \[已于第 2 轮修复\] 修复竞态/)
     assert.match(JSON.parse(reviewUpdates[0].body).body, /- \[已于第 2 轮修复\] 补充失败测试/)
-    assert.match(comments[0].command, /github\.com\/o\/r\/pull\/29/)
+    assert.match(comments[0].command, /repos\/o\/r\/issues\/29\/comments/)
     assert.match(comments[0].body, /^== Dev Meta ==\n- event: dev\n- commit: abc123\n- issue: #917\n- fixed: 2/m)
     assert.match(comments[0].body, /- round: 2\n- stats: commits=1 filesChanged=1 insertions=12 deletions=3/)
     assert.match(comments[0].body, /- \[已于第 2 轮修复\] 修复竞态\n- \[已于第 2 轮修复\] 补充失败测试/)
@@ -2348,9 +2447,10 @@ test('lossy agent output recovers the missing head from the host spill file into
     )
     const starts: Array<{ command: string; prompt: string }> = []
     const comments: Array<{ command: string; body: string }> = []
+    const issueComments: Array<{ author: { login: string }; body: string }> = []
     const handler = createHandler(
       async (spec) => {
-        const api = githubApi(spec.command, { item: currentIssue })
+        const api = githubApi(spec.command, { item: currentIssue, prComments: issueComments })
         if (api) return api
         if (spec.command === 'git rev-parse --short HEAD')
           return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
@@ -2360,13 +2460,11 @@ test('lossy agent output recovers the missing head from the host spill file into
           return { exitCode: 0, stdout: { text: 'abc123\u001f完成实现\n' }, stderr: { text: '' } }
         if (spec.command.startsWith('git diff --numstat '))
           return { exitCode: 0, stdout: { text: '1\t1\tsrc/recovered.ts\n' }, stderr: { text: '' } }
-        if (spec.command.startsWith('gh issue comment')) {
-          comments.push({ command: spec.command, body: spec.stdin ?? '' })
-          return {
-            exitCode: 0,
-            stdout: { text: 'https://github.com/o/r/issues/931#issuecomment-1' },
-            stderr: { text: '' },
-          }
+        if (spec.command.includes('--method POST') && spec.command.includes('/comments')) {
+          const body = JSON.parse(spec.stdin ?? '{}').body ?? ''
+          comments.push({ command: spec.command, body })
+          issueComments.push({ author: { login: 'clickvibe' }, body })
+          return { exitCode: 0, stdout: { text: 'HTTP/1.1 201\n\n{"id":1}' }, stderr: { text: '' } }
         }
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       },
@@ -2462,6 +2560,7 @@ test('completed development without a PR appends its Dev Meta comment to the iss
     workflow.prNumber = null
     await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const comments: Array<{ command: string; body: string }> = []
+    const issueComments: Array<{ author: { login: string }; body: string }> = []
     const prompts: string[] = []
     const handler = createHandler(
       async (spec) => {
@@ -2471,15 +2570,13 @@ test('completed development without a PR appends its Dev Meta comment to the iss
         if (spec.command === 'git rev-parse --short HEAD') {
           return { exitCode: 0, stdout: { text: 'def4567' }, stderr: { text: '' } }
         }
-        const api = githubApi(spec.command)
+        const api = githubApi(spec.command, { prComments: issueComments })
         if (api) return api
-        if (spec.command.startsWith('gh issue comment')) {
-          comments.push({ command: spec.command, body: spec.stdin ?? '' })
-          return {
-            exitCode: 0,
-            stdout: { text: 'https://github.com/o/r/issues/920#issuecomment-3' },
-            stderr: { text: '' },
-          }
+        if (spec.command.includes('--method POST') && spec.command.includes('/comments')) {
+          const body = JSON.parse(spec.stdin ?? '{}').body ?? ''
+          comments.push({ command: spec.command, body })
+          issueComments.push({ author: { login: 'clickvibe' }, body })
+          return { exitCode: 0, stdout: { text: 'HTTP/1.1 201\n\n{"id":3}' }, stderr: { text: '' } }
         }
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       },
@@ -2534,7 +2631,7 @@ test('completed development without a PR appends its Dev Meta comment to the iss
     assert.match(prompts[0], /updatedAt: 2026-08-21T00:00:00Z/)
     assert.match(prompts[0], /## 验收标准\n- persisted/)
     assert.equal(comments.length, 1)
-    assert.match(comments[0].command, /github\.com\/o\/r\/issues\/920/)
+    assert.match(comments[0].command, /repos\/o\/r\/issues\/920\/comments/)
     assert.match(comments[0].body, /^== Dev Meta ==\n- event: dev\n- commit: def4567\n- issue: #920\n- fixed: 0/m)
     const reloaded = await loadWorkflow(workflow.key)
     assert.equal(reloaded?.events.at(-1)?.publication?.target, 'issue')
@@ -2567,6 +2664,7 @@ test('concurrent resume requests reserve one workflow task before refreshing the
       updatedAt: '2026-08-22T07:00:00Z',
       comments: [],
     }
+    const prComments: Array<{ author: { login: string }; body: string }> = []
     const handler = createHandler(
       async (spec) => {
         if (/gh api .*\/issues\/930'/.test(spec.command)) {
@@ -2574,14 +2672,11 @@ test('concurrent resume requests reserve one workflow task before refreshing the
           await new Promise((resolve) => setTimeout(resolve, 25))
           return githubApi(spec.command, { item: currentIssue })
         }
-        const api = githubApi(spec.command, { item: currentIssue })
+        const api = githubApi(spec.command, { item: currentIssue, prComments })
         if (api) return api
-        if (spec.command.startsWith('gh issue comment')) {
-          return {
-            exitCode: 0,
-            stdout: { text: 'https://github.com/o/r/issues/930#issuecomment-1' },
-            stderr: { text: '' },
-          }
+        if (spec.command.includes('--method POST') && spec.command.includes('/comments')) {
+          prComments.push({ author: { login: 'clickvibe' }, body: JSON.parse(spec.stdin ?? '{}').body ?? '' })
+          return { exitCode: 0, stdout: { text: 'HTTP/1.1 201\n\n{"id":1}' }, stderr: { text: '' } }
         }
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       },
@@ -2660,8 +2755,11 @@ test('comment publication failure keeps the delivery event and stores a bounded 
         if (spec.command === 'git rev-parse --short HEAD') {
           return { exitCode: 0, stdout: { text: '987abcd' }, stderr: { text: '' } }
         }
-        if (spec.command.startsWith('gh issue comment')) {
+        if (spec.command.includes('--method POST') && spec.command.includes('/comments')) {
           return { exitCode: 1, stdout: { text: '' }, stderr: { text: `offline-${'x'.repeat(700)}` } }
+        }
+        if (spec.command.includes('/issues/29/comments') && !spec.command.includes('--method')) {
+          return { exitCode: 0, stdout: { text: 'HTTP/1.1 200\n\n[]' }, stderr: { text: '' } }
         }
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       },
@@ -2716,7 +2814,9 @@ test('comment publication failure keeps the delivery event and stores a bounded 
     assert.equal(reloaded?.events[0].hash, '987abcd')
     assert.equal(reloaded?.events[0].fixed, 1)
     assert.equal(reloaded?.events[0].publication?.target, 'pr')
-    assert.equal(reloaded?.events[0].publication?.status, 'failed')
+    // A lost transport response with an unproving readback is 'unknown' —
+    // the comment may exist upstream; recovery settles it by readback (F4).
+    assert.equal(reloaded?.events[0].publication?.status, 'unknown')
     assert.equal(reloaded?.events[0].publication?.error?.length, 500)
     assert.match(reloaded?.events[0].publication?.error ?? '', /offline-/)
   } finally {
@@ -2754,7 +2854,9 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     await writeFile(issueSpill, included(restIssue(currentIssue)))
     let reviewFetches = 0
     const comments: Array<{ command: string; body: string }> = []
-    const approvals: string[] = []
+    const issueComments: Array<{ author: { login: string }; body: string }> = []
+    const reviews: Array<{ state: string; body: string }> = []
+    const approvals: Array<{ command: string; body: string }> = []
     const issueTimeouts: number[] = []
     const pr = {
       number: 29,
@@ -2778,7 +2880,7 @@ test('invalid exact review session clears the stale id and falls back to a fresh
             stderr: { text: '' },
           }
         }
-        const api = githubApi(spec.command, { item: currentIssue, pr })
+        const api = githubApi(spec.command, { item: currentIssue, pr, prComments: issueComments, reviews })
         if (api) return api
         if (spec.command === 'git rev-parse --short HEAD')
           return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
@@ -2788,17 +2890,24 @@ test('invalid exact review session clears the stale id and falls back to a fresh
           return { exitCode: 0, stdout: { text: 'abc123\u001f完成实现\n' }, stderr: { text: '' } }
         if (spec.command.startsWith('git diff --numstat '))
           return { exitCode: 0, stdout: { text: '8\t1\tsrc/reviewed.ts\n' }, stderr: { text: '' } }
-        if (spec.command.startsWith('gh issue comment')) {
-          comments.push({ command: spec.command, body: spec.stdin ?? '' })
+        if (spec.command.includes('--method POST') && spec.command.includes('/comments')) {
+          const body = JSON.parse(spec.stdin ?? '{}').body ?? ''
+          comments.push({ command: spec.command, body })
+          issueComments.push({ author: { login: 'clickvibe' }, body })
           return {
             exitCode: 0,
-            stdout: { text: 'https://github.com/o/r/pull/29#issuecomment-2' },
+            stdout: { text: 'HTTP/1.1 201\n\n{"id":2,"html_url":"https://github.com/o/r/pull/29#issuecomment-2"}' },
             stderr: { text: '' },
           }
         }
-        if (spec.command.startsWith('gh pr review')) {
-          approvals.push(spec.command)
-          return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+        if (spec.command.includes('--method POST') && spec.command.includes('/reviews')) {
+          const body = JSON.parse(spec.stdin ?? '{}').body ?? ''
+          approvals.push({ command: spec.command, body })
+          reviews.push({ state: 'APPROVED', body, commit_id: 'abc123', user: { login: 'clickvibe' } })
+          return { exitCode: 0, stdout: { text: 'HTTP/1.1 201\n\n{"id":9}' }, stderr: { text: '' } }
+        }
+        if (spec.command.includes("'user'")) {
+          return { exitCode: 0, stdout: { text: included({ login: 'clickvibe' }) }, stderr: { text: '' } }
         }
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       },
@@ -2888,15 +2997,15 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     assert.ok(completed.delta.some((line) => line.includes('review 结论来源')))
     assert.equal(reloaded?.reviewResult?.commentUrl, 'https://github.com/o/r/pull/29#issuecomment-2')
     assert.equal(comments.length, 1)
-    assert.match(comments[0].command, /github\.com\/o\/r\/pull\/29/)
+    assert.match(comments[0].command, /repos\/o\/r\/issues\/29\/comments/)
     assert.match(
       comments[0].body,
       /^== Review Meta ==\n- event: review\n- commit: abc123\n- issue: #918\n- passed: true\n- next: merge/m,
     )
     assert.match(comments[0].body, /下一步:可合并当前提交。/)
-    assert.deepEqual(approvals, [
-      "gh pr review 'https://github.com/o/r/pull/29' --approve --body '**身份：Review Agent**\n\nLGTM'",
-    ])
+    assert.equal(approvals.length, 1)
+    assert.match(approvals[0].command, /repos\/o\/r\/pulls\/29\/reviews/)
+    assert.equal(approvals[0].body, '**身份：Review Agent**\n\nLGTM')
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
@@ -3590,6 +3699,8 @@ test('repo aggregation unlocks closed dependencies with an idempotent comment be
     milestone: null,
   }
   const writes: Array<{ command: string; stdin?: string }> = []
+  const postedComments: Array<{ body: string }> = []
+  let issueBody = issue.body
   const ctx = {
     shell: {
       resolve(spec: unknown) {
@@ -3600,15 +3711,24 @@ test('repo aggregation unlocks closed dependencies with an idempotent comment be
           return { exitCode: 0, stdout: { text: included([issue, dependency]) }, stderr: { text: '' } }
         if (spec.command.includes('/pulls?'))
           return { exitCode: 0, stdout: { text: included([]) }, stderr: { text: '' } }
+        // The unlock comment write transaction scans comments before posting
+        // and reads them back afterwards — serve the posted bodies.
         if (spec.command.includes('/issues/9/comments') && !spec.command.includes('--method')) {
-          return { exitCode: 0, stdout: { text: included([]) }, stderr: { text: '' } }
+          return { exitCode: 0, stdout: { text: included(postedComments) }, stderr: { text: '' } }
+        }
+        // The issue body PATCH transaction reads the issue back for its
+        // predicate — serve the rewritten body.
+        if (spec.command.includes('/issues/9') && !spec.command.includes('--method')) {
+          return { exitCode: 0, stdout: { text: included({ ...issue, body: issueBody }) }, stderr: { text: '' } }
         }
         if (spec.command.includes('--method POST')) {
           writes.push(spec)
+          postedComments.push({ body: JSON.parse(spec.stdin ?? '{}').body ?? '' })
           return { exitCode: 0, stdout: { text: included({ id: 1 }) }, stderr: { text: '' } }
         }
         if (spec.command.includes('--method PATCH')) {
           writes.push(spec)
+          issueBody = JSON.parse(spec.stdin ?? '{}').body ?? issueBody
           return {
             exitCode: 0,
             stdout: { text: included({ updated_at: '2026-08-22T08:00:00Z' }) },
@@ -3699,7 +3819,10 @@ test('repo aggregation cools down failed dependency-ledger writes across forced 
   }
   assert.match(firstLedger.dependencyLedger.error ?? '', /更新失败;冷却至/)
   assert.match(secondLedger.dependencyLedger.error ?? '', /更新冷却至/)
-  assert.equal(commentReads, 1, 'refreshes inside the cooldown must not retry GitHub writes')
+  // Slice B: one failed transaction reads comments twice — the marker scan
+  // and the mandatory authoritative readback — then the cooldown gate keeps
+  // the second forced refresh entirely offline.
+  assert.equal(commentReads, 2, 'refreshes inside the cooldown must not retry GitHub writes')
 })
 
 test('repo aggregation keeps a closed issue visible while merged cleanup is pending', async () => {
@@ -4115,10 +4238,20 @@ test('develop with user context stays a first development and records the note i
     }
     const prompts: string[] = []
     const comments: Array<{ command: string; body: string }> = []
+    const publishedComments: Array<{ author: { login: string }; body: string }> = []
     const handler = createHandler(
       async (spec) => {
         const api = githubApi(spec.command, { item })
         if (api) return api
+        // 评论回读单独应答,不改写 item:后续 authorize 的 expectedSnapshot
+        // 对比要求 issue 快照保持 comments 原样。
+        if (spec.command.includes('/issues/54/comments') && !spec.command.includes('--method')) {
+          return {
+            exitCode: 0,
+            stdout: { text: included([...item.comments, ...publishedComments].map(restComment)) },
+            stderr: { text: '' },
+          }
+        }
         if (spec.command === 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD')
           return { exitCode: 0, stdout: { text: 'origin/main' }, stderr: { text: '' } }
         if (spec.command === "git show-ref --verify --quiet 'refs/remotes/origin/main'; echo $?")
@@ -4127,11 +4260,13 @@ test('develop with user context stays a first development and records the note i
           return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
         if (spec.command === 'git rev-parse --short HEAD')
           return { exitCode: 0, stdout: { text: 'f00d123' }, stderr: { text: '' } }
-        if (spec.command.startsWith('gh issue comment')) {
-          comments.push({ command: spec.command, body: spec.stdin ?? '' })
+        if (spec.command.includes('--method POST') && spec.command.includes('/comments')) {
+          const body = JSON.parse(spec.stdin ?? '{}').body ?? ''
+          comments.push({ command: spec.command, body })
+          publishedComments.push({ author: { login: 'clickvibe' }, body })
           return {
             exitCode: 0,
-            stdout: { text: 'https://github.com/o/r/issues/54#issuecomment-9' },
+            stdout: { text: 'HTTP/1.1 201\n\n{"id":9,"html_url":"https://github.com/o/r/issues/54#issuecomment-9"}' },
             stderr: { text: '' },
           }
         }
@@ -4258,16 +4393,18 @@ test('resume (rework) carries the user context next to the review feedback and a
       updatedAt: 'now',
       comments: [],
     }
+    const prComments: Array<{ author: { login: string }; body: string }> = []
     const handler = createHandler(
       async (spec) => {
-        const api = githubApi(spec.command, { item: currentIssue })
+        const api = githubApi(spec.command, { item: currentIssue, prComments })
         if (api) return api
         if (spec.command === 'git rev-parse --short HEAD')
           return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
-        if (spec.command.startsWith('gh issue comment')) {
+        if (spec.command.includes('--method POST') && spec.command.includes('/comments')) {
+          prComments.push({ author: { login: 'clickvibe' }, body: JSON.parse(spec.stdin ?? '{}').body ?? '' })
           return {
             exitCode: 0,
-            stdout: { text: 'https://github.com/o/r/pull/29#issuecomment-4' },
+            stdout: { text: 'HTTP/1.1 201\n\n{"id":4,"html_url":"https://github.com/o/r/pull/29#issuecomment-4"}' },
             stderr: { text: '' },
           }
         }
@@ -4363,18 +4500,29 @@ test('review with user context appends it to the prompt and audits it in the rev
       base: { ref: 'main' },
       head: { ref: workflow.branch },
     }
+    const prComments: Array<{ author: { login: string }; body: string }> = []
+    const reviews: Array<{ state: string; body: string }> = []
     const handler = createHandler(
       async (spec) => {
-        const api = githubApi(spec.command, { item: currentIssue, pr })
+        const api = githubApi(spec.command, { item: currentIssue, pr, prComments, reviews })
         if (api) return api
         if (spec.command === 'git rev-parse --short HEAD')
           return { exitCode: 0, stdout: { text: 'abc123' }, stderr: { text: '' } }
-        if (spec.command.startsWith('gh issue comment')) {
+        if (spec.command.includes('--method POST') && spec.command.includes('/comments')) {
+          prComments.push({ author: { login: 'clickvibe' }, body: JSON.parse(spec.stdin ?? '{}').body ?? '' })
           return {
             exitCode: 0,
-            stdout: { text: 'https://github.com/o/r/pull/29#issuecomment-5' },
+            stdout: { text: 'HTTP/1.1 201\n\n{"id":5,"html_url":"https://github.com/o/r/pull/29#issuecomment-5"}' },
             stderr: { text: '' },
           }
+        }
+        if (spec.command.includes('--method POST') && spec.command.includes('/reviews')) {
+          const body = JSON.parse(spec.stdin ?? '{}').body ?? ''
+          reviews.push({ state: 'APPROVED', body, commit_id: 'abc123', user: { login: 'clickvibe' } })
+          return { exitCode: 0, stdout: { text: 'HTTP/1.1 201\n\n{"id":9}' }, stderr: { text: '' } }
+        }
+        if (spec.command.includes("'user'")) {
+          return { exitCode: 0, stdout: { text: included({ login: 'clickvibe' }) }, stderr: { text: '' } }
         }
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       },

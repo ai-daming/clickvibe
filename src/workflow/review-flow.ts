@@ -59,6 +59,7 @@ import { type ReviewIssueContract } from './merge-gates.ts'
 import { resolveReviewStartWorkflow } from './review-start.ts'
 import { workflowBaseBranch } from './state-view.ts'
 import { establishTaskClaim } from './task-claim.ts'
+import { recoverUnsettledWrites } from './write-recovery.ts'
 import { mutateLiveTaskWorkflow } from './task-lease.ts'
 import { notifyAutoRunCompletion } from './auto-run-signal.ts'
 
@@ -250,6 +251,9 @@ export async function startReview(
     }
   }
   if (!claim.claimed) return { ok: true, taskId: claim.taskId }
+  // Fresh claim: settle any pending/unknown write markers a crashed
+  // predecessor left behind — readback only, never a re-dispatch (review F4).
+  await recoverUnsettledWrites(ctx, live, workflow)
 
   // A prior run's file must never become the next run's verdict. This side
   // effect is after the cross-process claim, so a losing controller cannot
@@ -383,18 +387,55 @@ export async function startReview(
             if (latest.reviewResult) latest.reviewResult.commentUrl = commentUrl
           })
         }
+        // Attempt marker (slice B): the review event is already persisted
+        // before this point — re-approving after an uncertain outcome is
+        // guarded by the exact-body readback predicate, and an unconfirmed
+        // approval stays best-effort (non-blocking) exactly as before.
         const approval = await approvePassedReview(
+          ctx,
           {
             repoKey: reloaded.repoKey,
             prNumber: reloaded.prNumber,
             passed,
+            reviewedHead,
           },
-          (command) => runCommand(ctx, command, { timeoutMs: 30000 }),
+          async () => {
+            // The review event's approvalAttempt is the durable marker. It is
+            // only a marker once it COMMITTED — a task that lost workflow
+            // ownership must fail the approval before any dispatch (review F3).
+            let stored = false
+            const saved = await mutateLiveTaskWorkflow(live, reloaded, (latest) => {
+              const reviewEvent = [...(latest.events ?? [])]
+                .reverse()
+                .find((candidate) => candidate.kind === 'review' && candidate.taskId === event.taskId)
+              if (reviewEvent) {
+                if (!reviewEvent.approvalAttempt) reviewEvent.approvalAttempt = { status: 'pending' }
+                stored = true
+              }
+            })
+            if (saved.status !== 'committed' || !stored) {
+              throw new Error(`approval attempt marker 未落盘(${saved.status}),Approve 零派发`)
+            }
+          },
         )
+        // Resolve the attempt marker into the workflow's durable answer for
+        // the approval write (ADR-0010 §9): pending → confirmed/failed/unknown.
+        await mutateLiveTaskWorkflow(live, reloaded, (latest) => {
+          const reviewEvent = [...(latest.events ?? [])]
+            .reverse()
+            .find((candidate) => candidate.kind === 'review' && candidate.taskId === event.taskId)
+          if (reviewEvent?.approvalAttempt) {
+            reviewEvent.approvalAttempt = {
+              status: approval === 'approved' ? 'confirmed' : approval === 'failed' ? 'failed' : 'unknown',
+            }
+          }
+        })
         if (approval === 'approved') {
           pushTaskLine(live, '[clickvibe] 已提交 GitHub 原生 Approve (LGTM)')
         } else if (approval === 'failed') {
           pushTaskLine(live, '[clickvibe] GitHub 原生 Approve 失败(继续,不影响 Review 结论与评论)')
+        } else if (approval === 'unknown') {
+          pushTaskLine(live, '[clickvibe] GitHub 原生 Approve 结果未确认(继续,不影响 Review 结论与评论)')
         }
       }
       notifyAutoRunCompletion(ctx, workflow.key, 'done')

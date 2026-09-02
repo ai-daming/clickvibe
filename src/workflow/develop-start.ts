@@ -64,6 +64,7 @@ import { checkIssueContract } from './issue-contract.ts'
 import { firstDevelopmentFor } from './repository-state.ts'
 import { recordDevDelivery } from './dev-delivery.ts'
 import { establishTaskClaim } from './task-claim.ts'
+import { recoverUnsettledWrites } from './write-recovery.ts'
 import { mutateLiveTaskWorkflow } from './task-lease.ts'
 import { workflowBaseBranch } from './state-view.ts'
 import { notifyAutoRunCompletion } from './auto-run-signal.ts'
@@ -328,6 +329,9 @@ export async function startDevelop(
   if (!claim.claimed) {
     return { ok: true, taskId: claim.taskId, worktree: workflow.worktree, branch: workflow.branch }
   }
+  // Fresh claim: settle any pending/unknown write markers a crashed
+  // predecessor left behind — readback only, never a re-dispatch (review F4).
+  await recoverUnsettledWrites(ctx, live, workflow)
 
   void (async () => {
     try {

@@ -52,6 +52,10 @@ test('r5/F2: exceeding the declared cost bound fails the logical request before 
   await owner.runWithAdmission({ priority: 'normal', deadlineMs: 30_000, maxPages: 1 }, async () => {
     const requestId = owner.declareLogicalRequest('direct', 'bounded')
     await owner.runWithRequest(requestId, async () => {
+      // paginate's order: admit the page, then dispatch it. maxPages bounds
+      // continuation pages — mutate steps no longer consume the page budget
+      // (review F1), so page 1 admits and page 2 is the cost-bound breach.
+      owner.admitNextPage()
       await owner.submitStep('o/r', 1_000, 1, async () => 'page-1')
       assert.throws(() => owner.admitNextPage(), /成本上界/, 'page 2 is beyond the declared bound')
     })
