@@ -42,6 +42,8 @@ export interface DeliveryCleanup {
   worktree: boolean
   localBranch: boolean
   remoteBranch: boolean
+  /** Merge-cleanup-owned delete marker; prepared recovery is readback-only. */
+  remoteBranchAttempt?: RemoteGitWriteAttempt
   issue: boolean
   /** 关闭评论写事务的 attempt marker(merge 清理步骤账本):'pending' 表示已准备派发,重启恢复只回读;'confirmed' 表示已发布。 */
   issueComment?: 'pending' | 'confirmed'

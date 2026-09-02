@@ -40,6 +40,7 @@ import { collectMergeGateFailures, type MergeGateFailure, mergeGateRejection } f
 import { workflowBaseBranch } from './state-view.ts'
 import { baselineRestorePreview } from './baseline-restore.ts'
 import { type DevelopBaselinePreview, developBaselinePreview } from './develop-baseline-preview.ts'
+import { cleanupRemoteBranch } from './merge-remote-cleanup.ts'
 import { withWorkflowLock } from '../infra/workflow-lock.ts'
 
 export type MergeAuthorizationPreview =
@@ -489,13 +490,7 @@ export async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): P
 
   if (!delivery.cleanup.remoteBranch) {
     try {
-      await runCommand(
-        ctx,
-        `if git ls-remote --exit-code --heads origin ${shellQuote(`refs/heads/${workflow.branch}`)} >/dev/null 2>&1; then git push origin --delete ${shellQuote(workflow.branch)}; fi`,
-        { workdir: repoPath, timeoutMs: 60_000, sandboxPolicy: policy },
-      )
-      delivery.cleanup.remoteBranch = true
-      await persistStep()
+      await cleanupRemoteBranch(ctx, workflow, { repoPath, sandboxPolicy: policy, persist: persistStep })
     } catch (error) {
       return failCleanup('删除远端分支', error)
     }
