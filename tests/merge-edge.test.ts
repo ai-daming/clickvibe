@@ -174,13 +174,18 @@ test('merge execution rejects an authorization whose exact PR base changed', asy
     await writeFile(join(home, '.clickvibe', 'config.yaml'), `repos:\n  o/r: ${repo}\nworktreeRoot: ${worktreeRoot}\n`)
     const stored = workflow('8', { worktree: worktreePath, branch: 'repo-issue-8', prNumber: '8' })
     await saveWorkflow(stored)
-    const ctx = prCtx({ head: stored.branch, sha: 'abcdef1234567890', base: 'release/2.0', baseSha: 'bbb2222' })
+    const ctx = prCtx({
+      head: stored.branch,
+      sha: 'abcdef1234567890abcdef1234567890abcdef12',
+      base: 'release/2.0',
+      baseSha: 'bbb2222',
+    })
     const result = await mergeAndCleanupUnlocked(ctx as never, {
       url: stored.url,
       target: {
         prNumber: '8',
         branch: stored.branch,
-        head: 'abcdef1234567890',
+        head: 'abcdef1234567890abcdef1234567890abcdef12',
         baseRef: 'release/2.0',
         baseSha: 'aaa1111',
         mergeFlag: '--merge',

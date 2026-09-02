@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { Context } from '@deepseek-ai/cordis'
-import { remoteFetch, remotePush } from '../src/infra/remote-git.ts'
+import { remoteDeleteBranchIfPresent, remoteFetch, remotePush } from '../src/infra/remote-git.ts'
 
 function recordingShell(exitCode = 0, outputFor: (command: string) => string = () => 'out\n') {
   const commands: Array<{ command: string; workdir?: string; timeoutMs?: number }> = []
@@ -87,6 +87,56 @@ test('remotePush freezes an exact oid and performs one authoritative readback', 
     `git push --force-with-lease='refs/heads/main:${leaseOid}' origin '${forceOid}:refs/heads/main'`,
   )
   assert.equal(force.commands[1].command, "git ls-remote --heads origin 'refs/heads/main'")
+})
+
+test('remote delete performs a dedicated pre-read and only creates a marker when the ref exists', async () => {
+  const oid = 'd'.repeat(40)
+  let reads = 0
+  const present = recordingShell(0, (command) => {
+    if (!command.startsWith('git ls-remote')) return 'deleted\n'
+    reads += 1
+    return reads === 1 ? `${oid}\trefs/heads/feature\n` : ''
+  })
+  const states: string[] = []
+  await remoteDeleteBranchIfPresent(present.ctx, {
+    repoKey: 'ai-daming/clickvibe',
+    workdir: '/wt',
+    prepare: async () => ({ destinationRef: 'refs/heads/feature', expectedRemoteOid: oid }),
+    persistAttempt: async (attempt) => {
+      states.push(attempt.status)
+    },
+    settleAttempt: async (attempt) => {
+      states.push(attempt.status)
+    },
+  })
+  assert.deepEqual(
+    present.commands.map((command) => command.command),
+    [
+      "git ls-remote --heads origin 'refs/heads/feature'",
+      `git push --force-with-lease='refs/heads/feature:${oid}' origin ':refs/heads/feature'`,
+      "git ls-remote --heads origin 'refs/heads/feature'",
+    ],
+  )
+  assert.deepEqual(states, ['prepared', 'confirmed'])
+
+  const absent = recordingShell(0, () => '')
+  let markers = 0
+  await remoteDeleteBranchIfPresent(absent.ctx, {
+    repoKey: 'ai-daming/clickvibe',
+    workdir: '/wt',
+    prepare: async () => ({ destinationRef: 'refs/heads/missing', expectedRemoteOid: oid }),
+    persistAttempt: async () => {
+      markers += 1
+    },
+    settleAttempt: async () => {
+      markers += 1
+    },
+  })
+  assert.deepEqual(
+    absent.commands.map((command) => command.command),
+    ["git ls-remote --heads origin 'refs/heads/missing'"],
+  )
+  assert.equal(markers, 0)
 })
 
 test('non-zero exits reject through the shared runCommand semantics', async () => {

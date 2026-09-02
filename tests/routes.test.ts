@@ -1,31 +1,34 @@
 import assert from 'node:assert/strict'
 import { beforeEach } from 'node:test'
 import { resetGithubGatewayOwnerForTests } from '../src/github/gateway-owner.ts'
-import { resetRemoteGitCoordinatorForTests } from '../src/infra/remote-git.ts'
+import { closeRemoteGitCoordinator, resetRemoteGitCoordinatorForTests } from '../src/infra/remote-git.ts'
 
 beforeEach(() => {
   resetGithubGatewayOwnerForTests()
   resetRemoteGitCoordinatorForTests()
 })
-import { commitWorkflowFixture } from './workflow-fixture.ts'
+
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { createServer, request, type RequestListener } from 'node:http'
+import { createServer, type RequestListener, request } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test, { after } from 'node:test'
+import { waitForTaskPersistence } from '../src/agent/task-supervisor.ts'
 import { apply, fetchRepositoryIssues } from '../src/index.ts'
 import { decodeLiveLogLine, encodeLiveLogEvent } from '../src/infra/live-output.ts'
+import { liveTasks } from '../src/infra/runtime.ts'
 import {
   appendLog,
   appendTaskLog,
+  type IssueWorkflow,
   issueBodyHash,
   loadAllArchivedWorkflows,
   loadWorkflow,
   readLogHistory,
   startTaskLog,
-  type IssueWorkflow,
 } from '../src/infra/state.ts'
 import { createFakeJobs } from './fake-jobs.ts'
+import { commitWorkflowFixture } from './workflow-fixture.ts'
 
 // Route tests exercise /state background reconciliation; never let that controller
 // discover or mutate the developer's real ~/.clickvibe workflow files.
@@ -1061,7 +1064,7 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
           number: 29,
           state: merged ? 'closed' : 'open',
           merged_at: merged ? '2026-08-22T01:00:00Z' : null,
-          head: { ref: workflow.branch, sha: 'abcdef1234567890' },
+          head: { ref: workflow.branch, sha: 'abcdef1234567890abcdef1234567890abcdef12' },
           base: { ref: 'main', sha: '1111111111111111' },
           html_url: 'https://github.com/o/r/pull/29',
         },
@@ -1083,7 +1086,7 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
       if (spec.command === 'git worktree list --porcelain')
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       if (spec.command.startsWith('if git show-ref')) return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-      if (spec.command.startsWith('if git ls-remote'))
+      if (spec.command.startsWith('git ls-remote --heads'))
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
 
       throw new Error(`unexpected command: ${spec.command}`)
@@ -1111,7 +1114,7 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
     assert.deepEqual(authorized.body.preview, {
       prNumber: '29',
       branch: workflow.branch,
-      head: 'abcdef1234567890',
+      head: 'abcdef1234567890abcdef1234567890abcdef12',
       baseRef: 'main',
       baseSha: '1111111111111111',
       mergeFlag: '--merge',
@@ -1163,7 +1166,11 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
     assert.match(mergeCommand, /repos\/o\/r\/pulls\/29\/merge/)
     const mergeBody = JSON.parse(writeBodies[0] ?? '{}') as Record<string, unknown>
     assert.equal(mergeBody.merge_method, 'merge', 'merge commit strategy, not squash/rebase')
-    assert.equal(mergeBody.sha, 'abcdef1234567890', 'the head CAS pins the exact reviewed commit')
+    assert.equal(
+      mergeBody.sha,
+      'abcdef1234567890abcdef1234567890abcdef12',
+      'the head CAS pins the exact reviewed commit',
+    )
     assert.equal(mergeBody.commit_message, 'Closes #23')
     // The closing comment is its own confirmed write transaction: exactly one
     // POST with the exact body, proven by the comments readback.
@@ -1199,6 +1206,7 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
     )
     assert.equal(replay.status, 403)
   } finally {
+    await closeRemoteGitCoordinator()
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -1240,7 +1248,7 @@ test('/merge rejects a stale review hash before invoking the merge write', async
           number: 29,
           state: 'open',
           merged_at: null,
-          head: { ref: workflow.branch, sha: '2222222222222222' },
+          head: { ref: workflow.branch, sha: '2222222222222222222222222222222222222222' },
           base: { ref: 'main', sha: '1111111111111111' },
           html_url: 'https://github.com/o/r/pull/29',
         },
@@ -1304,7 +1312,7 @@ test('/merge authorization rejects a changed acceptance contract with the same P
           number: 29,
           state: 'open',
           merged_at: null,
-          head: { ref: workflow.branch, sha: 'abcdef1234567890' },
+          head: { ref: workflow.branch, sha: 'abcdef1234567890abcdef1234567890abcdef12' },
           base: { ref: 'main', sha: '1111111111111111' },
           html_url: 'https://github.com/o/r/pull/29',
         },
@@ -1388,7 +1396,7 @@ test('/merge gate rejection offers manual override that merges once and audits t
           number: 29,
           state: merged ? 'closed' : 'open',
           merged_at: merged ? '2026-08-22T01:00:00Z' : null,
-          head: { ref: workflow.branch, sha: '2222222222222222' },
+          head: { ref: workflow.branch, sha: '2222222222222222222222222222222222222222' },
           base: { ref: 'main', sha: '1111111111111111' },
           html_url: 'https://github.com/o/r/pull/29',
         },
@@ -1410,7 +1418,7 @@ test('/merge gate rejection offers manual override that merges once and audits t
       if (spec.command === 'git worktree list --porcelain')
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       if (spec.command.startsWith('if git show-ref')) return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
-      if (spec.command.startsWith('if git ls-remote'))
+      if (spec.command.startsWith('git ls-remote --heads'))
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
 
       throw new Error(`unexpected command: ${spec.command}`)
@@ -1488,7 +1496,7 @@ test('/merge gate rejection offers manual override that merges once and audits t
     assert.match(mergeCommand, /repos\/o\/r\/pulls\/29\/merge/)
     assert.equal(
       (JSON.parse(writeBodies[0] ?? '{}') as { sha?: string }).sha,
-      '2222222222222222',
+      '2222222222222222222222222222222222222222',
       'the head CAS pins the exact reviewed commit',
     )
     assert.equal(await loadWorkflow(workflow.key), null)
@@ -1517,6 +1525,7 @@ test('/merge gate rejection offers manual override that merges once and audits t
     )
     assert.equal(replay.status, 403)
   } finally {
+    await closeRemoteGitCoordinator()
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -1577,7 +1586,7 @@ test('/merge manual override refuses gate failures not covered by the confirmati
           number: 29,
           state: 'open',
           merged_at: null,
-          head: { ref: workflow.branch, sha: 'abcdef1234567890' },
+          head: { ref: workflow.branch, sha: 'abcdef1234567890abcdef1234567890abcdef12' },
           base: { ref: 'main', sha: '1111111111111111' },
           html_url: 'https://github.com/o/r/pull/29',
         },
@@ -1687,7 +1696,7 @@ test('cleanup failure keeps merged terminal state and retries without merging ag
           number: 29,
           state: merged ? 'closed' : 'open',
           merged_at: merged ? '2026-08-22T01:00:00Z' : null,
-          head: { ref: workflow.branch, sha: 'abcdef1234567890' },
+          head: { ref: workflow.branch, sha: 'abcdef1234567890abcdef1234567890abcdef12' },
           base: { ref: 'main', sha: '1111111111111111' },
           html_url: 'https://github.com/o/r/pull/29',
         },
@@ -1714,7 +1723,7 @@ test('cleanup failure keeps merged terminal state and retries without merging ag
         removeAttempts++
         return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'worktree contains changes' } }
       }
-      if (spec.command.startsWith('if git show-ref') || spec.command.startsWith('if git ls-remote')) {
+      if (spec.command.startsWith('if git show-ref') || spec.command.startsWith('git ls-remote --heads')) {
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       }
       throw new Error(`unexpected command: ${spec.command}`)
@@ -1764,6 +1773,7 @@ test('cleanup failure keeps merged terminal state and retries without merging ag
     assert.equal(commands.filter((command) => command.includes('/merge') && command.includes('--method PUT')).length, 1)
     assert.equal((await loadAllArchivedWorkflows())[0]?.delivery?.status, 'archived')
   } finally {
+    await closeRemoteGitCoordinator()
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await rm(tempHome, { recursive: true, force: true })
@@ -1789,7 +1799,7 @@ test('/state uses the live GitHub issue state instead of the stored issueState',
           number: 29,
           state: 'open',
           merged_at: null,
-          head: { ref: workflow.branch, sha: 'abcdef1234567890' },
+          head: { ref: workflow.branch, sha: 'abcdef1234567890abcdef1234567890abcdef12' },
           base: { ref: 'main', sha: '1111111111111111' },
           html_url: 'https://github.com/o/r/pull/29',
         },
@@ -2262,7 +2272,12 @@ async function waitForTask(listener: RequestListener, taskId: string): Promise<{
   for (let attempt = 0; attempt < 400; attempt++) {
     const polled = await post(listener, '/clickvibe/api/develop/poll', { taskId, cursor: 0 })
     const body = polled.body as { ok: boolean; done?: boolean; delta?: string[] }
-    if (body.done) return { delta: body.delta ?? [] }
+    if (body.done) {
+      const task = liveTasks.get(taskId)
+      assert.ok(task, `completed task ${taskId} disappeared before persistence quiesced`)
+      await waitForTaskPersistence(task)
+      return { delta: body.delta ?? [] }
+    }
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
   throw new Error(`task ${taskId} did not finish`)

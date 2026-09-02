@@ -13,29 +13,12 @@ import {
   type RemoteGitFreshness,
   type RemoteGitFreshnessEntry,
 } from './remote-git-freshness.ts'
+import type { RemoteGitOutcome, RemoteGitWriteAttempt } from './remote-git-contracts.ts'
+import { type RemoteGitDeleteInput, runDeleteRemoteBranchIfPresent } from './remote-git-delete.ts'
 
 export { deriveRemoteGitMetrics }
 export type { RemoteGitLifecycleEvent, RemoteGitMetrics, RemoteGitScope } from './remote-git-lifecycle.ts'
-
-export interface RemoteGitWriteAttempt {
-  attemptId: string
-  scope: RemoteGitScope
-  operationKind: 'push' | 'push-set-upstream' | 'force-with-lease' | 'delete'
-  destinationRef: string
-  expectedOid: string | null
-  expectedRemoteOid: string | null
-  status: 'prepared' | 'confirmed' | 'failed' | 'unknown'
-  preparedAt: string
-  diagnosticRef?: string
-}
-
-export interface RemoteGitOutcome {
-  outcome: RemoteGitTerminalOutcome
-  flightId: string
-  output?: string
-  readback?: string
-  error?: string
-}
+export type { RemoteGitOutcome, RemoteGitWriteAttempt } from './remote-git-contracts.ts'
 
 export type { RemoteGitFreshness } from './remote-git-freshness.ts'
 
@@ -166,8 +149,21 @@ export function createRemoteGitCoordinator(
     })
   }
 
-  const terminal = (requestId: string, flightId: string, outcome: RemoteGitTerminalOutcome, error?: unknown) => {
-    const event = { requestId, flightId, outcome, error: error === undefined ? null : errorText(error), at: now() }
+  const terminal = (
+    requestId: string,
+    flightId: string,
+    outcome: RemoteGitTerminalOutcome,
+    error?: unknown,
+    attemptId?: string,
+  ) => {
+    const event = {
+      requestId,
+      flightId,
+      ...(attemptId ? { attemptId } : {}),
+      outcome,
+      error: error === undefined ? null : errorText(error),
+      at: now(),
+    }
     if (terminalRequests.has(requestId)) {
       emit({ kind: 'late-result', ...event })
       return
@@ -180,15 +176,17 @@ export function createRemoteGitCoordinator(
   const noteSubprocess = (
     requestId: string,
     flightId: string,
-    phase: 'fetch' | 'push' | 'readback',
+    phase: 'fetch' | 'pre-read' | 'push' | 'readback',
     startedAt: number,
     error?: unknown,
+    attemptId?: string,
   ) => {
     emit({
       kind: 'subprocess-settled',
       requestId,
       flightId,
       phase,
+      ...(attemptId ? { attemptId } : {}),
       upstream: true,
       ok: error === undefined,
       serviceMs: Math.max(0, now() - startedAt),
@@ -318,7 +316,15 @@ export function createRemoteGitCoordinator(
       } catch (error) {
         return { outcome: 'failed', flightId, error: errorText(error) }
       }
-      emit({ kind: 'dispatched', requestId, flightId, operation: 'push', waitedMs: now() - queuedAt, at: now() })
+      emit({
+        kind: 'dispatched',
+        requestId,
+        flightId,
+        operation: 'push',
+        attemptId: attempt.attemptId,
+        waitedMs: now() - queuedAt,
+        at: now(),
+      })
       const pushStartedAt = now()
       let output: string | undefined
       let commandError: unknown
@@ -327,9 +333,16 @@ export function createRemoteGitCoordinator(
       } catch (error) {
         commandError = error
       }
-      noteSubprocess(requestId, flightId, 'push', pushStartedAt, commandError)
+      noteSubprocess(requestId, flightId, 'push', pushStartedAt, commandError, attempt.attemptId)
       input.invalidate()
-      emit({ kind: 'invalidated', requestId, flightId, repoKey: input.scope.repoKey, at: now() })
+      emit({
+        kind: 'invalidated',
+        requestId,
+        flightId,
+        attemptId: attempt.attemptId,
+        repoKey: input.scope.repoKey,
+        at: now(),
+      })
       let readback: string | null = null
       let readbackError: unknown
       const readbackStartedAt = now()
@@ -338,9 +351,9 @@ export function createRemoteGitCoordinator(
       } catch (error) {
         readbackError = error
       }
-      noteSubprocess(requestId, flightId, 'readback', readbackStartedAt, readbackError)
+      noteSubprocess(requestId, flightId, 'readback', readbackStartedAt, readbackError, attempt.attemptId)
       const confirmed = readbackError === undefined && readback === attempt.expectedOid
-      emit({ kind: 'readback-settled', requestId, flightId, confirmed, at: now() })
+      emit({ kind: 'readback-settled', requestId, flightId, attemptId: attempt.attemptId, confirmed, at: now() })
       const settled: RemoteGitWriteAttempt = {
         ...attempt,
         status: confirmed ? 'confirmed' : 'unknown',
@@ -356,6 +369,7 @@ export function createRemoteGitCoordinator(
       return {
         outcome: confirmed ? 'confirmed' : 'unknown',
         flightId,
+        attemptId: attempt.attemptId,
         output,
         readback: readback ?? undefined,
         ...(confirmed ? {} : { error: settled.diagnosticRef }),
@@ -367,7 +381,7 @@ export function createRemoteGitCoordinator(
         error: errorText(error),
       }),
     )
-    terminal(requestId, flightId, outcome.outcome, outcome.error)
+    terminal(requestId, flightId, outcome.outcome, outcome.error, outcome.attemptId)
     return outcome
   }
 
@@ -405,9 +419,16 @@ export function createRemoteGitCoordinator(
       } catch (error) {
         readbackError = error
       }
-      noteSubprocess(requestId, flightId, 'readback', startedAt, readbackError)
+      noteSubprocess(requestId, flightId, 'readback', startedAt, readbackError, input.attempt.attemptId)
       const confirmed = readbackError === undefined && readback === input.attempt.expectedOid
-      emit({ kind: 'readback-settled', requestId, flightId, confirmed, at: now() })
+      emit({
+        kind: 'readback-settled',
+        requestId,
+        flightId,
+        attemptId: input.attempt.attemptId,
+        confirmed,
+        at: now(),
+      })
       const settled: RemoteGitWriteAttempt = {
         ...input.attempt,
         status: confirmed ? 'confirmed' : 'unknown',
@@ -417,13 +438,26 @@ export function createRemoteGitCoordinator(
       return {
         outcome: confirmed ? 'confirmed' : 'unknown',
         flightId,
+        attemptId: input.attempt.attemptId,
         readback: readback ?? undefined,
         ...(confirmed ? {} : { error: settled.diagnosticRef }),
       }
     }).catch((error): RemoteGitOutcome => ({ outcome: 'unknown', flightId, error: errorText(error) }))
-    terminal(requestId, flightId, outcome.outcome, outcome.error)
+    terminal(requestId, flightId, outcome.outcome, outcome.error, input.attempt.attemptId)
     return outcome
   }
+
+  const deleteRemoteBranchIfPresent = (input: RemoteGitDeleteInput): Promise<RemoteGitOutcome> =>
+    runDeleteRemoteBranchIfPresent(input, {
+      assertOpen,
+      now,
+      newId: randomUUID,
+      enqueue,
+      emit,
+      noteSubprocess,
+      terminal,
+      errorText,
+    })
 
   const close = async (): Promise<void> => {
     if (closed) return
@@ -454,6 +488,7 @@ export function createRemoteGitCoordinator(
     lsRemote,
     push,
     recoverPush,
+    deleteRemoteBranchIfPresent,
     ensureFresh,
     clearFreshness,
     lifecycleEvents: (): RemoteGitLifecycleEvent[] => [...events],

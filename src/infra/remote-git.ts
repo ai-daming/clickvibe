@@ -1,13 +1,4 @@
-/**
- * Shared entry points for Controller-owned remote Git operations (issue #135
- * slice A). Thin, zero-behavior extraction: the command strings, timeouts and
- * sandbox policies match the call sites verbatim, and non-zero exits keep the
- * shared runCommand semantics. The Remote Git Coordinator (slice B) will own
- * these entry points — singleflight, the per-repository critical section, the
- * authoritative post-push readback and the snapshot invalidation broadcast
- * all wrap here for every migrated call site (the two compound flows pending
- * in slice C still go direct).
- */
+/** Controller-owned Remote Git entry points governed by ADR-0011. */
 
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
@@ -17,6 +8,7 @@ import {
   type RemoteGitFreshness,
   type RemoteGitWriteAttempt,
 } from './remote-git-coordinator.ts'
+import type { RemoteGitDeletePreparation } from './remote-git-delete.ts'
 import { createRemoteGitEvidenceSink } from './remote-git-evidence.ts'
 import { notifyLocalGitMutation } from './local-git-invalidate.ts'
 import { runCommand } from './runtime.ts'
@@ -91,6 +83,20 @@ function assertDestinationRef(value: string): void {
   if (!/^refs\/heads\/[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value) || value.includes('..') || value.includes('@{')) {
     throw new Error(`非法远端目标 ref: ${value}`)
   }
+}
+
+async function readRemoteHead(
+  ctx: Context,
+  remote: string,
+  destinationRef: string,
+  options: RemoteGitCommandOptions,
+): Promise<string | null> {
+  const output = await runCommand(ctx, `git ls-remote --heads ${remote} ${quoted(destinationRef)}`, {
+    workdir: options.workdir,
+    timeoutMs: 30_000,
+    sandboxPolicy: options.sandboxPolicy,
+  })
+  return output.trim().split(/\s+/)[0] || null
 }
 
 export interface RemotePushPreparation {
@@ -214,20 +220,50 @@ export function remotePush(
         })
       },
       invalidate: () => notifyLocalGitMutation({ repoKey: options.repoKey }, 'remote-push', 'RemoteGitCoordinator'),
-      readback: async (attempt) => {
-        const output = await runCommand(ctx, `git ls-remote --heads ${remote} ${quoted(attempt.destinationRef)}`, {
-          workdir: options.workdir,
-          timeoutMs: 30_000,
-          sandboxPolicy: options.sandboxPolicy,
-        })
-        return output.trim().split(/\s+/)[0] || null
-      },
+      readback: (attempt) => readRemoteHead(ctx, remote, attempt.destinationRef, options),
       settleAttempt: options.settleAttempt,
     })
     .then((outcome) => {
       if (outcome.outcome !== 'confirmed') throw outcomeError('git push', outcome)
       return outcome.output ?? ''
     })
+}
+
+export async function remoteDeleteBranchIfPresent(
+  ctx: Context,
+  options: RemoteGitCommandOptions & {
+    prepare(): Promise<RemoteGitDeletePreparation>
+    persistAttempt(attempt: RemoteGitWriteAttempt): Promise<void>
+    settleAttempt(attempt: RemoteGitWriteAttempt): Promise<void>
+  },
+): Promise<string> {
+  const remote = normalizedRemote(options.remote)
+  const outcome = await remoteGitCoordinator().deleteRemoteBranchIfPresent({
+    scope: { repoKey: options.repoKey, repositoryId: options.repositoryId, remote },
+    validate: async () => {
+      const plan = await options.prepare()
+      assertDestinationRef(plan.destinationRef)
+      assertOid(plan.expectedRemoteOid, 'expectedRemoteOid')
+      return plan
+    },
+    preRead: (plan) => readRemoteHead(ctx, remote, plan.destinationRef, options),
+    persistAttempt: options.persistAttempt,
+    execute: (attempt) =>
+      runCommand(
+        ctx,
+        `git push --force-with-lease=${quoted(`${attempt.destinationRef}:${attempt.expectedRemoteOid}`)} ${remote} ${quoted(`:${attempt.destinationRef}`)}`,
+        {
+          workdir: options.workdir,
+          timeoutMs: options.timeoutMs ?? 120_000,
+          sandboxPolicy: options.sandboxPolicy,
+        },
+      ),
+    invalidate: () => notifyLocalGitMutation({ repoKey: options.repoKey }, 'remote-delete', 'RemoteGitCoordinator'),
+    readback: (attempt) => readRemoteHead(ctx, remote, attempt.destinationRef, options),
+    settleAttempt: options.settleAttempt,
+  })
+  if (outcome.outcome !== 'confirmed') throw outcomeError('git push --delete', outcome)
+  return outcome.output ?? ''
 }
 
 export async function recoverRemotePush(
@@ -240,14 +276,7 @@ export async function recoverRemotePush(
   const remote = normalizedRemote(options.remote ?? options.attempt.scope.remote)
   const outcome = await remoteGitCoordinator().recoverPush({
     attempt: options.attempt,
-    readback: async (attempt) => {
-      const output = await runCommand(ctx, `git ls-remote --heads ${remote} ${quoted(attempt.destinationRef)}`, {
-        workdir: options.workdir,
-        timeoutMs: 30_000,
-        sandboxPolicy: options.sandboxPolicy,
-      })
-      return output.trim().split(/\s+/)[0] || null
-    },
+    readback: (attempt) => readRemoteHead(ctx, remote, attempt.destinationRef, options),
     settleAttempt: options.settleAttempt,
   })
   if (outcome.outcome !== 'confirmed') throw outcomeError('git push recovery', outcome)

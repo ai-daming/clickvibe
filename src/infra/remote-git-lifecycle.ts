@@ -6,7 +6,7 @@ export interface RemoteGitScope {
   remote: string
 }
 
-export type RemoteGitOperation = 'fetch' | 'push' | 'push-recovery' | 'ls-remote'
+export type RemoteGitOperation = 'fetch' | 'push' | 'push-recovery' | 'ls-remote' | 'delete-remote-branch-if-present'
 export type RemoteGitTerminalOutcome = 'confirmed' | 'failed' | 'unknown' | 'interrupted'
 
 export type RemoteGitLifecycleEvent =
@@ -17,7 +17,8 @@ export type RemoteGitLifecycleEvent =
       kind: 'dispatched'
       requestId: string
       flightId: string
-      operation: 'fetch' | 'push' | 'ls-remote'
+      operation: 'fetch' | 'push' | 'ls-remote' | 'delete-remote-branch-if-present'
+      attemptId?: string
       waitedMs: number
       at: number
     }
@@ -25,19 +26,28 @@ export type RemoteGitLifecycleEvent =
       kind: 'subprocess-settled'
       requestId: string
       flightId: string
-      phase: 'fetch' | 'push' | 'readback'
+      phase: 'fetch' | 'pre-read' | 'push' | 'readback'
+      attemptId?: string
       upstream: boolean
       ok: boolean
       serviceMs: number
       error: string | null
       at: number
     }
-  | { kind: 'invalidated'; requestId: string; flightId: string; repoKey: string; at: number }
-  | { kind: 'readback-settled'; requestId: string; flightId: string; confirmed: boolean; at: number }
+  | { kind: 'invalidated'; requestId: string; flightId: string; attemptId?: string; repoKey: string; at: number }
+  | {
+      kind: 'readback-settled'
+      requestId: string
+      flightId: string
+      attemptId?: string
+      confirmed: boolean
+      at: number
+    }
   | {
       kind: 'terminal'
       requestId: string
       flightId: string
+      attemptId?: string
       outcome: RemoteGitTerminalOutcome
       error: string | null
       at: number
@@ -46,6 +56,7 @@ export type RemoteGitLifecycleEvent =
       kind: 'late-result'
       requestId: string
       flightId: string
+      attemptId?: string
       outcome: RemoteGitTerminalOutcome
       error: string | null
       at: number
