@@ -7,25 +7,28 @@ beforeEach(() => {
   resetGithubGatewayOwnerForTests()
   resetRemoteGitCoordinatorForTests()
 })
-import { commitWorkflowFixture } from './workflow-fixture.ts'
+
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { createServer, request, type RequestListener } from 'node:http'
+import { createServer, type RequestListener, request } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test, { after } from 'node:test'
+import { waitForTaskPersistence } from '../src/agent/task-supervisor.ts'
 import { apply, fetchRepositoryIssues } from '../src/index.ts'
 import { decodeLiveLogLine, encodeLiveLogEvent } from '../src/infra/live-output.ts'
+import { liveTasks } from '../src/infra/runtime.ts'
 import {
   appendLog,
   appendTaskLog,
+  type IssueWorkflow,
   issueBodyHash,
   loadAllArchivedWorkflows,
   loadWorkflow,
   readLogHistory,
   startTaskLog,
-  type IssueWorkflow,
 } from '../src/infra/state.ts'
 import { createFakeJobs } from './fake-jobs.ts'
+import { commitWorkflowFixture } from './workflow-fixture.ts'
 
 // Route tests exercise /state background reconciliation; never let that controller
 // discover or mutate the developer's real ~/.clickvibe workflow files.
@@ -2269,7 +2272,12 @@ async function waitForTask(listener: RequestListener, taskId: string): Promise<{
   for (let attempt = 0; attempt < 400; attempt++) {
     const polled = await post(listener, '/clickvibe/api/develop/poll', { taskId, cursor: 0 })
     const body = polled.body as { ok: boolean; done?: boolean; delta?: string[] }
-    if (body.done) return { delta: body.delta ?? [] }
+    if (body.done) {
+      const task = liveTasks.get(taskId)
+      assert.ok(task, `completed task ${taskId} disappeared before persistence quiesced`)
+      await waitForTaskPersistence(task)
+      return { delta: body.delta ?? [] }
+    }
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
   throw new Error(`task ${taskId} did not finish`)
