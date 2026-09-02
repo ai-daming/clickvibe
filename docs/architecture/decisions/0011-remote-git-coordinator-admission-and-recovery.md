@@ -1,6 +1,6 @@
 # ADR-0011：Remote Git Coordinator 的单飞、串行化与写恢复
 
-> Status: Accepted | Date: 2026-09-02 | Baseline: `a342b9a14a65e880bcd57e89d035e73cc28d571d` | Refines: [ADR-0007](0007-three-git-github-access-planes.md)
+> Status: Accepted | Date: 2026-09-02 | Baseline: `a342b9a14a65e880bcd57e89d035e73cc28d571d` | Slice C amendment decisions: Q1-A/Q2-A confirmed 2026-09-02 against `2a0b54492a4743f886e994ef9112bfae5beffd77`, effective only after merge and a fresh impl-gate | Refines: [ADR-0007](0007-three-git-github-access-planes.md)
 
 ## Context
 
@@ -135,6 +135,34 @@ push 返回 timeout、远端拒绝、非零退出或传输中断时，只要命�
 | baseline restore | 已授权 target、preview fingerprint、相关 workflow revisions、候选 lease OID | 按稳定顺序持有全部相关 workflow locks；重新 preview；target/fingerprint/revisions 未变；远端 pre-read 等于授权 lease OID | 精确 target OID + exact force-with-lease；发起 restore action 保存 attempt |
 | merge cleanup delete（Slice C） | merge generation/step、branch、候选远端 OID | merge 仍 confirmed；cleanup generation/step 当前；branch 仍为待清理目标；远端 pre-read 等于候选 OID | `expectedOid=null` + exact lease OID；cleanup action 保存 attempt |
 
+#### 5.1 Slice C：远端分支删除是一个可空写操作族
+
+Slice C 不把旧 compound 命令机械拆成“普通 `ls-remote` 调用 + 独立 delete push 调用”。这两次调用之间没有共同临界区，普通 `ls-remote` 还可能 join 写前创建的 flight，无法为删除提供当前凭证。新增的具名操作族 `delete-remote-branch-if-present` 由 merge cleanup 单一生产调用，在既有 workflow lock 外层和同一 Remote Git scope FIFO 内层完成 pre-read、可选写入和回读；它不是通用 ref transaction，也不供其他调用方预测性复用。
+
+候选远端 OID 来自已确认合并并持久化的 `delivery.prHead`。操作顺序固定为：
+
+```text
+持有 workflow lock
+  -> enqueue delete-remote-branch-if-present
+  -> 取得 Remote Git scope 临界区
+  -> 重读 workflow delivery/cleanup/branch，确认 cleanup step 仍当前
+  -> dedicated ls-remote pre-read（不得 join 普通 flight）
+  -> ref 已不存在：confirmed no-op
+  -> ref OID 不等于 delivery.prHead：rejected，零远端写
+  -> ref OID 等于 delivery.prHead：冻结 exact lease plan
+  -> 持久化 cleanup-owned RemoteGitWriteAttempt
+  -> 恰好一次 exact force-with-lease delete push
+  -> repo 级 Local Git Snapshot 失效
+  -> dedicated ls-remote readback
+  -> ref 不存在才 confirmed，否则 unknown
+```
+
+“confirmed no-op”同时表达两层事实：业务条件“待清理 ref 已不存在”已由锁内权威读取证明，因此 `delivery.cleanup.remoteBranch` 可以持久化为 `true`；传输层没有发生写入，因此不创建 `RemoteGitWriteAttempt`、不 dispatch push、也不广播写失效。它仍产生一条可关联的 delete lifecycle：`declared -> queued -> dispatched -> subprocess-settled(pre-read) -> terminal(confirmed)`，如实计一次远端读取、零远端写。no-op 由 confirmed terminal 且没有 `attemptId`、`push` phase 或 `invalidated` event 推导，不新增专用字段或平行 counter；不得通过补零或伪造 attempt 让指标看起来像执行过删除。
+
+当 pre-read 看到候选 OID 后，外部调用者若把 ref 改到不同 OID，exact force-with-lease 必须拒绝删除；无论 push 返回何种状态，写后 readback 仍存在即结算 `unknown`，cleanup 保持 pending。若 ref 被删除后以相同名称和相同 OID 重建，Git ref 事实无法区分“重建代次”，本 ADR 明确接受 `ref name + OID` 作为 v0.2 的身份边界，删除可以继续；不引入 GitHub 事件审计、额外 generation 或新的权威来源。confirmed 只绑定 dedicated pre-read/readback 的观察时刻；外部在 terminal 之后重新创建 ref 是新的远端事实，不自动重开已经完成的 cleanup，也不属于本 attempt 能永久阻止的动作。
+
+只有 ref 存在且写计划已冻结时才创建 cleanup-owned attempt。该 attempt 复用 `RemoteGitWriteAttempt`，以 `delivery.cleanup.remoteBranchAttempt?: RemoteGitWriteAttempt` 随现有 workflow metadata 持久化；旧记录无该字段无需迁移。prepared attempt 的重启恢复沿用 §4：只做 dedicated readback，ref 已不存在才 confirmed，仍存在则 unknown，禁止自动重放 delete push。
+
 PR push confirmed 后设置本地 upstream tracking 属于 Local Git 写，不塞入 Remote Git push 事务；它沿用本地写站点的失效规则。若该本地步骤失败，不能倒推已确认的远端 push 失败，workflow 需分别记录错误。
 
 ### 6. 失效边界是 repo 级，顺序不可交换
@@ -159,7 +187,7 @@ TTL observation 只影响是否需要申请 fetch，不把 remote-tracking ref �
 
 ### 8. lifecycle event 是 Remote Git 计量的唯一来源
 
-Coordinator 不维护一组 counters 再另写一组 evidence。每个 logical request 只产生一条可关联的 `RemoteGitLifecycleEvent` 流，阶段限定为：`declared`、`ttl-hit | joined | queued`、`dispatched`、`subprocess-settled`、`invalidated`、`readback-settled`、`terminal`。
+Coordinator 不维护一组 counters 再另写一组 evidence。每个 logical request 只产生一条可关联的 `RemoteGitLifecycleEvent` 流，阶段限定为：`declared`、`ttl-hit | joined | queued`、`dispatched`、`subprocess-settled`、`invalidated`、`readback-settled`、`terminal`。Slice C delete 使用同一事件流和 `delete-remote-branch-if-present` operation kind；subprocess phase 区分 `pre-read`、`push` 与 `readback`，不另建 delete counters。
 
 事件至少携带 logical `requestId`、物理 `flightId`、写入时的 `attemptId`、scope、operation kind、单调时间戳、terminal outcome 和脱敏 `diagnosticRef`。token、credential、含密钥的 remote URL 和任意写入正文不得进入 evidence。
 
@@ -173,7 +201,7 @@ Coordinator 不维护一组 counters 再另写一组 evidence。每个 logical r
 
 ### 10. 迁移、回滚与分片边界
 
-Slice B 在同一实现变更中把清单内普通 fetch/push 路由到 Coordinator，并删除独立 freshness gate 和远端调用点失效；不得保留新旧两条可执行路径做长期双写。Slice C 才迁移 merge cleanup 的 `ls-remote && push --delete` 与 merge-gates 内嵌 fetch 的 compound 形态，并回填冻结场景实测证据。
+Slice B 在同一实现变更中把清单内普通 fetch/push 路由到 Coordinator，并删除独立 freshness gate 和远端调用点失效；不得保留新旧两条可执行路径做长期双写。到 Slice C baseline `2a0b54492a4743f886e994ef9112bfae5beffd77`，merge-gates 的显式 `remoteFetch` 已进入 Coordinator FIFO 且不受 TTL 命中短路，剩余迁移是 merge cleanup 的 `ls-remote && push --delete`；Slice C 同时更新过期登记并回填 Review-dense 冻结场景实测证据。
 
 本文不引入全局持久化 schema、迁移 job 或代次切换。现有 action 状态各自增加可选 attempt 子记录：旧记录无需批量转换；因为 dispatch 前强制先写 marker，旧记录中缺少 marker 只能表示没有按新协议派发。不得用“双读后猜测”兼容绕过该不变量。
 
@@ -188,6 +216,7 @@ Slice B 在同一实现变更中把清单内普通 fetch/push 路由到 Coordina
 | fetch join | compatible flight key | follower membership/lifecycle | RemoteGitOwner | 建 leader 或明确拒绝 |
 | mutation admission | scope FIFO、deadline | queue lifecycle | RemoteGitOwner | queue timeout → unknown |
 | write validation | workflow/action current state、Git refs | frozen plan | caller + owner 临界区 | rejected、零 dispatch |
+| cleanup delete pre-read | delivery/cleanup/branch、远端 ref | confirmed no-op 或 frozen delete plan | merge cleanup + owner 临界区 | 不存在即业务 confirmed；OID 不符即 rejected、零 push |
 | write preparation | frozen plan | durable attempt marker | caller action | marker failure、零 dispatch |
 | dispatch/失效 | marker、exact refspec | lifecycle + #122 invalidation | RemoteGitOwner | 继续 readback、否则 unknown |
 | authoritative readback | remote refs | attempt terminal + lifecycle terminal | caller action / owner evidence | unknown、禁止重放 |
@@ -202,6 +231,7 @@ Slice B 在同一实现变更中把清单内普通 fetch/push 路由到 Coordina
 | physical outcome envelope | scope dispatcher | leader / followers / #133 派生器 | 共享结果及一次物理 queue/service 边界 | flight terminal 后仅随 evidence 留存 |
 | frozen push plan | credential validator | marker writer / git adapter / readback predicate | 精确写什么、如何确认 | 单次 attempt |
 | caller-owned attempt | workflow/action | restart recovery / workflow settlement | 首次 dispatch 还是只回读 | 随 action 留存 |
+| cleanup delete attempt | merge cleanup | restart recovery / cleanup settlement | 仅 ref 存在且准备写时派发或恢复；初始不存在不创建 | `delivery.cleanup` 可选子记录，terminal 后留作审计 |
 | lifecycle event | RemoteGitOwner | diagnostics writer / #133 CI scenario | 阈值、故障证据、等待拆分 | 按 evidence 保留策略 |
 | #122 invalidation | RemoteGitOwner | LocalGitSnapshotRegistry | 哪些本地 snapshot 不再可复用 | registry generation |
 
@@ -220,6 +250,10 @@ Slice B 在同一实现变更中把清单内普通 fetch/push 路由到 Coordina
 - 外部竞争改变 force-with-lease 预期 SHA 时写被拒绝或 readback mismatch 为 unknown；
 - timeout/nonzero 的失效发生在 readback 和 terminal 之前；未 dispatch 的拒绝不失效；
 - PR push、sync、restore、cleanup 的凭证在临界区内过期时均零 dispatch；
+- cleanup delete 初始 pre-read 查无 ref 时业务 confirmed，但 marker、push 和 invalidation 均为零，lifecycle 只计真实 pre-read；
+- 用真实 bare remote barrier 卡住 cleanup pre-read 与 delete push，外部把 ref 从候选 OID 改到另一 OID 后 exact lease 拒绝写，竞争者 ref 保留且 cleanup 为 unknown/pending；
+- 同一 barrier 下把 ref 删除后以相同 OID 重建，测试明确记录 v0.2 接受该 ref 仍可被删除，不把 OID 身份边界伪装成 generation 保护；
+- cleanup delete 的 prepared marker 在进程中断后只触发 readback，remote hook 证明没有第二次 delete push；
 - `/state` 与 `/repo/issues` 既有 TTL 测试零修改通过；
 - #133 CI 场景从 lifecycle event 计算 logical/join/queue/service/failure/invalidation/readback，没有旁路 counter。
 
@@ -240,18 +274,22 @@ Key Remote Git write 使用本地 bare remote，必须满足冻结协议：恰�
 - workflow/action lock 会覆盖最多 120 秒的同 scope 排队等待；同 workflow 的其他动作会保守等待。
 - marker-before-dispatch 会制造可解释的 false unknown，需要用户重新授权，而不是后台自愈。
 - exact-OID refspec、逐类 credential 和 dedicated readback 增加了适配层分支，必须由交错集成测试守住。
+- delete 操作多一次锁内权威 pre-read，并增加一个 operation kind/phase 区分；这是阻止普通 singleflight 旧结果充当写凭证的必要成本。
 - 单进程 owner 不协调两个 Controller 进程；v0.2 仍依赖调用方租约和 Git 的 lease/ref 事实阻止冲突。
 
 ### Neutral
 
 - 本 ADR 借用 ADR-0010 的 caller-owned marker、readback-only recovery 和 lifecycle-as-metrics 模式，但不复用其 Gateway runtime、credential scope、队列、缓存或事件对象；Remote Git 与 GitHub REST 仍是两个访问平面。
 - 数值使用 #135 Q8 与 #133 冻结值，不在实现中另设“更合理”的默认值。
+- v0.2 以 `ref name + OID` 判断 merge cleanup 的远端分支身份；相同 OID 的删除后重建不可区分且允许继续删除，这是维护者明确接受的边界。
 
 ## Failure Modes
 
 - **flight key 过宽**：prune 与非 prune 错误 join 会丢语义；必须由 normalized mode 区分。
 - **push readback join 旧 flight**：可能把写前事实当写后事实；dedicated readback 必须在临界区内新发起。
 - **临界区前校验**：状态可在排队时过期；临界区内重读失败即零 dispatch。
+- **delete pre-read 复用普通 flight**：可能把临界区前旧结果当写凭证；cleanup pre-read 必须 dedicated、不可 join。
+- **初始不存在仍落写 marker**：会为零副作用动作制造 prepared/unknown 恢复债务；confirmed no-op 禁止创建 attempt、push 或 invalidation。
 - **移动 source ref**：用 branch name 推送可能偏离 marker；必须推 exact OID。
 - **lost response**：不得按退出码猜成功；失效、回读、严格谓词后才结算。
 - **marker 丢失**：无 marker 不能证明旧进程未写；新协议从构造上禁止 marker 前 dispatch，违反者是阻断性缺陷。
@@ -268,10 +306,15 @@ Key Remote Git write 使用本地 bare remote，必须满足冻结协议：恰�
 - **所有写统一成一种抽象 lease**：拒绝；四类写的权威状态和成功条件不同，抽象会掩盖实际校验。
 - **共享 #122 counters 或 #131 Gateway events**：拒绝；三个访问平面回答的问题不同，共享可变计数会混淆归属；本 ADR 只共享 #122 invalidation bus。
 - **worktree 级失效**：拒绝；fetch 更新 repo 共享的 remote-tracking refs，只失效一个 worktree 会留下可复用旧快照。
+- **把 cleanup 拆成普通 ls-remote 与独立 delete push**：拒绝；两次调用没有共同临界区，且普通 flight 可能提供写前旧结果。
+- **初始不存在也创建 marker 并发送 delete push**：拒绝；目标事实已经成立，额外写入只会制造失败和恢复歧义。
+- **为同 OID 重建增加 branch generation/GitHub 事件审计**：拒绝；需要新的权威来源、持久状态和跨平面恢复协议，超出 Slice C；v0.2 接受 Git ref 的 OID 身份边界。
 
 ## Acceptance and Effective Baseline
 
-维护者已于 2026-09-02 明确接受本文中的 fetch 组合算法、caller-owned marker、四类 credential、repo 级失效和 lifecycle 唯一来源。本文与索引现标记为 Accepted 候选，但在合入 `main` 前仍不是生效的 Coding baseline，也不表示 Slice B READY。只有以合入 `main` 的 exact SHA 重跑 impl-gate 得到 READY，且用户另行授权编码后，Slice B 才能开始实现。
+维护者已于 2026-09-02 明确接受本文中的 fetch 组合算法、caller-owned marker、四类 credential、repo 级失效和 lifecycle 唯一来源。该核心设计已由 PR #153 合入，并在 `f88e4f9bade6580fe5bd3372415b3f11a2477837` 完成架构入口登记；Slice B 后续实现由 PR #154 合入 `2a0b54492a4743f886e994ef9112bfae5beffd77`。
+
+维护者又于 2026-09-02 对 Slice C 明确选择 Q1-A/Q2-A：初始 ref 不存在按业务 confirmed、传输 no-op 结算；远端分支身份接受 `ref name + OID` 边界。该增补在合入 `main` 前不成为 Slice C 的生效 Coding baseline；合入后仍必须以新 exact SHA 重跑 impl-gate，READY 也不自动授权编码。
 
 若维护者要求改变 marker owner、锁顺序、恢复重放规则或任一写凭证，这不是实现细节，必须修改本文后重新接受和重跑闸门，禁止 Coding Agent 在实现中自行决定。
 
