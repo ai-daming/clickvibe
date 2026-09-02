@@ -4,7 +4,6 @@ import { readFile } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { notifyLocalGitMutation } from './local-git-invalidate.ts'
 /**
  * clickvibe host half — routes:
  * - `/clickvibe/api/fetch`          — fetch GitHub issue/PR data via gh
@@ -27,7 +26,7 @@ import { notifyLocalGitMutation } from './local-git-invalidate.ts'
  *                      └── rework ────────┘
  */
 import type { Context } from '@deepseek-ai/cordis'
-import { remoteFetch } from './remote-git.ts'
+import { ensureRemoteFresh, remoteFetch, remoteGitCoordinator } from './remote-git.ts'
 import { parse as parseYaml } from 'yaml'
 import { parseClickVibeConfigV1 } from './project-binding.ts'
 import { verifyProjectBindingRepository } from './repository-identity.ts'
@@ -43,7 +42,7 @@ import {
   validatePrivilegedRequest,
 } from './develop-core.ts'
 import { LineBuffer } from './line-buffer.ts'
-import { type RepositoryFreshness, RepositoryFreshnessGate, RepositoryRefreshClock } from './repo-freshness.ts'
+import { type RepositoryFreshness, RepositoryRefreshClock } from './repo-freshness.ts'
 import type { IssueWorkflow, WorkflowTaskLease } from './state.ts'
 import { ExclusiveTaskGate } from './task-gate.ts'
 
@@ -63,7 +62,7 @@ export const DEFAULT_FETCH_TTL_SECONDS = 45
 
 export const READ_FETCH_WAIT_MS = 2_000
 
-export const repositoryFreshness = new RepositoryFreshnessGate()
+export const repositoryFreshness = { clear: () => remoteGitCoordinator().clearFreshness() }
 
 export const dependencyRefreshClock = new RepositoryRefreshClock()
 
@@ -323,7 +322,7 @@ export async function runCommand(
   // 注:插件可见的 shell 类型只声明 {text},运行时才有 truncated/spillPath,做宽断言。
   const out = result.stdout as { text: string; truncated?: boolean; spillPath?: string }
   if (result.exitCode !== 0) {
-    // git merge 等命令把 CONFLICT/文件提示打到 stdout,只拼 stderr 会丢冲突详情
+    // merge 等 Git 命令把 CONFLICT/文件提示打到 stdout,只拼 stderr 会丢冲突详情
     const stderr = result.stderr?.text?.trim() ?? ''
     const stdout = out.text.trim()
     const detail = [stderr, stdout].filter(Boolean).join('\n')
@@ -358,24 +357,20 @@ export async function ensureConfiguredRepoFresh(
   if (!configuredPath) return null
   const repoPath = resolve(expandHome(configuredPath))
   if (!existsSync(repoPath)) return null
-  return repositoryFreshness.ensureWithin(
-    repoPath,
-    fetchTtlMs(config),
-    async () => {
-      try {
-        await remoteFetch(ctx, {
-          repoKey,
-          workdir: repoPath,
-          timeoutMs: 30_000,
-          sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: repoPath },
-        })
-      } finally {
-        notifyLocalGitMutation({ repoKey }, 'remote-fetch', 'ensureConfiguredRepoFresh')
-      }
-    },
-    READ_FETCH_WAIT_MS,
+  return ensureRemoteFresh({
+    repoKey,
+    ttlMs: fetchTtlMs(config),
+    waitMs: READ_FETCH_WAIT_MS,
     force,
-  )
+    refresh: async () => {
+      await remoteFetch(ctx, {
+        repoKey,
+        workdir: repoPath,
+        timeoutMs: 60_000,
+        sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: repoPath },
+      })
+    },
+  })
 }
 
 /** Read the current HEAD short-hash of a worktree (empty string on failure). */

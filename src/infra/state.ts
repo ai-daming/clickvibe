@@ -25,6 +25,7 @@ import {
   workflowStatePath,
 } from './workflow-persistence.ts'
 import { assertLegacyStateWriteAllowed, isV02GenerationViolation } from './v02-generation-fence.ts'
+import type { RemoteGitWriteAttempt } from './remote-git-coordinator.ts'
 export { WorkflowConflictError } from './workflow-persistence.ts'
 export type * from './workflow-persistence.ts'
 export { workflowRevision }
@@ -76,6 +77,9 @@ export interface IssueWorkflow {
   prNumber: string | null
   /** PR 创建写事务的 attempt marker:派发前落盘,重启恢复只回读不再创建。 */
   prCreate?: { status: 'pending'; at: string }
+  /** Caller-owned Remote Git write markers. Terminal attempts remain as audit
+   *  evidence; prepared/unknown attempts recover by readback only. */
+  remoteGitAttempts?: Partial<Record<'sync' | 'pr-push' | 'baseline-restore', RemoteGitWriteAttempt>>
   /** 最近一次从 GitHub 看到的 issue 状态(推导『已关闭→无动作』,issue #5)。 */
   issueState: 'OPEN' | 'CLOSED'
   /** 开发基线:不可变远端分支 + 最近一次成功合入 worktree 并持久化的 tip。 */
@@ -137,7 +141,16 @@ export interface IssueContractSnapshot {
 type WorkflowMetadataState = WorkflowStorageIdentity &
   Pick<
     IssueWorkflow,
-    'worktree' | 'branch' | 'prNumber' | 'issueState' | 'baseRef' | 'delivery' | 'issueSnapshot' | 'autoRun' | 'events'
+    | 'worktree'
+    | 'branch'
+    | 'prNumber'
+    | 'issueState'
+    | 'baseRef'
+    | 'delivery'
+    | 'issueSnapshot'
+    | 'autoRun'
+    | 'events'
+    | 'remoteGitAttempts'
   >
 
 /** Persist metadata without accepting any lifecycle field or whole workflow snapshot. */
@@ -185,6 +198,7 @@ export async function appendEvent(
       issueSnapshot: workflow.issueSnapshot,
       autoRun: workflow.autoRun,
       events: workflow.events,
+      remoteGitAttempts: workflow.remoteGitAttempts,
     }),
   )
 }

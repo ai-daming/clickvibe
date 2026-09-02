@@ -1,8 +1,4 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { remotePush } from '../infra/remote-git.ts'
-import { notifyLocalGitMutation } from '../infra/local-git-snapshot.ts'
-import { shellQuote } from '../infra/develop-core.ts'
-import { runCommand } from '../infra/runtime.ts'
 import { githubRest } from './rest.ts'
 import { githubWrite, githubWriteOutcomeError } from './writes.ts'
 
@@ -35,6 +31,9 @@ export async function ensurePullRequest(
     title: string
   },
   options: {
+    /** Workflow-owned Remote Git transaction, invoked only after the strict
+     *  open-PR lookup proves creation is still needed. */
+    beforeCreate?: () => Promise<void>
     /** Durable attempt marker hook: the caller persists the pending intent
      *  into its workflow state BEFORE the PR-create dispatch. */
     persistMarker?: () => Promise<void>
@@ -44,32 +43,7 @@ export async function ensurePullRequest(
   // not be interpreted as "there is no PR" and create a duplicate.
   const existing = await readOpenLinkedPr(ctx, input.repoKey, input.branch)
   if (existing) return { number: existing, created: false }
-  const policy = { mode: 'danger-full-access' as const, workspaceRoot: input.worktree }
-  const branch = await runCommand(ctx, 'git branch --show-current', {
-    workdir: input.worktree,
-    timeoutMs: 10_000,
-    sandboxPolicy: { mode: 'read-only', workspaceRoot: input.worktree },
-  })
-  if (branch !== input.branch) throw new Error('worktree 当前分支与 workflow 不一致,拒绝创建 PR')
-  const dirty = await runCommand(ctx, 'git status --porcelain', {
-    workdir: input.worktree,
-    timeoutMs: 10_000,
-    sandboxPolicy: { mode: 'read-only', workspaceRoot: input.worktree },
-  })
-  if (dirty !== '') throw new Error('worktree 有未提交改动,拒绝创建 PR')
-  await remotePush(ctx, {
-    repoKey: input.repoKey,
-    workdir: input.worktree,
-    timeoutMs: 120_000,
-    sandboxPolicy: policy,
-    refspec: shellQuote(input.branch),
-    setUpstream: true,
-  })
-  notifyLocalGitMutation(
-    { repoKey: input.repoKey, worktreePath: input.worktree },
-    'pr-create-push',
-    'ensurePullRequest',
-  )
+  await options.beforeCreate?.()
   // Slice B: PR creation is a non-repeatable typed write with a PR-by-head
   // authoritative readback. The attempt marker lands in the caller's
   // workflow state before dispatch; a lost response settles by re-reading

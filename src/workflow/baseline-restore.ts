@@ -1,5 +1,4 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { notifyLocalGitMutation } from '../infra/local-git-snapshot.ts'
 import { frozenBaseHash, frozenRemoteBase } from '../agent/baseline.ts'
 import { isValidGitBranchName } from '../infra/authorization-target.ts'
 import {
@@ -9,6 +8,8 @@ import {
 } from '../infra/baseline-restore-git.ts'
 import { expandHome, loadConfig, parseUrl } from '../infra/runtime.ts'
 import { issueKey, loadAllArchivedWorkflows, loadAllWorkflows, loadWorkflow } from '../infra/state.ts'
+import type { RemoteGitWriteAttempt } from '../infra/remote-git-coordinator.ts'
+import { recoverWorkflowRemotePush, type RemoteGitAttemptKind } from './remote-git-attempt.ts'
 
 export interface BaselineRestorePreview {
   baseBranch: string
@@ -64,7 +65,7 @@ export async function restoreBaseBranch(
     )
     const requested = await loadWorkflow(key)
     if (requested && !sharedWorkflows.some((workflow) => workflow.key === key)) sharedWorkflows.push(requested)
-    return await withBaselineWorkflowLocks(sharedWorkflows, async () => {
+    return await withBaselineWorkflowLocks(sharedWorkflows, async (transaction) => {
       // The authorization check and remote restoration are one serialized
       // transaction. A concurrent sync/delivery tip update must finish first
       // (making this authorization stale) or wait until this exact push ends.
@@ -72,8 +73,45 @@ export async function restoreBaseBranch(
       if (target.baseBranch !== authorizedTarget.baseBranch || target.baseHash !== authorizedTarget.baseHash) {
         throw new Error('恢复基线目标已变化,请刷新预览并重新确认')
       }
-      await restoreMissingOriginBranch(ctx, repoKey, expandHome(configured), target.baseBranch, target.baseHash)
-      notifyLocalGitMutation({ repoKey }, 'baseline-restore', 'restoreBaseBranch')
+      const ownerWorkflow = await loadWorkflow(key)
+      if (!ownerWorkflow) throw new Error('恢复基线 workflow 已不存在')
+      const persistAttempt = async (
+        workflow: typeof ownerWorkflow,
+        kind: RemoteGitAttemptKind,
+        attempt: RemoteGitWriteAttempt,
+      ) => {
+        if (kind !== 'baseline-restore') throw new Error(`baseline restore transaction cannot persist ${kind}`)
+        const updated = await transaction.commitMetadata(workflow, {
+          remoteGitAttempts: { ...workflow.remoteGitAttempts, [kind]: attempt },
+        })
+        Object.assign(workflow, updated)
+        return updated
+      }
+      const repoPath = expandHome(configured)
+      const policy = { mode: 'danger-full-access' as const, workspaceRoot: repoPath }
+      const recovered = await recoverWorkflowRemotePush(
+        ctx,
+        ownerWorkflow,
+        'baseline-restore',
+        repoPath,
+        policy,
+        persistAttempt,
+      )
+      const destinationRef = `refs/heads/${target.baseBranch}`
+      const recoveredSameTarget =
+        recovered?.status === 'confirmed' &&
+        recovered.destinationRef === destinationRef &&
+        recovered.expectedOid?.startsWith(target.baseHash)
+      if (!recoveredSameTarget) {
+        await restoreMissingOriginBranch(ctx, repoKey, repoPath, target.baseBranch, target.baseHash, {
+          persistAttempt: async (attempt) => {
+            await persistAttempt(ownerWorkflow, 'baseline-restore', attempt)
+          },
+          settleAttempt: async (attempt) => {
+            await persistAttempt(ownerWorkflow, 'baseline-restore', attempt)
+          },
+        })
+      }
       return { ok: true as const, ...target }
     })
   } catch (error) {

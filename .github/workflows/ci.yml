@@ -27,6 +27,7 @@ jobs:
       - run: pnpm run typecheck
       - run: pnpm run build
       - run: pnpm test
+      - run: pnpm run test:remote-git-key-write
       - run: pnpm run coverage
       - run: pnpm run lint
       - run: pnpm run format:check

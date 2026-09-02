@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict'
 import { beforeEach } from 'node:test'
 import { resetGithubGatewayOwnerForTests } from '../src/github/gateway-owner.ts'
+import { resetRemoteGitCoordinatorForTests } from '../src/infra/remote-git.ts'
 
-beforeEach(() => resetGithubGatewayOwnerForTests())
+beforeEach(() => {
+  resetGithubGatewayOwnerForTests()
+  resetRemoteGitCoordinatorForTests()
+})
 import { commitWorkflowFixture } from './workflow-fixture.ts'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer, request, type RequestListener } from 'node:http'
@@ -842,6 +846,8 @@ test('missing baseline restoration requires and consumes an exact one-use author
   const home = await mkdtemp(join(tmpdir(), 'clickvibe-restore-route-'))
   process.env.HOME = home
   try {
+    const firstHash = 'a'.repeat(40)
+    const secondHash = 'd'.repeat(40)
     const repo = join(home, 'repo')
     await mkdir(join(home, '.clickvibe'), { recursive: true })
     await mkdir(repo, { recursive: true })
@@ -868,16 +874,28 @@ test('missing baseline restoration requires and consumes an exact one-use author
       reviewResult: null,
       prNumber: null,
       issueState: 'OPEN',
-      baseRef: 'origin/release/deleted @ abc1234',
+      baseRef: `origin/release/deleted @ ${firstHash}`,
       updatedAt: 0,
       events: [],
     } satisfies IssueWorkflow
     await saveWorkflow(workflow)
     const commands: string[] = []
+    let pushed = false
     const handler = createHandler(async (spec) => {
       commands.push(spec.command)
       if (spec.command.includes('refs/remotes/origin/release/deleted')) {
         return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'missing' } }
+      }
+      if (spec.command.startsWith('git rev-parse --verify')) {
+        return { exitCode: 0, stdout: { text: secondHash }, stderr: { text: '' } }
+      }
+      if (spec.command.startsWith('git push ')) pushed = true
+      if (spec.command.startsWith('git ls-remote --heads')) {
+        return {
+          exitCode: 0,
+          stdout: { text: pushed ? `${secondHash}\trefs/heads/release/deleted\n` : '' },
+          stderr: { text: '' },
+        }
       }
       return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
     })
@@ -902,9 +920,9 @@ test('missing baseline restoration requires and consumes an exact one-use author
     }
     assert.equal(authorized.status, 200)
     assert.equal(authorized.body.preview.baseline, 'origin/release/deleted')
-    assert.equal(authorized.body.preview.baselineRef, 'abc1234')
-    assert.deepEqual(authorized.body.restoreTarget, { branch: 'release/deleted', hash: 'abc1234' })
-    workflow.baseRef = 'origin/release/deleted @ def5678'
+    assert.equal(authorized.body.preview.baselineRef, firstHash)
+    assert.deepEqual(authorized.body.restoreTarget, { branch: 'release/deleted', hash: firstHash })
+    workflow.baseRef = `origin/release/deleted @ ${secondHash}`
     await saveWorkflow(workflow)
     const stale = await post(
       handler,
@@ -930,7 +948,7 @@ test('missing baseline restoration requires and consumes an exact one-use author
       { action: 'restore-base', url: workflow.url },
       headers,
     )) as typeof authorized
-    assert.deepEqual(refreshed.body.restoreTarget, { branch: 'release/deleted', hash: 'def5678' })
+    assert.deepEqual(refreshed.body.restoreTarget, { branch: 'release/deleted', hash: secondHash })
     const restored = await post(
       handler,
       '/clickvibe/api/sync',
@@ -1973,6 +1991,7 @@ test('a rejected dry-run worktree attempt preserves the previous durable dev his
       const api = githubApi(command, { item: issue })
       if (api) return api
       if (command === 'git fetch origin --prune') return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+      if (command.startsWith('git for-each-ref')) return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       if (command === 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD')
         return { exitCode: 0, stdout: { text: 'origin/main' }, stderr: { text: '' } }
       if (command === "git rev-parse --short 'origin/main'")
@@ -2031,6 +2050,7 @@ test('dryrun uses the default baseline, reports command output and closes succes
         const api = githubApi(command, { item: issue })
         if (api) return api
         if (command === 'git fetch origin --prune') return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+        if (command.startsWith('git for-each-ref')) return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
         if (command === 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD')
           return { exitCode: 0, stdout: { text: 'origin/main' }, stderr: { text: '' } }
         if (command === "git show-ref --verify --quiet 'refs/remotes/origin/main'; echo $?")

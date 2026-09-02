@@ -44,6 +44,7 @@ const WORKFLOW_METADATA_FIELDS = new Set<WorkflowMetadataField>([
   'autoRun',
   'events',
   'prCreate',
+  'remoteGitAttempts',
 ])
 
 export function applyWorkflowMetadataPatch(
@@ -85,6 +86,7 @@ export function applyWorkflowMetadataPatch(
     ...(patch.delivery === undefined ? {} : { delivery: patch.delivery }),
     ...(patch.issueSnapshot === undefined ? {} : { issueSnapshot: patch.issueSnapshot }),
     ...(patch.autoRun === undefined ? {} : { autoRun: patch.autoRun }),
+    ...(patch.remoteGitAttempts === undefined ? {} : { remoteGitAttempts: patch.remoteGitAttempts }),
     updatedAt: 0,
     events: patch.events ?? [],
   }

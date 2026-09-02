@@ -6,7 +6,13 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
 import { createLiveTask, finishTask } from '../src/agent/task-supervisor.ts'
-import { commitWorkflowMetadata, issueKey, loadWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
+import {
+  commitWorkflowMetadata,
+  issueKey,
+  loadWorkflow,
+  type IssueWorkflow,
+  WorkflowConflictError,
+} from '../src/infra/state.ts'
 import { workflowTaskExpectation } from '../src/infra/task-ownership.ts'
 import { restoreBaseBranch } from '../src/workflow/baseline-restore.ts'
 import { recordDevDelivery } from '../src/workflow/dev-delivery.ts'
@@ -203,6 +209,8 @@ test('restore holds the workflow lock through the remote push', async () => {
   const home = join(root, 'home')
   const previousHome = process.env.HOME
   process.env.HOME = home
+  const frozen = 'a'.repeat(40)
+  let pushed = false
   let releaseFetch = () => undefined
   const fetchReleased = new Promise<void>((resolve) => {
     releaseFetch = resolve
@@ -223,6 +231,17 @@ test('restore holds the workflow lock through the remote push', async () => {
         }
         if (spec.command.startsWith('git rev-parse --verify refs/remotes/origin/')) {
           return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'missing' } }
+        }
+        if (spec.command.startsWith('git rev-parse --verify')) {
+          return { exitCode: 0, stdout: { text: frozen }, stderr: { text: '' } }
+        }
+        if (spec.command.startsWith('git push ')) pushed = true
+        if (spec.command.startsWith('git ls-remote --heads')) {
+          return {
+            exitCode: 0,
+            stdout: { text: pushed ? `${frozen}\trefs/heads/release/deleted\n` : '' },
+            stderr: { text: '' },
+          }
         }
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       },
@@ -247,7 +266,7 @@ test('restore holds the workflow lock through the remote push', async () => {
     reviewResult: null,
     prNumber: null,
     issueState: 'OPEN',
-    baseRef: 'origin/release/deleted @ aaa1111',
+    baseRef: `origin/release/deleted @ ${frozen}`,
     updatedAt: 0,
     events: [],
   } satisfies IssueWorkflow
@@ -261,7 +280,7 @@ test('restore holds the workflow lock through the remote push', async () => {
 
     const restoring = restoreBaseBranch(ctx as never, {
       url: workflow.url,
-      restoreTarget: { branch: 'release/deleted', hash: 'aaa1111' },
+      restoreTarget: { branch: 'release/deleted', hash: frozen },
     })
     await fetchStarted
     const mutation = commitWorkflowMetadata(workflow, workflow.revision ?? null, { issueState: 'CLOSED' })
@@ -273,7 +292,10 @@ test('restore holds the workflow lock through the remote push', async () => {
     releaseFetch()
 
     assert.equal((await restoring).ok, true)
-    await mutation
+    await assert.rejects(mutation, WorkflowConflictError)
+    const current = await loadWorkflow(workflow.key)
+    assert.ok(current)
+    await commitWorkflowMetadata(current, current.revision ?? null, { issueState: 'CLOSED' })
     assert.equal((await loadWorkflow(workflow.key))?.issueState, 'CLOSED')
   } finally {
     releaseFetch()

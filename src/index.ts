@@ -22,6 +22,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import { closeGithubGateway } from './github/gateway-owner.ts'
+import { closeRemoteGitCoordinator } from './infra/remote-git.ts'
 import { loadEmbeddedGhIssueSkill } from './infra/embedded-skill.ts'
 import { ROUTE } from './infra/http-contract.ts'
 import { readJsonBody, writeJson } from './infra/runtime.ts'
@@ -163,6 +164,7 @@ export function apply(ctx: Context): void {
   // flushes (ADR-0010 §10); nothing crosses into the next credential
   // generation. cordis effects await their disposer during teardown.
   ctx.effect(() => closeGithubGateway, 'clickvibe: close the GitHub gateway')
+  ctx.effect(() => closeRemoteGitCoordinator, 'clickvibe: close the Remote Git Coordinator')
 }
 
 export { buildMergePreface } from './infra/git.ts'
