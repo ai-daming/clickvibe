@@ -1,6 +1,6 @@
 # ClickVibe 当前有效架构
 
-> Status: Accepted | Owner: ClickVibe maintainers | Last updated: 2026-08-27 | Scope: target architecture; implementation order is governed by [roadmap](roadmap.md)
+> Status: Accepted | Owner: ClickVibe maintainers | Last updated: 2026-09-02 | Scope: target architecture; implementation order is governed by [roadmap](roadmap.md)
 
 本文是 ClickVibe 架构的唯一入口。它回答“当前系统由什么组成、事实由谁拥有、变化如何进入系统”。详细设计放在 `docs/architecture/`，重要取舍放在 `docs/architecture/decisions/`；带日期的 `docs/plans/` 只记录一次实施过程，不自动成为当前架构。
 
@@ -78,6 +78,7 @@ v0.1 已验证部分事实推导、Agent 流程和持久化能力，但它没有
 - [可观测性与复盘](architecture/observability.md)：日志、事件、错误、证据与架构版本绑定。
 - [架构决策记录](architecture/decisions/README.md)：Accepted、Superseded 和 Draft 决策。
 - [三访问平面决策](architecture/decisions/0007-three-git-github-access-planes.md)：Local Git、Remote Git、GitHub REST 与 Agent 直接调用的治理边界。
+- [Remote Git Coordinator 单飞、串行化与写恢复](architecture/decisions/0011-remote-git-coordinator-admission-and-recovery.md)：#135 的 fetch 单飞与 scope FIFO、caller-owned push marker、锁内凭证校验、repo 级失效和 readback-only 恢复。
 - [GitHub REST Gateway 准入与生命周期](architecture/decisions/0010-github-rest-gateway-admission-and-lifecycle.md)：#131 的类型化申请、调度、缓存、限流、写回读和证据所有权。
 
 ## 代码结构
