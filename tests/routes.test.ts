@@ -1987,6 +1987,9 @@ test('/state keeps local-ref state readable and marks freshness stale when fetch
     await initFixtureRepository(repo)
     await activateV02Home(tempHome, { 'o/r': repo })
     const handler = createHandler(async ({ command }) => {
+      if (command.startsWith('set +e')) {
+        return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'offline sample' } }
+      }
       assert.equal(command, 'git fetch origin --prune')
       return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'offline' } }
     })
@@ -2036,6 +2039,9 @@ test('/state returns stale local facts within a bounded wait when git fetch hang
     await initFixtureRepository(repo)
     await activateV02Home(tempHome, { 'hanging/repo': repo })
     const handler = createHandler(async ({ command }) => {
+      if (command.startsWith('set +e')) {
+        return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'offline sample' } }
+      }
       assert.equal(command, 'git fetch origin --prune')
       return new Promise(() => {})
     })
