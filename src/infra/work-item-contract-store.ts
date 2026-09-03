@@ -164,6 +164,7 @@ async function publishCaptureFiles(
   paths: WorkItemContractPaths,
   snapshot: WorkItemContractSnapshot,
   raw: Buffer,
+  fingerprintOf: ReaderOptions['fingerprintOf'],
   checkpoint?: PublisherOptions['checkpoint'],
 ): Promise<void> {
   const captureId = snapshot.rawArtifact.artifactId
@@ -185,11 +186,8 @@ async function publishCaptureFiles(
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST' && (error as NodeJS.ErrnoException).code !== 'ENOTEMPTY')
         throw error
-      const [storedRaw, storedSnapshot] = await Promise.all([
-        readFile(join(destination, 'raw.json')),
-        readFile(join(destination, 'snapshot.json'), 'utf8'),
-      ])
-      if (!storedRaw.equals(raw) || JSON.stringify(JSON.parse(storedSnapshot)) !== JSON.stringify(snapshot)) {
+      const stored = await readCapture(paths, snapshot.workItem, captureId, snapshot.fingerprint, fingerprintOf)
+      if (stored.state !== 'known' || !stored.raw.equals(raw)) {
         throw new Error(`immutable contract capture collision: ${captureId}`)
       }
     }
@@ -233,7 +231,7 @@ export async function publishWorkItemContractCapture(options: PublisherOptions):
     } else if (current.reason !== 'missing-current-contract') {
       return current
     }
-    await publishCaptureFiles(paths, options.snapshot, options.raw, options.checkpoint)
+    await publishCaptureFiles(paths, options.snapshot, options.raw, options.fingerprintOf, options.checkpoint)
     const verified = await readCapture(
       paths,
       options.workItem,

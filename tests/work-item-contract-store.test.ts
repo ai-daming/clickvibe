@@ -207,3 +207,94 @@ test('every publication crash boundary leaves either the complete old or complet
     })
   }
 })
+
+test('retry adopts a complete orphan capture after crashing before the current pointer update', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'clickvibe-contract-retry-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const oldRaw = raw('old-observation', '2026-09-03T00:00:00Z', 'old')
+  const nextRaw = raw('same-provider-bytes', '2026-09-03T00:00:02Z', 'new')
+  const oldSnapshot = snapshot(root, oldRaw, '2026-09-03T00:00:01Z', '2026-09-03T00:00:00Z', 'old')
+  const interruptedSnapshot = snapshot(root, nextRaw, '2026-09-03T00:00:03Z', '2026-09-03T00:00:02Z', 'new')
+  const retrySnapshot = snapshot(root, nextRaw, '2026-09-03T00:05:00Z', '2026-09-03T00:00:02Z', 'new')
+
+  await publishWorkItemContractCapture({
+    root,
+    workItem,
+    raw: oldRaw,
+    snapshot: oldSnapshot,
+    fingerprintOf,
+    compareSourceVersion,
+  })
+  await assert.rejects(
+    publishWorkItemContractCapture({
+      root,
+      workItem,
+      raw: nextRaw,
+      snapshot: interruptedSnapshot,
+      fingerprintOf,
+      compareSourceVersion,
+      checkpoint(name) {
+        if (name === 'after-capture-rename') throw new Error('simulated crash after capture rename')
+      },
+    }),
+    /simulated crash/,
+  )
+
+  const published = await publishWorkItemContractCapture({
+    root,
+    workItem,
+    raw: nextRaw,
+    snapshot: retrySnapshot,
+    fingerprintOf,
+    compareSourceVersion,
+  })
+  assert.equal(published.state, 'known')
+  if (published.state !== 'known') return
+  assert.equal(published.status, 'published')
+  assert.equal(published.raw.equals(nextRaw), true)
+  assert.equal(published.snapshot.capturedAt, interruptedSnapshot.capturedAt)
+  assert.equal(published.snapshot.fingerprint, retrySnapshot.fingerprint)
+})
+
+test('retry rejects an orphan capture whose stored fingerprint does not match', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'clickvibe-contract-retry-collision-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const bytes = raw('same-provider-bytes', '2026-09-03T00:00:02Z', 'new')
+  const interruptedSnapshot = snapshot(root, bytes, '2026-09-03T00:00:03Z', '2026-09-03T00:00:02Z', 'new')
+
+  await assert.rejects(
+    publishWorkItemContractCapture({
+      root,
+      workItem,
+      raw: bytes,
+      snapshot: interruptedSnapshot,
+      fingerprintOf,
+      compareSourceVersion,
+      checkpoint(name) {
+        if (name === 'after-capture-rename') throw new Error('simulated crash after capture rename')
+      },
+    }),
+    /simulated crash/,
+  )
+  const snapshotPath = join(
+    workItemContractPaths(root, workItem).captures,
+    interruptedSnapshot.rawArtifact.artifactId,
+    'snapshot.json',
+  )
+  await writeFile(
+    snapshotPath,
+    `${JSON.stringify({ ...interruptedSnapshot, fingerprint: `wic1_${'A'.repeat(43)}` })}\n`,
+  )
+
+  await assert.rejects(
+    publishWorkItemContractCapture({
+      root,
+      workItem,
+      raw: bytes,
+      snapshot: snapshot(root, bytes, '2026-09-03T00:05:00Z', '2026-09-03T00:00:02Z', 'new'),
+      fingerprintOf,
+      compareSourceVersion,
+    }),
+    /immutable contract capture collision/,
+  )
+})
