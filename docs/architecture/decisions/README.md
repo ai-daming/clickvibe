@@ -29,3 +29,4 @@ ADR 记录长期有效的架构取舍，不记录普通实现步骤。每个 ADR
 | [0010](0010-github-rest-gateway-admission-and-lifecycle.md) | Accepted | GitHub REST Gateway 的准入调度、写回读与证据生命周期 |
 | [0011](0011-remote-git-coordinator-admission-and-recovery.md) | Accepted | Remote Git Coordinator 的 fetch 单飞、串行化、写凭证与崩溃恢复 |
 | [0012](0012-work-item-contract-canonicalization-and-evidence.md) | Accepted | Work Item 契约规范化、原子 capture 发布、失效接线与诊断证据 |
+| [0013](0013-v02-exit-verification-single-writer-and-cutover-execution.md) | Accepted | v0.2 退出验收：状态类单一写入守卫、三平面终局汇总、provider-neutral 审计、资产处置与离线切换入口 |

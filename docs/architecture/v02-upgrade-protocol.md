@@ -198,3 +198,7 @@ rollback 用 config backup 生成同目录 temp，再按 fsync + atomic replace 
 - cold backup、Git worktree、branch、commit、dirty/conflict/ahead 在成功、失败、恢复后均未被自动删除、reset、stash 或 push。
 
 实现 PR 必须遵守 `AGENTS.md` 的 state 格式红线；本设计 PR 已先将其改为“只有 Accepted ADR + 显式升级协议可授权代次切换”，避免实现门禁与 ADR-0009 自相矛盾。
+
+## 12. 操作者入口与授权确认记录（ADR-0013）
+
+离线升级的操作者入口是 `scripts/upgrade-v0.2.mjs`：`preview` 只读打印完整 plan 与 fingerprint；`apply`/`resume`/`rollback` 要求操作者回显完整 fingerprint 作为显式授权凭证，回显不匹配即拒绝并零写入。回显确认后，runner 向 `~/.clickvibe/upgrade-v0.2-authorization.log` 追加一行 `{ at, entry, command, fingerprint }` 作为 AC2 的事后审计证据；授权绑定的机器权威仍是 journal 内的 `planFingerprint` 与 apply 临界区重算，两者冲突时以 journal 为准。runner 是薄组装层，不得复制或绕过本文规定的 fence/lock/fingerprint 校验。「active legacy reader」的判据与移除清单见 [ADR-0013](decisions/0013-v02-exit-verification-single-writer-and-cutover-execution.md) §6。
