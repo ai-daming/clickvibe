@@ -50,7 +50,7 @@ async function withRoots(shape: RootShape, run: (root: string, home: string) => 
     if (previous === undefined) delete process.env.HOME
     else process.env.HOME = previous
     resetV02GenerationFenceForTest()
-    await rm(home, { recursive: true, force: true })
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 }
 

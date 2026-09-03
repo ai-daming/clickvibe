@@ -108,7 +108,7 @@ test('merge authorization preview rejects invalid, missing, unreadable, closed a
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(home, { recursive: true, force: true })
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -153,7 +153,7 @@ test('merge execution validates URL, exclusivity, workflow, config, worktree roo
     mergingWorkflows.delete(issueKey('o/r', '2'))
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(home, { recursive: true, force: true })
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -194,7 +194,7 @@ test('merge execution rejects an authorization whose exact PR base changed', asy
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(home, { recursive: true, force: true })
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 

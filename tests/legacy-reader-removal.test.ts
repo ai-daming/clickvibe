@@ -30,7 +30,7 @@ async function withTempHome(name, run) {
   } finally {
     if (previous === undefined) delete process.env.HOME
     else process.env.HOME = previous
-    await rm(home, { recursive: true, force: true })
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 }
 
@@ -75,7 +75,7 @@ test('project import fails closed instead of writing a v0.1 repos mapping', asyn
   t.after(async () => {
     if (previous === undefined) delete process.env.HOME
     else process.env.HOME = previous
-    await rm(home, { recursive: true, force: true })
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   })
 
   const root = join(home, '.clickvibe')

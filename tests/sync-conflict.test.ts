@@ -211,7 +211,7 @@ test('sync pushes the clean merge commit to the existing PR branch (issue #45)',
       assert.equal(result.head, localShortHead)
     })
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -233,7 +233,7 @@ test('sync merges and records the frozen custom baseline', async () => {
       assert.match(saved?.events.at(-1)?.note ?? '', /origin\/release\/2\.0/)
     })
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -254,7 +254,7 @@ test('sync does not merge or push when the worktree has unrelated local changes 
       assert.match((await wt('status', '--short')).stdout, /local-notes\.md/)
     })
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -308,7 +308,7 @@ test('sync keeps the conflicted merge scene and rework stays reachable (issue #2
       assert.equal(derived.nextAction.kind, 'rework')
     })
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -343,7 +343,7 @@ test('an interrupted rework on a conflicted worktree resumes instead of re-synci
       assert.match(preface, /未完成的合并/)
     })
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -465,7 +465,7 @@ test('review issues reach the agent across stale-session fallback on an interrup
       assert.equal(occurrences, 1)
     })
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -493,7 +493,7 @@ test('merge preface guides the resume/rework agent through conflict then stalene
     const stale = await buildMergePreface(ctx, worktree, 'main')
     assert.match(stale, /落后 origin\/main/)
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 

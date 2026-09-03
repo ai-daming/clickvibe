@@ -57,7 +57,7 @@ async function sharedFixture() {
     async cleanup() {
       if (previousHome === undefined) delete process.env.HOME
       else process.env.HOME = previousHome
-      await rm(root, { recursive: true, force: true })
+      await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
     },
   }
 }

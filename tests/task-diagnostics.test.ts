@@ -49,7 +49,7 @@ test('task diagnostics persist the exact console JSON under the owning issue', a
     console.warn = originalWarn
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(tempHome, { recursive: true, force: true })
+    await rm(tempHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -79,7 +79,7 @@ test('an oversized diagnostic remains complete when the next record rotates it',
     console.warn = originalWarn
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(tempHome, { recursive: true, force: true })
+    await rm(tempHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -97,6 +97,6 @@ test('diagnostic persistence failure never escapes logTaskDiagnostic', async () 
     console.warn = originalWarn
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(tempHome, { recursive: true, force: true })
+    await rm(tempHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })

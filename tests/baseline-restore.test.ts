@@ -109,7 +109,7 @@ test('authorized recovery recreates only the frozen missing base branch at its f
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -195,7 +195,7 @@ test('restore rejects an authorization made stale by a queued baseline-tip mutat
     releaseFetch()
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -293,7 +293,7 @@ test('restore holds the workflow lock through the remote push', async () => {
     releaseFetch()
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -369,7 +369,7 @@ test('sync advances the durable baseline tip before a deleted branch is restored
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -464,6 +464,6 @@ test('a resolved baseline merge conflict advances the durable tip before restore
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })

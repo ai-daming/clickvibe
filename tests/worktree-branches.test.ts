@@ -129,7 +129,7 @@ async function runScenario(number: string, scenario: Scenario = {}) {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await chmod(join(home, '.clickvibe', 'state'), 0o700).catch(() => undefined)
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 }
 
@@ -152,7 +152,7 @@ test('worktree preparation fails clearly for missing config, repository, default
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(home, { recursive: true, force: true })
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
   const noDefault = await runScenario('3', { symbolicRef: null, mainExists: false })
   assert.equal(noDefault.result.ok, false)

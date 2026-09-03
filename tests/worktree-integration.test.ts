@@ -69,7 +69,7 @@ test('real git worktree creation uses origin/main instead of the source reposito
     assert.notEqual(issue, side)
     assert.equal(branch, 'issue-1')
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -133,7 +133,7 @@ test('first development creates from a selected remote branch and freezes it', a
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -169,6 +169,6 @@ test('a baseline persistence failure rolls back a newly created worktree and bra
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     await chmod(join(home, '.clickvibe', 'state'), 0o700).catch(() => undefined)
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
