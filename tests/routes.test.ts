@@ -21,6 +21,7 @@ import { liveTasks } from '../src/infra/runtime.ts'
 import {
   appendLog,
   appendTaskLog,
+  issueKey,
   type IssueWorkflow,
   loadAllArchivedWorkflows,
   loadWorkflow,
@@ -791,7 +792,7 @@ test('concurrent first-development authorizations freeze exactly one baseline an
     assert.deepEqual(results.map((result) => result.status).sort(), [200, 400])
     assert.equal(starts, 1)
     assert.match(results.find((result) => result.status === 400)?.body.error ?? '', /基线已定格/)
-    const frozen = await loadWorkflow('o-r-601')
+    const frozen = await loadWorkflow(issueKey('o/r', '601'))
     assert.match(frozen?.baseRef ?? '', /^origin\/(?:main|release\/2\.0) @ (?:1111111|2222222)$/)
     await new Promise((resolve) => setTimeout(resolve, 120))
   } finally {
@@ -2096,7 +2097,7 @@ test('a rejected dry-run worktree attempt preserves the previous durable dev his
       join(tempHome, '.clickvibe', 'config.yaml'),
       ['repos:', `  o/r: ${repo}`, `worktreeRoot: ${worktreeRoot}`, ''].join('\n'),
     )
-    await appendLog('o-r-905', 'dev', 'previous completed task history')
+    await appendLog(issueKey('o/r', '905'), 'dev', 'previous completed task history')
 
     const issue = {
       url: 'https://github.com/o/r/issues/905',
@@ -2131,7 +2132,7 @@ test('a rejected dry-run worktree attempt preserves the previous durable dev his
     })
     assert.equal(result.status, 400)
     assert.match(result.body.error ?? '', /worktree 冲突/)
-    const history = await readLogHistory('o-r-905', 'dev')
+    const history = await readLogHistory(issueKey('o/r', '905'), 'dev')
     assert.equal(history[0], 'previous completed task history')
     assert.ok(history.some((line) => line.includes('worktree 冲突')))
   } finally {
@@ -4512,7 +4513,7 @@ test('develop with user context stays a first development and records the note i
     assert.match(prompts[0], /请执行 ClickVibe 开发阶段。/)
     assert.doesNotMatch(prompts[0], /返工阶段/)
     assert.match(prompts[0], /附加上下文:\n优先补齐边界测试,注意向后兼容/)
-    let reloaded = await loadWorkflow('o-r-54')
+    let reloaded = await loadWorkflow(issueKey('o/r', '54'))
     assert.equal(reloaded?.events.at(-1)?.kind, 'dev')
     assert.equal(reloaded?.events.at(-1)?.userContext, firstContext)
     assert.equal(typeof reloaded?.events.at(-1)?.durationMs, 'number')
@@ -4551,7 +4552,7 @@ test('develop with user context stays a first development and records the note i
 
     assert.match(prompts[1], /请执行 ClickVibe 按 Review 意见返工阶段。/)
     assert.match(prompts[1], /附加上下文:\n第二轮:按新约束调整实现/)
-    reloaded = await loadWorkflow('o-r-54')
+    reloaded = await loadWorkflow(issueKey('o/r', '54'))
     assert.equal(reloaded?.events.at(-1)?.kind, 'rework')
     assert.equal(reloaded?.events.at(-1)?.userContext, secondContext)
     assert.equal(typeof reloaded?.events.at(-1)?.durationMs, 'number')

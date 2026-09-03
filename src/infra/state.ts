@@ -6,12 +6,11 @@ import { join } from 'node:path'
 import { isAutoRunState } from './contracts.ts'
 import type { AutoRunState, DeliveryPublication, DeliveryStats, PromptSnapshot } from './contracts.ts'
 export type { AutoRunPausedReason, AutoRunState, AutoRunUnresolvedRound } from './contracts.ts'
-import { issueKey, legacyIssueKey, taskLogPath, type WorkflowStorageIdentity } from './state-layout.ts'
+import { issueKey, taskLogPath, type WorkflowStorageIdentity } from './state-layout.ts'
 import {
   appendTaskLog as appendTaskLogRecord,
   appendTaskLogNext,
   listTaskIds,
-  migrateLegacyLog,
   readTaskLog as readTaskLogRecords,
   startTaskLog as createTaskLog,
   type AppendTaskLogOptions,
@@ -252,103 +251,10 @@ async function storedWorkflowFiles(): Promise<string[]> {
   return files
 }
 
-async function migrateWorkflowLogs(workflow: IssueWorkflow): Promise<void> {
-  const root = stateDir()
-  assertLegacyStateWriteAllowed(root)
-  for (const kind of ['dev', 'review'] as const) {
-    const taskId = kind === 'dev' ? workflow.devTaskId : workflow.reviewTaskId
-    if (!taskId) continue
-    const storageKeys = [workflow.key, legacyIssueKey(workflow.key)].filter((key): key is string => key !== null)
-    for (const storageKey of storageKeys) {
-      try {
-        assertLegacyStateWriteAllowed(root)
-        await migrateLegacyLog(
-          root,
-          workflow,
-          kind,
-          taskId,
-          join(stateDir(), storageKey, `${kind}.log`),
-          new Date(workflow.updatedAt || 0).toISOString(),
-        )
-        break
-      } catch (reason) {
-        if (isV02GenerationViolation(reason)) throw reason
-        // Best effort: try the legacy alias or leave the source for a later retry.
-      }
-    }
-  }
-}
-
-async function migrateLegacyWorkflowFile(path: string): Promise<void> {
-  const root = stateDir()
-  assertLegacyStateWriteAllowed(root)
-  const workflow = await readWorkflowFile(path)
-  if (!workflow) return
-  const destination = statePath(workflow)
-  try {
-    const existing = await readWorkflowFile(destination)
-    if (existing && existing.key !== workflow.key) throw new Error('workflow migration target belongs to another issue')
-    if (!existing) {
-      assertLegacyStateWriteAllowed(root)
-      await mkdir(join(destination, '..'), { recursive: true })
-      assertLegacyStateWriteAllowed(root)
-      await link(path, destination)
-    }
-    assertLegacyStateWriteAllowed(root)
-    await rm(path)
-    await migrateWorkflowLogs(workflow)
-  } catch (reason) {
-    if (isV02GenerationViolation(reason)) throw reason
-    // Migration is retryable and must not prevent startup.
-  }
-}
-
-const migrations = new Map<string, Promise<void>>()
-
-async function migrateLegacyState(): Promise<void> {
-  const root = stateDir()
-  assertLegacyStateWriteAllowed(root)
-  const existing = migrations.get(root)
-  if (existing) return existing
-  const migration = (async () => {
-    try {
-      assertLegacyStateWriteAllowed(root)
-      for (const entry of await readdir(root, { withFileTypes: true })) {
-        if (entry.isFile() && entry.name.endsWith('.json')) {
-          await migrateLegacyWorkflowFile(join(root, entry.name))
-        }
-      }
-      const archive = join(root, 'archive')
-      try {
-        assertLegacyStateWriteAllowed(root)
-        for (const entry of await readdir(archive, { withFileTypes: true })) {
-          if (entry.isFile() && entry.name.endsWith('.json')) await migrateLegacyWorkflowFile(join(archive, entry.name))
-        }
-        assertLegacyStateWriteAllowed(root)
-        await rm(archive, { recursive: false }).catch(() => undefined)
-      } catch (reason) {
-        if (isV02GenerationViolation(reason)) throw reason
-        // No legacy archive directory.
-      }
-    } catch (reason) {
-      if (isV02GenerationViolation(reason)) throw reason
-      // Missing state root or a transient read failure is non-fatal.
-    }
-  })()
-  migrations.set(root, migration)
-  try {
-    await migration
-  } finally {
-    if (migrations.get(root) === migration) migrations.delete(root)
-  }
-}
-
 export async function loadWorkflow(key: string): Promise<IssueWorkflow | null> {
-  await migrateLegacyState()
   for (const path of await storedWorkflowFiles()) {
     const workflow = await readWorkflowFile(path)
-    if (workflow && (workflow.key === key || currentKey(workflow) === key || legacyIssueKey(workflow.key) === key)) {
-      await migrateWorkflowLogs(workflow)
+    if (workflow && (workflow.key === key || currentKey(workflow) === key)) {
       return workflow.delivery?.status === 'archived' ? null : workflow
     }
   }
@@ -356,12 +262,10 @@ export async function loadWorkflow(key: string): Promise<IssueWorkflow | null> {
 }
 
 export async function loadAllWorkflows(includeArchived = false): Promise<IssueWorkflow[]> {
-  await migrateLegacyState()
   const workflows: IssueWorkflow[] = []
   for (const path of await storedWorkflowFiles()) {
     const workflow = await readWorkflowFile(path)
     if (workflow) {
-      await migrateWorkflowLogs(workflow)
       if (includeArchived || workflow.delivery?.status !== 'archived') workflows.push(workflow)
     }
   }
@@ -369,7 +273,6 @@ export async function loadAllWorkflows(includeArchived = false): Promise<IssueWo
 }
 
 export async function loadAllArchivedWorkflows(): Promise<IssueWorkflow[]> {
-  await migrateLegacyState()
   const workflows: IssueWorkflow[] = []
   for (const path of await storedWorkflowFiles()) {
     const workflow = await readWorkflowFile(path)
@@ -439,17 +342,7 @@ export async function appendLog(key: string, kind: 'dev' | 'review', line: strin
       await appendTaskLogNext(stateDir(), workflow, kind, taskId, line)
       return
     }
-    const legacyAlias = legacyIssueKey(key)
-    let storageKey = key
-    if (legacyAlias) {
-      try {
-        await readFile(join(stateDir(), legacyAlias, `${kind}.log`), 'utf8')
-        storageKey = legacyAlias
-      } catch {
-        // No legacy alias exists; use the current stable id.
-      }
-    }
-    const legacyPath = join(stateDir(), storageKey, `${kind}.log`)
+    const legacyPath = join(stateDir(), key, `${kind}.log`)
     assertLegacyStateWriteAllowed(stateDir())
     await mkdir(join(legacyPath, '..'), { recursive: true })
     assertLegacyStateWriteAllowed(stateDir())

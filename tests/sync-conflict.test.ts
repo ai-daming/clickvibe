@@ -15,7 +15,7 @@ import {
   type IssueWorkflow,
 } from '../src/index.ts'
 import { liveTasks } from '../src/infra/runtime.ts'
-import { applyDevRunOutcome, loadWorkflow, readLogTail } from '../src/infra/state.ts'
+import { applyDevRunOutcome, issueKey, loadWorkflow, readLogTail } from '../src/infra/state.ts'
 import { createFakeJobs } from './fake-jobs.ts'
 
 const execFileAsync = promisify(execFile)
@@ -129,7 +129,7 @@ async function setupSyncableRepo(baseBranch = 'main') {
 
 function conflictedWorkflow(worktree: string): IssueWorkflow {
   return {
-    key: 'o-r-26',
+    key: issueKey('o/r', '26'),
     url: 'https://github.com/o/r/issues/26',
     repoKey: 'o/r',
     worktree,
@@ -273,7 +273,7 @@ test('sync keeps the conflicted merge scene and rework stays reachable (issue #2
       assert.deepEqual((result as { files?: string[] }).files, ['readme.md'])
       assert.match(result.error, /readme\.md/)
       assert.match(result.error, /Automatic merge failed|CONFLICT|冲突/)
-      const logLines = (await readLogTail('o-r-26', 'dev', 10)).join('\n')
+      const logLines = (await readLogTail(issueKey('o/r', '26'), 'dev', 10)).join('\n')
       assert.match(logLines, /冲突文件:readme\.md/)
 
       // 现场保留:合并仍在进行(MERGE_HEAD 存在)、文件带冲突标记,没有被 abort
@@ -284,7 +284,7 @@ test('sync keeps the conflicted merge scene and rework stays reachable (issue #2
       await assert.rejects(remoteGit('rev-parse', 'refs/heads/clickvibe-issue-26'))
 
       // 冲突已记录到权威时间线(含文件清单)
-      const reloaded = await loadWorkflow('o-r-26')
+      const reloaded = await loadWorkflow(issueKey('o/r', '26'))
       assert.ok(reloaded)
       const lastEvent = reloaded.events.at(-1)
       assert.equal(lastEvent?.kind, 'note')
@@ -325,7 +325,7 @@ test('an interrupted rework on a conflicted worktree resumes instead of re-synci
       // 用户点「按意见返工」:resumeDevelop 把 stage 置为 developing;
       // 随后返工 agent 非零退出(被停止/超时/Host 重启同理),
       // applyDevRunOutcome 把 stage 留在 developing、旧 review 结论保留。
-      const started = await loadWorkflow('o-r-26')
+      const started = await loadWorkflow(issueKey('o/r', '26'))
       assert.ok(started)
       started.stage = 'developing'
       applyDevRunOutcome(started, 'failed', 1, null, 'codex')
@@ -419,7 +419,7 @@ test('review issues reach the agent across stale-session fallback on an interrup
       assert.equal((result as { conflict?: boolean }).conflict, true)
 
       // 返工中断:stage=developing、旧 review 结论保留;客户端 resume 不带 context
-      const interrupted = await loadWorkflow('o-r-26')
+      const interrupted = await loadWorkflow(issueKey('o/r', '26'))
       assert.ok(interrupted)
       interrupted.stage = 'developing'
       applyDevRunOutcome(interrupted, 'failed', 1, null, 'codex')
@@ -440,7 +440,7 @@ test('review issues reach the agent across stale-session fallback on an interrup
       }
 
       // 场景 B:会话归属不匹配 → 直接全新会话,意见同样送达
-      const mismatched = await loadWorkflow('o-r-26')
+      const mismatched = await loadWorkflow(issueKey('o/r', '26'))
       assert.ok(mismatched)
       mismatched.devSessionId = 'dev-session-2'
       mismatched.devSessionAgent = 'claude'
