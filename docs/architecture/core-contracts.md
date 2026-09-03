@@ -202,7 +202,7 @@ interface ArtifactRef {
   artifactId: string
   kind: 'issue-snapshot' | 'log' | 'diff' | 'provider-response' | 'model-output' | 'diagnostic'
   path: string
-  contentHash: string
+  contentHash: `sha256-v1_${string}` // SHA-256 of exact stored bytes, base64url without padding
   redaction: 'none' | 'applied'
 }
 
@@ -469,7 +469,7 @@ type WorkflowEvent =
 | `observer.completed` | 必须非空 | 诊断只能作用于触发它的 generation 与 evidence |
 | `delivery.merged` | 必须非空 | 交付记录必须证明合并的是通过门禁的 exact head |
 
-DiagnosticRecord 不使用 EventEnvelope 的 `basis` 表达前置基础设施错误；它通过 source、可空 workflow、operation、correlation、原始错误和 ArtifactRef 保存证据。它与 GatewayLifecycleEvent、RemoteGitLifecycleEvent 共用 v0.2 diagnostics JSONL transport 和索引，但不替代两者，也不从错误记录重复推导请求指标；关系与物理通道见 [ADR-0012 §7](decisions/0012-work-item-contract-canonicalization-and-evidence.md)。v0.1 legacy event 不进入 active projection；需要复盘时只从只读冷备份人工提取，不能授权当前动作。
+DiagnosticRecord 不使用 EventEnvelope 的 `basis` 表达前置基础设施错误；它通过 source、可空 workflow、operation、correlation、原始错误和 ArtifactRef 保存证据。Gateway/Remote Git 失败记录的 `correlationId` 等于既有 lifecycle `requestId`，索引按 `source + correlationId` 连接；lifecycle 不新增 diagnosticId。三者共用 v0.2 diagnostics JSONL transport 和索引，但 DiagnosticRecord 不替代 lifecycle，也不重复推导请求指标；关系与物理通道见 [ADR-0012 §7](decisions/0012-work-item-contract-canonicalization-and-evidence.md)。v0.1 legacy event 不进入 active projection；需要复盘时只从只读冷备份人工提取，不能授权当前动作。
 
 事件用于审计与投影，不意味着所有当前状态都必须从零重放。WorkflowControlState 仍由串行命令域原子持久化，事件追加失败必须作为明确错误处理，不能静默丢失因果链。
 
