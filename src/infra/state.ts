@@ -133,12 +133,9 @@ export interface WorkflowEvent {
   operator?: string
 }
 
-export interface IssueContractSnapshot {
-  /** GitHub issue body 原文的 SHA-256。 */
-  bodyHash: string
-  /** GitHub 在冻结快照时返回的 updatedAt，保留作审计证据。 */
-  updatedAt: string
-}
+export type IssueContractSnapshot =
+  | { fingerprint: `wic1_${string}`; capturedAt: string }
+  | { bodyHash: string; updatedAt: string } // decoded legacy evidence; never authorizes a v0.2 action
 
 type WorkflowMetadataState = WorkflowStorageIdentity &
   Pick<
@@ -197,7 +194,6 @@ export async function appendEvent(
       issueState: workflow.issueState,
       baseRef: workflow.baseRef,
       delivery: workflow.delivery,
-      issueSnapshot: workflow.issueSnapshot,
       autoRun: workflow.autoRun,
       events: workflow.events,
       remoteGitAttempts: workflow.remoteGitAttempts,

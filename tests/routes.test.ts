@@ -3,9 +3,10 @@ import { beforeEach } from 'node:test'
 import { resetGithubGatewayOwnerForTests } from '../src/github/gateway-owner.ts'
 import { closeRemoteGitCoordinator, resetRemoteGitCoordinatorForTests } from '../src/infra/remote-git.ts'
 
-beforeEach(() => {
+beforeEach(async () => {
   resetGithubGatewayOwnerForTests()
   resetRemoteGitCoordinatorForTests()
+  await rm(join(routesTestHome, '.clickvibe', 'state', 'work-items'), { recursive: true, force: true })
 })
 
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
@@ -21,7 +22,6 @@ import {
   appendLog,
   appendTaskLog,
   type IssueWorkflow,
-  issueBodyHash,
   loadAllArchivedWorkflows,
   loadWorkflow,
   readLogHistory,
@@ -29,6 +29,9 @@ import {
 } from '../src/infra/state.ts'
 import { createFakeJobs } from './fake-jobs.ts'
 import { commitWorkflowFixture } from './workflow-fixture.ts'
+import { fingerprintGithubIssueContract } from '../src/workflow/work-item-contract-repository.ts'
+import { workItemContractPaths } from '../src/infra/work-item-contract-store.ts'
+import { readDiagnosticRecords } from '../src/infra/diagnostic-record.ts'
 
 // Route tests exercise /state background reconciliation; never let that controller
 // discover or mutate the developer's real ~/.clickvibe workflow files.
@@ -42,6 +45,14 @@ after(async () => {
 })
 
 const saveWorkflow = (workflow: IssueWorkflow) => commitWorkflowFixture(workflow, workflow.revision ?? null)
+
+function contractBody(goal: string, acceptance = goal): string {
+  return `## 目标\n${goal}\n## 验收标准\n- [ ] ${acceptance}\n## 依赖\n无\n## 非目标\n无\n## 约束\n无`
+}
+
+function contractRef(url: string, body: string, capturedAt: string) {
+  return { fingerprint: fingerprintGithubIssueContract({ url, body }), capturedAt }
+}
 
 function included(body: unknown, status = 200, headers: Record<string, string> = {}): string {
   return [
@@ -257,7 +268,7 @@ test('/auto authorization binds the frozen issue and all five configuration valu
     url: 'https://github.com/ai-daming/clickvibe/issues/74',
     number: 74,
     title: 'Auto delivery',
-    body: '## 目标\nship\n## 验收标准\n- [ ] done\n## 依赖\n无',
+    body: contractBody('ship', 'done'),
     state: 'OPEN',
     updatedAt: '2026-08-23T13:31:14Z',
     comments: [],
@@ -322,7 +333,7 @@ test('/clickvibe auto command previews the five settings through the shared back
     url: 'https://github.com/o/r/issues/74',
     number: 74,
     title: 'auto command',
-    body: '## 目标\nship\n## 验收标准\n- [ ] done\n## 依赖\n无',
+    body: contractBody('ship', 'done'),
     state: 'OPEN',
     updatedAt: '2026-08-23T13:31:14Z',
     comments: [],
@@ -401,6 +412,15 @@ test('/create-pr recovers a pending PR-create marker by readback and never re-cr
     workflow.prCreate = { status: 'pending', at: '2026-08-22T00:00:00Z' }
     await commitWorkflowFixture(workflow, workflow.revision ?? null)
     let writes = 0
+    const issue = {
+      url: workflow.url,
+      number: 74,
+      title: 'recover PR',
+      body: contractBody('recover PR'),
+      state: 'OPEN',
+      updatedAt: '2026-09-03T00:00:00Z',
+      comments: [],
+    }
     const handler = createHandler(async (spec) => {
       if (spec.command.includes('/pulls?state=open')) {
         return {
@@ -409,6 +429,8 @@ test('/create-pr recovers a pending PR-create marker by readback and never re-cr
           stderr: { text: '' },
         }
       }
+      const api = githubApi(spec.command, { item: issue })
+      if (api) return api
       if (spec.command.includes('--method')) {
         writes += 1
         throw new Error(`unexpected write: ${spec.command}`)
@@ -472,7 +494,7 @@ test('authorization route freezes the displayed snapshot and consumes tampered c
   const item = {
     url: 'https://github.com/ai-daming/clickvibe/issues/1',
     title: 'snapshot title',
-    body: 'snapshot body',
+    body: contractBody('snapshot body'),
     state: 'OPEN',
     updatedAt: '2026-08-21T00:00:00Z',
     comments: [{ author: { login: 'owner' }, body: 'review note' }],
@@ -551,7 +573,7 @@ test('develop authorization previews fetched baselines and binds a custom select
     const item = {
       url: 'https://github.com/o/r/issues/60',
       title: 'baseline selection',
-      body: '## 验收标准\n- select release',
+      body: contractBody('select release'),
       state: 'OPEN',
       updatedAt: '2026-08-23T00:00:00Z',
       comments: [],
@@ -669,7 +691,7 @@ test('concurrent first-development authorizations freeze exactly one baseline an
     const item = {
       url: 'https://github.com/o/r/issues/601',
       title: 'baseline race',
-      body: '## 验收标准\n- freeze once',
+      body: contractBody('freeze once'),
       state: 'OPEN',
       updatedAt: '2026-08-23T00:00:00Z',
       comments: [],
@@ -784,7 +806,7 @@ test('development rejects a confirmed snapshot when the issue changes before sta
   const oldItem = {
     url,
     title: 'old target',
-    body: 'old acceptance',
+    body: '## 目标\nold target\n## 验收标准\n- [ ] old acceptance\n## 依赖\n无\n## 非目标\n无\n## 约束\n无',
     state: 'OPEN',
     updatedAt: '2026-08-22T05:00:00Z',
     comments: [],
@@ -798,7 +820,7 @@ test('development rejects a confirmed snapshot when the issue changes before sta
           ? oldItem
           : {
               ...oldItem,
-              body: 'new acceptance',
+              body: oldItem.body.replace('old acceptance', 'new acceptance'),
               updatedAt: '2026-08-22T06:00:00Z',
             }
       return githubApi(spec.command, { item: current })
@@ -832,7 +854,89 @@ test('development rejects a confirmed snapshot when the issue changes before sta
     headers,
   )
   assert.equal(developed.status, 400)
-  assert.match(developed.body.error ?? '', /内容在确认后已变化/)
+  assert.match(developed.body.error ?? '', /契约在确认后已变化/)
+  assert.equal(issueReads, 2)
+})
+
+test('an unknown current contract version issues zero authorization and preserves diagnostic evidence', async () => {
+  const url = 'https://github.com/ai-daming/clickvibe/issues/22'
+  const item = {
+    url,
+    title: 'future contract',
+    body: contractBody('ship safely'),
+    state: 'OPEN',
+    updatedAt: '2026-09-03T02:00:00Z',
+    comments: [],
+  }
+  const handler = createHandler(async (spec) => {
+    return githubApi(spec.command, { item }) ?? { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+  })
+  const observed = await post(handler, '/clickvibe/api/fetch', { url })
+  assert.equal(observed.status, 200)
+  const root = join(routesTestHome, '.clickvibe', 'state')
+  const workItem = { provider: 'github', instance: 'github.com', container: 'ai-daming/clickvibe', id: '22' }
+  const paths = workItemContractPaths(root, workItem)
+  await writeFile(
+    paths.current,
+    `${JSON.stringify({ schemaVersion: 2, captureId: 'capture2_future', fingerprint: 'wic2_future' })}\n`,
+  )
+
+  const authorized = await post(
+    handler,
+    '/clickvibe/api/authorize',
+    { action: 'develop', url, agent: 'codex', expectedSnapshot: item },
+    { origin: 'same-origin', 'x-clickvibe-request': '1' },
+  )
+  assert.equal(authorized.status, 400)
+  assert.equal((authorized.body as { authorizationId?: string }).authorizationId, undefined)
+  assert.match(authorized.body.error ?? '', /当前契约|unknown-current-version/)
+  const diagnostics = await readDiagnosticRecords(root, workItem)
+  assert.ok(diagnostics.some((record) => record.message.includes('unknown-current-version')))
+})
+
+test('development authorization survives title comments checkbox and updatedAt changes', async () => {
+  const url = 'https://github.com/ai-daming/clickvibe/issues/21'
+  const body = '## 目标\nship\n## 验收标准\n- [ ] done\n## 依赖\n无\n## 非目标\n无\n## 约束\n无'
+  const oldItem = { url, title: 'old title', body, state: 'OPEN', updatedAt: '2026-09-03T01:00:00Z', comments: [] }
+  let issueReads = 0
+  const handler = createHandler(async (spec) => {
+    if (/gh api .*\/issues\/21'/.test(spec.command)) {
+      issueReads += 1
+      const current =
+        issueReads === 1
+          ? oldItem
+          : {
+              ...oldItem,
+              title: 'new title',
+              body: body.replace('- [ ] done', '- [x] done'),
+              updatedAt: '2026-09-03T01:01:00Z',
+              comments: [{ author: { login: 'bot' }, body: 'diagnostic evidence' }],
+            }
+      return githubApi(spec.command, { item: current })
+    }
+    return githubApi(spec.command, { item: oldItem }) ?? { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+  })
+  const headers = { origin: 'same-origin', 'x-clickvibe-request': '1' }
+  const authorized = (await post(
+    handler,
+    '/clickvibe/api/authorize',
+    { action: 'develop', url, agent: 'codex', context: '', expectedSnapshot: oldItem },
+    headers,
+  )) as { status: number; body: { authorizationId?: string; authorizationDigest?: string } }
+  assert.equal(authorized.status, 200, JSON.stringify(authorized.body))
+  const developed = await post(
+    handler,
+    '/clickvibe/api/develop',
+    {
+      url,
+      agent: 'codex',
+      context: '',
+      authorizationId: authorized.body.authorizationId,
+      authorizationDigest: authorized.body.authorizationDigest,
+    },
+    headers,
+  )
+  assert.doesNotMatch(developed.body.error ?? '', /授权|契约.*变化/)
   assert.equal(issueReads, 2)
 })
 
@@ -1029,7 +1133,7 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
       lastObservedAt: null,
       pausedReason: null,
     }
-    const reviewedBody = '## 验收标准\n- merge contract'
+    const reviewedBody = contractBody('merge contract')
     workflow.events = [
       {
         kind: 'review',
@@ -1037,7 +1141,7 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
         hash: 'abcdef1',
         verdict: { passed: true, issues: [] },
         reviewBase: { ref: 'main', sha: '1111111111111111' },
-        issueContract: { bodyHash: issueBodyHash(reviewedBody), updatedAt: '2026-08-22T00:00:00Z' },
+        issueContract: contractRef(workflow.url, reviewedBody, '2026-08-22T00:00:00Z'),
       },
     ]
     await commitWorkflowFixture(workflow, workflow.revision ?? null)
@@ -1290,8 +1394,7 @@ test('/merge authorization rejects a changed acceptance contract with the same P
         verdict: { passed: true, issues: [] },
         reviewBase: { ref: 'main', sha: '1111111111111111' },
         issueContract: {
-          bodyHash: issueBodyHash('## 验收标准\n- reviewed contract'),
-          updatedAt: '2026-08-22T00:00:00Z',
+          ...contractRef(workflow.url, contractBody('reviewed contract'), '2026-08-22T00:00:00Z'),
         },
       },
     ]
@@ -1304,7 +1407,7 @@ test('/merge authorization rejects a changed acceptance contract with the same P
           url: workflow.url,
           number: 23,
           title: 'changed issue',
-          body: '## 验收标准\n- changed contract',
+          body: contractBody('changed contract'),
           state: 'OPEN',
           updatedAt: '2026-08-22T01:00:00Z',
         },
@@ -1361,7 +1464,7 @@ test('/merge gate rejection offers manual override that merges once and audits t
     workflow.branch = 'r-issue-23'
     workflow.stage = 'passed'
     workflow.reviewResult = { passed: true, issues: [] }
-    const reviewedBody = '## 验收标准\n- override contract'
+    const reviewedBody = contractBody('override contract')
     workflow.events = [
       {
         kind: 'review',
@@ -1369,7 +1472,7 @@ test('/merge gate rejection offers manual override that merges once and audits t
         hash: '1111111',
         verdict: { passed: true, issues: [] },
         reviewBase: { ref: 'main', sha: '1111111111111111' },
-        issueContract: { bodyHash: issueBodyHash(reviewedBody), updatedAt: '2026-08-22T00:00:00Z' },
+        issueContract: contractRef(workflow.url, reviewedBody, '2026-08-22T00:00:00Z'),
       },
     ]
     await commitWorkflowFixture(workflow, workflow.revision ?? null)
@@ -1557,8 +1660,7 @@ test('/merge manual override refuses gate failures not covered by the confirmati
         verdict: { passed: true, issues: [] },
         reviewBase: { ref: 'main', sha: '1111111111111111' },
         issueContract: {
-          bodyHash: issueBodyHash('## 验收标准\n- reviewed contract'),
-          updatedAt: '2026-08-22T00:00:00Z',
+          ...contractRef(workflow.url, contractBody('reviewed contract'), '2026-08-22T00:00:00Z'),
         },
       },
     ]
@@ -1578,7 +1680,7 @@ test('/merge manual override refuses gate failures not covered by the confirmati
           url: workflow.url,
           number: 23,
           title: 'changed issue',
-          body: '## 验收标准\n- changed contract',
+          body: contractBody('changed contract'),
           state: 'OPEN',
           updatedAt: '2026-08-22T01:00:00Z',
         },
@@ -1665,7 +1767,7 @@ test('cleanup failure keeps merged terminal state and retries without merging ag
     workflow.branch = 'r-issue-23'
     workflow.stage = 'passed'
     workflow.reviewResult = { passed: true, issues: [] }
-    const reviewedBody = '## 验收标准\n- retry cleanup contract'
+    const reviewedBody = contractBody('retry cleanup contract')
     workflow.events = [
       {
         kind: 'review',
@@ -1673,7 +1775,7 @@ test('cleanup failure keeps merged terminal state and retries without merging ag
         hash: 'abcdef1',
         verdict: { passed: true, issues: [] },
         reviewBase: { ref: 'main', sha: '1111111111111111' },
-        issueContract: { bodyHash: issueBodyHash(reviewedBody), updatedAt: '2026-08-22T00:00:00Z' },
+        issueContract: contractRef(workflow.url, reviewedBody, '2026-08-22T00:00:00Z'),
       },
     ]
     await commitWorkflowFixture(workflow, workflow.revision ?? null)
@@ -1794,7 +1896,14 @@ test('/state uses the live GitHub issue state instead of the stored issueState',
     await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const handler = createHandler(async (spec) => {
       const api = githubApi(spec.command, {
-        item: { url: workflow.url, number: 23, state: 'CLOSED' },
+        item: {
+          url: workflow.url,
+          number: 23,
+          title: 'closed issue',
+          body: contractBody('closed issue'),
+          state: 'CLOSED',
+          updatedAt: '2026-09-03T00:00:00Z',
+        },
         pr: {
           number: 29,
           state: 'open',
@@ -1992,7 +2101,7 @@ test('a rejected dry-run worktree attempt preserves the previous durable dev his
     const issue = {
       url: 'https://github.com/o/r/issues/905',
       title: 'conflicting worktree',
-      body: '',
+      body: contractBody('dryrun conflict'),
       state: 'OPEN',
       updatedAt: 'now',
       comments: [],
@@ -2049,7 +2158,7 @@ test('dryrun uses the default baseline, reports command output and closes succes
       const issue = {
         url: `https://github.com/o/r/issues/${number}`,
         title: 'dryrun execution',
-        body: '',
+        body: contractBody('dryrun'),
         state: 'OPEN',
         updatedAt: 'now',
         comments: [],
@@ -2258,7 +2367,7 @@ function interruptedWorkflow(key: string, url: string, worktree: string): IssueW
     issueSnapshot: {
       url,
       title: 'persisted issue',
-      body: '## 验收标准\n- persisted',
+      body: contractBody('persisted'),
       state: 'OPEN',
       updatedAt: '2026-08-21T00:00:00Z',
       comments: [],
@@ -2313,7 +2422,7 @@ test('invalid exact dev session falls back once to a fresh session on the same t
     const currentIssue = {
       url: workflow.url,
       title: 'resume issue',
-      body: '## 验收标准\n- fallback',
+      body: contractBody('fallback'),
       state: 'OPEN',
       updatedAt: 'now',
       comments: [],
@@ -2411,7 +2520,7 @@ test('invalid exact dev session falls back once to a fresh session on the same t
     for (const start of starts) {
       assert.match(start.prompt, /=== 需求快照 ===/)
       assert.match(start.prompt, /updatedAt: now/)
-      assert.match(start.prompt, /## 验收标准\n- fallback/)
+      assert.match(start.prompt, /## 验收标准\n- \[ \] fallback/)
       assert.match(start.prompt, /== Review Meta ==\n- event: review/)
       assert.match(start.prompt, /修复竞态/)
       assert.match(start.prompt, /=== 信任边界 ===/)
@@ -2466,7 +2575,7 @@ test('lossy agent output recovers the missing head from the host spill file into
     const currentIssue = {
       url: workflow.url,
       title: 'recover issue',
-      body: '## 验收标准\n- recover',
+      body: contractBody('recover'),
       state: 'OPEN',
       updatedAt: '2026-08-22T08:00:00Z',
       comments: [],
@@ -2584,7 +2693,7 @@ test('lossy agent output recovers the missing head from the host spill file into
   }
 })
 
-test('completed development without a PR appends its Dev Meta comment to the issue', async () => {
+test('completed development without a PR uses the current contract and appends its Dev Meta comment', async () => {
   const previousHome = process.env.HOME
   const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-dev-comment-fallback-'))
   process.env.HOME = tempHome
@@ -2599,14 +2708,21 @@ test('completed development without a PR appends its Dev Meta comment to the iss
     const prompts: string[] = []
     const handler = createHandler(
       async (spec) => {
-        if (/gh api .*\/issues\/920'/.test(spec.command)) {
-          return { exitCode: 1, stdout: { text: included({ message: 'offline' }, 500) }, stderr: { text: 'offline' } }
-        }
+        const api = githubApi(spec.command, {
+          item: {
+            url: workflow.url,
+            number: 920,
+            title: 'persisted issue',
+            body: contractBody('persisted'),
+            state: 'OPEN',
+            updatedAt: '2026-09-03T00:00:00Z',
+            comments: issueComments,
+          },
+        })
+        if (api) return api
         if (spec.command === 'git rev-parse --short HEAD') {
           return { exitCode: 0, stdout: { text: 'def4567' }, stderr: { text: '' } }
         }
-        const api = githubApi(spec.command, { prComments: issueComments })
-        if (api) return api
         if (spec.command.includes('--method POST') && spec.command.includes('/comments')) {
           const body = JSON.parse(spec.stdin ?? '{}').body ?? ''
           comments.push({ command: spec.command, body })
@@ -2662,9 +2778,9 @@ test('completed development without a PR appends its Dev Meta comment to the iss
     await waitForTask(handler, resumed.body.taskId)
 
     assert.equal(prompts.length, 1)
-    assert.match(prompts[0], /持久化回退\(可能过期\)/)
-    assert.match(prompts[0], /updatedAt: 2026-08-21T00:00:00Z/)
-    assert.match(prompts[0], /## 验收标准\n- persisted/)
+    assert.doesNotMatch(prompts[0], /持久化回退/)
+    assert.match(prompts[0], /updatedAt: 2026-09-03T00:00:00Z/)
+    assert.match(prompts[0], /## 验收标准\n- \[ \] persisted/)
     assert.equal(comments.length, 1)
     assert.match(comments[0].command, /repos\/o\/r\/issues\/920\/comments/)
     assert.match(comments[0].body, /^== Dev Meta ==\n- event: dev\n- commit: def4567\n- issue: #920\n- fixed: 0/m)
@@ -2694,7 +2810,7 @@ test('concurrent resume requests reserve one workflow task before refreshing the
     const currentIssue = {
       url: workflow.url,
       title: 'resume gate',
-      body: '## 验收标准\n- one task',
+      body: contractBody('one task'),
       state: 'OPEN',
       updatedAt: '2026-08-22T07:00:00Z',
       comments: [],
@@ -2796,6 +2912,18 @@ test('comment publication failure keeps the delivery event and stores a bounded 
         if (spec.command.includes('/issues/29/comments') && !spec.command.includes('--method')) {
           return { exitCode: 0, stdout: { text: 'HTTP/1.1 200\n\n[]' }, stderr: { text: '' } }
         }
+        const api = githubApi(spec.command, {
+          item: {
+            url: workflow.url,
+            number: 921,
+            title: 'publication failure',
+            body: contractBody('publication failure'),
+            state: 'OPEN',
+            updatedAt: '2026-09-03T00:00:00Z',
+            comments: [],
+          },
+        })
+        if (api) return api
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       },
       () => {
@@ -2874,7 +3002,7 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     workflow.reviewSessionAgent = 'codex'
     await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const starts: Array<{ command: string; prompt: string }> = []
-    const reviewedBody = '## 验收标准\n- frozen review contract'
+    const reviewedBody = contractBody('frozen review contract')
     const reviewedUpdatedAt = '2026-08-22T01:02:03Z'
     const issueSpill = join(tempHome, 'issue-contract.json')
     const currentIssue = {
@@ -3009,7 +3137,10 @@ test('invalid exact review session clears the stale id and falls back to a fresh
       assert.match(start.prompt, /=== 需求快照 ===/)
       assert.match(start.prompt, /updatedAt: 2026-08-22T01:02:03Z/)
       assert.match(start.prompt, /frozen review contract/)
-      assert.match(start.prompt, new RegExp(`契约正文 SHA-256: ${issueBodyHash(reviewedBody)}`))
+      assert.match(
+        start.prompt,
+        new RegExp(`canonical contract fingerprint: ${contractRef(workflow.url, reviewedBody, '').fingerprint}`),
+      )
       assert.match(start.prompt, /PR: https:\/\/github\.com\/o\/r\/pull\/29/)
       assert.match(start.prompt, /被审 commit: abc123/)
       assert.match(start.prompt, /\[验证不通过\].*\[无法验证\]/)
@@ -3020,10 +3151,10 @@ test('invalid exact review session clears the stale id and falls back to a fresh
     assert.equal(reloaded?.reviewSessionAgent, 'codex')
     assert.equal(reloaded?.reviewResult?.passed, true)
     assert.deepEqual(issueTimeouts, [20000])
-    assert.deepEqual(reloaded?.events.at(-1)?.issueContract, {
-      bodyHash: issueBodyHash(reviewedBody),
-      updatedAt: reviewedUpdatedAt,
-    })
+    assert.equal(
+      reloaded?.events.at(-1)?.issueContract && 'fingerprint' in reloaded.events.at(-1)!.issueContract!,
+      true,
+    )
     assert.equal(reloaded?.events.at(-1)?.round, 1)
     assert.equal(reloaded?.events.at(-1)?.agent, 'codex')
     assert.equal(reloaded?.events.at(-1)?.taskId, reviewed.body.taskId)
@@ -3076,7 +3207,7 @@ test('duplicate review requests reuse the reserved task before fetching the Issu
       url: workflow.url,
       number: 920,
       title: 'review issue',
-      body: '## 验收标准\n- gate',
+      body: contractBody('gate'),
       state: 'OPEN',
       updatedAt: '2026-08-22T03:04:05Z',
       comments: [],
@@ -3180,7 +3311,7 @@ test('cross-agent review starts fresh and an empty failed verdict requires re-re
     workflow.reviewResult = { passed: false, issues: ['old issue'] }
     await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const starts: string[] = []
-    const reviewedBody = '## 验收标准\n- current contract'
+    const reviewedBody = contractBody('current contract')
     const handler = createHandler(
       async (spec) => {
         const api = githubApi(spec.command, {
@@ -3270,7 +3401,8 @@ test('/fetch resolves blockedBy from the body and blocking from a repo scan', as
     number: 7,
     title: 'issue 7',
     state: 'OPEN',
-    body: '## 目标\n做 X\n\n## 依赖\n\nBlocked by #5',
+    body: contractBody('做 X').replace('## 依赖\n无', '## 依赖\nBlocked by #5'),
+    updatedAt: '2026-09-03T00:00:00Z',
     comments: [],
   }
   const issues = [
@@ -3286,7 +3418,13 @@ test('/fetch resolves blockedBy from the body and blocking from a repo scan', as
   const deps = (
     result.body as {
       ok: true
-      data: { dependencies?: { blockedBy: { number: number }[]; blocking: { number: number }[] } }
+      data: {
+        dependencies?: { blockedBy: { number: number }[]; blocking: { number: number }[] }
+        contractObservation?: {
+          state: 'known'
+          snapshot: { fingerprint: string; dependencies: { state: string } }
+        }
+      }
     }
   ).data.dependencies
   assert.ok(deps)
@@ -3298,6 +3436,20 @@ test('/fetch resolves blockedBy from the body and blocking from a repo scan', as
     deps.blocking.map((d) => d.number),
     [8],
   )
+  const contract = (
+    result.body as {
+      ok: true
+      data: {
+        contractObservation?: {
+          state: 'known'
+          snapshot: { fingerprint: string; dependencies: { state: string } }
+        }
+      }
+    }
+  ).data.contractObservation
+  assert.equal(contract?.state, 'known')
+  assert.match(contract?.snapshot.fingerprint ?? '', /^wic1_[A-Za-z0-9_-]{43}$/)
+  assert.equal(contract?.snapshot.dependencies.state, 'known')
 })
 
 test('/fetch on an issue without a 依赖 section yields no blockedBy (and no blocking)', async () => {
@@ -3336,7 +3488,7 @@ test('/develop automatic mode fails closed before worktree creation for invalid 
     title: 'invalid',
     state: 'OPEN',
     updatedAt: '2026-08-22T00:00:00Z',
-    body: '## 目标\n做事\n\n## 依赖\n无',
+    body: '## 目标\n做事\n\n## 依赖\n无\n## 非目标\n无\n## 约束\n无',
     comments: [],
   }
   const invalidHandler = createHandler(async (spec) => {
@@ -3350,7 +3502,7 @@ test('/develop automatic mode fails closed before worktree creation for invalid 
     automatic: true,
   })
   assert.equal(invalidResult.status, 400)
-  assert.match(invalidResult.body.error ?? '', /契约缺失: 验收标准/)
+  assert.match(invalidResult.body.error ?? '', /unknown 字段/)
 
   // The two phases simulate DIFFERENT GitHub states in one process; the
   // process-level Gateway owner would otherwise serve phase 1's aggregate.
@@ -3358,7 +3510,8 @@ test('/develop automatic mode fails closed before worktree creation for invalid 
   const blocked = {
     ...invalid,
     title: 'blocked',
-    body: '## 目标\n做事\n\n## 验收标准\n- [ ] 完成\n\n## 依赖\nBlocked by #8',
+    updatedAt: '2026-08-22T00:01:00Z',
+    body: '## 目标\n做事\n\n## 验收标准\n- [ ] 完成\n\n## 依赖\nBlocked by #8\n## 非目标\n无\n## 约束\n无',
   }
   const dependency = { number: 8, title: 'dependency', state: 'OPEN', body: '' }
   const blockedHandler = createHandler(async (spec) => {
@@ -3395,7 +3548,7 @@ test('/develop automatic mode rejects a branch with commits when workflow histor
       title: 'lost workflow',
       state: 'OPEN',
       updatedAt: '2026-08-22T00:00:00Z',
-      body: '## 目标\n自动开发\n\n## 验收标准\n- [ ] 完成\n\n## 依赖\n无',
+      body: contractBody('自动开发', '完成'),
       comments: [],
     }
     const commands: string[] = []
@@ -3597,7 +3750,7 @@ test('repo issue aggregation includes open issues without workflows and honors l
       number: 8,
       title: 'never developed',
       state: 'open',
-      body: '## 目标\n自动开发\n\n## 验收标准\n- [ ] 完成\n\n## 依赖\n无',
+      body: contractBody('自动开发', '完成'),
       html_url: 'https://github.com/o/r/issues/8',
       milestone: null,
     },
@@ -3666,7 +3819,7 @@ test('repo ready excludes recovery even when the generic next action is develop'
     number: 81,
     title: 'resume existing development',
     state: 'open',
-    body: '## 目标\n继续开发\n\n## 验收标准\n- [ ] 完成\n\n## 依赖\n无',
+    body: contractBody('继续开发', '完成'),
     html_url: 'https://github.com/recovery/case/issues/81',
     milestone: null,
   }
@@ -3716,7 +3869,7 @@ test('repo ready excludes recovery even when the generic next action is develop'
 })
 
 test('repo aggregation unlocks closed dependencies with an idempotent comment before rewriting the ledger', async () => {
-  const body = '## 目标\n自动开发\n\n## 验收标准\n- [ ] 可启动\n\n## 依赖\nBlocked by #8'
+  const body = '## 目标\n自动开发\n\n## 验收标准\n- [ ] 可启动\n\n## 依赖\nBlocked by #8\n## 非目标\n无\n## 约束\n无'
   const issue = {
     number: 9,
     title: 'ready after dependency',
@@ -3800,7 +3953,7 @@ test('repo aggregation unlocks closed dependencies with an idempotent comment be
 })
 
 test('repo aggregation cools down failed dependency-ledger writes across forced refreshes', async () => {
-  const body = '## 目标\n自动开发\n\n## 验收标准\n- [ ] 可启动\n\n## 依赖\nBlocked by #908'
+  const body = '## 目标\n自动开发\n\n## 验收标准\n- [ ] 可启动\n\n## 依赖\nBlocked by #908\n## 非目标\n无\n## 约束\n无'
   const issue = {
     number: 909,
     title: 'retry later',
@@ -4258,7 +4411,7 @@ test('develop with user context stays a first development and records the note i
     const item = {
       url,
       title: 'context issue',
-      body: '## 验收标准\n- context',
+      body: contractBody('context'),
       state: 'OPEN',
       updatedAt: '2026-08-22T00:00:00Z',
       comments: [],
@@ -4423,7 +4576,7 @@ test('resume (rework) carries the user context next to the review feedback and a
     const currentIssue = {
       url: workflow.url,
       title: 'resume issue',
-      body: '## 验收标准\n- context',
+      body: contractBody('context'),
       state: 'OPEN',
       updatedAt: 'now',
       comments: [],
@@ -4517,7 +4670,7 @@ test('review with user context appends it to the prompt and audits it in the rev
     workflow.stage = 'review-ready'
     await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const starts: Array<{ command: string; prompt: string }> = []
-    const reviewedBody = '## 验收标准\n- review context'
+    const reviewedBody = contractBody('review context')
     const currentIssue = {
       url: workflow.url,
       number: 922,

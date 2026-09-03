@@ -27,6 +27,62 @@ export interface WorkItemIdentity {
   id: string
 }
 
+export type ContractUnknownReason = 'missing' | 'conflicting' | 'unparseable'
+
+export type ContractField<T> = { state: 'known'; value: T } | { state: 'unknown'; reason: ContractUnknownReason }
+
+export type VerificationAuthority = 'agent' | 'human' | 'external'
+
+export interface AcceptanceCriterion {
+  description: string
+  verificationAuthority: VerificationAuthority
+}
+
+export interface ArtifactRef {
+  artifactId: string
+  kind: 'issue-snapshot' | 'log' | 'diff' | 'provider-response' | 'model-output' | 'diagnostic'
+  path: string
+  contentHash: `sha256-v1_${string}`
+  redaction: 'none' | 'applied'
+}
+
+export interface WorkItemContractSnapshot {
+  schemaVersion: 1
+  canonicalizationVersion: 1
+  workItem: WorkItemIdentity
+  sourceVersion: string
+  goal: ContractField<string>
+  acceptanceCriteria: ContractField<AcceptanceCriterion[]>
+  nonGoals: ContractField<string[]>
+  constraints: ContractField<string[]>
+  dependencies: ContractField<WorkItemIdentity[]>
+  architectureImpact: 'L0' | 'L1' | 'L2' | 'L3' | 'unknown'
+  fingerprint: `wic1_${string}`
+  capturedAt: string
+  rawArtifact: ArtifactRef
+}
+
+/** The only Work Item contract authority carried by a privileged capability. */
+export interface ContractAuthorizationBinding {
+  workItem: WorkItemIdentity
+  fingerprint: WorkItemContractSnapshot['fingerprint']
+}
+
+export interface DiagnosticRecord {
+  schemaVersion: 1
+  diagnosticId: string
+  recordType: 'diagnostic'
+  source: 'clickvibe' | 'github-gateway' | 'remote-git'
+  workflow: { workItem: WorkItemIdentity } | null
+  operation: string
+  classification: string
+  message: string
+  stack: string | null
+  correlationId: string | null
+  rawArtifact: ArtifactRef | null
+  occurredAt: string
+}
+
 export interface ProjectContainerIdentity {
   provider: string
   instance: string
@@ -141,6 +197,8 @@ export interface AutoRunState {
   unresolved: AutoRunUnresolvedRound[]
   lastObservedAt: string | null
   pausedReason: AutoRunPausedReason | null
+  /** Contract authority for every later privileged stage in this run. */
+  contract?: ContractAuthorizationBinding
   /** Durable scheduler checkpoint; git/GitHub facts remain the workflow truth. */
   controllerRecovery?: AutoRunControllerRecovery
 }
@@ -150,6 +208,15 @@ export function isAutoRunState(value: unknown): value is AutoRunState {
   if (!value || typeof value !== 'object') return false
   const state = value as Partial<AutoRunState>
   const recovery = state.controllerRecovery
+  const contract = state.contract
+  const validContract =
+    contract === undefined ||
+    (typeof contract === 'object' &&
+      contract !== null &&
+      typeof contract.fingerprint === 'string' &&
+      contract.fingerprint.startsWith('wic1_') &&
+      typeof contract.workItem === 'object' &&
+      contract.workItem !== null)
   const validRecovery =
     recovery === undefined ||
     (typeof recovery === 'object' &&
@@ -173,6 +240,7 @@ export function isAutoRunState(value: unknown): value is AutoRunState {
     typeof state.startedAt === 'string' &&
     typeof state.deadline === 'string' &&
     Array.isArray(state.unresolved) &&
-    validRecovery
+    validRecovery &&
+    validContract
   )
 }

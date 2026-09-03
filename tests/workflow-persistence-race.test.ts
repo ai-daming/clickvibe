@@ -51,7 +51,9 @@ const ctx = {
       const issue = {
         number: Number(issueNumber),
         html_url: 'https://github.com/owner/repo/issues/' + issueNumber,
-        title: 'resume race', body: '', state: 'open',
+        title: 'resume race',
+        body: '## 目标\\nresume race\\n## 验收标准\\n- [ ] resume once\\n## 依赖\\n无\\n## 非目标\\n无\\n## 约束\\n无',
+        state: 'open',
         user: { login: 'owner' }, created_at: '', updated_at: '2026-08-24T00:00:00Z',
       }
       const body = /\\/issues\\?state=all/.test(command) ? [issue]

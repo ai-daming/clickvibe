@@ -1,7 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { ensureWorktree } from '../agent/worktree.ts'
-import { fetchIssue, issueSnapshot, sameIssueContract } from '../github/issue.ts'
-import { type IssuePromptSnapshot } from '../infra/develop-core.ts'
+import type { ContractAuthorizationBinding } from '../infra/contracts.ts'
 import { isGithubRateLimitError } from '../github/rest.ts'
 import { localGitSnapshots } from '../infra/local-git-snapshot.ts'
 import { liveTasks, parseUrl } from '../infra/runtime.ts'
@@ -43,6 +42,7 @@ import { enrichWorkflowStates } from './repository-state.ts'
 import { resumeDevelop } from './resume.ts'
 import { startReview } from './review-flow.ts'
 import { syncWorktree } from './sync.ts'
+import { contractHasKnownCanonicalFields, observeCurrentIssueContract } from './work-item-contract-repository.ts'
 
 interface AutoRunCommandState {
   running: Set<string>
@@ -118,7 +118,7 @@ async function applyDecision(ctx: Context, key: string, decision: AutoRunDecisio
       result = await startDevelop(
         ctx,
         { url: workflow.url, agent: workflow.autoRun.devAgent },
-        workflow.issueSnapshot ?? null,
+        workflow.autoRun.contract ?? null,
       )
       break
     case 'create-pr':
@@ -248,26 +248,30 @@ registerAutoRunReconciler(requestAutoRunReconcile)
 export async function startAutoRun(
   ctx: Context,
   payload: unknown,
-  authorizedSnapshot: IssuePromptSnapshot | null,
+  authorizedContract: ContractAuthorizationBinding | null,
 ): Promise<{ ok: true; workflowKey: string } | { ok: false; error: string }> {
   const body = (payload ?? {}) as { url?: unknown; autoRun?: unknown }
   const url = String(body.url ?? '').trim()
   const parsed = parseUrl(url)
   if (!parsed || parsed.kind !== 'issue') return { ok: false, error: '自动跑到底目标必须是 GitHub Issue URL' }
-  if (!authorizedSnapshot || authorizedSnapshot.url !== url || authorizedSnapshot.state !== 'OPEN') {
-    return { ok: false, error: '缺少与该 OPEN Issue 和配置绑定的服务端确认快照' }
-  }
+  if (!authorizedContract) return { ok: false, error: '缺少与该 Work Item 契约和配置绑定的服务端授权' }
   let config: AutoRunConfig
   try {
     config = validateAutoRunConfig(body.autoRun)
   } catch (error) {
     return { ok: false, error: String(error instanceof Error ? error.message : error) }
   }
-  const refreshed = await fetchIssue(ctx, { url, forceRefresh: true })
-  if (!refreshed.ok) return { ok: false, error: `执行前无法刷新 Issue 快照: ${refreshed.error}` }
-  const currentSnapshot = issueSnapshot(refreshed.data.item as Record<string, unknown>)
-  if (!sameIssueContract(currentSnapshot, authorizedSnapshot)) {
-    return { ok: false, error: 'Issue 契约已变化(正文/标题/状态),拒绝使用旧授权启动自动跑到底' }
+  const current = await observeCurrentIssueContract(ctx, url, { force: true })
+  if (current.state !== 'known') return { ok: false, error: `执行前无法确认当前契约: ${current.reason}` }
+  if (!contractHasKnownCanonicalFields(current.snapshot)) {
+    return { ok: false, error: '当前契约含 unknown 字段,拒绝启动自动跑到底' }
+  }
+  if (current.prompt.state !== 'OPEN') return { ok: false, error: '只有 OPEN Issue 可以启动自动跑到底' }
+  if (
+    JSON.stringify(current.snapshot.workItem) !== JSON.stringify(authorizedContract.workItem) ||
+    current.snapshot.fingerprint !== authorizedContract.fingerprint
+  ) {
+    return { ok: false, error: 'Issue 契约已变化,拒绝使用旧授权启动自动跑到底' }
   }
   const key = issueKey(`${parsed.owner}/${parsed.repo}`, parsed.number)
   const ensured = await ensureWorktree(ctx, parsed)
@@ -280,7 +284,6 @@ export async function startAutoRun(
     return { ok: false, error: '当前控制器无法确认旧任务生死,为避免双开已禁止启动自动跑到底' }
   }
   const startedAt = new Date().toISOString()
-  ensured.workflow.issueSnapshot = authorizedSnapshot
   ensured.workflow.autoRun = {
     status: 'running',
     ...config,
@@ -291,6 +294,7 @@ export async function startAutoRun(
     unresolved: [],
     lastObservedAt: null,
     pausedReason: null,
+    contract: authorizedContract,
   }
   await appendEvent(
     ensured.workflow,

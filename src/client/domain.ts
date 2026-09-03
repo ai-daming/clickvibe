@@ -79,6 +79,14 @@ export interface Workflow {
   events?: WorkflowEvent[]
   observedAt?: number
   observation?: { freshness: 'unknown'; error: string }
+  diagnostics?: Array<{
+    diagnosticId: string
+    operation: string
+    classification: string
+    message: string
+    occurredAt: string
+    correlationId: string | null
+  }>
   derived?: {
     taskRef: { kind: 'dev' | 'review'; taskId: string } | null
     head: string | null
@@ -152,7 +160,7 @@ export interface WorkflowEvent {
   }
   taskId?: string
   verdict?: { passed: boolean; issues: string[] }
-  issueContract?: { bodyHash: string; updatedAt: string }
+  issueContract?: { fingerprint: `wic1_${string}`; capturedAt: string } | { bodyHash: string; updatedAt: string }
   reviewBase?: { ref: string; sha: string }
   fixed?: number
   /** 用户附加说明(issue #54):动作触发时填写,只进本地时间线。 */
@@ -196,7 +204,15 @@ export function stageLabel(stage: WorkflowStatus, workflow: Workflow | null): st
 export type FetchIssueResponse =
   | {
       ok: true
-      data: { kind: 'issue' | 'pr'; item: unknown; timeline?: TimelineEvent[]; dependencies?: Dependencies }
+      data: {
+        kind: 'issue' | 'pr'
+        item: unknown
+        timeline?: TimelineEvent[]
+        dependencies?: Dependencies
+        contractObservation?:
+          | { state: 'known'; snapshot: { fingerprint: `wic1_${string}`; capturedAt: string } }
+          | { state: 'unknown'; reason: string }
+      }
       dependencyError?: string
     }
   | { ok: false; error: string }

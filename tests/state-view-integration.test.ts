@@ -9,7 +9,6 @@ import { deriveWorkflowState, type IssueWorkflow } from '../src/index.ts'
 import { LineLog } from '../src/infra/develop-core.ts'
 import { LineBuffer } from '../src/infra/line-buffer.ts'
 import { liveTasks } from '../src/infra/runtime.ts'
-import { issueBodyHash } from '../src/infra/state.ts'
 import { readConfiguredBranchFacts } from '../src/github/facts.ts'
 
 const execFileAsync = promisify(execFile)
@@ -322,7 +321,7 @@ test('review verdict binds to the reviewed HEAD and goes stale when the head mov
     const headC = (await wt('rev-parse', '--short', 'HEAD')).stdout.trim()
 
     // review 结论绑定 HEAD C(与事件时间线一致)
-    const issueContract = { bodyHash: issueBodyHash('## 验收标准\n- A'), updatedAt: '2026-08-22T00:00:00Z' }
+    const issueContract = { fingerprint: 'wic1_contract-a' as const, capturedAt: '2026-08-22T00:00:00Z' }
     const wf = workflow({
       worktree,
       prNumber: '9',
@@ -359,8 +358,8 @@ test('review verdict goes stale when the issue acceptance contract changes', asy
   try {
     await wt('commit', '--allow-empty', '-m', 'dev work C')
     const head = (await wt('rev-parse', '--short', 'HEAD')).stdout.trim()
-    const reviewedContract = { bodyHash: issueBodyHash('## 验收标准\n- A'), updatedAt: '2026-08-22T00:00:00Z' }
-    const currentContract = { bodyHash: issueBodyHash('## 验收标准\n- A\n- B'), updatedAt: '2026-08-22T01:00:00Z' }
+    const reviewedContract = { fingerprint: 'wic1_contract-a' as const, capturedAt: '2026-08-22T00:00:00Z' }
+    const currentContract = { fingerprint: 'wic1_contract-b' as const, capturedAt: '2026-08-22T01:00:00Z' }
     const wf = workflow({
       worktree,
       prNumber: '9',
@@ -394,7 +393,7 @@ test('GitHub-only approval is fail-closed with an explicit missing-snapshot reas
   const { root, worktree, wt } = await setupRepo()
   try {
     await wt('commit', '--allow-empty', '-m', 'dev work C')
-    const currentContract = { bodyHash: issueBodyHash('## 验收标准\n- A'), updatedAt: '2026-08-22T01:00:00Z' }
+    const currentContract = { fingerprint: 'wic1_contract-a' as const, capturedAt: '2026-08-22T01:00:00Z' }
     const derived = (
       await deriveWorkflowState(ctx, workflow({ worktree, prNumber: '9' }), {
         pr: {
@@ -424,7 +423,7 @@ test('an unavailable live issue contract blocks merge as unknown instead of chan
   try {
     await wt('commit', '--allow-empty', '-m', 'dev work C')
     const head = (await wt('rev-parse', '--short', 'HEAD')).stdout.trim()
-    const reviewedContract = { bodyHash: issueBodyHash('## 验收标准\n- A'), updatedAt: '2026-08-22T00:00:00Z' }
+    const reviewedContract = { fingerprint: 'wic1_contract-a' as const, capturedAt: '2026-08-22T00:00:00Z' }
     const wf = workflow({
       worktree,
       prNumber: '9',
@@ -457,7 +456,7 @@ test('metadata-only updatedAt drift does not invalidate an unchanged issue body'
   try {
     await wt('commit', '--allow-empty', '-m', 'dev work C')
     const head = (await wt('rev-parse', '--short', 'HEAD')).stdout.trim()
-    const bodyHash = issueBodyHash('## 验收标准\n- A')
+    const fingerprint = 'wic1_contract-a' as const
     const wf = workflow({
       worktree,
       prNumber: '9',
@@ -468,7 +467,7 @@ test('metadata-only updatedAt drift does not invalidate an unchanged issue body'
           at: new Date().toISOString(),
           hash: head,
           verdict: { passed: true, issues: [] },
-          issueContract: { bodyHash, updatedAt: '2026-08-22T00:00:00Z' },
+          issueContract: { fingerprint, capturedAt: '2026-08-22T00:00:00Z' },
         },
       ],
       stage: 'passed',
@@ -476,7 +475,7 @@ test('metadata-only updatedAt drift does not invalidate an unchanged issue body'
 
     const current = (
       await deriveWorkflowState(ctx, wf, {
-        issueContract: { bodyHash, updatedAt: '2026-08-22T01:00:00Z' },
+        issueContract: { fingerprint, capturedAt: '2026-08-22T01:00:00Z' },
       })
     ).derived
     assert.equal(current.issueContractCurrent, true)

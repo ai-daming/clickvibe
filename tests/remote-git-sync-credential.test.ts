@@ -201,7 +201,25 @@ test('PR push credential expires inside the remote lock when HEAD changes while 
         async run(spec: { command: string; workdir?: string }) {
           if (spec.command.startsWith('gh ')) {
             if (spec.command.includes('--method')) githubWrites += 1
-            return { exitCode: 0, stdout: { text: 'HTTP/2.0 200 OK\n\n[]' }, stderr: { text: '' } }
+            const issue = {
+              number: 15,
+              html_url: workflow.url,
+              title: 'create PR safely',
+              body: '## 目标\ncreate PR\n## 验收标准\n- [ ] PR created\n## 依赖\n无\n## 非目标\n无\n## 约束\n无',
+              state: 'open',
+              updated_at: '2026-09-03T00:00:00Z',
+              user: { login: 'owner' },
+            }
+            const body = spec.command.includes("repos/o/r/issues/15'")
+              ? issue
+              : spec.command.includes('/issues?')
+                ? [issue]
+                : []
+            return {
+              exitCode: 0,
+              stdout: { text: `HTTP/2.0 200 OK\n\n${JSON.stringify(body)}` },
+              stderr: { text: '' },
+            }
           }
           try {
             const output = await execFileAsync('/bin/sh', ['-c', spec.command], {

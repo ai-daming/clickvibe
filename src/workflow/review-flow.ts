@@ -13,12 +13,8 @@ import { existsSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import { remoteFetch } from '../infra/remote-git.ts'
 import { type AgentKind } from '../agent/agent-stream.ts'
-import {
-  buildReviewPrompt,
-  fetchPrHeadBranch,
-  resolvePromptSnapshot,
-  resolveReviewBaseTarget,
-} from '../agent/prompts.ts'
+import { buildReviewPrompt, fetchPrHeadBranch, resolveReviewBaseTarget } from '../agent/prompts.ts'
+import { resolvePromptSnapshot } from './prompt-resolution.ts'
 import {
   attachAgentProcess,
   createLiveTask,
@@ -35,7 +31,6 @@ import { type LiveTask, parseUrl, readWorktreeHead, reviewTaskGate, runCommand, 
 import {
   clearStaleSessionId,
   type IssueWorkflow,
-  issueBodyHash,
   issueKey,
   loadAllWorkflows,
   loadWorkflow,
@@ -149,8 +144,8 @@ export async function startReview(
     body: resolvedSnapshot.snapshot.body,
     state: resolvedSnapshot.snapshot.state,
     contract: {
-      bodyHash: issueBodyHash(resolvedSnapshot.snapshot.body),
-      updatedAt: resolvedSnapshot.snapshot.updatedAt,
+      fingerprint: resolvedSnapshot.contract.fingerprint,
+      capturedAt: resolvedSnapshot.contract.capturedAt,
     },
   }
   try {

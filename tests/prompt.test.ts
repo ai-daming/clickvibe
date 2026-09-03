@@ -22,6 +22,13 @@ const snapshot: PromptSnapshot = {
   comments: [{ author: 'owner', body: '相关评论正文' }],
 }
 
+const contractFingerprint = 'wic1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' as const
+const currentResolved = {
+  snapshot,
+  freshness: 'current' as const,
+  contract: { fingerprint: contractFingerprint, capturedAt: '2026-09-03T00:00:00Z' },
+}
+
 test('develop prompt derives sync and PR target instructions from the frozen baseline', () => {
   const prompt = buildDevelopPrompt(
     {
@@ -30,7 +37,7 @@ test('develop prompt derives sync and PR target instructions from the frozen bas
       worktree: '/tmp/worktree',
       baseRef: 'origin/release/2.0 @ abc1234',
     } as never,
-    { snapshot, freshness: 'current' },
+    currentResolved,
     '',
     true,
   )
@@ -59,7 +66,7 @@ test('resume and rework prompts derive sync and PR target instructions from the 
       reviewResult: { passed: false, issues: ['fix it'] },
       events: [],
     } as never,
-    { snapshot, freshness: 'current' },
+    currentResolved,
     '',
     '',
     'session-1',
@@ -203,12 +210,13 @@ test('review without a PR falls back to the frozen workflow baseline', async () 
       prNumber: null,
       baseRef: 'origin/release/2.0 @ abc123',
     } as never,
-    { snapshot, freshness: 'current' },
+    currentResolved,
     'def456',
   )
   assert.match(prompt, /对比 base: fed7890/)
   assert.match(prompt, /PR 基线身份: release\/2\.0 @ fed7890/)
   assert.match(prompt, /git diff fed7890\.\.\.HEAD/)
+  assert.match(prompt, new RegExp(`canonical contract fingerprint: ${contractFingerprint}`))
 })
 
 test('review without a PR falls back to the frozen commit when its remote baseline was deleted', async () => {
@@ -233,7 +241,7 @@ test('review without a PR falls back to the frozen commit when its remote baseli
       prNumber: null,
       baseRef: 'origin/release/deleted @ abc123',
     } as never,
-    { snapshot, freshness: 'current' },
+    currentResolved,
     'def456',
   )
   assert.deepEqual(commands, ["git rev-parse --verify 'origin/release/deleted^{commit}'"])
@@ -269,7 +277,7 @@ test('review keeps the live PR base ahead of the frozen workflow baseline', asyn
       prNumber: '77',
       baseRef: 'origin/release/2.0 @ abc123',
     } as never,
-    { snapshot, freshness: 'current' },
+    currentResolved,
     'def456',
   )
   assert.match(prompt, /对比 base: def8888/)
@@ -309,7 +317,7 @@ test('review diff uses the exact PR base SHA even when the same-name local ref p
       prNumber: '77',
       baseRef: 'origin/release/2.0 @ abc1234',
     } as never,
-    { snapshot, freshness: 'current' },
+    currentResolved,
     'feature-head',
   )
   assert.match(prompt, /PR 基线身份: integration @ def9999/)
@@ -352,7 +360,7 @@ test('review with a deleted PR base still uses the exact PR base SHA', async () 
       prNumber: '77',
       baseRef: 'origin/release/2.0 @ abc1234',
     } as never,
-    { snapshot, freshness: 'current' },
+    currentResolved,
     'def456',
   )
   assert.equal(
@@ -385,7 +393,7 @@ test('review fails closed when a linked PR base identity cannot be read', async 
         prNumber: '77',
         baseRef: 'origin/release/2.0 @ abc1234',
       } as never,
-      { snapshot, freshness: 'current' },
+      currentResolved,
       'feature-head',
     ),
     /无法读取 PR #77 的基线身份/,
@@ -421,7 +429,7 @@ test('review fails closed when GitHub returns a malformed PR base SHA', async ()
         prNumber: '77',
         baseRef: 'origin/release/2.0 @ abc1234',
       } as never,
-      { snapshot, freshness: 'current' },
+      currentResolved,
       'feature-head',
     ),
     /PR #77 返回了无效的基线 commit/,
@@ -438,7 +446,7 @@ test('legacy review without a persisted baseline retains origin/main without pro
       prNumber: null,
       baseRef: null,
     } as never,
-    { snapshot, freshness: 'current' },
+    currentResolved,
     'abc123',
   )
   assert.match(prompt, /git diff origin\/main\.\.\.HEAD/)

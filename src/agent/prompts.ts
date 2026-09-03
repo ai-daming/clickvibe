@@ -18,19 +18,12 @@
  *                      └── rework ────────┘
  */
 import type { Context } from '@deepseek-ai/cordis'
-import { fetchIssue, issueSnapshot } from '../github/issue.ts'
-import { fetchPrRestDetail, type GithubCommentRest } from '../github/reads.ts'
+import { fetchPrRestDetail } from '../github/reads.ts'
 import { isGithubRateLimitError } from '../github/rest.ts'
-import { githubRead } from '../github/operations.ts'
 import { REVIEW_RESULT_RELATIVE_PATH } from '../infra/review-result.ts'
 import { readWorktreeHead, runCommand } from '../infra/runtime.ts'
-import {
-  commitWorkflowMetadata,
-  type IssueWorkflow,
-  issueBodyHash,
-  WorkflowConflictError,
-  workflowRevision,
-} from '../infra/state.ts'
+import { type IssueWorkflow } from '../infra/state.ts'
+import type { WorkItemContractSnapshot } from '../infra/contracts.ts'
 import { frozenBaseHash, frozenRemoteBase } from './baseline.ts'
 import { shellQuote } from './develop.ts'
 import {
@@ -45,78 +38,8 @@ import {
 export interface ResolvedPromptSnapshot {
   snapshot: PromptSnapshot
   freshness: SnapshotFreshness
+  contract: Pick<WorkItemContractSnapshot, 'fingerprint' | 'capturedAt'>
   fetchError?: string
-}
-
-export async function fetchPrPromptComments(
-  ctx: Context,
-  workflow: IssueWorkflow,
-): Promise<{ author: string; body: string }[] | null> {
-  if (!workflow.prNumber) return []
-  try {
-    const comments = (await githubRead(ctx, {
-      operation: 'pr-comments',
-      repoKey: workflow.repoKey,
-      number: workflow.prNumber,
-      consistency: 'cache-ok',
-    })) as GithubCommentRest[]
-    return comments.map((comment) => ({
-      author: String(comment.user?.login ?? 'unknown'),
-      body: String(comment.body ?? ''),
-    }))
-  } catch (error) {
-    if (isGithubRateLimitError(error)) throw error
-    return null
-  }
-}
-
-/** Refresh at stage start; only a complete persisted snapshot may cover an outage. */
-export async function resolvePromptSnapshot(
-  ctx: Context,
-  workflow: IssueWorkflow,
-): Promise<ResolvedPromptSnapshot | { error: string }> {
-  // A privileged stage start must revalidate the frozen authorization snapshot;
-  // this security boundary intentionally bypasses the display cache.
-  const fetched = await fetchIssue(ctx, { url: workflow.url, forceRefresh: true })
-  if (fetched.ok) {
-    const snapshot = issueSnapshot(fetched.data.item as Record<string, unknown>)
-    const prComments = await fetchPrPromptComments(ctx, workflow)
-    if (prComments) snapshot.comments.push(...prComments)
-    workflow.issueSnapshot = snapshot
-    if (snapshot.state === 'OPEN' || snapshot.state === 'CLOSED') workflow.issueState = snapshot.state
-    const persistenceError = await persistPromptWorkflow(workflow)
-    if (persistenceError) return { error: persistenceError }
-    return { snapshot, freshness: 'current' }
-  }
-  const snapshot = workflow.issueSnapshot
-  if (!snapshot) {
-    return { error: `无法刷新 Issue,且没有可回退的持久化需求快照: ${fetched.error}` }
-  }
-  workflow.issueSnapshot = snapshot
-  const persistenceError = await persistPromptWorkflow(workflow)
-  if (persistenceError) return { error: persistenceError }
-  return { snapshot, freshness: 'persisted', fetchError: fetched.error.slice(0, 500) }
-}
-
-async function persistPromptWorkflow(workflow: IssueWorkflow): Promise<string | null> {
-  try {
-    Object.assign(
-      workflow,
-      await commitWorkflowMetadata(workflow, workflowRevision(workflow), {
-        issueSnapshot: workflow.issueSnapshot,
-        issueState: workflow.issueState,
-      }),
-    )
-    return null
-  } catch (error) {
-    return error instanceof WorkflowConflictError
-      ? 'Workflow 已由另一控制器推进,本次启动已取消;请刷新后重试'
-      : `需求快照持久化失败:${String(error instanceof Error ? error.message : error)}`
-  }
-}
-
-export function sameSnapshot(left: PromptSnapshot, right: PromptSnapshot): boolean {
-  return JSON.stringify(left) === JSON.stringify(right)
 }
 
 export const GITHUB_USAGE_REQUIREMENT =
@@ -210,7 +133,6 @@ export async function buildReviewPrompt(
   // Keeping a second caller-provided diff field would permit recording B while reviewing A.
   const base = reviewBase.sha || `origin/${reviewBase.ref}`
   const prUrl = workflow.prNumber ? `https://github.com/${workflow.repoKey}/pull/${workflow.prNumber}` : '未关联'
-  const contractHash = issueBodyHash(resolved.snapshot.body)
   const promptSnapshot = freshSession ? snapshotWithoutReviewFeedback(resolved.snapshot) : resolved.snapshot
   return buildStagePrompt({
     stage: 'review',
@@ -223,7 +145,7 @@ export async function buildReviewPrompt(
       `被审 commit: ${reviewedHead}`,
       `对比 base: ${base}`,
       `PR 基线身份: ${reviewBase.ref} @ ${reviewBase.sha || '未知'}`,
-      `契约正文 SHA-256: ${contractHash}`,
+      `canonical contract fingerprint: ${resolved.contract.fingerprint}`,
       `会话模式: ${sessionId ? `续接 review 会话 ${sessionId};保留既有审查记忆` : '全新 review 会话'}`,
       ...(extraContext ? ['附加上下文:', extraContext] : []),
     ],

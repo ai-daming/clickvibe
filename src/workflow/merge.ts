@@ -9,7 +9,6 @@ import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
 import { notifyLocalGitMutation } from '../infra/local-git-snapshot.ts'
 import { parseWorktreeList } from '../agent/worktree.ts'
 import { fetchGithubIssueState, fetchGithubPrFact } from '../github/facts.ts'
-import { fetchIssue, issueSnapshot } from '../github/issue.ts'
 import { githubRest } from '../github/rest.ts'
 import {
   type AgentAuthorizationInput,
@@ -42,6 +41,11 @@ import { baselineRestorePreview } from './baseline-restore.ts'
 import { type DevelopBaselinePreview, developBaselinePreview } from './develop-baseline-preview.ts'
 import { cleanupRemoteBranch } from './merge-remote-cleanup.ts'
 import { withWorkflowLock } from '../infra/workflow-lock.ts'
+import {
+  contractHasKnownCanonicalFields,
+  fingerprintGithubIssueContract,
+  observeCurrentIssueContract,
+} from './work-item-contract-repository.ts'
 
 export type MergeAuthorizationPreview =
   | {
@@ -159,18 +163,29 @@ export async function authorizeAgent(
     const action = String(body.action ?? '') as AgentAuthorizationInput['action']
     const input = authorizationInputFromPayload(action, payload)
     let snapshot: IssuePromptSnapshot | null = null
+    let contract: import('../infra/contracts.ts').ContractAuthorizationBinding | null = null
     let baselinePreview: DevelopBaselinePreview | null = null
     let mergePreview: Extract<Awaited<ReturnType<typeof mergeAuthorizationPreview>>, { ok: true }> | null = null
     let restorePreview: Awaited<ReturnType<typeof baselineRestorePreview>> | null = null
     let mergeOverride: AgentAuthorizationInput['override']
     if (input.action === 'develop' || input.action === 'auto') {
-      const fetched = await fetchIssue(ctx, { url: input.url })
-      if (!fetched.ok) return fetched
-      snapshot = issueSnapshot(fetched.data.item as Record<string, unknown>)
-      if (snapshot.state !== 'OPEN') return { ok: false, error: '只有 OPEN Issue 可以启动开发' }
-      if (JSON.stringify(body.expectedSnapshot) !== JSON.stringify(snapshot)) {
-        return { ok: false, error: 'Issue 内容已变化或未提供完整预览快照,请刷新面板并重新确认' }
+      const current = await observeCurrentIssueContract(ctx, input.url, { force: true })
+      if (current.state !== 'known') return { ok: false, error: `当前契约不可用: ${current.reason}` }
+      if (!contractHasKnownCanonicalFields(current.snapshot)) {
+        return { ok: false, error: '当前契约含 unknown 字段,禁止签发开发授权' }
       }
+      snapshot = current.prompt
+      if (snapshot.state !== 'OPEN') return { ok: false, error: '只有 OPEN Issue 可以启动开发' }
+      if (!body.expectedSnapshot || typeof body.expectedSnapshot !== 'object' || Array.isArray(body.expectedSnapshot)) {
+        return { ok: false, error: '未提供可验证的契约预览,请刷新面板并重新确认' }
+      }
+      if (
+        fingerprintGithubIssueContract(body.expectedSnapshot as Record<string, unknown>) !==
+        current.snapshot.fingerprint
+      ) {
+        return { ok: false, error: 'Issue 契约在预览后已变化,请刷新面板并重新确认' }
+      }
+      contract = { workItem: current.snapshot.workItem, fingerprint: current.snapshot.fingerprint }
       if (input.action === 'develop') baselinePreview = await developBaselinePreview(ctx, input.url, input.baseline)
     } else if (input.action === 'restore-base') {
       restorePreview = await baselineRestorePreview(ctx, input.url)
@@ -223,7 +238,7 @@ export async function authorizeAgent(
             restoreTarget: { branch: restorePreview.baseBranch, hash: restorePreview.baseHash },
           }
         : input
-    const authorization = authorizations.issue(authorizationInput, snapshot)
+    const authorization = authorizations.issue(authorizationInput, snapshot, contract)
     // 预览沿用量剔除 ok 判别字段,保持既有合并预览结构不变。
     const mergePreviewBody = mergePreview ? (({ ok, ...fields }) => fields)(mergePreview) : null
     return {
@@ -251,6 +266,7 @@ export async function authorizeAgent(
               title: snapshot.title,
               updatedAt: snapshot.updatedAt,
               commentCount: snapshot.comments.length,
+              contractFingerprint: contract?.fingerprint,
               digest: authorization.digest,
               ...(baselinePreview ?? {}),
               ...(input.action === 'auto' ? { autoRun: input.autoRun } : {}),

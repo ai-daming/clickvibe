@@ -32,6 +32,7 @@ import {
 import { githubErrorMessage, isGithubRateLimitError } from '../github/rest.ts'
 import { consistencyFromForce, githubRead } from '../github/operations.ts'
 import { type IssuePromptSnapshot } from '../infra/develop-core.ts'
+import type { WorkItemContractSnapshot } from '../infra/contracts.ts'
 import { dependencyRefreshClock, fetchTtlMs, loadConfig, parseUrl } from '../infra/runtime.ts'
 export async function fetchIssue(
   ctx: Context,
@@ -44,6 +45,9 @@ export async function fetchIssue(
         item: unknown
         timeline?: unknown
         dependencies?: { blockedBy: IssueDependency[]; blocking: IssueDependency[] }
+        contractObservation?:
+          | { state: 'known'; snapshot: WorkItemContractSnapshot }
+          | { state: 'unknown'; reason: string }
       }
       dependencyError?: string
     }
@@ -74,6 +78,9 @@ export async function fetchIssue(
       item: unknown
       timeline?: unknown
       dependencies?: { blockedBy: IssueDependency[]; blocking: IssueDependency[] }
+      contractObservation?:
+        | { state: 'known'; snapshot: WorkItemContractSnapshot }
+        | { state: 'unknown'; reason: string }
     } = {
       kind: parsed.kind,
       item: detail.item,
@@ -106,22 +113,8 @@ export async function fetchIssue(
   }
 }
 
-/**
- * Contract identity for auto-run re-authorization: url/title/state/body only.
- * Comments and updatedAt are audit evidence, not contract — ClickVibe's own
- * agents comment on the issue mid-run (开发前不变量、Dev Meta), and those must
- * not invalidate the authorization. Same principle as review-verdict binding
- * (docs/state-model.md: 正文 hash 才是契约身份).
- */
-export function sameIssueContract(
-  a: Pick<IssuePromptSnapshot, 'url' | 'title' | 'body' | 'state'>,
-  b: Pick<IssuePromptSnapshot, 'url' | 'title' | 'body' | 'state'>,
-): boolean {
-  return a.url === b.url && a.title === b.title && a.state === b.state && a.body === b.body
-}
-
 export function issueSnapshot(item: Record<string, unknown>): IssuePromptSnapshot {
-  const url = String(item.url ?? '')
+  const url = String(item.url ?? item.html_url ?? '')
   if (!parseUrl(url)) throw new Error('GitHub 返回了无效 URL')
   const comments = Array.isArray(item.comments)
     ? (item.comments as { author?: { login?: string } | null; body?: unknown }[]).map((comment) => ({
@@ -134,7 +127,7 @@ export function issueSnapshot(item: Record<string, unknown>): IssuePromptSnapsho
     title: String(item.title ?? ''),
     body: String(item.body ?? ''),
     state: String(item.state ?? '').toUpperCase(),
-    updatedAt: String(item.updatedAt ?? ''),
+    updatedAt: String(item.updatedAt ?? item.updated_at ?? ''),
     comments,
   }
 }

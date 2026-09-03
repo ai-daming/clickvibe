@@ -313,7 +313,7 @@ test('privileged requests require loopback, exact origin and a custom request ma
   )
 })
 
-test('server authorization is one-use, bounded, expiring and bound to the frozen snapshot', () => {
+test('server authorization is one-use, bounded, expiring and bound to the canonical contract', () => {
   let now = 1000
   const store = new AuthorizationStore({ ttlMs: 100, limit: 2, now: () => now })
   const input = makeAuthorizationInput({
@@ -330,8 +330,18 @@ test('server authorization is one-use, bounded, expiring and bound to the frozen
     updatedAt: '2026-08-21T00:00:00Z',
     comments: [],
   }
-  const authorization = store.issue(input, snapshot)
-  assert.equal(authorization.digest, authorizationDigest(input, snapshot))
+  const contract = {
+    workItem: { provider: 'github', instance: 'github.com', container: 'ai-daming/clickvibe', id: '1' },
+    fingerprint: 'wic1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' as const,
+  }
+  const authorization = store.issue(input, snapshot, contract)
+  assert.deepEqual(authorization.contract, contract)
+  assert.equal(authorization.digest, authorizationDigest(input, contract))
+  assert.equal(
+    authorizationDigest(input, contract),
+    authorizationDigest(input, contract),
+    'presentation metadata is not part of the capability digest',
+  )
   assert.equal(store.consume(authorization.id, { ...input, context: 'tampered' }, authorization.digest), null)
   assert.equal(
     store.consume(authorization.id, input, authorization.digest),

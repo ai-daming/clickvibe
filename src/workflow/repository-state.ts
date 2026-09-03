@@ -24,7 +24,6 @@ import {
   fetchEnrichmentSnapshot,
   fetchGithubIssueState,
   fetchGithubPrFact,
-  issueContractFrom,
   type RepositoryIssueItem,
   readConfiguredBranchFacts,
   snapshotPrFact,
@@ -57,6 +56,8 @@ import {
   type ObservationAttemptEvidence,
   resolveConfiguredRepoPath,
 } from '../infra/local-git-snapshot.ts'
+import { readCurrentIssueContract } from './work-item-contract-repository.ts'
+import { stateDir } from '../infra/state.ts'
 
 /** Derive the observation outcome for one workflow's worktree (issue #122). */
 async function observeWorktreeFor(
@@ -229,7 +230,17 @@ export async function enrichWorkflowStates(
               // review state, the upstream reviews fan-out is needless.
               fetchGithubPrFact(ctx, workflow.repoKey, workflow.branch, workflow.prNumber, !workflow.reviewResult),
         snapshotIssue
-          ? Promise.resolve(issueContractFrom(snapshotIssue))
+          ? readCurrentIssueContract(String(snapshotIssue.html_url), stateDir()).then((publication) =>
+              publication.state === 'known'
+                ? {
+                    ...publication.prompt,
+                    contract: {
+                      fingerprint: publication.snapshot.fingerprint,
+                      capturedAt: publication.snapshot.capturedAt,
+                    },
+                  }
+                : null,
+            )
           : fetchIssueContract(ctx, workflow.url).catch(() => null),
         snapshotIssue
           ? Promise.resolve(

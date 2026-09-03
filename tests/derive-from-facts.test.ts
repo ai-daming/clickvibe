@@ -166,8 +166,11 @@ test('a missing worktree cannot produce hasNewCommits even with a delivery hash'
   assert.equal(result.derived.hasNewCommits, false)
 })
 
-function verdictFixture(): { workflow: IssueWorkflow; contract: { bodyHash: string; updatedAt: string } } {
-  const contract = { bodyHash: 'contract-hash-1', updatedAt: '2026-08-28T00:00:00.000Z' }
+function verdictFixture(): {
+  workflow: IssueWorkflow
+  contract: { fingerprint: `wic1_${string}`; capturedAt: string }
+} {
+  const contract = { fingerprint: 'wic1_contract-hash-1' as const, capturedAt: '2026-08-28T00:00:00.000Z' }
   const workflow = makeWorkflow({
     reviewResult: { passed: true, issues: [] },
     events: [reviewEvent({ hash: 'abc1234', issueContract: contract })],
@@ -185,13 +188,13 @@ test('verdict bound to current HEAD and current contract is current', () => {
   assert.equal(result.derived.issueContractUnknownReason, null)
   assert.equal(result.derived.verdictCurrent, true)
   assert.equal(result.derived.reviewedHash, 'abc1234')
-  assert.equal(result.derived.reviewedIssueBodyHash, 'contract-hash-1')
+  assert.equal(result.derived.reviewedIssueBodyHash, 'wic1_contract-hash-1')
 })
 
 test('changed issue contract fail-closes the verdict', () => {
   const { workflow } = verdictFixture()
   const result = deriveWorkflowStateFromFacts(workflow, makeFacts(), NONE_OWNERSHIP, {
-    issueContract: { bodyHash: 'contract-hash-2', updatedAt: '2026-08-29T00:00:00.000Z' },
+    issueContract: { fingerprint: 'wic1_contract-hash-2', capturedAt: '2026-08-29T00:00:00.000Z' },
   })
   assert.equal(result.derived.issueContractStatus, 'changed')
   assert.equal(result.derived.verdictCurrent, false)

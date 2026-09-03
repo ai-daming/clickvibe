@@ -7,7 +7,7 @@ import {
   restoreAuthorizationTarget,
 } from './authorization-target.ts'
 import { type AutoRunAuthorizationConfig, parseAutoRunAuthorization } from './auto-run-authorization.ts'
-import type { PromptSnapshot } from './contracts.ts'
+import type { ContractAuthorizationBinding, PromptSnapshot } from './contracts.ts'
 
 export type DevelopAgent = 'codex' | 'claude' | 'dryrun'
 export type AgentAction = 'develop' | 'review' | 'resume' | 'create-pr' | 'merge' | 'auto' | 'restore-base'
@@ -262,19 +262,25 @@ export interface AgentAuthorization {
   id: string
   input: AgentAuthorizationInput
   snapshot: IssuePromptSnapshot | null
+  contract: ContractAuthorizationBinding | null
   digest: string
   expiresAt: number
 }
 
-function stableAuthorizationValue(input: AgentAuthorizationInput, snapshot: IssuePromptSnapshot | null): string {
-  return JSON.stringify({ input, snapshot })
+function stableAuthorizationValue(
+  input: AgentAuthorizationInput,
+  contract: ContractAuthorizationBinding | null,
+): string {
+  return JSON.stringify({ input, contract })
 }
 
-export function authorizationDigest(input: AgentAuthorizationInput, snapshot: IssuePromptSnapshot | null): string {
-  return createHash('sha256').update(stableAuthorizationValue(input, snapshot)).digest('hex')
+export function authorizationDigest(
+  input: AgentAuthorizationInput,
+  contract: ContractAuthorizationBinding | null,
+): string {
+  return createHash('sha256').update(stableAuthorizationValue(input, contract)).digest('hex')
 }
 
-/** One-use, short-lived server authorization bound to an exact action and issue snapshot. */
 export class AuthorizationStore {
   readonly #ttlMs: number
   readonly #limit: number
@@ -288,7 +294,11 @@ export class AuthorizationStore {
     if (this.#ttlMs < 1 || this.#limit < 1) throw new Error('authorization bounds must be positive')
   }
 
-  issue(input: AgentAuthorizationInput, snapshot: IssuePromptSnapshot | null): AgentAuthorization {
+  issue(
+    input: AgentAuthorizationInput,
+    snapshot: IssuePromptSnapshot | null,
+    contract: ContractAuthorizationBinding | null = null,
+  ): AgentAuthorization {
     this.prune()
     while (this.#entries.size >= this.#limit) {
       const oldest = this.#entries.keys().next().value as string | undefined
@@ -299,7 +309,8 @@ export class AuthorizationStore {
       id: randomBytes(24).toString('base64url'),
       input,
       snapshot,
-      digest: authorizationDigest(input, snapshot),
+      contract,
+      digest: authorizationDigest(input, contract),
       expiresAt: this.#now() + this.#ttlMs,
     }
     this.#entries.set(authorization.id, authorization)
@@ -310,9 +321,8 @@ export class AuthorizationStore {
     this.prune()
     const authorization = this.#entries.get(id)
     if (!authorization) return null
-    // Consume before comparison so a guessed/tampered request cannot retry a capability.
     this.#entries.delete(id)
-    const expected = authorizationDigest(input, authorization.snapshot)
+    const expected = authorizationDigest(input, authorization.contract)
     if (digest !== authorization.digest || expected !== authorization.digest) return null
     return authorization
   }

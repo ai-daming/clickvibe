@@ -1,0 +1,4 @@
+{
+  "canonicalUtf8": "[\"clickvibe.work-item-contract\",1,[\"clickvibe.work-item-identity\",1,\"github\",\"github.com\",\"ai-daming/clickvibe\",\"136\"],[\"goal\",[\"known\",\"Ship\\ncontract\"]],[\"acceptanceCriteria\",[\"known\",[[\"agent\",\"Agent check\"],[\"human\",\"Human check\"]]]],[\"dependencies\",[\"known\",[[\"clickvibe.work-item-identity\",1,\"github\",\"github.com\",\"ai-daming/clickvibe\",\"137\"]]]],[\"nonGoals\",[\"unknown\",\"missing\"]],[\"constraints\",[\"known\",[\"No  double spaces\"]]]]",
+  "fingerprint": "wic1_LIygac3m5o_7_IhHl93Nl2or6OduYNDEHd9T4G0MI5Y"
+}

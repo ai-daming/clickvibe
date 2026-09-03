@@ -11,7 +11,8 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { apply } from '../src/index.ts'
 import { parseCommand } from '../src/workflow/command.ts'
-import { issueBodyHash, type IssueWorkflow } from '../src/infra/state.ts'
+import { type IssueWorkflow } from '../src/infra/state.ts'
+import { fingerprintGithubIssueContract } from '../src/workflow/work-item-contract-repository.ts'
 function included(body: unknown, status = 200): string {
   return [`HTTP/2.0 ${status} ${status === 200 ? 'OK' : 'Error'}`, '', JSON.stringify(body)].join('\n')
 }
@@ -252,7 +253,7 @@ async function developPreviewScenario(): Promise<void> {
     url: 'https://github.com/o/r/issues/13',
     number: 13,
     title: 'command develop',
-    body: '## 验收标准\n- x',
+    body: '## 目标\ncommand develop\n## 验收标准\n- [ ] x\n## 依赖\n无\n## 非目标\n无\n## 约束\n无',
     state: 'OPEN',
     updatedAt: '2026-08-23T00:00:00Z',
     comments: [],
@@ -315,7 +316,7 @@ async function confirmedDevelopScenario(): Promise<void> {
     url,
     number: 14,
     title: 'old target',
-    body: 'old acceptance',
+    body: '## 目标\nold target\n## 验收标准\n- [ ] old acceptance\n## 依赖\n无\n## 非目标\n无\n## 约束\n无',
     state: 'OPEN',
     updatedAt: '2026-08-23T05:00:00Z',
     comments: [],
@@ -325,9 +326,16 @@ async function confirmedDevelopScenario(): Promise<void> {
     async ({ command }) => {
       if (/\/issues\/14'/.test(command)) {
         issueReads += 1
-        // read1 = 命令预览时的强制刷新;read2 = 确认执行前的快照复验(此时已变化)
+        // read1 = 命令解析目标;read2 = 授权签发前的 upstream-confirmed capture;
+        // read3 = 确认执行前的 upstream-confirmed capture(此时已变化)。
         const current =
-          issueReads === 1 ? oldItem : { ...oldItem, body: 'new acceptance', updatedAt: '2026-08-23T06:00:00Z' }
+          issueReads <= 2
+            ? oldItem
+            : {
+                ...oldItem,
+                body: oldItem.body.replace('old acceptance', 'new acceptance'),
+                updatedAt: '2026-08-23T06:00:00Z',
+              }
         return githubApi(command, { item: current })
       }
       return githubApi(command, { item: oldItem }) ?? { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
@@ -338,7 +346,7 @@ async function confirmedDevelopScenario(): Promise<void> {
   )
 
   const preview = await post(handler, { command: 'develop #14' }, PRIVILEGED)
-  assert.equal(preview.status, 200)
+  assert.equal(preview.status, 200, JSON.stringify(preview.body))
   const authorization = preview.body.authorization as Record<string, string>
   const confirmed = await post(
     handler,
@@ -351,7 +359,7 @@ async function confirmedDevelopScenario(): Promise<void> {
   )
   // startDevelop 在执行前重新拉取 issue:预览后正文变化 → 拒绝,与面板按钮同一门禁
   assert.equal(confirmed.status, 400)
-  assert.match(String(confirmed.body.error), /内容在确认后已变化/)
+  assert.match(String(confirmed.body.error), /契约在确认后已变化/)
 }
 
 test('review command previews through the shared authorize path', async () => {
@@ -410,6 +418,7 @@ test('merge command surfaces every gate failure and supports the manual override
     )
     workflow.branch = 'r-issue-23'
     workflow.stage = 'passed'
+    const reviewedBody = '## 目标\noverride\n## 验收标准\n- [ ] old\n## 依赖\n无\n## 非目标\n无\n## 约束\n无'
     workflow.events = [
       {
         kind: 'review',
@@ -418,7 +427,10 @@ test('merge command surfaces every gate failure and supports the manual override
         verdict: { passed: true, issues: [] },
         reviewBase: { ref: 'main', sha: '1111111111111111' },
         // 契约也变更:两个门禁同时失败,命令应把清单全量列出
-        issueContract: { bodyHash: issueBodyHash('## 验收标准\n- old'), updatedAt: '2026-08-22T00:00:00Z' },
+        issueContract: {
+          fingerprint: fingerprintGithubIssueContract({ url: workflow.url, body: reviewedBody }),
+          capturedAt: '2026-08-22T00:00:00Z',
+        },
       },
     ]
     await commitWorkflowFixture(workflow, workflow.revision ?? null)
@@ -429,7 +441,7 @@ test('merge command surfaces every gate failure and supports the manual override
             url: workflow.url,
             number: 23,
             title: 'override issue',
-            body: '## 验收标准\n- changed',
+            body: reviewedBody.replace('old', 'changed'),
             state: 'OPEN',
             updatedAt: '2026-08-23T00:00:00Z',
           },
