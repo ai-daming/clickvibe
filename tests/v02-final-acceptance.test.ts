@@ -84,10 +84,29 @@ async function buildRepositoryWithWorkItems(root: string, numbers: number[]): Pr
   await execFileAsync('git', ['-C', repo, 'remote', 'set-head', 'origin', '--auto'])
   for (const number of numbers) {
     const worktree = join(root, `wt-${number}`)
-    await execFileAsync('git', ['-C', repo, 'worktree', 'add', '-b', `clickvibe-issue-${number}`, worktree, 'origin/main'])
+    await execFileAsync('git', [
+      '-C',
+      repo,
+      'worktree',
+      'add',
+      '-b',
+      `clickvibe-issue-${number}`,
+      worktree,
+      'origin/main',
+    ])
     writeFileSync(join(worktree, `n-${number}.txt`), `${number}\n`)
     await execFileAsync('git', ['-C', worktree, 'add', '.'])
-    await execFileAsync('git', ['-C', worktree, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-m', `wip ${number}`])
+    await execFileAsync('git', [
+      '-C',
+      worktree,
+      '-c',
+      'user.email=t@t',
+      '-c',
+      'user.name=t',
+      'commit',
+      '-m',
+      `wip ${number}`,
+    ])
   }
   return repo
 }
