@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import {
-  assertLegacyStateWriteAllowed,
+  assertActiveStateWriteAllowed,
   assertLegacyTaskStartAllowed,
   createOfflineV02GenerationFence,
   createOnlineV02GenerationFence,
@@ -57,13 +57,13 @@ test('legacy state writers fail closed for active v0.2 state and unfinished or c
   const state = join(root, 'state')
   try {
     await mkdir(state, { recursive: true })
-    assert.doesNotThrow(() => assertLegacyStateWriteAllowed(state))
+    assert.doesNotThrow(() => assertActiveStateWriteAllowed(state))
     await writeFile(join(root, 'upgrade-v0.2.json'), '{broken')
-    assert.throws(() => assertLegacyStateWriteAllowed(state), /recovery journal/)
+    assert.throws(() => assertActiveStateWriteAllowed(state), /recovery journal/)
     await writeFile(join(root, 'upgrade-v0.2.json'), JSON.stringify({ schemaVersion: 1, phase: 'rolled_back' }))
-    assert.doesNotThrow(() => assertLegacyStateWriteAllowed(state))
+    assert.doesNotThrow(() => assertActiveStateWriteAllowed(state))
     await writeFile(join(state, '.clickvibe-state.json'), JSON.stringify({ schemaVersion: 1, generation: 'v0.2' }))
-    assert.throws(() => assertLegacyStateWriteAllowed(state), /v0\.2 state/)
+    assert.throws(() => assertActiveStateWriteAllowed(state), /v0\.2 marker without a completed upgrade/)
   } finally {
     await rm(home, { recursive: true, force: true })
   }

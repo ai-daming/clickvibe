@@ -23,6 +23,18 @@ function run(args) {
   return spawnSync(process.execPath, [RUNNER, ...args], { encoding: 'utf8', cwd: process.cwd() })
 }
 
+/** A parallel suite may run the fence suite's decoy `clickvibe-v0.1-plugin`
+ *  process, which preview legitimately reports as a live old plugin; retry
+ *  until that short-lived decoy is gone. */
+function runPreview(args) {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const result = run(args)
+    if (result.status === 0 || !/blocked \[host\]/.test(result.stderr ?? '')) return result
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 800)
+  }
+  return run(args)
+}
+
 function planJsonFrom(output) {
   const begin = output.indexOf('PLAN-JSON-BEGIN\n')
   const end = output.indexOf('PLAN-JSON-END')
@@ -69,7 +81,7 @@ test('preview prints the plan and fingerprint and writes nothing', async (t) => 
   t.after(() => rm(item.home, { recursive: true, force: true }))
   const before = await clickvibeEntries(item.root)
 
-  const result = run(['preview', '--home', item.home])
+  const result = runPreview(['preview', '--home', item.home])
   assert.equal(result.status, 0, `stderr:\n${result.stderr}`)
   const fingerprint = fingerprintFrom(result.stdout)
   const plan = planJsonFrom(result.stdout)
@@ -83,7 +95,7 @@ test('preview prints the plan and fingerprint and writes nothing', async (t) => 
 test('apply with a mismatched fingerprint echo is rejected before any write', async (t) => {
   const item = await fixture('wrong-echo')
   t.after(() => rm(item.home, { recursive: true, force: true }))
-  const preview = run(['preview', '--home', item.home])
+  const preview = runPreview(['preview', '--home', item.home])
   assert.equal(preview.status, 0, preview.stderr)
   const planFile = join(item.home, 'plan.json')
   await writeFile(planFile, JSON.stringify(planJsonFrom(preview.stdout)))
@@ -101,7 +113,7 @@ test('apply with a mismatched fingerprint echo is rejected before any write', as
 test('apply with the echoed fingerprint records authorization and reaches verified', async (t) => {
   const item = await fixture('verified')
   t.after(() => rm(item.home, { recursive: true, force: true }))
-  const preview = run(['preview', '--home', item.home])
+  const preview = runPreview(['preview', '--home', item.home])
   assert.equal(preview.status, 0, preview.stderr)
   const fingerprint = fingerprintFrom(preview.stdout)
   const planFile = join(item.home, 'plan.json')
@@ -133,7 +145,7 @@ test('apply with the echoed fingerprint records authorization and reaches verifi
 test('a facts-changed apply still records the attempted authorization and writes no journal', async (t) => {
   const item = await fixture('facts-changed')
   t.after(() => rm(item.home, { recursive: true, force: true }))
-  const preview = run(['preview', '--home', item.home])
+  const preview = runPreview(['preview', '--home', item.home])
   assert.equal(preview.status, 0, preview.stderr)
   const fingerprint = fingerprintFrom(preview.stdout)
   const planFile = join(item.home, 'plan.json')
@@ -152,7 +164,7 @@ test('a facts-changed apply still records the attempted authorization and writes
 test('recovery without an unfinished journal refuses and points back to preview', async (t) => {
   const item = await fixture('recovery')
   t.after(() => rm(item.home, { recursive: true, force: true }))
-  const preview = run(['preview', '--home', item.home])
+  const preview = runPreview(['preview', '--home', item.home])
   assert.equal(preview.status, 0, preview.stderr)
   const planFile = join(item.home, 'plan.json')
   await writeFile(planFile, JSON.stringify(planJsonFrom(preview.stdout)))

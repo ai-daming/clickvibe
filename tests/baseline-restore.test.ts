@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
+import { activateV02Home, initFixtureRepository } from './helpers/v02-home.ts'
 import { createLiveTask, finishTask } from '../src/agent/task-supervisor.ts'
 import {
   commitWorkflowMetadata,
@@ -71,10 +72,7 @@ test('authorized recovery recreates only the frozen missing base branch at its f
     const frozen = (await git('rev-parse', 'HEAD')).stdout.trim()
     await git('push', '-u', 'origin', 'release/deleted')
     await git('push', 'origin', '--delete', 'release/deleted')
-    await writeFile(
-      join(home, '.clickvibe', 'config.yaml'),
-      ['repos:', `  o/r: ${repo}`, `worktreeRoot: ${join(root, 'worktrees')}`, ''].join('\n'),
-    )
+    await activateV02Home(home, { 'o/r': repo }, { worktreeRoot: join(root, 'worktrees') })
     await saveWorkflow({
       key: issueKey('o/r', '60'),
       url: 'https://github.com/o/r/issues/60',
@@ -118,7 +116,7 @@ test('authorized recovery recreates only the frozen missing base branch at its f
 test('restore rejects an authorization made stale by a queued baseline-tip mutation', async () => {
   const root = await mkdtemp(join(tmpdir(), 'clickvibe-restore-stale-authorization-'))
   const home = join(root, 'home')
-  const repo = join(root, 'repo')
+  const repo = await initFixtureRepository(join(root, 'repo'))
   const previousHome = process.env.HOME
   process.env.HOME = home
   let releaseFetch = () => undefined
@@ -173,10 +171,7 @@ test('restore rejects an authorization made stale by a queued baseline-tip mutat
   } satisfies IssueWorkflow
   try {
     await mkdir(join(home, '.clickvibe'), { recursive: true })
-    await writeFile(
-      join(home, '.clickvibe', 'config.yaml'),
-      ['repos:', `  o/r: ${repo}`, `worktreeRoot: ${join(root, 'worktrees')}`, ''].join('\n'),
-    )
+    await activateV02Home(home, { 'o/r': repo }, { worktreeRoot: join(root, 'worktrees') })
     await saveWorkflow(workflow)
 
     await commitWorkflowMetadata(workflow, workflow.revision ?? null, {
@@ -271,11 +266,8 @@ test('restore holds the workflow lock through the remote push', async () => {
     events: [],
   } satisfies IssueWorkflow
   try {
-    await mkdir(join(home, '.clickvibe'), { recursive: true })
-    await writeFile(
-      join(home, '.clickvibe', 'config.yaml'),
-      ['repos:', `  o/r: ${join(root, 'repo')}`, `worktreeRoot: ${join(root, 'worktrees')}`, ''].join('\n'),
-    )
+    const repo = await initFixtureRepository(join(root, 'repo'))
+    await activateV02Home(home, { 'o/r': repo }, { worktreeRoot: join(root, 'worktrees') })
     await saveWorkflow(workflow)
 
     const restoring = restoreBaseBranch(ctx as never, {
@@ -334,10 +326,7 @@ test('sync advances the durable baseline tip before a deleted branch is restored
     await git('commit', '--allow-empty', '-m', 'release B')
     const latest = (await git('rev-parse', 'HEAD')).stdout.trim()
     await git('push', 'origin', 'release/deleted')
-    await writeFile(
-      join(home, '.clickvibe', 'config.yaml'),
-      ['repos:', `  o/r: ${repo}`, `worktreeRoot: ${join(root, 'worktrees')}`, ''].join('\n'),
-    )
+    await activateV02Home(home, { 'o/r': repo }, { worktreeRoot: join(root, 'worktrees') })
     const workflow = {
       key: issueKey('o/r', '61'),
       url: 'https://github.com/o/r/issues/61',
@@ -417,10 +406,7 @@ test('a resolved baseline merge conflict advances the durable tip before restore
     await git('commit', '-am', 'release B')
     const latest = (await git('rev-parse', 'HEAD')).stdout.trim()
     await git('push', 'origin', 'release/conflict')
-    await writeFile(
-      join(home, '.clickvibe', 'config.yaml'),
-      ['repos:', `  o/r: ${repo}`, `worktreeRoot: ${join(root, 'worktrees')}`, ''].join('\n'),
-    )
+    await activateV02Home(home, { 'o/r': repo }, { worktreeRoot: join(root, 'worktrees') })
     const item = {
       key: issueKey('o/r', '62'),
       url: 'https://github.com/o/r/issues/62',

@@ -28,6 +28,7 @@ import {
   readLogHistory,
   startTaskLog,
 } from '../src/infra/state.ts'
+import { activateV02Home, initFixtureRepository } from './helpers/v02-home.ts'
 import { createFakeJobs } from './fake-jobs.ts'
 import { commitWorkflowFixture } from './workflow-fixture.ts'
 import { fingerprintGithubIssueContract } from '../src/workflow/work-item-contract-repository.ts'
@@ -569,8 +570,8 @@ test('develop authorization previews fetched baselines and binds a custom select
   try {
     const repo = join(tempHome, 'repo')
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await mkdir(repo, { recursive: true })
-    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), ['repos:', `  o/r: ${repo}`, ''].join('\n'))
+    await initFixtureRepository(repo)
+    await activateV02Home(tempHome, { 'o/r': repo })
     const item = {
       url: 'https://github.com/o/r/issues/60',
       title: 'baseline selection',
@@ -684,11 +685,8 @@ test('concurrent first-development authorizations freeze exactly one baseline an
   try {
     const repo = join(tempHome, 'repo')
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await mkdir(repo, { recursive: true })
-    await writeFile(
-      join(tempHome, '.clickvibe', 'config.yaml'),
-      ['repos:', `  o/r: ${repo}`, `worktreeRoot: ${join(tempHome, 'worktrees')}`, ''].join('\n'),
-    )
+    await initFixtureRepository(repo)
+    await activateV02Home(tempHome, { 'o/r': repo }, { worktreeRoot: join(tempHome, 'worktrees') })
     const item = {
       url: 'https://github.com/o/r/issues/601',
       title: 'baseline race',
@@ -958,11 +956,8 @@ test('missing baseline restoration requires and consumes an exact one-use author
     const secondHash = 'd'.repeat(40)
     const repo = join(home, 'repo')
     await mkdir(join(home, '.clickvibe'), { recursive: true })
-    await mkdir(repo, { recursive: true })
-    await writeFile(
-      join(home, '.clickvibe', 'config.yaml'),
-      ['repos:', `  o/r: ${repo}`, `worktreeRoot: ${join(home, 'worktrees')}`, ''].join('\n'),
-    )
+    await initFixtureRepository(repo)
+    await activateV02Home(home, { 'o/r': repo }, { worktreeRoot: join(home, 'worktrees') })
     const workflow = {
       key: 'o-r-60',
       url: 'https://github.com/o/r/issues/60',
@@ -1110,12 +1105,9 @@ test('/merge requires one-use authorization, exact reviewed HEAD, merge commit, 
     const repo = join(tempHome, 'repo')
     const worktreeRoot = join(tempHome, 'worktrees')
     const worktree = join(worktreeRoot, 'r-issue-23')
-    await mkdir(repo, { recursive: true })
+    await initFixtureRepository(repo)
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await writeFile(
-      join(tempHome, '.clickvibe', 'config.yaml'),
-      `repos:\n  o/r: ${repo}\nworktreeRoot: ${worktreeRoot}\n`,
-    )
+    await activateV02Home(tempHome, { 'o/r': repo }, { worktreeRoot: worktreeRoot })
     const workflow = interruptedWorkflow('o-r-23', 'https://github.com/o/r/issues/23', worktree)
     workflow.branch = 'r-issue-23'
     workflow.stage = 'passed'
@@ -1325,12 +1317,9 @@ test('/merge rejects a stale review hash before invoking the merge write', async
   try {
     const repo = join(tempHome, 'repo')
     const worktreeRoot = join(tempHome, 'worktrees')
-    await mkdir(repo, { recursive: true })
+    await initFixtureRepository(repo)
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await writeFile(
-      join(tempHome, '.clickvibe', 'config.yaml'),
-      `repos:\n  o/r: ${repo}\nworktreeRoot: ${worktreeRoot}\n`,
-    )
+    await activateV02Home(tempHome, { 'o/r': repo }, { worktreeRoot: worktreeRoot })
     const workflow = interruptedWorkflow('o-r-23', 'https://github.com/o/r/issues/23', join(worktreeRoot, 'r-issue-23'))
     workflow.branch = 'r-issue-23'
     workflow.stage = 'passed'
@@ -1455,12 +1444,9 @@ test('/merge gate rejection offers manual override that merges once and audits t
     const repo = join(tempHome, 'repo')
     const worktreeRoot = join(tempHome, 'worktrees')
     const worktree = join(worktreeRoot, 'r-issue-23')
-    await mkdir(repo, { recursive: true })
+    await initFixtureRepository(repo)
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await writeFile(
-      join(tempHome, '.clickvibe', 'config.yaml'),
-      `repos:\n  o/r: ${repo}\nworktreeRoot: ${worktreeRoot}\n`,
-    )
+    await activateV02Home(tempHome, { 'o/r': repo }, { worktreeRoot: worktreeRoot })
     const workflow = interruptedWorkflow('o-r-23', 'https://github.com/o/r/issues/23', worktree)
     workflow.branch = 'r-issue-23'
     workflow.stage = 'passed'
@@ -1643,12 +1629,9 @@ test('/merge manual override refuses gate failures not covered by the confirmati
   try {
     const repo = join(tempHome, 'repo')
     const worktreeRoot = join(tempHome, 'worktrees')
-    await mkdir(repo, { recursive: true })
+    await initFixtureRepository(repo)
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await writeFile(
-      join(tempHome, '.clickvibe', 'config.yaml'),
-      `repos:\n  o/r: ${repo}\nworktreeRoot: ${worktreeRoot}\n`,
-    )
+    await activateV02Home(tempHome, { 'o/r': repo }, { worktreeRoot: worktreeRoot })
     const workflow = interruptedWorkflow('o-r-23', 'https://github.com/o/r/issues/23', join(worktreeRoot, 'r-issue-23'))
     workflow.branch = 'r-issue-23'
     workflow.stage = 'passed'
@@ -1758,12 +1741,9 @@ test('cleanup failure keeps merged terminal state and retries without merging ag
     const repo = join(tempHome, 'repo')
     const worktreeRoot = join(tempHome, 'worktrees')
     const worktree = join(worktreeRoot, 'r-issue-23')
-    await mkdir(repo, { recursive: true })
+    await initFixtureRepository(repo)
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await writeFile(
-      join(tempHome, '.clickvibe', 'config.yaml'),
-      `repos:\n  o/r: ${repo}\nworktreeRoot: ${worktreeRoot}\n`,
-    )
+    await activateV02Home(tempHome, { 'o/r': repo }, { worktreeRoot: worktreeRoot })
     const workflow = interruptedWorkflow('o-r-23', 'https://github.com/o/r/issues/23', worktree)
     workflow.branch = 'r-issue-23'
     workflow.stage = 'passed'
@@ -1944,11 +1924,8 @@ test('/state and repo/issues share one repository fetch TTL while manual refresh
   try {
     const repo = join(tempHome, 'repo')
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await mkdir(repo, { recursive: true })
-    await writeFile(
-      join(tempHome, '.clickvibe', 'config.yaml'),
-      ['repos:', `  o/r: ${repo}`, 'fetchTtlSeconds: 45', ''].join('\n'),
-    )
+    await initFixtureRepository(repo)
+    await activateV02Home(tempHome, { 'o/r': repo }, { fetchTtlSeconds: 45 })
     let fetches = 0
     const handler = createHandler(async ({ command }) => {
       if (command === 'git fetch origin --prune') {
@@ -2007,8 +1984,8 @@ test('/state keeps local-ref state readable and marks freshness stale when fetch
   try {
     const repo = join(tempHome, 'repo')
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await mkdir(repo, { recursive: true })
-    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), ['repos:', `  o/r: ${repo}`, ''].join('\n'))
+    await initFixtureRepository(repo)
+    await activateV02Home(tempHome, { 'o/r': repo })
     const handler = createHandler(async ({ command }) => {
       assert.equal(command, 'git fetch origin --prune')
       return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'offline' } }
@@ -2027,24 +2004,21 @@ test('/state keeps local-ref state readable and marks freshness stale when fetch
   }
 })
 
-test('/state schedules dependency refreshes for a remote-only configured repository', async () => {
+test('/state fails closed when a bound clone vanished instead of degrading to remote-only mode', async () => {
   const previousHome = process.env.HOME
   const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-remote-dependencies-'))
   process.env.HOME = tempHome
   try {
-    await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await writeFile(
-      join(tempHome, '.clickvibe', 'config.yaml'),
-      ['repos:', '  remote/only: /path/not/on/this/host', ''].join('\n'),
-    )
+    // v0.1 tolerated repos configured with paths missing on this host; the
+    // v0.2 strict pairing (ADR-0009, #134) has no remote-only mode, so a
+    // vanished clone fails the whole config load instead of guessing.
+    const remoteOnly = await initFixtureRepository(join(tempHome, 'remote-only'))
+    await activateV02Home(tempHome, { 'remote/only': remoteOnly }, { deleteAfterActivation: [remoteOnly] })
     const handler = createHandler()
 
-    const first = await post(handler, '/clickvibe/api/state', { repoKey: 'remote/only' })
-    const second = await post(handler, '/clickvibe/api/state', { repoKey: 'remote/only' })
-
-    assert.equal((first.body as { dependenciesRefreshDue?: boolean }).dependenciesRefreshDue, true)
-    assert.equal((second.body as { dependenciesRefreshDue?: boolean }).dependenciesRefreshDue, false)
-    assert.equal((first.body as { freshness?: unknown }).freshness, null)
+    const result = await post(handler, '/clickvibe/api/state', { repoKey: 'remote/only' })
+    assert.equal(result.status, 500)
+    assert.match(String((result.body as { error?: string }).error), /remote-only|No such file or directory/)
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
@@ -2059,8 +2033,8 @@ test('/state returns stale local facts within a bounded wait when git fetch hang
   try {
     const repo = join(tempHome, 'repo')
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await mkdir(repo, { recursive: true })
-    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), ['repos:', `  hanging/repo: ${repo}`, ''].join('\n'))
+    await initFixtureRepository(repo)
+    await activateV02Home(tempHome, { 'hanging/repo': repo })
     const handler = createHandler(async ({ command }) => {
       assert.equal(command, 'git fetch origin --prune')
       return new Promise(() => {})
@@ -2090,13 +2064,10 @@ test('a rejected dry-run worktree attempt preserves the previous durable dev his
     const worktreeRoot = join(tempHome, 'worktrees')
     const target = join(worktreeRoot, 'repo', 'repo-issue-905')
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await mkdir(repo, { recursive: true })
+    await initFixtureRepository(repo)
     await mkdir(target, { recursive: true })
     await writeFile(join(target, 'unregistered.txt'), 'must not be removed')
-    await writeFile(
-      join(tempHome, '.clickvibe', 'config.yaml'),
-      ['repos:', `  o/r: ${repo}`, `worktreeRoot: ${worktreeRoot}`, ''].join('\n'),
-    )
+    await activateV02Home(tempHome, { 'o/r': repo }, { worktreeRoot: worktreeRoot })
     await appendLog(issueKey('o/r', '905'), 'dev', 'previous completed task history')
 
     const issue = {
@@ -2150,11 +2121,8 @@ test('dryrun uses the default baseline, reports command output and closes succes
     const repo = join(tempHome, 'repo')
     const worktreeRoot = join(tempHome, 'worktrees')
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await mkdir(repo, { recursive: true })
-    await writeFile(
-      join(tempHome, '.clickvibe', 'config.yaml'),
-      ['repos:', `  o/r: ${repo}`, `worktreeRoot: ${worktreeRoot}`, ''].join('\n'),
-    )
+    await initFixtureRepository(repo)
+    await activateV02Home(tempHome, { 'o/r': repo }, { worktreeRoot: worktreeRoot })
     const runOne = async (number: number, failPwd: boolean) => {
       const issue = {
         url: `https://github.com/o/r/issues/${number}`,
@@ -2220,7 +2188,7 @@ test('dryrun uses the default baseline, reports command output and closes succes
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(tempHome, { recursive: true, force: true })
+    await rm(tempHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -2558,7 +2526,7 @@ test('invalid exact dev session falls back once to a fresh session on the same t
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(tempHome, { recursive: true, force: true })
+    await rm(tempHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -3536,12 +3504,8 @@ test('/develop automatic mode rejects a branch with commits when workflow histor
   try {
     const repo = join(tempHome, 'repo')
     const worktreeRoot = join(tempHome, 'worktrees')
-    await mkdir(repo, { recursive: true })
-    await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await writeFile(
-      join(tempHome, '.clickvibe', 'config.yaml'),
-      `repos:\n  history/repo: ${repo}\nworktreeRoot: ${worktreeRoot}\n`,
-    )
+    await initFixtureRepository(repo)
+    await activateV02Home(tempHome, { 'history/repo': repo }, { worktreeRoot })
     const url = 'https://github.com/history/repo/issues/910'
     const issue = {
       url,
@@ -4402,12 +4366,9 @@ test('develop with user context stays a first development and records the note i
   try {
     const repo = join(tempHome, 'repo')
     const worktreeRoot = join(tempHome, 'worktrees')
-    await mkdir(repo, { recursive: true })
+    await initFixtureRepository(repo)
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await writeFile(
-      join(tempHome, '.clickvibe', 'config.yaml'),
-      ['repos:', `  o/r: ${repo}`, `worktreeRoot: ${worktreeRoot}`, ''].join('\n'),
-    )
+    await activateV02Home(tempHome, { 'o/r': repo }, { worktreeRoot: worktreeRoot })
     const url = 'https://github.com/o/r/issues/54'
     const item = {
       url,

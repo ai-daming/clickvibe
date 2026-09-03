@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { beforeEach } from 'node:test'
+import { activateV02Home, initFixtureRepository } from './helpers/v02-home.ts'
 import { resetGithubGatewayOwnerForTests } from '../src/github/gateway-owner.ts'
 
 beforeEach(() => resetGithubGatewayOwnerForTests())
@@ -157,9 +158,8 @@ async function withConfiguredRepo(
   process.env.HOME = home
   repositoryFreshness.clear()
   try {
-    await mkdir(join(home, '.clickvibe'), { recursive: true })
-    await mkdir(repo)
-    await writeFile(join(home, '.clickvibe', 'config.yaml'), `repos:\n  o/r: ${repo}\n`)
+    await initFixtureRepository(repo)
+    await activateV02Home(home, { 'o/r': repo })
     await run(createHandler(fakeShell(scenario, commands)), commands)
   } finally {
     repositoryFreshness.clear()

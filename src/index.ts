@@ -155,8 +155,14 @@ export function apply(ctx: Context): void {
         return
       }
 
-      const { status, body } = await handleApiPost(ctx, req, method, payload)
-      writeJson(res, status, body)
+      try {
+        const { status, body } = await handleApiPost(ctx, req, method, payload)
+        writeJson(res, status, body)
+      } catch (error) {
+        // Fail closed with the raw message preserved (错误不埋葬): a broken
+        // v0.2 config/state pairing must surface, not vanish into a 500 crash.
+        writeJson(res, 500, { ok: false, error: String(error instanceof Error ? error.message : error) })
+      }
     },
   })
   // Gateway lifecycle follows the plugin fiber: on unload, admission closes,

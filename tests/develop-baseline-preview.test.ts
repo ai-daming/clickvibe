@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { activateV02Home, initFixtureRepository } from './helpers/v02-home.ts'
 import { resetGithubGatewayOwnerForTests } from '../src/github/gateway-owner.ts'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -64,8 +65,8 @@ test('baseline preview exposes fetch failure for the default but rejects an unve
   try {
     const repo = join(home, 'repo')
     await mkdir(join(home, '.clickvibe'), { recursive: true })
-    await mkdir(repo, { recursive: true })
-    await writeFile(join(home, '.clickvibe', 'config.yaml'), ['repos:', `  o/r: ${repo}`, ''].join('\n'))
+    await initFixtureRepository(repo)
+    await activateV02Home(home, { 'o/r': repo })
     const ctx = {
       shell: {
         resolve(spec: unknown) {
@@ -96,8 +97,8 @@ test('baseline preview excludes and rejects the current issue development branch
   try {
     const repo = join(home, 'repo')
     await mkdir(join(home, '.clickvibe'), { recursive: true })
-    await mkdir(repo, { recursive: true })
-    await writeFile(join(home, '.clickvibe', 'config.yaml'), ['repos:', `  o/r: ${repo}`, ''].join('\n'))
+    await initFixtureRepository(repo)
+    await activateV02Home(home, { 'o/r': repo })
     const ctx = {
       shell: {
         resolve(spec: unknown) {

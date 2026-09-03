@@ -2,7 +2,7 @@ import { appendFile, link, mkdir, readFile, readdir, rm, rmdir, writeFile } from
 import { dirname, join } from 'node:path'
 import { decodeLiveLogLine, encodeLiveLogEvent, type LiveLogEvent } from './live-output.ts'
 import { taskLogPath, type WorkflowStorageIdentity } from './state-layout.ts'
-import { assertLegacyStateWriteAllowed } from './v02-generation-fence.ts'
+import { assertActiveStateWriteAllowed } from './v02-generation-fence.ts'
 
 export type TaskLogKind = 'dev' | 'review'
 export type TaskExitStatus = 'done' | 'failed' | 'stopped' | 'timed_out'
@@ -119,13 +119,13 @@ export async function startTaskLog(
   kind: TaskLogKind,
   taskId: string,
 ): Promise<void> {
-  assertLegacyStateWriteAllowed(root)
+  assertActiveStateWriteAllowed(root)
   const path = taskLogPath(root, workflow, kind, taskId)
   await enqueue(path, async () => {
-    assertLegacyStateWriteAllowed(root)
+    assertActiveStateWriteAllowed(root)
     await mkdir(dirname(path), { recursive: true })
     try {
-      assertLegacyStateWriteAllowed(root)
+      assertActiveStateWriteAllowed(root)
       await writeFile(path, '', { encoding: 'utf8', flag: 'wx' })
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
@@ -142,13 +142,13 @@ export async function appendTaskLog(
   encodedLine: string,
   options: AppendTaskLogOptions = {},
 ): Promise<void> {
-  assertLegacyStateWriteAllowed(root)
+  assertActiveStateWriteAllowed(root)
   const path = taskLogPath(root, workflow, kind, taskId)
   const record = taskRecord(taskId, sequence, encodedLine, options)
   await enqueue(path, async () => {
-    assertLegacyStateWriteAllowed(root)
+    assertActiveStateWriteAllowed(root)
     await mkdir(dirname(path), { recursive: true })
-    assertLegacyStateWriteAllowed(root)
+    assertActiveStateWriteAllowed(root)
     await appendFile(path, `${JSON.stringify(record)}\n`, 'utf8')
   })
 }
@@ -219,10 +219,10 @@ export async function appendTaskLogNext(
   encodedLine: string,
   options: AppendTaskLogOptions = {},
 ): Promise<void> {
-  assertLegacyStateWriteAllowed(root)
+  assertActiveStateWriteAllowed(root)
   const path = taskLogPath(root, workflow, kind, taskId)
   await enqueue(path, async () => {
-    assertLegacyStateWriteAllowed(root)
+    assertActiveStateWriteAllowed(root)
     await mkdir(dirname(path), { recursive: true })
     let sequence = 1
     try {
@@ -238,7 +238,7 @@ export async function appendTaskLogNext(
     } catch {
       // Missing task file is created by appendFile.
     }
-    assertLegacyStateWriteAllowed(root)
+    assertActiveStateWriteAllowed(root)
     await appendFile(path, `${JSON.stringify(taskRecord(taskId, sequence, encodedLine, options))}\n`, 'utf8')
   })
 }

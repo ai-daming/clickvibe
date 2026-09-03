@@ -65,12 +65,7 @@ const CONFIG_LITERAL_ALLOWED = (relative) =>
     (item) => relative === item || relative.endsWith(`/${item}`),
   )
 /** May additionally contain fs write primitives while referencing them; every entry needs a reason and a removal ticket. */
-const CONFIG_WRITE_ALLOWLIST = new Map([
-  [
-    'src/infra/project-config.ts',
-    'v0.1 repos read-modify-write writer; disposition table row A2 marks it 废弃 and its removal PR deletes this entry',
-  ],
-])
+const CONFIG_WRITE_ALLOWLIST = new Map([])
 
 function allowedEntry(relative, table) {
   for (const [file, value] of table) {
