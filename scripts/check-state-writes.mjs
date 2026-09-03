@@ -9,6 +9,79 @@ import ts from 'typescript'
 // those module boundaries and state-path ownership; it deliberately does not
 // claim to prove arbitrary JavaScript value-flow properties.
 
+// Per-state-class write tripwires (ADR-0013 §1). The capability boundary stays
+// structural: quoted path literals and path-resolver identifiers may appear
+// only in each class's owner modules, and module imports are admitted per file
+// with a closed name set. Like the persistence rules above, this deliberately
+// does not claim to prove arbitrary JavaScript value-flow properties.
+
+const CONTRACT_STORE_FILE = /work-item-contract-store\.ts$/
+const CONTRACT_STORE_IMPORTS = new Map([
+  [
+    'src/workflow/work-item-contract-repository.ts',
+    new Set([
+      'createRawArtifactRef',
+      'publishWorkItemContractCapture',
+      'readCurrentWorkItemContract',
+      'WorkItemContractPublication',
+      'WorkItemContractRead',
+    ]),
+  ],
+])
+const CONTRACT_PATH_ALLOWED = new Set(['src/infra/work-item-contract-store.ts'])
+const CONTRACT_PATH_NAMES = new Set(['workItemContractPaths'])
+const CONTRACT_PATH_LITERALS = ["'current.json'", '"current.json"']
+
+const DIAGNOSTICS_FILE = /diagnostic-log-store\.ts$/
+const DIAGNOSTICS_IMPORTS = new Map([
+  ['src/infra/diagnostic-record.ts', new Set(['appendDiagnosticLine'])],
+  [
+    'src/infra/remote-git-evidence.ts',
+    new Set(['appendDiagnosticLine', 'DEFAULT_DIAGNOSTIC_MAX_BYTES', 'waitForDiagnosticLines']),
+  ],
+  [
+    'src/infra/task-diagnostics.ts',
+    new Set(['appendDiagnosticLine', 'DEFAULT_DIAGNOSTIC_MAX_BYTES', 'waitForDiagnosticLines']),
+  ],
+  [
+    'src/github/gateway-evidence.ts',
+    new Set(['appendDiagnosticLine', 'DEFAULT_DIAGNOSTIC_MAX_BYTES', 'waitForDiagnosticLines']),
+  ],
+  ['src/workflow/work-item-contract-repository.ts', new Set(['DEFAULT_DIAGNOSTIC_MAX_BYTES'])],
+])
+const DIAGNOSTICS_PATH_ALLOWED = new Set([
+  'src/infra/state-layout.ts',
+  'src/infra/diagnostic-log-store.ts',
+  'src/infra/diagnostic-record.ts',
+])
+const DIAGNOSTICS_PATH_NAMES = new Set(['diagnosticLogPath'])
+
+const CONFIG_PATH_LITERAL = /['"](?:config\.yaml|\.clickvibe-state\.json)['"]/
+const WRITE_PRIMITIVE = /\b(?:writeFile|appendFile|rename|rm|unlink|link|symlink|cp|mkdir|truncate)\s*\(/
+/** May reference the quoted config/marker literals at all. */
+const CONFIG_LITERAL_ALLOWED = (relative) =>
+  /v02-upgrade[^/]*\.ts$/.test(relative) ||
+  ['src/infra/runtime.ts', 'src/infra/project-config.ts', 'src/infra/v02-generation-fence.ts'].some(
+    (item) => relative === item || relative.endsWith(`/${item}`),
+  )
+/** May additionally contain fs write primitives while referencing them; every entry needs a reason and a removal ticket. */
+const CONFIG_WRITE_ALLOWLIST = new Map([
+  [
+    'src/infra/project-config.ts',
+    'v0.1 repos read-modify-write writer; disposition table row A2 marks it 废弃 and its removal PR deletes this entry',
+  ],
+])
+
+function allowedEntry(relative, table) {
+  for (const [file, value] of table) {
+    if (relative === file || relative.endsWith(`/${file}`)) return value
+  }
+  return null
+}
+
+function inAllowed(relative, set) {
+  return [...set].some((item) => relative === item || relative.endsWith(`/${item}`))
+}
 const PERSISTENCE_FILE = /workflow-persistence\.ts$/
 const PATH_NAMES = new Set(['workflowPath', 'workflowStatePath'])
 const PATH_ALLOWED = new Set(['src/infra/workflow-persistence.ts', 'src/infra/state-layout.ts', 'src/infra/state.ts'])
@@ -101,6 +174,45 @@ for (const file of files) {
         }
       }
     }
+    if (specifier && CONTRACT_STORE_FILE.test(specifier)) {
+      const permitted = allowedEntry(relative, CONTRACT_STORE_IMPORTS)
+      if (!permitted) {
+        failures.push(`${relative}: imports work-item-contract-store outside the capture repository`)
+      } else {
+        for (const name of importedNames(node)) {
+          if (name === '*' || !permitted.has(name)) {
+            failures.push(`${relative}: work-item-contract-store export ${name} is outside this module's capability`)
+          }
+        }
+      }
+    }
+    if (specifier && DIAGNOSTICS_FILE.test(specifier)) {
+      const permitted = allowedEntry(relative, DIAGNOSTICS_IMPORTS)
+      if (!permitted) {
+        failures.push(`${relative}: imports the diagnostics log store outside an admitted writer caller`)
+      } else {
+        for (const name of importedNames(node)) {
+          if (name === '*' || !permitted.has(name)) {
+            failures.push(`${relative}: diagnostics log store export ${name} is outside this caller's admitted names`)
+          }
+        }
+      }
+    }
+    if (!inAllowed(relative, CONTRACT_PATH_ALLOWED)) {
+      if (ts.isIdentifier(node) && CONTRACT_PATH_NAMES.has(node.text)) {
+        failures.push(`${relative}: work-item-contract capture path may only be constructed in the contract store`)
+      }
+      for (const literal of CONTRACT_PATH_LITERALS) {
+        if (ts.isStringLiteral(node) && node.text === literal.slice(1, -1)) {
+          failures.push(`${relative}: work-item-contract capture path may only be constructed in the contract store`)
+        }
+      }
+    }
+    if (!inAllowed(relative, DIAGNOSTICS_PATH_ALLOWED)) {
+      if (ts.isIdentifier(node) && DIAGNOSTICS_PATH_NAMES.has(node.text)) {
+        failures.push(`${relative}: diagnostics path may only be resolved in the diagnostics write layer`)
+      }
+    }
     if (![...PATH_ALLOWED].some((item) => relative === item || relative.endsWith(`/${item}`))) {
       if (ts.isIdentifier(node) && PATH_NAMES.has(node.text)) {
         failures.push(`${relative}: workflow state path may only be referenced in the persistence layer`)
@@ -109,6 +221,21 @@ for (const file of files) {
     ts.forEachChild(node, visit)
   }
   visit(source)
+
+  // Config and state-marker literals: file-level co-occurrence with fs write
+  // primitives. Readers without write primitives stay admitted; only the
+  // upgrade machine (plus explicitly ticketed temporary writers) may write.
+  if (CONFIG_PATH_LITERAL.test(source.text)) {
+    if (!CONFIG_LITERAL_ALLOWED(relative) && !allowedEntry(relative, CONFIG_WRITE_ALLOWLIST)) {
+      failures.push(
+        `${relative}: quoted config/state-marker literals belong to the upgrade machine or admitted readers`,
+      )
+    }
+    const isUpgradeModule = /(^|\/)v02-upgrade[^/]*\.ts$/.test(relative)
+    if (!isUpgradeModule && !allowedEntry(relative, CONFIG_WRITE_ALLOWLIST) && WRITE_PRIMITIVE.test(source.text)) {
+      failures.push(`${relative}: active config/state-marker writes belong to the v0.2 upgrade machine`)
+    }
+  }
 }
 
 if (failures.length > 0) {
