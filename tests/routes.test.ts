@@ -1988,7 +1988,13 @@ test('/state keeps local-ref state readable and marks freshness stale when fetch
     await activateV02Home(tempHome, { 'o/r': repo })
     const handler = createHandler(async ({ command }) => {
       if (command.startsWith('set +e')) {
-        return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'offline sample' } }
+        return {
+          exitCode: 0,
+          stdout: {
+            text: 'REPO_DEFAULT\t128\t\nREPO_BRANCH\t0\tbWFpbg==\nREPO_HEAD\t128\t\nREPO_MAIN_COUNT\t128\t\nREPO_HEAD_COUNT\t128\t\n',
+          },
+          stderr: { text: '' },
+        }
       }
       assert.equal(command, 'git fetch origin --prune')
       return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'offline' } }
@@ -2040,7 +2046,13 @@ test('/state returns stale local facts within a bounded wait when git fetch hang
     await activateV02Home(tempHome, { 'hanging/repo': repo })
     const handler = createHandler(async ({ command }) => {
       if (command.startsWith('set +e')) {
-        return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'offline sample' } }
+        return {
+          exitCode: 0,
+          stdout: {
+            text: 'REPO_DEFAULT\t128\t\nREPO_BRANCH\t0\tbWFpbg==\nREPO_HEAD\t128\t\nREPO_MAIN_COUNT\t128\t\nREPO_HEAD_COUNT\t128\t\n',
+          },
+          stderr: { text: '' },
+        }
       }
       assert.equal(command, 'git fetch origin --prune')
       return new Promise(() => {})

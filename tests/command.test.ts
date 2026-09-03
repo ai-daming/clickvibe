@@ -209,6 +209,15 @@ test('status command returns readable workflow state derived from the same /stat
       comments: [],
     }
     const handler = createHandler(async ({ command }) => {
+      if (command.startsWith('set +e')) {
+        return {
+          exitCode: 0,
+          stdout: {
+            text: 'REPO_DEFAULT\t128\t\nREPO_BRANCH\t0\tbWFpbg==\nREPO_HEAD\t128\t\nREPO_MAIN_COUNT\t128\t\nREPO_HEAD_COUNT\t128\t\n',
+          },
+          stderr: { text: '' },
+        }
+      }
       const api = githubApi(command, {
         item,
         pr: {
