@@ -158,6 +158,61 @@ test('tripwire confines each semantic command to its designated owner', async ()
   )
 })
 
+test('contract-capture state class: store imports, paths, and current pointer stay in the store', async () => {
+  await withFixtures(
+    {
+      'src/workflow/rogue-contract.ts':
+        "import { publishWorkItemContractCapture } from '../infra/work-item-contract-store.ts'\nexport const x = publishWorkItemContractCapture",
+      'src/infra/rogue-paths.ts':
+        "export const p = (root: string, key: string) => join(root, 'work-items', key, 'contract', 'current.json')\nexport const q = (x: unknown) => workItemContractPaths(x)",
+    },
+    (directory) => {
+      const result = runGate(directory)
+      assert.equal(result.status, 1, `expected failure, got:\n${result.stdout}${result.stderr}`)
+      assert.match(result.stderr ?? '', /imports work-item-contract-store outside the capture repository/)
+      assert.match(result.stderr ?? '', /work-item-contract capture path/)
+    },
+  )
+})
+
+test('diagnostics state class: single write entry and confined path resolution', async () => {
+  await withFixtures(
+    {
+      'src/infra/rogue-diagnostics.ts':
+        "import { appendDiagnosticLine } from './diagnostic-log-store.ts'\nexport const p = diagnosticLogPath('/root', 'x')",
+      'src/infra/diagnostic-record.ts':
+        "import { appendDiagnosticLine, waitForDiagnosticLines } from './diagnostic-log-store.ts'\nexport const x = { appendDiagnosticLine, waitForDiagnosticLines }",
+    },
+    (directory) => {
+      const result = runGate(directory)
+      assert.equal(result.status, 1, `expected failure, got:\n${result.stdout}${result.stderr}`)
+      assert.match(result.stderr ?? '', /imports the diagnostics log store outside an admitted writer caller/)
+      assert.match(result.stderr ?? '', /waitForDiagnosticLines is outside this caller's admitted names/)
+      assert.match(result.stderr ?? '', /diagnostics path may only be resolved/)
+    },
+  )
+})
+
+test('config and state-marker class: quoted literals plus write primitives are upgrade-only', async () => {
+  await withFixtures(
+    {
+      'src/infra/rogue-config-writer.ts':
+        "import { writeFile } from 'node:fs/promises'\nexport const w = (root: string) => writeFile(`${root}/x`, '')\nconst configPath = 'config.yaml'\nexport const c = configPath",
+      'src/infra/v02-upgrade-fixture.ts':
+        "import { writeFile } from 'node:fs/promises'\nconst marker = '.clickvibe-state.json'\nexport const w = (root: string) => writeFile(`${root}/${marker}`, '')\nexport const m = marker",
+      'src/infra/runtime.ts':
+        "import { readFile } from 'node:fs/promises'\nconst configPath = 'config.yaml'\nexport const r = (root: string) => readFile(`${root}/${configPath}`)",
+    },
+    (directory) => {
+      const result = runGate(directory)
+      assert.equal(result.status, 1, `expected failure, got:\n${result.stdout}${result.stderr}`)
+      assert.match(result.stderr ?? '', /rogue-config-writer/)
+      assert.match(result.stderr ?? '', /active config\/state-marker writes belong to the v0.2 upgrade machine/)
+      assert.doesNotMatch(result.stderr ?? '', /v02-upgrade-fixture/)
+    },
+  )
+})
+
 test('tripwire passes the repository command owners', () => {
   const result = spawnSync(process.execPath, [join('scripts', 'check-state-writes.mjs')], { encoding: 'utf8' })
   assert.equal(result.status, 0, `expected pass, got:\n${result.stdout}${result.stderr}`)
