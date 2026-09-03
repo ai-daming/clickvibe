@@ -57,7 +57,7 @@ allowlist 条目必须带理由注释，与 `check:github-access` 的符号级�
 
 ### 3. provider-neutral 审计（AC9）
 
-**core 模块集（封闭清单）**：`src/infra/contracts.ts`、`src/infra/work-item-identity.ts`、`src/infra/project-binding.ts`、`src/infra/repository-identity.ts`、`src/workflow/work-item-contract.ts`、`src/infra/state-view.ts` 及 `src/workflow/` 内不 import `src/github/**` 的纯逻辑文件。provider 专属组装（如 `work-item-contract-repository.ts`、`src/github/**`）按定义排除在 core 之外——GitHub 字段只在 Adapter 边界校验和转换（ADR-0006/0007 既有决策）。
+**core 模块集（封闭清单）**：`src/infra/contracts.ts`、`src/infra/work-item-identity.ts`、`src/infra/project-binding.ts`、`src/infra/repository-identity.ts`、`src/workflow/work-item-contract.ts`、`src/workflow/derive-from-facts.ts`。provider 专属组装（如 `work-item-contract-repository.ts`、`src/github/**`）按定义排除在 core 之外——GitHub 字段只在 Adapter 边界校验和转换（ADR-0006/0007 既有决策）；展示层（面板 URL/文案格式化）与 I/O 编排也不属于 core，不进清单。新增 core 文件必须先修订本清单；清单文件缺失时门禁 fail-closed。（勘误：本节初稿误列了不存在的 `src/infra/state-view.ts` 并以「不 import `src/github/**` 的 workflow 纯逻辑文件」作动态条款，随门禁实现 PR 修正为上述显式封闭清单。）
 
 **方法**：新增 `scripts/check-provider-neutral.mjs`，AST 扫描 core 集合，违规判据（全部机械可判、未知即红）：
 
