@@ -19,7 +19,8 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { remoteFetch } from '../infra/remote-git.ts'
-import { buildResumePrompt, resolvePromptSnapshot } from '../agent/prompts.ts'
+import { buildResumePrompt } from '../agent/prompts.ts'
+import { resolvePromptSnapshot } from './prompt-resolution.ts'
 import {
   attachAgentProcess,
   createLiveTask,

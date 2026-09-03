@@ -38,12 +38,13 @@ import {
 } from '../infra/runtime.ts'
 import { localGitSnapshots, type LocalGitSnapshotReader } from '../infra/local-git-snapshot.ts'
 import { logTaskDiagnostic } from '../infra/task-diagnostics.ts'
-import { type IssueWorkflow, issueBodyHash, issueKey, loadAllWorkflows } from '../infra/state.ts'
+import { type IssueWorkflow, issueKey, loadAllWorkflows, stateDir } from '../infra/state.ts'
 import { deriveAutoDevelopment } from './auto-development.ts'
 import { deriveWorkflowState } from './derive.ts'
 import { checkIssueContract } from './issue-contract.ts'
 import { firstDevelopmentFor, maintainCompletedDependencyLedger } from './repository-state.ts'
 import { readConfiguredRepositoryAdvance, type RepositoryAdvanceSignal } from './repository-sync.ts'
+import { readCurrentIssueContract } from './work-item-contract-repository.ts'
 
 export async function fetchRepositoryIssues(
   ctx: Context,
@@ -255,21 +256,25 @@ export async function fetchRepositoryIssues(
         workflow.worktree = worktree
         workflow.branch = branch
         workflow.issueState = String(issue.state).toUpperCase() === 'CLOSED' ? 'CLOSED' : 'OPEN'
+        const blockedBy = parseDependencies(issue.body).map((number) => {
+          const dependency = issueByNumber.get(number)
+          return { number, title: dependency?.title ?? '', state: String(dependency?.state ?? 'UNKNOWN').toUpperCase() }
+        })
+        const contractPublication = await readCurrentIssueContract(String(issue.url), stateDir())
         const derived = await deriveWorkflowState(ctx, workflow, {
           pr,
           prStatusKnown,
           branchExists,
           hasCommits,
           defaultBranch,
-          issueContract: {
-            bodyHash: issueBodyHash(issue.body),
-            updatedAt: issue.updatedAt ?? '',
-          },
+          issueContract:
+            contractPublication.state === 'known'
+              ? {
+                  fingerprint: contractPublication.snapshot.fingerprint,
+                  capturedAt: contractPublication.snapshot.capturedAt,
+                }
+              : null,
           workflowCachePresent: existing !== undefined,
-        })
-        const blockedBy = parseDependencies(issue.body).map((number) => {
-          const dependency = issueByNumber.get(number)
-          return { number, title: dependency?.title ?? '', state: String(dependency?.state ?? 'UNKNOWN').toUpperCase() }
         })
         const contract = checkIssueContract(issue.body ?? '')
         const autoDevelopment = deriveAutoDevelopment({

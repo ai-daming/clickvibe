@@ -20,11 +20,11 @@ import { existsSync } from 'node:fs'
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { remoteFetch } from '../infra/remote-git.ts'
-import { fetchIssueRestDetail } from '../github/reads.ts'
 import { type MergeOverrideGate, shellQuote } from '../infra/develop-core.ts'
-import { parseUrl, runCommand } from '../infra/runtime.ts'
-import { type IssueContractSnapshot, type IssueWorkflow, issueBodyHash, type WorkflowEvent } from '../infra/state.ts'
+import { runCommand } from '../infra/runtime.ts'
+import { type IssueContractSnapshot, type IssueWorkflow, type WorkflowEvent } from '../infra/state.ts'
 import { workflowBaseBranch } from './state-view.ts'
+import { contractHasKnownCanonicalFields, observeCurrentIssueContract } from './work-item-contract-repository.ts'
 
 export interface ReviewIssueContract {
   title: string
@@ -35,17 +35,17 @@ export interface ReviewIssueContract {
 
 /** Read the exact Issue contract that one review run evaluates. */
 export async function fetchIssueContract(ctx: Context, url: string, force = false): Promise<ReviewIssueContract> {
-  const parsed = parseUrl(url)
-  if (!parsed || parsed.kind !== 'issue') throw new Error('review workflow 缺少有效 Issue URL')
-  const item = await fetchIssueRestDetail(ctx, `${parsed.owner}/${parsed.repo}`, parsed.number, force, 5_000)
-  const body = String(item.body ?? '')
+  const current = await observeCurrentIssueContract(ctx, url, { force })
+  if (current.state !== 'known') throw new Error(current.reason)
+  if (!contractHasKnownCanonicalFields(current.snapshot))
+    throw new Error('current Work Item contract contains unknown fields')
   return {
-    title: String(item.title ?? ''),
-    body,
-    state: String(item.state ?? '').toUpperCase(),
+    title: current.prompt.title,
+    body: current.prompt.body,
+    state: current.prompt.state,
     contract: {
-      bodyHash: issueBodyHash(body),
-      updatedAt: String(item.updated_at ?? ''),
+      fingerprint: current.snapshot.fingerprint,
+      capturedAt: current.snapshot.capturedAt,
     },
   }
 }
@@ -219,7 +219,11 @@ export async function collectMergeGateFailures(
       })
       return failures
     }
-    if (current.contract.bodyHash !== reviewedContract.bodyHash) {
+    if (
+      !('fingerprint' in reviewedContract) ||
+      !('fingerprint' in current.contract) ||
+      current.contract.fingerprint !== reviewedContract.fingerprint
+    ) {
       failures.push({ key: 'contract-changed', message: '验收契约已变更,需重新 Review' })
     }
   }

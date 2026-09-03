@@ -34,7 +34,6 @@ import {
 import { isGithubRateLimitError } from './rest.ts'
 import { consistencyFromForce, githubRead } from './operations.ts'
 import { githubRest } from './rest.ts'
-import { issueBodyHash } from '../infra/state.ts'
 
 export interface GithubPrLookup {
   known: boolean
@@ -274,21 +273,5 @@ export function snapshotPrFact(
     headRefOid: pull.head?.sha,
     baseRefName: pull.base?.ref,
     baseRefOid: pull.base?.sha,
-  }
-}
-
-/** Derive the review contract fields from a snapshot issue row. */
-export function issueContractFrom(issue: RepositoryIssueRest): {
-  title: string
-  body: string
-  state: string
-  contract: { bodyHash: string; updatedAt: string }
-} {
-  const body = String(issue.body ?? '')
-  return {
-    title: String(issue.title ?? ''),
-    body,
-    state: String(issue.state ?? '').toUpperCase(),
-    contract: { bodyHash: issueBodyHash(body), updatedAt: String(issue.updated_at ?? '') },
   }
 }

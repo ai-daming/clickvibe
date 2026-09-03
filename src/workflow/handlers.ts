@@ -21,11 +21,11 @@
 import { existsSync } from 'node:fs'
 import type { IncomingMessage } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
-import { fetchIssue, issueSnapshot } from '../github/issue.ts'
 import { githubErrorMessage, isGithubRateLimitError } from '../github/rest.ts'
 import { handleApiPost } from './dispatch.ts'
 import { type IssuePromptSnapshot, mergeGateLabel } from '../infra/develop-core.ts'
 import { aggregateRepositoryFreshness, type RepositoryFreshness } from '../infra/repo-freshness.ts'
+import { observeCurrentIssueContract } from './work-item-contract-repository.ts'
 import {
   dependencyRefreshClock,
   ensureConfiguredRepoFresh,
@@ -59,6 +59,8 @@ import { enrichWorkflowStates } from './repository-state.ts'
 import { readConfiguredRepositoryAdvance } from './repository-sync.ts'
 import { pauseOrphanedAutoRuns } from './auto-run.ts'
 import { localGitSnapshots } from '../infra/local-git-snapshot.ts'
+import { stateDir } from '../infra/state.ts'
+import { attachWorkItemDiagnostics } from './diagnostic-projection.ts'
 
 /** `/state` implementation, shared by the route and the `status` command (issue #13). */
 export async function stateWorkflows(
@@ -104,7 +106,10 @@ export async function stateWorkflows(
     const dependenciesRefreshDue = [...repoKeys]
       .map((key) => dependencyRefreshClock.take(key, fetchTtlMs(config), force))
       .some(Boolean)
-    const enriched = await enrichWorkflowStates(ctx, workflows, config, localGitSnapshots)
+    const enriched = await attachWorkItemDiagnostics(
+      await enrichWorkflowStates(ctx, workflows, config, localGitSnapshots),
+      stateDir(),
+    )
     const freshness = aggregateRepositoryFreshness(freshnesses)
     const onlyRepo = keyedFreshness.length === 1 ? keyedFreshness[0] : null
     const repoAdvance = onlyRepo
@@ -381,9 +386,11 @@ export async function handleCommand(
         : null
   let expectedSnapshot: IssuePromptSnapshot | undefined
   if (command.action === 'develop' || command.action === 'auto') {
-    const fetched = await fetchIssue(ctx, { url, forceRefresh: true })
-    if (!fetched.ok) return { status: 400, body: { ok: false, action: command.action, error: fetched.error } }
-    expectedSnapshot = issueSnapshot(fetched.data.item as Record<string, unknown>)
+    const current = await observeCurrentIssueContract(ctx, url, { force: true })
+    if (current.state !== 'known') {
+      return { status: 400, body: { ok: false, action: command.action, error: current.reason } }
+    }
+    expectedSnapshot = current.prompt
   }
   const authorized = await authorizeAgent(ctx, {
     action: authAction,

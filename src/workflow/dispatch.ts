@@ -17,6 +17,8 @@ import { startReview } from './review-flow.ts'
 import { syncWorktree } from './sync.ts'
 import { restoreBaseBranch } from './baseline-restore.ts'
 import { pollDevelop, stopTask } from './task-api.ts'
+import { captureGithubIssueContractObservation } from './work-item-contract-repository.ts'
+import { stateDir } from '../infra/state.ts'
 
 /** Body size bound of one JSON request. */
 export async function handleApiPost(
@@ -28,6 +30,18 @@ export async function handleApiPost(
   if (method === 'command') return await handleCommand(ctx, req, payload)
   if (method === 'fetch') {
     const result = await fetchIssue(ctx, payload)
+    if (result.ok && result.data.kind === 'issue' && result.data.dependencies) {
+      const publication = await captureGithubIssueContractObservation({
+        root: stateDir(),
+        item: result.data.item as Record<string, unknown>,
+        blockedBy: result.data.dependencies.blockedBy,
+        capturedAt: new Date().toISOString(),
+      })
+      result.data.contractObservation =
+        publication.state === 'known'
+          ? { state: 'known', snapshot: publication.snapshot }
+          : { state: 'unknown', reason: publication.reason }
+    }
     return { status: githubAwareStatus(result), body: result }
   }
   if (method === 'projects') {
@@ -67,7 +81,7 @@ export async function handleApiPost(
     } catch (error) {
       return { status: 400, body: { ok: false, error: String(error instanceof Error ? error.message : error) } }
     }
-    const result = await startDevelop(ctx, payload, authorization?.snapshot ?? null)
+    const result = await startDevelop(ctx, payload, authorization?.contract ?? null)
     return { status: result.ok ? 200 : 400, body: result }
   }
   if (method === 'auto') {
@@ -78,7 +92,7 @@ export async function handleApiPost(
       if (!authorization) {
         return { status: 403, body: { ok: false, error: '自动跑到底授权无效、已使用或已过期,请重新确认' } }
       }
-      const result = await startAutoRun(ctx, payload, authorization.snapshot)
+      const result = await startAutoRun(ctx, payload, authorization.contract)
       return { status: result.ok ? 200 : 400, body: result }
     } catch (error) {
       return { status: 400, body: { ok: false, error: String(error instanceof Error ? error.message : error) } }

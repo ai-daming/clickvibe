@@ -120,13 +120,17 @@ export function deriveWorkflowStateFromFacts(
   const reviewPassed = workflow.reviewResult?.passed ?? githubReviewPassed
   const reviewedHash = lastReviewHash ?? (githubReviewPassed !== null ? head : null)
   const currentIssueContract = options.issueContract ?? null
-  // updatedAt 是审计证据；正文 hash 才是契约身份，避免评论/标签更新误杀结论。
+  const reviewedFingerprint =
+    lastReviewContract && 'fingerprint' in lastReviewContract ? lastReviewContract.fingerprint : null
+  const currentFingerprint =
+    currentIssueContract && 'fingerprint' in currentIssueContract ? currentIssueContract.fingerprint : null
+  // Legacy bodyHash evidence is readable history, but cannot authorize a v0.2 verdict.
   const issueContractStatus: IssueContractStatus =
-    lastReviewContract === null
+    reviewedFingerprint === null
       ? 'unknown'
-      : currentIssueContract === null
+      : currentFingerprint === null
         ? 'unknown'
-        : lastReviewContract.bodyHash === currentIssueContract.bodyHash
+        : reviewedFingerprint === currentFingerprint
           ? 'current'
           : 'changed'
   const issueContractUnknownReason: IssueContractUnknownReason =
@@ -229,10 +233,12 @@ export function deriveWorkflowStateFromFacts(
       lastDevHash,
       lastReviewHash,
       reviewedHash,
-      reviewedIssueBodyHash: lastReviewContract?.bodyHash ?? null,
-      currentIssueBodyHash: currentIssueContract?.bodyHash ?? null,
-      reviewedIssueUpdatedAt: lastReviewContract?.updatedAt ?? null,
-      currentIssueUpdatedAt: currentIssueContract?.updatedAt ?? null,
+      reviewedIssueBodyHash: reviewedFingerprint,
+      currentIssueBodyHash: currentFingerprint,
+      reviewedIssueUpdatedAt:
+        lastReviewContract && 'fingerprint' in lastReviewContract ? lastReviewContract.capturedAt : null,
+      currentIssueUpdatedAt:
+        currentIssueContract && 'fingerprint' in currentIssueContract ? currentIssueContract.capturedAt : null,
       issueContractCurrent,
       issueContractStatus,
       issueContractUnknownReason,

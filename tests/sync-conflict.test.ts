@@ -149,7 +149,7 @@ function conflictedWorkflow(worktree: string): IssueWorkflow {
     issueSnapshot: {
       url: 'https://github.com/o/r/issues/26',
       title: 'conflict issue',
-      body: '## 验收标准\n- resolve conflicts',
+      body: '## 目标\nresolve conflicts\n## 验收标准\n- [ ] resolve conflicts\n## 依赖\n无\n## 非目标\n无\n## 约束\n无',
       state: 'OPEN',
       updatedAt: '2026-08-21T00:00:00Z',
       comments: [],
@@ -170,7 +170,7 @@ function syncableWorkflow(worktree: string, branch: string): IssueWorkflow {
     issueSnapshot: {
       url: 'https://github.com/o/r/issues/45',
       title: 'sync then push',
-      body: '## 验收标准\n- push synced branch',
+      body: '## 目标\npush synced branch\n## 验收标准\n- [ ] push synced branch\n## 依赖\n无\n## 非目标\n无\n## 约束\n无',
       state: 'OPEN',
       updatedAt: '2026-08-22T00:00:00Z',
       comments: [],
@@ -357,6 +357,27 @@ function capturingShellCtx(launches: { command: string; prompt: string }[]) {
         return spec
       },
       async run(spec: { command: string; workdir?: string }) {
+        if (spec.command.startsWith('gh api ')) {
+          const issue = {
+            number: 26,
+            html_url: 'https://github.com/o/r/issues/26',
+            title: 'conflict issue',
+            body: '## 目标\nresolve conflicts\n## 验收标准\n- [ ] resolve conflicts\n## 依赖\n无\n## 非目标\n无\n## 约束\n无',
+            state: 'open',
+            updated_at: '2026-08-21T00:00:00Z',
+            user: { login: 'owner' },
+          }
+          const body = spec.command.includes("repos/o/r/issues/26'")
+            ? issue
+            : spec.command.includes('/issues?')
+              ? [issue]
+              : []
+          return {
+            exitCode: 0,
+            stdout: { text: `HTTP/2.0 200 OK\n\n${JSON.stringify(body)}` },
+            stderr: { text: '' },
+          }
+        }
         try {
           const out = await execFileAsync('/bin/sh', ['-c', spec.command], {
             cwd: spec.workdir,

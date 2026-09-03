@@ -284,6 +284,24 @@ export function IssueView({
           ) : null}
         </div>
       ) : null}
+      {workflow?.diagnostics && workflow.diagnostics.length > 0 ? (
+        <CollapsibleSection
+          key={sectionStorageKey(issue.url, 'diagnostics')}
+          storageKey={sectionStorageKey(issue.url, 'diagnostics')}
+          title={`诊断证据 (${workflow.diagnostics.length})`}
+          defaultExpanded={false}
+        >
+          <div className="cv-links">
+            {workflow.diagnostics.map((record) => (
+              <div className="cv-link-row" key={record.diagnosticId} title={record.correlationId ?? undefined}>
+                <span>{fmtDate(record.occurredAt)}</span>
+                <code className="cv-tl-hash">{record.operation}</code>
+                <span className="cv-dev-error">{record.message}</span>
+              </div>
+            ))}
+          </div>
+        </CollapsibleSection>
+      ) : null}
       {/* 依赖图:blockedBy(依赖谁)/ blocking(谁依赖我)——与 GitHub「关联」明确区分 */}
       {dependencies && (dependencies.blockedBy.length > 0 || dependencies.blocking.length > 0) ? (
         <CollapsibleSection

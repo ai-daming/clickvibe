@@ -20,7 +20,7 @@
 
 import { basename, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { buildDevelopPrompt, type ResolvedPromptSnapshot, sameSnapshot } from '../agent/prompts.ts'
+import { buildDevelopPrompt, type ResolvedPromptSnapshot } from '../agent/prompts.ts'
 import {
   attachAgentProcess,
   createLiveTask,
@@ -30,15 +30,9 @@ import {
 } from '../agent/task-supervisor.ts'
 import { ensureWorktree } from '../agent/worktree.ts'
 import { fetchGithubPrFact, readConfiguredBranchFacts } from '../github/facts.ts'
-import { fetchIssue, issueSnapshot } from '../github/issue.ts'
+import { buildFreshAgentCommand, type DevelopAgent, parseAgent } from '../infra/develop-core.ts'
+import type { ContractAuthorizationBinding } from '../infra/contracts.ts'
 import {
-  buildFreshAgentCommand,
-  type DevelopAgent,
-  type IssuePromptSnapshot,
-  parseAgent,
-} from '../infra/develop-core.ts'
-import {
-  automaticDependencyValidationClock,
   expandHome,
   type LiveTask,
   loadConfig,
@@ -54,6 +48,11 @@ import {
   type TaskOwnershipContext,
   workflowTaskExpectation,
 } from '../infra/task-ownership.ts'
+import {
+  contractHasKnownCanonicalFields,
+  dependencyStatesFromContract,
+  observeCurrentIssueContract,
+} from './work-item-contract-repository.ts'
 import { withWorkflowLock } from '../infra/workflow-lock.ts'
 import { deriveAutoDevelopment } from './auto-development.ts'
 import { type AutoRunFailureClassification, classifiedAutoRunFailure } from './auto-run-policy.ts'
@@ -126,7 +125,7 @@ export async function resolveAutomaticFirstDevelopment(
 export async function startDevelop(
   ctx: Context,
   payload: unknown,
-  authorizedSnapshot: IssuePromptSnapshot | null,
+  authorizedContract: ContractAuthorizationBinding | null,
 ): Promise<
   | { ok: true; taskId: string; worktree: string; branch: string }
   | ({ ok: false; error: string; controllerError?: true } & AutoRunFailureClassification)
@@ -156,56 +155,37 @@ export async function startDevelop(
   }
 
   let launchSnapshot: ResolvedPromptSnapshot | null = null
-  let automaticSnapshot: Awaited<ReturnType<typeof fetchIssue>> | null = null
-  const automaticDependencyRefresh = automatic
-    ? automaticDependencyValidationClock.take(`${parsed.owner}/${parsed.repo}`, 30_000)
-    : true
-  if (agent === 'dryrun') {
-    const fetched = await fetchIssue(ctx, {
-      url,
-      forceRefresh: true,
-      forceDependencyRefresh: automaticDependencyRefresh,
-    })
-    if (!fetched.ok) return fetched
-    automaticSnapshot = fetched
-    const snapshot = issueSnapshot(fetched.data.item as Record<string, unknown>)
-    if (snapshot.state !== 'OPEN') return { ok: false, error: '只有 OPEN Issue 可以执行 dryrun' }
-  } else if (!authorizedSnapshot || authorizedSnapshot.url !== url || authorizedSnapshot.state !== 'OPEN') {
-    return { ok: false, error: '缺少与该 OPEN Issue 绑定的服务端确认快照' }
-  } else {
-    const fetched = await fetchIssue(ctx, {
-      url,
-      forceRefresh: true,
-      forceDependencyRefresh: automaticDependencyRefresh,
-    })
-    if (fetched.ok) {
-      automaticSnapshot = fetched
-      const current = issueSnapshot(fetched.data.item as Record<string, unknown>)
-      if (!sameSnapshot(current, authorizedSnapshot)) {
-        return classifiedAutoRunFailure(
-          'Issue 内容在确认后已变化,旧授权已失效;请刷新面板并按当前快照重新确认',
-          'authorization-denied',
-        )
-      }
-      launchSnapshot = { snapshot: current, freshness: 'current' }
-    } else {
-      launchSnapshot = {
-        snapshot: authorizedSnapshot,
-        freshness: 'persisted',
-        fetchError: fetched.error.slice(0, 500),
-      }
-    }
+  const currentContract = await observeCurrentIssueContract(ctx, url, { force: true })
+  if (currentContract.state !== 'known') {
+    return classifiedAutoRunFailure(`执行前无法确认当前契约: ${currentContract.reason}`, 'authorization-denied')
   }
+  if (!contractHasKnownCanonicalFields(currentContract.snapshot)) {
+    return classifiedAutoRunFailure('当前契约含 unknown 字段,禁止启动 Coding', 'authorization-denied')
+  }
+  if (currentContract.prompt.state !== 'OPEN') {
+    return { ok: false, error: agent === 'dryrun' ? '只有 OPEN Issue 可以执行 dryrun' : '只有 OPEN Issue 可以启动开发' }
+  }
+  if (
+    agent !== 'dryrun' &&
+    (!authorizedContract ||
+      JSON.stringify(authorizedContract.workItem) !== JSON.stringify(currentContract.snapshot.workItem) ||
+      authorizedContract.fingerprint !== currentContract.snapshot.fingerprint)
+  ) {
+    return classifiedAutoRunFailure(
+      'Issue 契约在确认后已变化,旧授权已失效;请刷新面板并按当前契约重新确认',
+      'authorization-denied',
+    )
+  }
+  launchSnapshot = { snapshot: currentContract.prompt, contract: currentContract.snapshot, freshness: 'current' }
 
   if (automatic) {
-    if (!automaticSnapshot?.ok) return { ok: false, error: '自动开发必须取得当前 GitHub 依赖快照' }
-    const current = issueSnapshot(automaticSnapshot.data.item as Record<string, unknown>)
+    const current = currentContract.prompt
     const contract = checkIssueContract(current.body)
-    const dependencies = automaticSnapshot.data.dependencies?.blockedBy
-    if (!dependencies) return { ok: false, error: '依赖状态不可用，自动开发已关门' }
+    const dependencyStates = dependencyStatesFromContract(currentContract)
+    if (!dependencyStates) return { ok: false, error: '依赖状态不可用，自动开发已关门' }
     const prerequisiteDecision = deriveAutoDevelopment({
       issueState: current.state,
-      dependencyStates: dependencies.map((dependency) => dependency.state),
+      dependencyStates,
       contract,
       firstDevelopment: true,
     })
@@ -216,7 +196,7 @@ export async function startDevelop(
     if (!firstDevelopment.ok) return firstDevelopment
     const decision = deriveAutoDevelopment({
       issueState: current.state,
-      dependencyStates: dependencies.map((dependency) => dependency.state),
+      dependencyStates,
       contract,
       firstDevelopment: firstDevelopment.firstDevelopment,
     })
@@ -231,7 +211,6 @@ export async function startDevelop(
   const { workflow } = ensured
   // issue 已校验为 OPEN(真实 agent 走授权快照,dryrun 走抓取校验)
   workflow.issueState = 'OPEN'
-  if (launchSnapshot) workflow.issueSnapshot = launchSnapshot.snapshot
   // 首次开工 = 本地无任何开发/返工交付记录;带附加说明也不得误判为返工(issue #54)。
   const firstDevelopment = !workflow.events.some(
     (event) => event.kind === 'dev' || event.kind === 'rework' || event.kind === 'resume',
@@ -269,7 +248,7 @@ export async function startDevelop(
     })()
     return { ok: true, taskId: taskIdValue, worktree: workflow.worktree, branch: workflow.branch }
   }
-  if (!authorizedSnapshot || !launchSnapshot) return { ok: false, error: '服务端确认快照丢失,请重新确认' }
+  if (!authorizedContract || !launchSnapshot) return { ok: false, error: '服务端契约授权丢失,请重新确认' }
 
   const ownershipGate = taskLaunchDecision(observeWorkflowTask(ctx as unknown as TaskOwnershipContext, workflow))
   if (!ownershipGate.allowed) {

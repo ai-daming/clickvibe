@@ -1,5 +1,6 @@
 import { Buffer } from 'node:buffer'
 import { join, relative, sep } from 'node:path'
+import { parseWorkItemIdentity, workItemKey } from './work-item-identity.ts'
 
 export interface WorkflowStorageIdentity {
   key: string
@@ -93,6 +94,12 @@ export function parseIssueKey(key: unknown): { owner: string; repo: string; issu
 }
 
 export function diagnosticLogPath(root: string, workflowKey?: unknown): string {
+  try {
+    const workItem = parseWorkItemIdentity(workflowKey)
+    return join(root, 'work-items', workItemKey(workItem), 'diagnostics.jsonl')
+  } catch {
+    // Legacy workflow keys and global plane names continue below.
+  }
   const coordinates = parseIssueKey(workflowKey)
   return coordinates
     ? join(issueDirectory(root, coordinates.owner, coordinates.repo, coordinates.issue), 'diagnostics.jsonl')
