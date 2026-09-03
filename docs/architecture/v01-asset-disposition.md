@@ -33,8 +33,7 @@ rg -n 'migrateLegacy' src                        # v0.1 state 迁移族
 | `src/infra/state.ts` `migrateLegacyState`/`migrateLegacyWorkflowFile`/`migrateWorkflowLogs`（state 根 `*.json`、`archive/`、`<key>.log` 迁移族） | 废弃 | infra/state | `loadStates`/`readWorkflow` 启动路径 | ADR-0009 D1/D2：v0.2 active state 为全新目录，不存在 v0.1 布局输入；ADR-0013 §6(b) | state 冷备份 `state-v0.1-backup-<ts>-<nonce>`；代码级 git revert |
 | `src/infra/state.ts:442-449` legacyAlias `<key>.log` 读取 | 废弃 | infra/state | task 日志读取 | 同上 §6(b) | 同上 |
 | `src/infra/task-log-store.ts` `migrateLegacyLog` | 废弃 | infra/task-log-store | state.ts 迁移族 | 同上 §6(b) | 同上 |
-| `src/infra/state-layout.ts` `legacyIssueKey` 及 state.ts 两处消费 | 废弃 | infra/state-layout | state.ts | §6(c)：active 路径不做 v0.1 workflow key 兼容回退 | 同上 |
-| `src/infra/state-layout.ts` `diagnosticLogPath` 的 `parseIssueKey` 回退分支 | 废弃 | infra/state-layout | diagnostic-log-store | §6(c)。`work-items/<key>/` 与根级（平面源）路径保留 | 同上 |
+| `src/infra/state-layout.ts` `legacyIssueKey` 及 state.ts 消费（含 `appendLog` 的 legacy 别名探测） | 废弃 | infra/state-layout | state.ts | §6(c)：active 路径不做 v0.1 workflow key 兼容回退 | 同上 |
 
 ## C. 保留类（判据不命中，逐条说明）
 
@@ -44,6 +43,7 @@ rg -n 'migrateLegacy' src                        # v0.1 state 迁移族
 | `decodeLiveLogLine` 纯文本行容错（`src/infra/live-output.ts`） | 保留 | 现行 task JSONL 内未标记行的容错读取；JSONL 是现行格式 |
 | `bodyHash` 解码证据（`src/infra/state.ts:138`、`derive-from-facts.ts:127`） | 保留 | 只读历史证据，已显式「永不授权 v0.2 verdict」 |
 | workflow-session legacy/unknown owner stale 判定（`src/infra/workflow-session.ts:48`） | 保留 | 防御性 fail-closed（缺失≠死亡原则），非格式 reader |
+| `diagnosticLogPath` 的 issue-key 分支与 `appendLog`/`readLogHistory` 现行 key 扁平日志通道 | 保留 | 服务**现行** workflow key 编码与 taskless 动作日志（worktree 恢复路径在用），非 v0.1 格式 reader（ADR-0013 §6 勘误）；taskless 日志的 v0.2 终态属未来需求 |
 | `LegacyV02UpgradeLockOwner`（`src/infra/v02-upgrade-lock.ts`） | 保留 | 协议 §3.1 要求识别 schema 1 旧锁 owner，PID 存活不抢锁 |
 | derive/local-git-sampler/repository-state 等处 "legacy parity" 注释族 | 保留 | 行为对齐说明，无代码分支 |
 | `src/infra/v02-upgrade*.ts` 的 v0.1 解析（`parseLegacyConfig`、state inventory、恢复 inventory） | 保留 | 升级机器的转换输入，ADR-0009 明确授权；ADR-0013 §6 明确非 active reader |
