@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { activateV02Home, initFixtureRepository } from './helpers/v02-home.ts'
 import { ensureWorktree } from '../src/agent/worktree.ts'
 import { issueKey, loadWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
 import { commitWorkflowFixture } from './workflow-fixture.ts'
@@ -34,12 +35,9 @@ async function runScenario(number: string, scenario: Scenario = {}) {
   const previousHome = process.env.HOME
   process.env.HOME = home
   await mkdir(join(home, '.clickvibe'), { recursive: true })
-  await mkdir(repo, { recursive: true })
-  await writeFile(
-    join(home, '.clickvibe', 'config.yaml'),
-    ['repos:', `  o/r: ${repo}`, `worktreeRoot: ${worktreeRoot}`, ''].join('\n'),
-  )
-  if (scenario.persistFailure) await writeFile(join(home, '.clickvibe', 'state'), 'blocks workflow persistence')
+  await initFixtureRepository(repo)
+  await activateV02Home(home, { 'o/r': repo }, { worktreeRoot: worktreeRoot })
+  if (scenario.persistFailure) await chmod(join(home, '.clickvibe', 'state'), 0o500)
   if (scenario.path === 'empty' || scenario.path === 'nonempty') await mkdir(target, { recursive: true })
   if (scenario.path === 'nonempty') await writeFile(join(target, 'owned.txt'), 'keep')
   if (scenario.frozenBase) {
@@ -130,7 +128,8 @@ async function runScenario(number: string, scenario: Scenario = {}) {
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(root, { recursive: true, force: true })
+    await chmod(join(home, '.clickvibe', 'state'), 0o700).catch(() => undefined)
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 }
 
@@ -140,19 +139,20 @@ test('worktree preparation fails clearly for missing config, repository, default
   process.env.HOME = home
   try {
     await mkdir(join(home, '.clickvibe'), { recursive: true })
-    await writeFile(join(home, '.clickvibe', 'config.yaml'), 'repos: {}\n')
     const noRepo = await ensureWorktree({} as never, { owner: 'o', repo: 'r', number: '1' })
     assert.equal(noRepo.ok, false)
     if (!noRepo.ok) assert.match(noRepo.error, /未配置仓库/)
 
-    await writeFile(join(home, '.clickvibe', 'config.yaml'), 'repos:\n  o/r: /definitely/missing/clickvibe\n')
+    // A vanished clone fails the strict v0.2 config pairing (no remote-only mode).
+    const vanished = await initFixtureRepository(join(home, 'vanished'))
+    await activateV02Home(home, { 'o/r': vanished }, { deleteAfterActivation: [vanished] })
     const missingPath = await ensureWorktree({} as never, { owner: 'o', repo: 'r', number: '2' })
     assert.equal(missingPath.ok, false)
-    if (!missingPath.ok) assert.match(missingPath.error, /仓库路径不存在/)
+    if (!missingPath.ok) assert.match(missingPath.error, /No such file or directory|vanished/)
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(home, { recursive: true, force: true })
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
   const noDefault = await runScenario('3', { symbolicRef: null, mainExists: false })
   assert.equal(noDefault.result.ok, false)

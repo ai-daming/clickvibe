@@ -5,6 +5,7 @@ import type { IncomingMessage } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { activateV02Home, initFixtureRepository } from './helpers/v02-home.ts'
 import { issueKey, loadWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
 import { handleCommand } from '../src/workflow/handlers.ts'
 
@@ -57,7 +58,8 @@ test('stop command explicitly confirms task-unknown dev and review through the s
   process.env.HOME = tempHome
   try {
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), `repos:\n  o/r: ${join(tempHome, 'repo')}\n`)
+    const stopRepo = await initFixtureRepository(join(tempHome, 'repo'))
+    await activateV02Home(tempHome, { 'o/r': stopRepo })
     const key = issueKey('o/r', '111')
     const workflow = workflowFixture(key, tempHome)
     await commitWorkflowFixture(workflow, null)
@@ -114,6 +116,6 @@ test('stop command explicitly confirms task-unknown dev and review through the s
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(tempHome, { recursive: true, force: true })
+    await rm(tempHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })

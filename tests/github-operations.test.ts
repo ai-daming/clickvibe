@@ -10,6 +10,9 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { beforeEach } from 'node:test'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { resetGithubGatewayOwnerForTests } from '../src/github/gateway-owner.ts'
 
 beforeEach(() => resetGithubGatewayOwnerForTests())
@@ -95,7 +98,15 @@ test('r5/F2: every family declares the admission ladder; only the gate families 
   assert.deepEqual(critical, ['contract-issue-detail', 'gate-pr-fact'], 'critical is for gates only')
 })
 
-test('r5/F2: a gate read declares critical in the production owner; the panel stays normal', async () => {
+test('r5/F2: a gate read declares critical in the production owner; the panel stays normal', async (t) => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-gate-priority-'))
+  process.env.HOME = tempHome
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    return rm(tempHome, { recursive: true, force: true })
+  })
   const { githubGatewayOwner } = await import('../src/github/gateway-owner.ts')
   const owner = githubGatewayOwner()
   const gateRoutes = [

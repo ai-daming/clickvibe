@@ -1,7 +1,7 @@
 import { appendFile, mkdir, rename, rm, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { diagnosticLogPath } from './state-layout.ts'
-import { assertLegacyStateWriteAllowed } from './v02-generation-fence.ts'
+import { assertActiveStateWriteAllowed } from './v02-generation-fence.ts'
 
 export const DEFAULT_DIAGNOSTIC_MAX_BYTES = 5 * 1024 * 1024
 
@@ -52,21 +52,21 @@ export function appendDiagnosticLine(
   maxBytes: unknown | Promise<unknown>,
   options: { generation?: 'v0.2' } = {},
 ): Promise<void> {
-  if (options.generation !== 'v0.2') assertLegacyStateWriteAllowed(root)
+  if (options.generation !== 'v0.2') assertActiveStateWriteAllowed(root)
   const path = diagnosticLogPath(root, workflowKey)
   return enqueue(path, async () => {
-    if (options.generation !== 'v0.2') assertLegacyStateWriteAllowed(root)
+    if (options.generation !== 'v0.2') assertActiveStateWriteAllowed(root)
     const limit = configuredMaxBytes(await maxBytes)
     const record = `${line}\n`
     await mkdir(dirname(path), { recursive: true })
     const existingBytes = await fileSize(path)
     if (existingBytes > 0 && existingBytes + Buffer.byteLength(record, 'utf8') > limit) {
-      if (options.generation !== 'v0.2') assertLegacyStateWriteAllowed(root)
+      if (options.generation !== 'v0.2') assertActiveStateWriteAllowed(root)
       await rm(rotatedPath(path), { force: true })
-      if (options.generation !== 'v0.2') assertLegacyStateWriteAllowed(root)
+      if (options.generation !== 'v0.2') assertActiveStateWriteAllowed(root)
       await rename(path, rotatedPath(path))
     }
-    if (options.generation !== 'v0.2') assertLegacyStateWriteAllowed(root)
+    if (options.generation !== 'v0.2') assertActiveStateWriteAllowed(root)
     await appendFile(path, record, 'utf8')
   })
 }

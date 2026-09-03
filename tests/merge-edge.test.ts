@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { activateV02Home, initFixtureRepository } from './helpers/v02-home.ts'
 import { mergingWorkflows } from '../src/infra/runtime.ts'
 import { issueKey, loadWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
 import {
@@ -107,7 +108,7 @@ test('merge authorization preview rejects invalid, missing, unreadable, closed a
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(home, { recursive: true, force: true })
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -135,16 +136,12 @@ test('merge execution validates URL, exclusivity, workflow, config, worktree roo
 
     await saveWorkflow(workflow('2'))
     await mkdir(join(home, '.clickvibe'), { recursive: true })
-    await writeFile(join(home, '.clickvibe', 'config.yaml'), 'repos: {}\n')
     assert.match((await mergeAndCleanupUnlocked({} as never, { url: workflow('2').url })).error, /未配置项目/)
 
     const repo = join(home, 'repo')
     const root = join(home, 'worktrees')
-    await mkdir(repo, { recursive: true })
-    await writeFile(
-      join(home, '.clickvibe', 'config.yaml'),
-      ['repos:', `  o/r: ${repo}`, `worktreeRoot: ${root}`, ''].join('\n'),
-    )
+    await initFixtureRepository(repo)
+    await activateV02Home(home, { 'o/r': repo }, { worktreeRoot: root })
     await saveWorkflow(workflow('2', { worktree: join(home, 'outside') }))
     assert.match(
       (await mergeAndCleanupUnlocked({} as never, { url: workflow('2').url })).error,
@@ -156,7 +153,7 @@ test('merge execution validates URL, exclusivity, workflow, config, worktree roo
     mergingWorkflows.delete(issueKey('o/r', '2'))
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(home, { recursive: true, force: true })
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -168,10 +165,10 @@ test('merge execution rejects an authorization whose exact PR base changed', asy
     const repo = join(home, 'repo')
     const worktreeRoot = join(home, 'worktrees')
     const worktreePath = join(worktreeRoot, 'repo-issue-8')
-    await mkdir(repo, { recursive: true })
+    await initFixtureRepository(repo)
     await mkdir(worktreePath, { recursive: true })
     await mkdir(join(home, '.clickvibe'), { recursive: true })
-    await writeFile(join(home, '.clickvibe', 'config.yaml'), `repos:\n  o/r: ${repo}\nworktreeRoot: ${worktreeRoot}\n`)
+    await activateV02Home(home, { 'o/r': repo }, { worktreeRoot: worktreeRoot })
     const stored = workflow('8', { worktree: worktreePath, branch: 'repo-issue-8', prNumber: '8' })
     await saveWorkflow(stored)
     const ctx = prCtx({
@@ -197,7 +194,7 @@ test('merge execution rejects an authorization whose exact PR base changed', asy
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(home, { recursive: true, force: true })
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 

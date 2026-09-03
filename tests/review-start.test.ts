@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { activateV02Home, initFixtureRepository } from './helpers/v02-home.ts'
 import { issueKey, loadWorkflow } from '../src/infra/state.ts'
 import { resolveReviewStartWorkflow, reviewStartError } from '../src/workflow/review-start.ts'
 
@@ -27,12 +28,9 @@ test('review start recovers a missing workflow from matching branch, commit, and
     const worktreeRoot = join(tempHome, 'worktrees')
     const worktree = join(worktreeRoot, 'r', 'r-issue-106')
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await mkdir(repo, { recursive: true })
+    await initFixtureRepository(repo)
     await mkdir(worktree, { recursive: true })
-    await writeFile(
-      join(tempHome, '.clickvibe', 'config.yaml'),
-      ['repos:', `  o/r: ${repo}`, `worktreeRoot: ${worktreeRoot}`, ''].join('\n'),
-    )
+    await activateV02Home(tempHome, { 'o/r': repo }, { worktreeRoot: worktreeRoot })
 
     const head = 'abc1234567890abcdef'
     const ctx = {
@@ -122,6 +120,6 @@ test('review start recovers a missing workflow from matching branch, commit, and
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(tempHome, { recursive: true, force: true })
+    await rm(tempHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })

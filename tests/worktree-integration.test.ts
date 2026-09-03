@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
 import { exec, execFile } from 'node:child_process'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
+import { activateV02Home, initFixtureRepository } from './helpers/v02-home.ts'
 import { buildWorktreeAddCommand } from '../src/agent/develop.ts'
 import { ensureWorktree } from '../src/agent/worktree.ts'
 
@@ -68,7 +69,7 @@ test('real git worktree creation uses origin/main instead of the source reposito
     assert.notEqual(issue, side)
     assert.equal(branch, 'issue-1')
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -95,10 +96,7 @@ test('first development creates from a selected remote branch and freezes it', a
     await git('commit', '--allow-empty', '-m', 'release base')
     await git('push', '-u', 'origin', 'release/2.0')
     await git('switch', 'main')
-    await writeFile(
-      join(home, '.clickvibe', 'config.yaml'),
-      ['repos:', `  o/r: ${repo}`, `worktreeRoot: ${worktreeRoot}`, ''].join('\n'),
-    )
+    await activateV02Home(home, { 'o/r': repo }, { worktreeRoot: worktreeRoot })
 
     const created = await ensureWorktree(
       realShellCtx() as never,
@@ -135,7 +133,7 @@ test('first development creates from a selected remote branch and freezes it', a
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -159,11 +157,8 @@ test('a baseline persistence failure rolls back a newly created worktree and bra
     await git('branch', '-M', 'main')
     await git('push', '-u', 'origin', 'main')
     await execFileAsync('git', [`--git-dir=${remote}`, 'symbolic-ref', 'HEAD', 'refs/heads/main'])
-    await writeFile(
-      join(home, '.clickvibe', 'config.yaml'),
-      ['repos:', `  o/r: ${repo}`, `worktreeRoot: ${worktreeRoot}`, ''].join('\n'),
-    )
-    await writeFile(join(home, '.clickvibe', 'state'), 'blocks workflow persistence')
+    await activateV02Home(home, { 'o/r': repo }, { worktreeRoot: worktreeRoot })
+    await chmod(join(home, '.clickvibe', 'state'), 0o500)
 
     const result = await ensureWorktree(realShellCtx() as never, { owner: 'o', repo: 'r', number: '63' })
     assert.equal(result.ok, false)
@@ -173,6 +168,7 @@ test('a baseline persistence failure rolls back a newly created worktree and bra
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(root, { recursive: true, force: true })
+    await chmod(join(home, '.clickvibe', 'state'), 0o700).catch(() => undefined)
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })

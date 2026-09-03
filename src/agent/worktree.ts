@@ -42,7 +42,14 @@ export async function ensureWorktree(
   parsed: { owner: string; repo: string; number: string },
   requestedBaseline?: unknown,
 ): Promise<{ ok: true; workflow: IssueWorkflow; worktree: string; branch: string } | { ok: false; error: string }> {
-  const config = await loadConfig()
+  let config: Awaited<ReturnType<typeof loadConfig>>
+  try {
+    config = await loadConfig()
+  } catch (reason) {
+    // Strict v0.2 pairing failures (e.g. a vanished clone) must surface as a
+    // readable refusal, not an unhandled crash (错误不埋葬).
+    return { ok: false, error: reason instanceof Error ? reason.message : String(reason) }
+  }
   const repoKey = `${parsed.owner}/${parsed.repo}`
   const repoPath = config.repos[repoKey]
   if (!repoPath) {

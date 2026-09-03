@@ -204,12 +204,9 @@ export async function loadConfigFromHome(home: string): Promise<ClickVibeConfig>
   if (parsed?.schemaVersion === 1) return await loadV02Config(home, raw, parsed)
   if (parsed?.schemaVersion !== undefined)
     throw new Error(`unsupported ClickVibe config schemaVersion: ${parsed.schemaVersion}`)
-  return {
-    repos: parsed?.repos ?? {},
-    worktreeRoot: parsed?.worktreeRoot ? expandHome(parsed.worktreeRoot) : join(home, '.clickvibe', 'worktrees'),
-    fetchTtlSeconds: parsed?.fetchTtlSeconds,
-    diagnosticsMaxBytes: parsed?.diagnosticsMaxBytes,
-  }
+  throw new Error(
+    'v0.1 config is no longer readable by the v0.2 runtime (ADR-0009 clean break); run `node scripts/upgrade-v0.2.mjs preview` and authorize the upgrade with its plan fingerprint',
+  )
 }
 
 /** Read and strictly validate ~/.clickvibe/config.yaml. */

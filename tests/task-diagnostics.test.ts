@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { activateV02Home, initFixtureRepository } from './helpers/v02-home.ts'
 import { issueKey } from '../src/infra/state-layout.ts'
 import { logTaskDiagnostic } from '../src/infra/task-diagnostics.ts'
 
@@ -48,7 +49,7 @@ test('task diagnostics persist the exact console JSON under the owning issue', a
     console.warn = originalWarn
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(tempHome, { recursive: true, force: true })
+    await rm(tempHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -61,7 +62,8 @@ test('an oversized diagnostic remains complete when the next record rotates it',
   console.warn = (message?: unknown) => warnings.push(String(message))
   try {
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), 'diagnosticsMaxBytes: 200\n', 'utf8')
+    const diagRepo = await initFixtureRepository(join(tempHome, 'diag-repo'))
+    await activateV02Home(tempHome, { 'o/r': diagRepo }, { diagnosticsMaxBytes: 200 })
     logTaskDiagnostic('global-oversized', { workflowKey: issueKey('foo', '7'), evidence: 'a'.repeat(1_000) })
     logTaskDiagnostic('global-next', { evidence: 'next' })
 
@@ -77,7 +79,7 @@ test('an oversized diagnostic remains complete when the next record rotates it',
     console.warn = originalWarn
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(tempHome, { recursive: true, force: true })
+    await rm(tempHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -95,6 +97,6 @@ test('diagnostic persistence failure never escapes logTaskDiagnostic', async () 
     console.warn = originalWarn
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(tempHome, { recursive: true, force: true })
+    await rm(tempHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })

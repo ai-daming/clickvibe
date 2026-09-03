@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { beforeEach } from 'node:test'
+import { activateV02Home, initFixtureRepository } from './helpers/v02-home.ts'
 import { resetGithubGatewayOwnerForTests } from '../src/github/gateway-owner.ts'
 
 beforeEach(() => resetGithubGatewayOwnerForTests())
@@ -170,10 +171,22 @@ test('help command answers readable text without any shell call', async () => {
   assert.match(String(result.body.text), /merge/)
 })
 
-test('projects command lists configured repos', async () => {
+test('projects command lists configured repos', async (t) => {
+  const previousHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-cmd-projects-'))
+  process.env.HOME = tempHome
+  t.after(async () => {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    await rm(tempHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+  })
+  const repo = await initFixtureRepository(join(tempHome, 'repo'))
+  await activateV02Home(tempHome, { 'o/r': repo })
+
   const result = await post(createHandler(), { command: 'projects' })
   assert.equal(result.status, 200)
   assert.match(String(result.body.text), /已配置的项目/)
+  assert.match(String(result.body.text), /o\/r/)
 })
 
 test('status command returns readable workflow state derived from the same /state logic', async () => {
@@ -182,7 +195,8 @@ test('status command returns readable workflow state derived from the same /stat
   process.env.HOME = tempHome
   try {
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), `repos:\n  o/r: ${join(tempHome, 'missing-repo')}\n`)
+    const missingRepo = await initFixtureRepository(join(tempHome, 'missing-repo'))
+    await activateV02Home(tempHome, { 'o/r': missingRepo })
     const workflow = workflowFixture('o-r-23', 'https://github.com/o/r/issues/23', join(tempHome, 'missing-worktree'))
     await commitWorkflowFixture(workflow, workflow.revision ?? null)
     const item = {
@@ -195,6 +209,15 @@ test('status command returns readable workflow state derived from the same /stat
       comments: [],
     }
     const handler = createHandler(async ({ command }) => {
+      if (command.startsWith('set +e')) {
+        return {
+          exitCode: 0,
+          stdout: {
+            text: 'REPO_DEFAULT\t128\t\nREPO_BRANCH\t0\tbWFpbg==\nREPO_HEAD\t128\t\nREPO_MAIN_COUNT\t128\t\nREPO_HEAD_COUNT\t128\t\n',
+          },
+          stderr: { text: '' },
+        }
+      }
       const api = githubApi(command, {
         item,
         pr: {
@@ -223,7 +246,7 @@ test('status command returns readable workflow state derived from the same /stat
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(tempHome, { recursive: true, force: true })
+    await rm(tempHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -239,12 +262,13 @@ test('develop command previews with a one-use authorization instead of starting 
   process.env.HOME = tempHome
   try {
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), `repos:\n  o/r: ${join(tempHome, 'missing-repo')}\n`)
+    const missingRepo = await initFixtureRepository(join(tempHome, 'missing-repo'))
+    await activateV02Home(tempHome, { 'o/r': missingRepo })
     await developPreviewScenario()
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(tempHome, { recursive: true, force: true })
+    await rm(tempHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -301,12 +325,13 @@ test('confirmed develop revalidates the frozen snapshot through the same backend
   process.env.HOME = tempHome
   try {
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), `repos:\n  o/r: ${join(tempHome, 'missing-repo')}\n`)
+    const missingRepo = await initFixtureRepository(join(tempHome, 'missing-repo'))
+    await activateV02Home(tempHome, { 'o/r': missingRepo })
     await confirmedDevelopScenario()
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(tempHome, { recursive: true, force: true })
+    await rm(tempHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -368,7 +393,8 @@ test('review command previews through the shared authorize path', async () => {
   process.env.HOME = tempHome
   try {
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), `repos:\n  o/r: ${join(tempHome, 'missing-repo')}\n`)
+    const missingRepo = await initFixtureRepository(join(tempHome, 'missing-repo'))
+    await activateV02Home(tempHome, { 'o/r': missingRepo })
     const item = {
       url: 'https://github.com/o/r/issues/15',
       number: 15,
@@ -395,7 +421,7 @@ test('review command previews through the shared authorize path', async () => {
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(tempHome, { recursive: true, force: true })
+    await rm(tempHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -405,12 +431,9 @@ test('merge command surfaces every gate failure and supports the manual override
   process.env.HOME = tempHome
   try {
     const repo = join(tempHome, 'repo')
-    await mkdir(repo, { recursive: true })
+    await initFixtureRepository(repo)
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await writeFile(
-      join(tempHome, '.clickvibe', 'config.yaml'),
-      `repos:\n  o/r: ${repo}\nworktreeRoot: ${join(tempHome, 'worktrees')}\n`,
-    )
+    await activateV02Home(tempHome, { 'o/r': repo }, { worktreeRoot: join(tempHome, 'worktrees') })
     const workflow = workflowFixture(
       'o-r-23',
       'https://github.com/o/r/issues/23',
@@ -488,7 +511,7 @@ test('merge command surfaces every gate failure and supports the manual override
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(tempHome, { recursive: true, force: true })
+    await rm(tempHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -498,7 +521,9 @@ test('unknown repos and unparsable commands answer actionable errors', async () 
   process.env.HOME = tempHome
   try {
     await mkdir(join(tempHome, '.clickvibe'), { recursive: true })
-    await writeFile(join(tempHome, '.clickvibe', 'config.yaml'), 'repos:\n  a/one: /x\n  b/two: /y\n')
+    const one = await initFixtureRepository(join(tempHome, 'one'))
+    const two = await initFixtureRepository(join(tempHome, 'two'))
+    await activateV02Home(tempHome, { 'a/one': one, 'b/two': two })
     const ambiguous = await post(createHandler(), { command: 'develop #8' }, PRIVILEGED)
     assert.equal(ambiguous.status, 400)
     assert.match(String(ambiguous.body.error), /多个项目/)
@@ -513,6 +538,6 @@ test('unknown repos and unparsable commands answer actionable errors', async () 
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(tempHome, { recursive: true, force: true })
+    await rm(tempHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })

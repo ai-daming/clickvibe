@@ -78,15 +78,29 @@ function hasV02Marker(stateRoot: string): boolean {
   }
 }
 
-/** Reject every legacy writer once an upgrade journal or v0.2 marker owns the state root. */
-export function assertLegacyStateWriteAllowed(stateRoot: string): void {
-  if (fenceState.mode !== 'legacy-open')
-    throw new V02GenerationViolationError('legacy state write blocked by the v0.2 generation fence')
+/**
+ * Admit current-format runtime writers exactly when the state root has one
+ * consistent owner (ADR-0009 D1/D6, protocol §1): a verified journal plus the
+ * v0.2 marker owns the root for the v0.2 runtime; a rolled-back or journal-free
+ * root without a marker keeps pre-upgrade semantics. An in-progress upgrade,
+ * any partial/torn journal phase, or journal/marker drift stays fail-closed.
+ */
+export function assertActiveStateWriteAllowed(stateRoot: string): void {
+  if (fenceState.mode === 'upgrade-held')
+    throw new V02GenerationViolationError('state write blocked: v0.2 upgrade holds the generation fence')
+  if (fenceState.mode === 'v0.2-active') return
   const phase = journalPhase(clickvibeRootForState(stateRoot))
-  if (phase !== null && phase !== 'rolled_back') {
-    throw new V02GenerationViolationError(`legacy state write blocked by v0.2 recovery journal (${phase})`)
+  const marker = hasV02Marker(stateRoot)
+  if (phase === null || phase === 'rolled_back') {
+    if (marker) throw new V02GenerationViolationError('state write blocked: v0.2 marker without a completed upgrade')
+    return
   }
-  if (hasV02Marker(stateRoot)) throw new V02GenerationViolationError('legacy state write blocked by active v0.2 state')
+  if (phase === 'verified') {
+    if (!marker)
+      throw new V02GenerationViolationError('state write blocked: verified journal without the v0.2 state marker')
+    return
+  }
+  throw new V02GenerationViolationError(`state write blocked by v0.2 recovery journal (${phase})`)
 }
 
 /** Synchronous start boundary: no task can slip between fence acquisition and host observation. */
@@ -95,7 +109,7 @@ export function assertLegacyTaskStartAllowed(): void {
     throw new V02GenerationViolationError('legacy task start blocked by the v0.2 generation fence')
   if (fenceState.mode === 'v0.2-active')
     throw new V02GenerationViolationError('legacy task start blocked by the active v0.2 generation')
-  assertLegacyStateWriteAllowed(join(homedir(), '.clickvibe', 'state'))
+  assertActiveStateWriteAllowed(join(homedir(), '.clickvibe', 'state'))
 }
 
 /**

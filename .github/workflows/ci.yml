@@ -20,10 +20,6 @@ jobs:
         run: |
           git config --global user.email "ci@clickvibe.local"
           git config --global user.name "ClickVibe CI"
-      - name: Seed ClickVibe config for project-list contract test
-        run: |
-          mkdir -p "$HOME/.clickvibe"
-          printf 'repos:\n  ai-daming/clickvibe: %s\n' "$GITHUB_WORKSPACE" > "$HOME/.clickvibe/config.yaml"
       - run: pnpm run typecheck
       - run: pnpm run build
       - run: pnpm test

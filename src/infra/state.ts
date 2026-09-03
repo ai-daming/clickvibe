@@ -23,7 +23,7 @@ import {
   workflowRevision,
   workflowStatePath,
 } from './workflow-persistence.ts'
-import { assertLegacyStateWriteAllowed, isV02GenerationViolation } from './v02-generation-fence.ts'
+import { assertActiveStateWriteAllowed, isV02GenerationViolation } from './v02-generation-fence.ts'
 import type { RemoteGitWriteAttempt } from './remote-git-coordinator.ts'
 export { WorkflowConflictError } from './workflow-persistence.ts'
 export type * from './workflow-persistence.ts'
@@ -343,9 +343,9 @@ export async function appendLog(key: string, kind: 'dev' | 'review', line: strin
       return
     }
     const legacyPath = join(stateDir(), key, `${kind}.log`)
-    assertLegacyStateWriteAllowed(stateDir())
+    assertActiveStateWriteAllowed(stateDir())
     await mkdir(join(legacyPath, '..'), { recursive: true })
-    assertLegacyStateWriteAllowed(stateDir())
+    assertActiveStateWriteAllowed(stateDir())
     await appendFile(legacyPath, `${line}\n`, 'utf8')
   } catch (reason) {
     if (isV02GenerationViolation(reason)) throw reason

@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { activateV02Home, initFixtureRepository } from './helpers/v02-home.ts'
 import { commitWorkflowMetadata, issueKey, loadWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
 import { restoreBaseBranch } from '../src/workflow/baseline-restore.ts'
 import { commitWorkflowFixture } from './workflow-fixture.ts'
@@ -44,11 +45,8 @@ async function sharedFixture() {
   const previousHome = process.env.HOME
   process.env.HOME = home
   await mkdir(join(home, '.clickvibe'), { recursive: true })
-  await mkdir(repo, { recursive: true })
-  await writeFile(
-    join(home, '.clickvibe', 'config.yaml'),
-    ['repos:', `  o/r: ${repo}`, `worktreeRoot: ${join(root, 'worktrees')}`, ''].join('\n'),
-  )
+  await initFixtureRepository(repo)
+  await activateV02Home(home, { 'o/r': repo }, { worktreeRoot: join(root, 'worktrees') })
   const older = sharedWorkflow(root, '1', OLDER_HASH, 1)
   const latest = sharedWorkflow(root, '2', LATEST_HASH, 2)
   await saveWorkflow(older)
@@ -59,7 +57,7 @@ async function sharedFixture() {
     async cleanup() {
       if (previousHome === undefined) delete process.env.HOME
       else process.env.HOME = previousHome
-      await rm(root, { recursive: true, force: true })
+      await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
     },
   }
 }

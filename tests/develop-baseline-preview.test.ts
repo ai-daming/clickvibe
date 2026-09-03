@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { activateV02Home, initFixtureRepository } from './helpers/v02-home.ts'
 import { resetGithubGatewayOwnerForTests } from '../src/github/gateway-owner.ts'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -53,7 +54,7 @@ test('baseline preview validates URLs and degrades an unconfigured repository on
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(home, { recursive: true, force: true })
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -64,8 +65,8 @@ test('baseline preview exposes fetch failure for the default but rejects an unve
   try {
     const repo = join(home, 'repo')
     await mkdir(join(home, '.clickvibe'), { recursive: true })
-    await mkdir(repo, { recursive: true })
-    await writeFile(join(home, '.clickvibe', 'config.yaml'), ['repos:', `  o/r: ${repo}`, ''].join('\n'))
+    await initFixtureRepository(repo)
+    await activateV02Home(home, { 'o/r': repo })
     const ctx = {
       shell: {
         resolve(spec: unknown) {
@@ -85,7 +86,7 @@ test('baseline preview exposes fetch failure for the default but rejects an unve
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(home, { recursive: true, force: true })
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -96,8 +97,8 @@ test('baseline preview excludes and rejects the current issue development branch
   try {
     const repo = join(home, 'repo')
     await mkdir(join(home, '.clickvibe'), { recursive: true })
-    await mkdir(repo, { recursive: true })
-    await writeFile(join(home, '.clickvibe', 'config.yaml'), ['repos:', `  o/r: ${repo}`, ''].join('\n'))
+    await initFixtureRepository(repo)
+    await activateV02Home(home, { 'o/r': repo })
     const ctx = {
       shell: {
         resolve(spec: unknown) {
@@ -141,7 +142,7 @@ test('baseline preview excludes and rejects the current issue development branch
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(home, { recursive: true, force: true })
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
 
@@ -192,6 +193,6 @@ test('frozen issue-branch preview skips self-dependencies and ignores a closed p
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await rm(home, { recursive: true, force: true })
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 })
