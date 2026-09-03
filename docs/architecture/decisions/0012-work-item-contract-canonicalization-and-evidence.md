@@ -1,6 +1,6 @@
 # ADR-0012：Work Item 契约规范化、原子发布与诊断证据
 
-> Status: Accepted | Date: 2026-09-03 | Acceptance: user confirmed ADR and AC1 field mapping on 2026-09-03; effective only after merge to `main` | Issue: #136 | Refines: [ADR-0006](0006-canonical-domain-model-and-contracts.md), [ADR-0009](0009-v02-clean-break-local-state-and-config.md), [ADR-0010](0010-github-rest-gateway-admission-and-lifecycle.md), [ADR-0011](0011-remote-git-coordinator-admission-and-recovery.md)
+> Status: Accepted | Date: 2026-09-03 | Acceptance: user confirmed ADR and AC1 field mapping, then confirmed the `correlationId` and exact-byte-hash repair on 2026-09-03; each change is effective only after merge to `main` | Issue: #136 | Refines: [ADR-0006](0006-canonical-domain-model-and-contracts.md), [ADR-0009](0009-v02-clean-break-local-state-and-config.md), [ADR-0010](0010-github-rest-gateway-admission-and-lifecycle.md), [ADR-0011](0011-remote-git-coordinator-admission-and-recovery.md)
 
 ## Context
 
@@ -143,7 +143,7 @@ wic1_<base64url-without-padding(SHA-256(canonical UTF-8 bytes))>
 
 `workItemKey` 复用 #134 已实现的 `wi1_...` durable key；不得另用裸 Issue number、URL、`repoKey` 或 v0.1 workflow key 建第二棵目录。
 
-`captureId = capture1_<base64url-sha256(raw canonical artifact bytes)>`。`snapshot.json` 的 `rawArtifact.path` 必须指向同一 capture 内的 `raw.json`，其 `contentHash` 必须与回读字节一致。raw artifact 保存该次 Provider Issue item 的完整返回字段和同次原生 dependency observation，并执行字段级脱敏；凭据不落盘。评论/timeline 若由独立请求取得，保存为关联的 Provider Observation/ArtifactRef，不复制进 canonical snapshot，也不构成第二个 IssueSnapshot。
+`raw.json` 先完整序列化为无 BOM 的 UTF-8 文件字节，再对最终写入并回读的 exact bytes 计算 `sha256-v1`；`ArtifactRef.contentHash` 固定为 `sha256-v1_<base64url-without-padding(SHA-256(exact file bytes))>`，`captureId` 固定为复用同一 digest payload 的 `capture1_<base64url-without-padding digest>`。raw serialization 不承担语义去重，也不是第二套 contract canonicalization：同一 Provider 对象若写成不同字节可以产生不同 capture，但 reader 必须能用 ArtifactRef 逐字节验证。`snapshot.json` 的 `rawArtifact.path` 必须指向同一 capture 内的 `raw.json`。raw artifact 保存该次 Provider Issue item 的完整返回字段和同次原生 dependency observation，并执行字段级脱敏；凭据不落盘。评论/timeline 若由独立请求取得，保存为关联的 Provider Observation/ArtifactRef，不复制进 canonical snapshot，也不构成第二个 IssueSnapshot。
 
 发布者在每个 WorkItemIdentity 的既有跨进程 link-lock 原语下执行：
 
@@ -199,8 +199,8 @@ flowchart LR
   G[GitHub REST Gateway] -->|GatewayLifecycleEvent| S[shared diagnostics JSONL writer]
   R[Remote Git Coordinator] -->|RemoteGitLifecycleEvent| S
   C[Contract repository / workflow] -->|DiagnosticRecord| S
-  G -. failure diagnosticId .-> D[DiagnosticRecord]
-  R -. failure diagnosticId .-> D
+  G -. failure: correlationId=requestId .-> D[DiagnosticRecord]
+  R -. failure: correlationId=requestId .-> D
   D --> S
   S --> I[one diagnostic index projection]
   I --> P[panel / history / #133 metrics readers]
@@ -208,11 +208,11 @@ flowchart LR
 
 - GatewayLifecycleEvent 仍是 GitHub 请求计量的唯一来源；RemoteGitLifecycleEvent 仍是 Remote Git 计量的唯一来源。
 - lifecycle 记录描述 declared/queued/dispatched/settled 等状态迁移；DiagnosticRecord 保存原始异常、stack、operation、classification、correlation 和可选 rawArtifact。
-- lifecycle failure 通过 `diagnosticId` 引用一条 DiagnosticRecord；不得把同一请求重新编码为第三套 lifecycle，也不得从 DiagnosticRecord 反算 queue/service metrics。
+- lifecycle event shape 保持 ADR-0010/0011 已接受的结构，不新增 `diagnosticId`。发生失败时，producer 另写 DiagnosticRecord：`source` 表示平面，`correlationId` 精确等于该 lifecycle 的 `requestId`；一个 requestId 可以关联零到多条、各有唯一 diagnosticId 的错误记录。索引按 `source + correlationId` 连接两者，不能只按可能跨平面重复的 requestId；不得把同一请求重新编码为第三套 lifecycle，也不得从 DiagnosticRecord 反算 queue/service metrics。
 - 三者复用 `appendDiagnosticLine` 的串行、轮转和 flush 生命周期，并使用显式 `recordType` 区分；面板和事件索引只读同一 physical stream/projection。
 - 全局 Gateway/Remote Git 记录写 global diagnostics；Work Item 可归属错误写对应 issue diagnostics。索引可以联合查询，但不复制记录。
 
-v0.2 不预建 v0.3 EventEnvelope。未来 EventEnvelope 落地时可引用相同 ArtifactRef/diagnosticId，但不得追溯改写 v0.2 JSONL。
+v0.2 不预建 v0.3 EventEnvelope。未来 EventEnvelope 落地时可引用相同 ArtifactRef/diagnosticId，但不得给 v0.2 lifecycle 追补字段或追溯改写 JSONL。
 
 ### 8. 未知版本 fail closed
 
@@ -246,7 +246,7 @@ v0.2 不预建 v0.3 EventEnvelope。未来 EventEnvelope 落地时可引用相�
 - 行内空白、目标、AC 描述、AC 验证权、依赖、非目标和约束变化会换 fingerprint；
 - comments、updatedAt、title、labels、问题证据、architectureImpact 和 `[ ]`/`[x]` 变化不换 fingerprint；
 - 缺章节是 unknown，显式“无”是 known empty，二者 fingerprint 不同；未知 AC 前缀与依赖冲突 fail closed；
-- 未知 snapshot schema、canonicalizationVersion、fingerprint prefix/hash policy、损坏 raw hash 均返回 unknown 且零授权；
+- 未知 snapshot schema、canonicalizationVersion、fingerprint prefix/hash policy、损坏 raw hash 均返回 unknown 且零授权；fixture 对 `raw.json` 最终 UTF-8 bytes 计算固定 `sha256-v1_` contentHash，并证明任何落盘字节变化都会使回读失败；
 - 在 raw write、snapshot write、capture rename、pointer temp write、pointer rename 和目录 fsync 前后注入真实文件系统失败，证明读者只能看到完整旧 bundle 或完整新 bundle；
 - 两个交错 publish 不产生新 snapshot + 旧 fingerprint，较旧 observation 不覆盖明确较新 current；
 - authorization 签发后 contract 改变，consume 零启动；Review 后 contract 改变，现有 `verdictCurrent` 和 merge gate 失效；
@@ -291,6 +291,7 @@ v0.2 不预建 v0.3 EventEnvelope。未来 EventEnvelope 落地时可引用相�
 - **只 hash contract，不包含 WorkItemIdentity**：拒绝；相同文字可跨 Issue 误复用授权或 Review。identity 放入 tuple 后 fingerprint 可独立防重放。
 - **snapshot/raw/fingerprint 三个文件各自原子覆盖**：拒绝；单文件 rename 不能保证三者是同一代。
 - **把 raw body 内联进 snapshot**：拒绝；大型/Provider-specific 证据会污染领域快照并绕过 ArtifactRef。
+- **为 raw artifact 再建跨语言 canonical JSON**：拒绝；raw 的身份是实际保存的证据字节，完整性只需 exact-file hash；语义稳定性由 WorkItemContract 的 `wic1_` canonical bytes 负责。
 - **所有 lifecycle 都转换成 DiagnosticRecord**：拒绝；会丢失 Gateway/Remote Git 的判别式状态机和唯一计量来源。
 - **让 DiagnosticRecord 使用完整 EventEnvelope**：v0.2 拒绝；前置基础设施错误可能没有完整 DeliveryBasis，且会预建 v0.3 概念。
 
