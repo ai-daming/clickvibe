@@ -105,8 +105,3 @@ export function diagnosticLogPath(root: string, workflowKey?: unknown): string {
     ? join(issueDirectory(root, coordinates.owner, coordinates.repo, coordinates.issue), 'diagnostics.jsonl')
     : join(root, 'diagnostics.jsonl')
 }
-
-export function legacyIssueKey(key: string): string | null {
-  const coordinates = parseIssueKey(key)
-  return coordinates ? `${coordinates.owner}-${coordinates.repo}-${coordinates.issue}` : null
-}

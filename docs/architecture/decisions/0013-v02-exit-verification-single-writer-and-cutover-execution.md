@@ -91,12 +91,12 @@ allowlist 条目必须带理由注释，与 `check:github-access` 的符号级�
 
 **判据（可判定）**：
 
-- **是 legacy reader**：运行时代码路径把 v0.1 格式解释为 active 状态——(a) 读取无 `schemaVersion` 的 config 并当作有效配置继续（`src/infra/runtime.ts` `loadConfigFromHome` 的 v0.1 分支）；(b) 读取或迁移 v0.1 state 布局（state 根 `*.json`、`archive/`、`legacyIssueKey` 别名、`<key>.log`、`diagnosticLogPath` 的 legacy 回退）；(c) 对 active 输入按 v0.1 workflow key 语法做兼容回退解析。
+- **是 legacy reader**：运行时代码路径把 v0.1 格式解释为 active 状态——(a) 读取无 `schemaVersion` 的 config 并当作有效配置继续（`src/infra/runtime.ts` `loadConfigFromHome` 的 v0.1 分支）；(b) 读取或迁移 v0.1 state 布局（state 根 `*.json`、`archive/`、`legacyIssueKey` 别名、v0.1 扁平日志的启动迁移）；(c) 对 active 输入按 v0.1 workflow key 语法做兼容回退解析。（勘误：初稿把 `diagnosticLogPath` 的 issue-key 分支与 `appendLog`/`readLogHistory` 在**现行** workflow key 下的扁平日志通道误列为 legacy——两者服务当前 key 编码，判据不命中，随移除实现 PR 修正；v0.1 侧真正移除的是启动迁移族、`legacyIssueKey` 别名探测与 v0.1 repos 写入器。）
 - **不是 legacy reader**：升级机器（`src/infra/v02-upgrade*.ts`）对 v0.1 字节的解析——那是转换输入，ADR-0009 明确授权；测试 fixture；纯文案提及。
 
 **移除后行为**：v0.2 runtime 遇到无 `schemaVersion` 的 config → fail-closed 报错并指向升级入口；active 路径不再有 legacy key 回退分支。`owner/<repo>/issue-N` 目录布局是现行 workflow 存储布局，**不是** legacy reader，不在移除范围（工作项 key 全量迁移是另一个需求，本 ADR 不授权）。
 
-**已知清单（baseline `73aaf23`）**：`src/infra/runtime.ts` v0.1 config 分支；`src/infra/state.ts` 的 `migrateLegacyState`/`migrateLegacyWorkflowFile`/`migrateWorkflowLogs`/legacy 存储 key 别名；`src/infra/state-layout.ts` 的 `diagnosticLogPath` legacy 回退与 `legacyIssueKey`；`src/infra/task-log-store.ts` 的 `migrateLegacyLog` 与 legacy 日志读取；`src/infra/live-output.ts` 的 legacy 纯文本日志读取。实现 PR 必须附 `rg -n 'legacy|Legacy' src` 全量输出并逐条分类（fence 守卫 / 升级机器 / 待移除 / 文案），清单以枚举输出为准，不得凭记忆裁剪。
+**已知清单（baseline `73aaf23`）**：`src/infra/runtime.ts` v0.1 config 分支；`src/infra/state.ts` 的 `migrateLegacyState`/`migrateLegacyWorkflowFile`/`migrateWorkflowLogs`/legacy 存储 key 别名与 `appendLog` 的 legacy 别名探测；`src/infra/state-layout.ts` 的 `legacyIssueKey`；`src/infra/task-log-store.ts` 的 `migrateLegacyLog`；`src/infra/project-config.ts` 的 v0.1 repos 写入器及其消费方 `src/workflow/project-import.ts`。实现 PR 必须附 `rg -n 'legacy|Legacy' src` 全量输出并逐条分类（fence 守卫 / 升级机器 / 待移除 / 文案），清单以枚举输出为准，不得凭记忆裁剪。
 
 ## Algorithm ↔ Data Structure Cross-check
 

@@ -105,7 +105,7 @@ test('process enumeration finds a real legacy ClickVibe process and fence waits 
   }
 })
 
-test('legacy startup migration cannot scan or move files after a v0.2 marker takes ownership', async () => {
+test('startup reads never scan or move v0.1 flat files after a v0.2 marker takes ownership', async () => {
   const home = await mkdtemp(join(tmpdir(), 'clickvibe-v02-legacy-migration-'))
   const root = join(home, '.clickvibe')
   const state = join(root, 'state')
@@ -130,7 +130,9 @@ test('legacy startup migration cannot scan or move files after a v0.2 marker tak
     })
     const [code] = (await once(child, 'exit')) as [number]
     assert.equal(code, 0)
-    assert.match(output, /BLOCKED:.*v0\.2 state/)
+    // The startup migration family is removed entirely (ADR-0013 §6); startup
+    // loads succeed without scanning the v0.1 flat layout at all.
+    assert.equal(output.trim(), 'ALLOWED')
     assert.equal(await readFile(legacy, 'utf8'), '{}\n')
   } finally {
     await rm(home, { recursive: true, force: true })

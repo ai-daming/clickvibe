@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { loadWorkflow } from '../src/infra/state.ts'
+import { issueKey, loadWorkflow } from '../src/infra/state.ts'
 import { resolveReviewStartWorkflow, reviewStartError } from '../src/workflow/review-start.ts'
 
 function included(body: unknown): string {
@@ -101,7 +101,7 @@ test('review start recovers a missing workflow from matching branch, commit, and
     assert.equal(resolved.workflow.prNumber, '105')
     // Recovery persists only Git/GitHub metadata. The review claim is the
     // first command allowed to advance durable lifecycle state.
-    assert.equal((await loadWorkflow('o-r-106'))?.stage, 'idle')
+    assert.equal((await loadWorkflow(issueKey('o/r', '106')))?.stage, 'idle')
 
     resolved.workflow.stage = 'developing'
     resolved.workflow.devInterrupted = true
@@ -115,7 +115,7 @@ test('review start recovers a missing workflow from matching branch, commit, and
     assert.equal(interrupted.ok, false)
     if (interrupted.ok) return
     assert.match(interrupted.error, /开发仍在进行/)
-    const preserved = await loadWorkflow('o-r-106')
+    const preserved = await loadWorkflow(issueKey('o/r', '106'))
     assert.equal(preserved?.stage, 'developing')
     assert.equal(preserved?.devInterrupted, true)
     assert.deepEqual(preserved?.reviewResult, { passed: false, issues: ['resume this rework'] })

@@ -8,7 +8,6 @@ import { appendTaskLog, type IssueWorkflow, loadWorkflow, readTaskLog, startTask
 import {
   issueDirectory,
   issueKey,
-  legacyIssueKey,
   parseIssueDirectory,
   parseIssueKey,
   taskLogPath,
@@ -56,7 +55,7 @@ test('project issue paths are reversible and do not depend on collision-prone ke
   assert.notEqual(issueKey('a-b/c', '7'), issueKey('a/b-c', '7'))
   assert.equal(workflowPath(root, fixture()), '/state/a-b/c/issue-7/workflow.json')
   for (const invalid of [issueKey('foo', '7'), issueKey('a/b/c', '7')]) {
-    assert.deepEqual([parseIssueKey(invalid), legacyIssueKey(invalid)], [null, null])
+    assert.equal(parseIssueKey(invalid), null)
   }
 })
 
@@ -111,9 +110,9 @@ test('task generations append valid structured JSONL independently and aggregate
   }
 })
 
-test('legacy flat workflow and logs migrate into the project tree without losing lines', async () => {
+test('legacy flat workflows are ignored as-is after the v0.2 clean break', async () => {
   const previousHome = process.env.HOME
-  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-migrate-'))
+  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-legacy-flat-'))
   process.env.HOME = tempHome
   try {
     const root = join(tempHome, '.clickvibe', 'state')
@@ -122,36 +121,13 @@ test('legacy flat workflow and logs migrate into the project tree without losing
     await writeFile(join(root, `${workflow.key}.json`), JSON.stringify(workflow), 'utf8')
     await writeFile(join(root, workflow.key, 'dev.log'), 'first\n[clickvibe] second\n', 'utf8')
 
-    const loaded = await loadWorkflow(workflow.key)
-    assert.equal(loaded?.repoKey, 'a-b/c')
-    const migrated = await readTaskLog(workflow, 'dev', workflow.devTaskId!)
-    assert.deepEqual(migrated.lines, ['first', '[clickvibe] second'])
-    assert.equal(await readFile(workflowPath(root, workflow), 'utf8').then(() => true), true)
-    assert.equal(
-      (await readdir(root)).some((entry) => entry === `${workflow.key}.json` || entry === workflow.key),
-      false,
-    )
-  } finally {
-    if (previousHome === undefined) delete process.env.HOME
-    else process.env.HOME = previousHome
-    await rm(tempHome, { recursive: true, force: true })
-  }
-})
-
-test('a failed legacy migration does not block reads and retries after the source is repaired', async () => {
-  const previousHome = process.env.HOME
-  const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-migrate-retry-'))
-  process.env.HOME = tempHome
-  try {
-    const root = join(tempHome, '.clickvibe', 'state')
-    const workflow = fixture('legacy-retry-7')
-    const legacyPath = join(root, `${workflow.key}.json`)
-    await mkdir(root, { recursive: true })
-    await writeFile(legacyPath, '{broken', 'utf8')
     assert.equal(await loadWorkflow(workflow.key), null)
-    await writeFile(legacyPath, JSON.stringify(workflow), 'utf8')
-    assert.equal((await loadWorkflow(workflow.key))?.repoKey, workflow.repoKey)
-    assert.equal(await readFile(workflowPath(root, workflow), 'utf8').then(() => true), true)
+    assert.equal(
+      await readFile(join(root, `${workflow.key}.json`), 'utf8').then(() => true),
+      true,
+      'the v0.1 flat layout stays untouched',
+    )
+    assert.equal(await readFile(join(root, workflow.key, 'dev.log'), 'utf8'), 'first\n[clickvibe] second\n')
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome

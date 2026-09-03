@@ -1,6 +1,5 @@
-/** DSH-project import use case: validate git origin, then add one config mapping. */
+/** DSH-project import use case: validate git origin, then refuse the v0.1 repos write. */
 import type { Context } from '@deepseek-ai/cordis'
-import { addProjectRepoMapping } from '../infra/project-config.ts'
 import { runCommand } from '../infra/runtime.ts'
 
 export type ProjectImportResult = { ok: true; repoKey: string } | { ok: false; error: string }
@@ -40,11 +39,9 @@ export async function importDshProject(ctx: Context, projectPath: string): Promi
   }
   const repoKey = parseGithubRepoKey(remote)
   if (!repoKey) return { ok: false, error: 'origin 不是可识别的 GitHub 仓库地址' }
-  try {
-    const written = await addProjectRepoMapping(repoKey, path)
-    return written.added ? { ok: true, repoKey } : { ok: false, error: written.error }
-  } catch (reason) {
-    return { ok: false, error: `写入 ~/.clickvibe/config.yaml 失败: ${errorMessage(reason)}` }
+  return {
+    ok: false,
+    error: `项目 ${repoKey} 的 v0.1 repos 写入已随 v0.2 clean break 废弃（ADR-0009、处置表 A2）；v0.2 项目新增入口是显式非目标`,
   }
 }
 

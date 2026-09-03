@@ -41,11 +41,6 @@
     "issueRef": "#131"
   },
   {
-    "path": "src/infra/state.ts",
-    "reason": "Issue #131 slice B adds the typed-write event fields (approvalAttempt marker, delivery publication pending status) to the v0.2 workflow event schema, crossing 500 by 1 line; splitting infra/state is the pre-existing #61 structural-split scope, not this feature.",
-    "issueRef": "#131"
-  },
-  {
     "path": "tests/github-gateway-writes.test.ts",
     "reason": "Issue #131 slice B: the transaction interleaving matrix and every write family's dispatch/readback/predicate contract live in one suite (each test is a design §9/§13 interleaving over the shared fake-reader harness); splitting the matrix from the family specs is deferred.",
     "issueRef": "#131"
