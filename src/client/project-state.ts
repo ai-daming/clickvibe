@@ -1,5 +1,12 @@
 /** Project-list data loading, polling and detail-navigation state. */
 import { applyWorkflowSnapshot } from './workflow-snapshot.ts'
+import { DEPENDENCY_REFRESH_TIMEOUT_MS } from './runtime.ts'
+
+/**
+ * Dependency refreshes walk several GitHub pages behind the gateway's paced
+ * lane; a cold refresh measures ~7s, so a 4s client abort cut off refreshes
+ * the server still completed (#137 post-cutover field report, 2026-09-04).
+ */
 import React from 'react'
 import {
   type ProjectOption,
@@ -87,7 +94,7 @@ export function useProjectPanel() {
         if (response.dependenciesRefreshDue) {
           try {
             if (result) {
-              const next = await fetchIssue(String(result.item.url ?? ''), 4_000)
+              const next = await fetchIssue(String(result.item.url ?? ''), DEPENDENCY_REFRESH_TIMEOUT_MS)
               if (next.ok) {
                 setResult({
                   ...(next.data as NonNullable<typeof result>),
@@ -106,7 +113,7 @@ export function useProjectPanel() {
                     repoAdvance: RepositoryAdvanceSignal | null
                   }
                 | { ok: false; error: string }
-              >('repo/issues', { repoKey }, 4_000)
+              >('repo/issues', { repoKey }, DEPENDENCY_REFRESH_TIMEOUT_MS)
               if (next.ok) {
                 setIssues(next.issues)
                 setFreshness(next.freshness)

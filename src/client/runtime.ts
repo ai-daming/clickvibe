@@ -8,6 +8,13 @@
  */
 import type { Workflow, WorkflowEvent } from './domain.ts'
 
+/**
+ * Dependency refreshes walk several GitHub pages behind the gateway's paced
+ * lane; a cold refresh measures ~7s, so a 4s client abort cut off refreshes
+ * the server still completed (#137 post-cutover field report, 2026-09-04).
+ */
+export const DEPENDENCY_REFRESH_TIMEOUT_MS = 15_000
+
 export type AgentKind = 'codex' | 'claude'
 
 export function latestDevelopmentEvent(events: WorkflowEvent[]): WorkflowEvent | undefined {
