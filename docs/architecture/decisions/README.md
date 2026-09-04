@@ -30,3 +30,5 @@ ADR 记录长期有效的架构取舍，不记录普通实现步骤。每个 ADR
 | [0011](0011-remote-git-coordinator-admission-and-recovery.md) | Accepted | Remote Git Coordinator 的 fetch 单飞、串行化、写凭证与崩溃恢复 |
 | [0012](0012-work-item-contract-canonicalization-and-evidence.md) | Accepted | Work Item 契约规范化、原子 capture 发布、失效接线与诊断证据 |
 | [0013](0013-v02-exit-verification-single-writer-and-cutover-execution.md) | Accepted | v0.2 退出验收：状态类单一写入守卫、三平面终局汇总、provider-neutral 审计、资产处置与离线切换入口 |
+| [0014](0014-autonomous-delivery-control-and-trust.md) | Accepted | v0.3 自主交付控制与信任模型：最小 Policy、DeliveryBasis、WorkflowControlState、CapabilityLease 与纯规则 Loop Guard |
+| [0015](0015-event-envelope-causal-chain.md) | Accepted | v0.3 EventEnvelope 判别式因果链：随 lease/guard 真实生产者落地，包裹既有事件流 |
