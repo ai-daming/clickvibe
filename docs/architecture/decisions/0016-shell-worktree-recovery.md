@@ -138,6 +138,8 @@ Shell 的前台结束不证明任意后台 hook 已退出。自动补存/恢复�
 
 ## 7. 兼容、发布与回滚：revision 2 决定
 
+> 本节的共用状态根目录、替换旧 marker 和“旧版全部拒写”假设由 [ADR-0017](0017-recovery-state-root-isolation.md) 替代；其余范围依 ADR-0017 §8 解释。
+
 旧程序会删除 controllerRecovery、忽略新增准备记录，不能把新增字段称为安全的可选扩展。采用一次离线格式升级，保持现有 Work Item 身份、路径、Git 现场和历史记录，不做 clean break 或丢弃旧 state。
 格式：config schemaVersion=2；state marker schemaVersion=2、generation=v0.2-recovery-1；原 v0.2 journal 保留原样。新增本次离线升级 journal，schemaVersion=1，独立描述 prepared/config-written/marker-written/verified 状态和原/目标文件哈希、备份清单、授权 fingerprint。
 本 ADR 明确授权此次格式设计与升级协议，不能借用 ADR-0009 的一次性 clean-break 授权。合入后实施仍须 impl-gate；现场执行仍须操作者授权本次精确计划。
