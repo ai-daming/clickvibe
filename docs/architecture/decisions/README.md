@@ -30,3 +30,4 @@ ADR 记录长期有效的架构取舍，不记录普通实现步骤。每个 ADR
 | [0011](0011-remote-git-coordinator-admission-and-recovery.md) | Accepted | Remote Git Coordinator 的 fetch 单飞、串行化、写凭证与崩溃恢复 |
 | [0012](0012-work-item-contract-canonicalization-and-evidence.md) | Accepted | Work Item 契约规范化、原子 capture 发布、失效接线与诊断证据 |
 | [0013](0013-v02-exit-verification-single-writer-and-cutover-execution.md) | Accepted | v0.2 退出验收：状态类单一写入守卫、三平面终局汇总、provider-neutral 审计、资产处置与离线切换入口 |
+| [0016](0016-shell-worktree-recovery.md) | Accepted | Shell 原因诊断、工作区准备与认领互斥、持久恢复额度及离线格式升级（#170） |
