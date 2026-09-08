@@ -1,3 +1,7 @@
+import { stopWorkflowPreparationCommand } from '../infra/workflow-persistence.ts'
+import { workflowSeed } from '../infra/workflow-seed.ts'
+import { loadConfig, expandHome } from '../infra/runtime.ts'
+import { parseIssueKey } from '../infra/state-layout.ts'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type { JobId } from '@deepseek-ai/dsh-jobs'
@@ -220,8 +224,32 @@ export async function stopTask(
   ctx: Context,
   payload: unknown,
 ): Promise<{ ok: true; taskId: string; stopped: boolean } | { ok: false; error: string }> {
-  const input = payload as { taskId?: unknown; confirmedStopped?: unknown } | undefined
+  const input = payload as { taskId?: unknown; workflowKey?: unknown; confirmedStopped?: unknown } | undefined
   const taskId = String(input?.taskId ?? '')
+  if (!taskId && typeof input?.workflowKey === 'string') {
+    const coordinates = parseIssueKey(input.workflowKey)
+    if (!coordinates) return { ok: false, error: 'invalid workflow key' }
+    try {
+      const config = await loadConfig(),
+        repoKey = `${coordinates.owner}/${coordinates.repo}`
+      if (!config.repos[repoKey]) return { ok: false, error: '未配置项目' }
+      const current = await loadWorkflow(input.workflowKey)
+      const ownership = current
+        ? observeWorkflowTask(ctx as unknown as TaskOwnershipContext, current)
+        : { state: 'none' as const }
+      if (ownership.state !== 'none' && 'taskId' in ownership)
+        return stopTask(ctx, { taskId: ownership.taskId, confirmedStopped: input.confirmedStopped })
+      const stopped = await stopWorkflowPreparationCommand(
+        current ?? workflowSeed(repoKey, coordinates.issue, expandHome(config.repos[repoKey]), config.worktreeRoot),
+      )
+      if (stopped.preparation?.status === 'dispatched')
+        return { ok: false, error: '已撤销后续启动；Git 命令结束未知，请在宿主核查' }
+      return { ok: true, taskId: '', stopped: true }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
   const confirmedStopped = input?.confirmedStopped === true
   const task = liveTasks.get(taskId)
   if (!task) {

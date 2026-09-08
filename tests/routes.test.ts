@@ -1,3 +1,4 @@
+import { preparationShell } from './helpers/preparation-shell.ts'
 import assert from 'node:assert/strict'
 import { beforeEach } from 'node:test'
 import { resetGithubGatewayOwnerForTests } from '../src/github/gateway-owner.ts'
@@ -6,7 +7,7 @@ import { closeRemoteGitCoordinator, resetRemoteGitCoordinatorForTests } from '..
 beforeEach(async () => {
   resetGithubGatewayOwnerForTests()
   resetRemoteGitCoordinatorForTests()
-  await rm(join(routesTestHome, '.clickvibe', 'state', 'work-items'), { recursive: true, force: true })
+  await rm(join(routesTestHome, '.clickvibe', 'state-recovery-1', 'work-items'), { recursive: true, force: true })
 })
 
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
@@ -28,7 +29,8 @@ import {
   readLogHistory,
   startTaskLog,
 } from '../src/infra/state.ts'
-import { activateV02Home, initFixtureRepository } from './helpers/v02-home.ts'
+import { initFixtureRepository } from './helpers/v02-home.ts'
+import { activateRecoveryHome as activateV02Home } from './helpers/recovery-home.ts'
 import { createFakeJobs } from './fake-jobs.ts'
 import { commitWorkflowFixture } from './workflow-fixture.ts'
 import { fingerprintGithubIssueContract } from '../src/workflow/work-item-contract-repository.ts'
@@ -40,6 +42,7 @@ import { readDiagnosticRecords } from '../src/infra/diagnostic-record.ts'
 const routesOriginalHome = process.env.HOME
 const routesTestHome = await mkdtemp(join(tmpdir(), 'clickvibe-routes-home-'))
 process.env.HOME = routesTestHome
+await activateV02Home(routesTestHome, {})
 after(async () => {
   if (routesOriginalHome === undefined) delete process.env.HOME
   else process.env.HOME = routesOriginalHome
@@ -167,7 +170,7 @@ function createHandler(
         return spec
       },
       run:
-        run ??
+        (run ? preparationShell(run) : undefined) ??
         (() => {
           throw new Error('shell must not run for rejected requests')
         }),
@@ -789,9 +792,13 @@ test('concurrent first-development authorizations freeze exactly one baseline an
     const results = await Promise.all([develop('origin/main', main), develop('origin/release/2.0', release)])
     assert.deepEqual(results.map((result) => result.status).sort(), [200, 400])
     assert.equal(starts, 1)
-    assert.match(results.find((result) => result.status === 400)?.body.error ?? '', /基线已定格/)
+    assert.match(results.find((result) => result.status === 400)?.body.error ?? '', /基线已定格|任务代次已变化/)
     const frozen = await loadWorkflow(issueKey('o/r', '601'))
-    assert.match(frozen?.baseRef ?? '', /^origin\/(?:main|release\/2\.0) @ (?:1111111|2222222)$/)
+    assert.ok(
+      [`origin/main @ ${'1111111'.padEnd(40, '0')}`, `origin/release/2.0 @ ${'2222222'.padEnd(40, '0')}`].includes(
+        frozen?.baseRef ?? '',
+      ),
+    )
     await new Promise((resolve) => setTimeout(resolve, 120))
   } finally {
     if (previousHome === undefined) delete process.env.HOME
@@ -872,7 +879,7 @@ test('an unknown current contract version issues zero authorization and preserve
   })
   const observed = await post(handler, '/clickvibe/api/fetch', { url })
   assert.equal(observed.status, 200)
-  const root = join(routesTestHome, '.clickvibe', 'state')
+  const root = join(routesTestHome, '.clickvibe', 'state-recovery-1')
   const workItem = { provider: 'github', instance: 'github.com', container: 'ai-daming/clickvibe', id: '22' }
   const paths = workItemContractPaths(root, workItem)
   await writeFile(

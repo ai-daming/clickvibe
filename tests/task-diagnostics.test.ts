@@ -3,7 +3,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { activateV02Home, initFixtureRepository } from './helpers/v02-home.ts'
+import { initFixtureRepository } from './helpers/v02-home.ts'
+import { activateRecoveryHome as activateV02Home } from './helpers/recovery-home.ts'
 import { issueKey } from '../src/infra/state-layout.ts'
 import { logTaskDiagnostic } from '../src/infra/task-diagnostics.ts'
 
@@ -26,6 +27,7 @@ test('task diagnostics persist the exact console JSON under the owning issue', a
   const originalWarn = console.warn
   const warnings: string[] = []
   process.env.HOME = tempHome
+  await activateV02Home(tempHome, {})
   console.warn = (message?: unknown) => warnings.push(String(message))
   try {
     const errorStack = 'Error: forced reconcile failure\n    at reconcileOnce (auto-run.ts:1:1)'
@@ -36,7 +38,7 @@ test('task diagnostics persist the exact console JSON under the owning issue', a
       errorStack,
     })
 
-    const path = join(tempHome, '.clickvibe', 'state', 'owner', 'repo', 'issue-123', 'diagnostics.jsonl')
+    const path = join(tempHome, '.clickvibe', 'state-recovery-1', 'owner', 'repo', 'issue-123', 'diagnostics.jsonl')
     const raw = await readEventually(path)
     assert.equal(raw, `${warnings[0]}\n`)
     const persisted = JSON.parse(raw)
@@ -44,7 +46,10 @@ test('task diagnostics persist the exact console JSON under the owning issue', a
     assert.equal(persisted.errorName, 'Error')
     assert.equal(persisted.errorMessage, 'forced reconcile failure')
     assert.equal(persisted.errorStack, errorStack)
-    await assert.rejects(readFile(join(tempHome, '.clickvibe', 'state', 'diagnostics.jsonl'), 'utf8'), /ENOENT/)
+    await assert.rejects(
+      readFile(join(tempHome, '.clickvibe', 'state-recovery-1', 'diagnostics.jsonl'), 'utf8'),
+      /ENOENT/,
+    )
   } finally {
     console.warn = originalWarn
     if (previousHome === undefined) delete process.env.HOME
@@ -67,8 +72,8 @@ test('an oversized diagnostic remains complete when the next record rotates it',
     logTaskDiagnostic('global-oversized', { workflowKey: issueKey('foo', '7'), evidence: 'a'.repeat(1_000) })
     logTaskDiagnostic('global-next', { evidence: 'next' })
 
-    const path = join(tempHome, '.clickvibe', 'state', 'diagnostics.jsonl')
-    const rotatedPath = join(tempHome, '.clickvibe', 'state', 'diagnostics.1.jsonl')
+    const path = join(tempHome, '.clickvibe', 'state-recovery-1', 'diagnostics.jsonl')
+    const rotatedPath = join(tempHome, '.clickvibe', 'state-recovery-1', 'diagnostics.1.jsonl')
     const rotated = await readEventually(rotatedPath)
     const active = await readEventually(path)
     assert.equal(rotated, `${warnings[0]}\n`)

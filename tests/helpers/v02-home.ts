@@ -72,7 +72,7 @@ export async function activateV02Home(
   const label = `activate-${createHash('sha256').update(home).digest('hex').slice(0, 12)}`
   const root = join(home, '.clickvibe')
   await mkdir(root, { recursive: true })
-  const lines = ['repos:']
+  const lines = [Object.keys(repos).length ? 'repos:' : 'repos: {}']
   for (const [repoKey, path] of Object.entries(repos)) lines.push(`  ${repoKey}: ${path}`)
   if (options.worktreeRoot) lines.push(`worktreeRoot: ${options.worktreeRoot}`)
   if (options.fetchTtlSeconds !== undefined) lines.push(`fetchTtlSeconds: ${options.fetchTtlSeconds}`)

@@ -9,7 +9,7 @@ import test from 'node:test'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { createProjectBinding, parseClickVibeConfigV1 } from '../src/infra/project-binding.ts'
 import { readRepositoryId } from '../src/infra/repository-identity.ts'
-import { loadConfigFromHome } from '../src/infra/runtime.ts'
+import { loadV02Config } from '../src/infra/runtime.ts'
 import {
   createOfflineV02GenerationFence,
   createOnlineV02GenerationFence,
@@ -442,3 +442,9 @@ test('verification rejects a fabricated cold state backup when legacy state was 
     await rm(item.home, { recursive: true, force: true })
   }
 })
+
+// Historical v0.2 pairing remains the migration input validator, not the active runtime loader.
+async function loadConfigFromHome(home: string) {
+  const raw = await readFile(join(home, '.clickvibe', 'config.yaml'), 'utf8')
+  return loadV02Config(home, raw, parseYaml(raw))
+}

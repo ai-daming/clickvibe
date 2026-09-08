@@ -1,3 +1,4 @@
+import { automaticRunId } from '../infra/recovery-budget.ts'
 /**
  * clickvibe host half — routes:
  * - `/clickvibe/api/fetch`          — fetch GitHub issue/PR data via gh
@@ -132,6 +133,7 @@ export async function startDevelop(
 > {
   const body = (payload ?? {}) as {
     url?: unknown
+    autoRunId?: unknown
     agent?: unknown
     context?: unknown
     automatic?: unknown
@@ -206,7 +208,9 @@ export async function startDevelop(
   // Automatic selection and dryrun are deliberately pinned to the default sentinel.
   const requestedBaseline = automatic || agent === 'dryrun' ? undefined : body.baseline
   const workflowKey = issueKey(`${parsed.owner}/${parsed.repo}`, parsed.number)
-  const ensured = await withWorkflowLock(workflowKey, () => ensureWorktree(ctx, parsed, requestedBaseline))
+  const ensured = await withWorkflowLock(workflowKey, () =>
+    ensureWorktree(ctx, parsed, requestedBaseline, authorizedContract?.taskStateRevision, automaticRunId(body)),
+  )
   if (!ensured.ok) return ensured
   const { workflow } = ensured
   // issue 已校验为 OPEN(真实 agent 走授权快照,dryrun 走抓取校验)
@@ -294,6 +298,7 @@ export async function startDevelop(
       kind: 'dev',
       taskId: taskIdValue,
       hostJobId: hostReservation.hostJobId,
+      autoRunId: automaticRunId(body),
       agent,
     },
     claimExpectation,

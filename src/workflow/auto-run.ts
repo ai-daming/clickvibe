@@ -1,3 +1,8 @@
+import { enforcePendingControllerFuse } from './auto-run-pending.ts'
+import { isRecoveryBudget } from '../infra/recovery-budget.ts'
+import { randomUUID } from 'node:crypto'
+import { scheduleAutoRunWakeAt } from '../infra/auto-run-scheduler.ts'
+import { commitRecoveryControlCommand } from '../infra/workflow-persistence.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import { ensureWorktree } from '../agent/worktree.ts'
 import type { ContractAuthorizationBinding } from '../infra/contracts.ts'
@@ -31,6 +36,7 @@ import {
   autoRunWakePending,
   AutoRunControllerError,
   clearAutoRunControllerFailure,
+  clearAutoRunTimers,
   completeAutoRun,
   handleAutoRunControllerFailure,
   maintainPausedAutoRun,
@@ -58,9 +64,20 @@ const commandState = (commandStateRoot[commandStateSymbol] as AutoRunCommandStat
 commandStateRoot[commandStateSymbol] = commandState
 const { running, queued } = commandState
 
-async function persistDecision(key: string, decision: Exclude<AutoRunDecision, { kind: 'manual' }>): Promise<void> {
+async function persistDecision(
+  key: string,
+  decision: Exclude<AutoRunDecision, { kind: 'manual' }>,
+  expectedRunId: string,
+): Promise<void> {
   const workflow = await loadWorkflow(key)
-  if (!workflow?.autoRun || workflow.autoRun.status !== 'running') return
+  if (
+    !workflow?.autoRun ||
+    !isRecoveryBudget(workflow.autoRun.recoveryBudget) ||
+    workflow.autoRun.recoveryBudget.runId !== expectedRunId ||
+    workflow.autoRun.recoveryBudget.halted ||
+    workflow.autoRun.status !== 'running'
+  )
+    return
   workflow.autoRun.rounds = decision.rounds
   workflow.autoRun.unresolved = decision.unresolved
   if (decision.kind === 'trigger') workflow.autoRun.step = decision.step
@@ -84,25 +101,41 @@ async function persistDecision(key: string, decision: Exclude<AutoRunDecision, {
   }
 }
 
-async function applyDecision(ctx: Context, key: string, decision: AutoRunDecision): Promise<void> {
+async function applyDecision(
+  ctx: Context,
+  key: string,
+  decision: AutoRunDecision,
+  expectedRunId: string,
+): Promise<void> {
   if (decision.kind === 'manual') return
   if (decision.kind === 'wait') {
     const workflow = await loadWorkflow(key)
-    if (workflow?.autoRun?.status === 'running') {
+    if (workflow?.autoRun?.status === 'running' && workflow.autoRun.recoveryBudget?.runId === expectedRunId) {
       scheduleAutoRunObservation(ctx, key, workflow.autoRun.deadline, requestAutoRunReconcile)
     }
     return
   }
   if (decision.kind === 'pause') {
-    await pauseAutoRun(key, decision.reason, undefined, ctx)
+    await pauseAutoRun(key, decision.reason, undefined, ctx, expectedRunId)
     return
   }
   if (decision.kind === 'complete') {
-    await completeAutoRun(key, decision.reason === 'issue-closed' ? 'Issue 已关闭,自动跑到底结束' : undefined)
+    await completeAutoRun(
+      key,
+      decision.reason === 'issue-closed' ? 'Issue 已关闭,自动跑到底结束' : undefined,
+      expectedRunId,
+    )
     return
   }
   const workflow = await loadWorkflow(key)
-  if (!workflow?.autoRun || workflow.autoRun.status !== 'running') return
+  if (
+    !workflow?.autoRun ||
+    !isRecoveryBudget(workflow.autoRun.recoveryBudget) ||
+    workflow.autoRun.recoveryBudget.runId !== expectedRunId ||
+    workflow.autoRun.recoveryBudget.halted ||
+    workflow.autoRun.status !== 'running'
+  )
+    return
   let result: {
     ok: boolean
     error?: string
@@ -117,25 +150,29 @@ async function applyDecision(ctx: Context, key: string, decision: AutoRunDecisio
     case 'develop':
       result = await startDevelop(
         ctx,
-        { url: workflow.url, agent: workflow.autoRun.devAgent },
+        { url: workflow.url, agent: workflow.autoRun.devAgent, autoRunId: expectedRunId },
         workflow.autoRun.contract ?? null,
       )
       break
     case 'create-pr':
-      result = await createPullRequest(ctx, { url: workflow.url })
+      result = await createPullRequest(ctx, { url: workflow.url, autoRunId: expectedRunId })
       break
     case 'review':
-      result = await startReview(ctx, { url: workflow.url, agent: workflow.autoRun.reviewAgent })
+      result = await startReview(ctx, {
+        url: workflow.url,
+        agent: workflow.autoRun.reviewAgent,
+        autoRunId: expectedRunId,
+      })
       break
     case 'rework':
-      result = await resumeDevelop(ctx, { url: workflow.url })
+      result = await resumeDevelop(ctx, { url: workflow.url, autoRunId: expectedRunId })
       break
     case 'sync':
-      result = await syncWorktree(ctx, { url: workflow.url })
+      result = await syncWorktree(ctx, { url: workflow.url, autoRunId: expectedRunId })
       break
     case 'merge':
     case 'cleanup':
-      result = await mergeAndCleanup(ctx, { url: workflow.url })
+      result = await mergeAndCleanup(ctx, { url: workflow.url, autoRunId: expectedRunId })
       break
   }
   if (!result.ok) {
@@ -163,19 +200,34 @@ async function applyDecision(ctx: Context, key: string, decision: AutoRunDecisio
         error: result.error,
       },
       ctx,
+      expectedRunId,
     )
     return
   }
+  await clearAutoRunControllerFailure(key, expectedRunId)
   if (decision.action === 'create-pr' || decision.action === 'sync') requestAutoRunReconcile(ctx, key)
 }
 
-async function reconcileOnce(ctx: Context, key: string, outcome?: AutoRunTaskOutcome): Promise<void> {
+async function reconcileOnce(
+  ctx: Context,
+  key: string,
+  outcome: AutoRunTaskOutcome | undefined,
+  expectedRunId: string | null,
+): Promise<void> {
   const workflow = await loadWorkflow(key)
-  if (!workflow?.autoRun || workflow.autoRun.status !== 'running') return
+  if (
+    !workflow?.autoRun ||
+    !isRecoveryBudget(workflow.autoRun.recoveryBudget) ||
+    workflow.autoRun.recoveryBudget.runId !== expectedRunId ||
+    workflow.autoRun.recoveryBudget.halted ||
+    workflow.autoRun.status !== 'running'
+  )
+    return
   if (Date.now() >= Date.parse(workflow.autoRun.deadline)) {
-    await pauseAutoRun(key, 'budget-exhausted', undefined, ctx)
+    await pauseAutoRun(key, 'budget-exhausted', undefined, ctx, expectedRunId ?? undefined)
     return
   }
+  if (await enforcePendingControllerFuse(ctx, workflow, requestAutoRunReconcile)) return
   const [observed] = await enrichWorkflowStates(ctx, [workflow], undefined, localGitSnapshots)
   if (!observed) return
   if (!observed.derived) {
@@ -197,9 +249,8 @@ async function reconcileOnce(ctx: Context, key: string, outcome?: AutoRunTaskOut
     issueOpen: observed.issueState !== 'CLOSED',
     ...(outcome ? { taskOutcome: outcome } : {}),
   })
-  if (decision.kind !== 'manual') await persistDecision(key, decision)
-  await applyDecision(ctx, key, decision)
-  await clearAutoRunControllerFailure(key)
+  if (decision.kind !== 'manual') await persistDecision(key, decision, workflow.autoRun.recoveryBudget.runId)
+  await applyDecision(ctx, key, decision, workflow.autoRun.recoveryBudget.runId)
 }
 
 export function requestAutoRunReconcile(ctx: Context, key: string, outcome?: AutoRunTaskOutcome): void {
@@ -210,15 +261,17 @@ export function requestAutoRunReconcile(ctx: Context, key: string, outcome?: Aut
   running.add(key)
   void (async () => {
     let nextOutcome = outcome
+    let expectedRunId: string | null = null
     try {
       do {
         queued.delete(key)
         const current = await loadWorkflow(key)
+        expectedRunId = current?.autoRun?.recoveryBudget?.runId ?? null
         if (current?.autoRun?.status === 'paused' && current.autoRun.pausedReason === 'controller-error') {
-          const maintained = await maintainPausedAutoRun(ctx, key, requestAutoRunReconcile)
-          if (maintained === 'reattached') await reconcileOnce(ctx, key, nextOutcome)
+          const maintained = await maintainPausedAutoRun(ctx, key, requestAutoRunReconcile, expectedRunId)
+          if (maintained === 'reattached') await reconcileOnce(ctx, key, nextOutcome, expectedRunId)
         } else {
-          await reconcileOnce(ctx, key, nextOutcome)
+          await reconcileOnce(ctx, key, nextOutcome, expectedRunId)
         }
         nextOutcome = queued.get(key)
       } while (queued.has(key))
@@ -226,12 +279,22 @@ export function requestAutoRunReconcile(ctx: Context, key: string, outcome?: Aut
       logTaskDiagnostic('auto-run-reconcile-error', {
         workflowKey: key,
         outcome: nextOutcome ?? null,
+        runId: expectedRunId,
         errorName: error instanceof Error ? error.name : typeof error,
         errorMessage: error instanceof Error ? error.message : String(error),
         errorStack: error instanceof Error ? error.stack : null,
       })
       const source = error instanceof AutoRunControllerError ? error.source : 'reconcile'
-      await handleAutoRunControllerFailure(ctx, key, error, source, requestAutoRunReconcile)
+      try {
+        await handleAutoRunControllerFailure(ctx, key, error, source, requestAutoRunReconcile, expectedRunId)
+      } catch (failure) {
+        logTaskDiagnostic('auto-run-checkpoint-failed', {
+          workflowKey: key,
+          runId: expectedRunId,
+          error: failure instanceof Error ? failure.message : String(failure),
+        })
+        scheduleAutoRunWakeAt(ctx, key, Date.now() + 5_000, requestAutoRunReconcile)
+      }
     } finally {
       running.delete(key)
       if (queued.has(key)) {
@@ -274,7 +337,7 @@ export async function startAutoRun(
     return { ok: false, error: 'Issue 契约已变化,拒绝使用旧授权启动自动跑到底' }
   }
   const key = issueKey(`${parsed.owner}/${parsed.repo}`, parsed.number)
-  const ensured = await ensureWorktree(ctx, parsed)
+  const ensured = await ensureWorktree(ctx, parsed, undefined, authorizedContract.taskStateRevision)
   if (!ensured.ok) return ensured
   const ownership = observeWorkflowTask(ctx as unknown as TaskOwnershipContext, ensured.workflow)
   if (ownership.state === 'running') {
@@ -284,7 +347,9 @@ export async function startAutoRun(
     return { ok: false, error: '当前控制器无法确认旧任务生死,为避免双开已禁止启动自动跑到底' }
   }
   const startedAt = new Date().toISOString()
+  const previousRunId = ensured.workflow.autoRun?.recoveryBudget?.runId ?? null
   ensured.workflow.autoRun = {
+    recoveryBudget: { schema: 1, runId: randomUUID(), cooldownUsed: false, halted: false },
     status: 'running',
     ...config,
     startedAt,
@@ -296,11 +361,16 @@ export async function startAutoRun(
     pausedReason: null,
     contract: authorizedContract,
   }
-  await appendEvent(
+  Object.assign(
     ensured.workflow,
-    { kind: 'auto-run', at: startedAt, round: 0, note: '自动跑到底已启动' },
-    workflowRevision(ensured.workflow) ?? 0,
+    await commitRecoveryControlCommand(ensured.workflow, workflowRevision(ensured.workflow), {
+      expectedRunId: previousRunId,
+      next: ensured.workflow.autoRun,
+      authorization: authorizedContract,
+      event: { kind: 'auto-run', at: startedAt, round: 0, note: '自动跑到底已启动' },
+    }),
   )
+  clearAutoRunTimers(key)
   armAutoRunDeadline(ctx, key, ensured.workflow.autoRun.deadline, requestAutoRunReconcile)
   requestAutoRunReconcile(ctx, key)
   return { ok: true, workflowKey: key }
@@ -312,7 +382,7 @@ export async function pauseOrphanedAutoRuns(
 ): Promise<void> {
   for (const candidate of workflows) {
     const autoRun = candidate.autoRun
-    if (!autoRun) continue
+    if (!autoRun || !isRecoveryBudget(autoRun.recoveryBudget) || autoRun.recoveryBudget.halted) continue
     const eligible =
       autoRun.status === 'running' || (autoRun.status === 'paused' && autoRun.pausedReason === 'controller-error')
     if (!eligible || running.has(candidate.key) || autoRunWakePending(candidate.key)) {

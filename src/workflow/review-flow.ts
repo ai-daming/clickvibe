@@ -1,3 +1,4 @@
+import { automaticRunId } from '../infra/recovery-budget.ts'
 /**
  * clickvibe host half — routes:
  * Routes cover state, development, review, resume, sync, task logs and streams.
@@ -62,7 +63,13 @@ export async function startReview(
   ctx: Context,
   payload: unknown,
 ): Promise<{ ok: true; taskId: string } | { ok: false; error: string; controllerError?: true }> {
-  const body = (payload ?? {}) as { url?: unknown; agent?: unknown; context?: unknown; freshSession?: unknown }
+  const body = (payload ?? {}) as {
+    url?: unknown
+    autoRunId?: unknown
+    agent?: unknown
+    context?: unknown
+    freshSession?: unknown
+  }
   const url = String(body.url ?? '').trim()
   const extraContext = typeof body.context === 'string' ? body.context.trim() : ''
   const freshSession = body.freshSession === true
@@ -230,6 +237,7 @@ export async function startReview(
       kind: 'review',
       taskId: live.taskId,
       hostJobId: hostReservation.hostJobId,
+      autoRunId: automaticRunId(body),
       agent,
       resetSession,
       ...(parsed.kind === 'pr' && !workflow.prNumber ? { prNumber: parsed.number } : {}),

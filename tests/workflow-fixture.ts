@@ -1,3 +1,7 @@
+import { homedir } from 'node:os'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
+import { activateRecoveryHome } from './helpers/recovery-home.ts'
 import { randomBytes } from 'node:crypto'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
@@ -48,6 +52,7 @@ export function autoRunWorkflowFixture(
     issueState: 'OPEN',
     baseRef: 'origin/main @ b9c6dea',
     autoRun: {
+      recoveryBudget: { schema: 1, runId: `fixture-${number}`, cooldownUsed: false, halted: false },
       status: 'running',
       autoMerge: false,
       devAgent: 'codex',
@@ -70,6 +75,7 @@ export function autoRunWorkflowFixture(
 
 /** Test setup only: writes an otherwise unreachable persisted lifecycle fixture. */
 export async function commitWorkflowFixture(workflow: IssueWorkflow, expectedRevision: number | null): Promise<void> {
+  if (!existsSync(join(homedir(), '.clickvibe', 'upgrade-recovery-1.json'))) await activateRecoveryHome(homedir(), {})
   const path = statePath(workflow)
   let current: IssueWorkflow | null = null
   try {

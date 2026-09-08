@@ -331,10 +331,14 @@ export async function handleCommand(
     const key = parseUrl(url)
     if (!key) return { status: 400, body: { ok: false, action: 'stop', error: '目标 URL 无效' } }
     const workflow = await loadWorkflow(issueKey(`${key.owner}/${key.repo}`, key.number))
-    if (!workflow) return { status: 400, body: { ok: false, action: 'stop', error: '该 issue 没有运行中的任务' } }
+    if (!workflow)
+      return formatWriteOutcome(
+        'stop',
+        await execute('stop', { workflowKey: issueKey(`${key.owner}/${key.repo}`, key.number) }),
+      )
     const ownership = observeWorkflowTask(ctx as unknown as TaskOwnershipContext, workflow)
     if (ownership.state === 'none') {
-      return { status: 400, body: { ok: false, action: 'stop', error: '该 issue 没有运行中的任务' } }
+      return formatWriteOutcome('stop', await execute('stop', { workflowKey: workflow.key }))
     }
     const taskId = ownership.taskId
     if (ownership.state === 'unknown' && !confirmedStopped) {

@@ -238,3 +238,26 @@ export function observeWorkflowTask(ctx: TaskOwnershipContext, workflow: IssueWo
     (taskId) => liveTasks.get(taskId)?.startedAt ?? null,
   )
 }
+
+/** Preparation admission includes reservations that have not acquired a durable task id yet. */
+export function preparationBlockReason(ctx: TaskOwnershipContext, workflow: IssueWorkflow): string | null {
+  if ([...liveTasks.values()].some((task) => task.workflowKey === workflow.key && !task.closed))
+    return '工作区已有任务占用'
+  if (!ctx.jobs?.list) return '无法确认宿主任务列表，禁止准备工作区'
+  try {
+    const jobs = ctx.jobs.list()
+    if (
+      jobs.some(
+        (job) =>
+          job.kind === 'clickvibe' &&
+          !['completed', 'killed', 'failed'].includes(job.status) &&
+          (typeof job.label !== 'string' || !job.label || job.label.startsWith(`clickvibe:${workflow.key}:`)),
+      )
+    )
+      return '工作区已有宿主任务或未认领占用'
+    const observed = observeWorkflowTask({ jobs: { list: () => jobs, get: (id) => ctx.jobs!.get(id) } }, workflow)
+    return observed.state === 'running' || observed.state === 'unknown' ? '无法确认工作区没有任务占用' : null
+  } catch {
+    return '无法确认宿主任务列表，禁止准备工作区'
+  }
+}

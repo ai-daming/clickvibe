@@ -3,6 +3,21 @@ import { randomBytes } from 'node:crypto'
 import { link, mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
+const pendingReleases = new Map<string, string>()
+
+async function finishPendingRelease(lockPath: string): Promise<void> {
+  const token = pendingReleases.get(lockPath)
+  if (!token) return
+  try {
+    const owner = JSON.parse(await readFile(lockPath, 'utf8')) as { token?: string }
+    if (owner.token === token) await unlink(lockPath)
+    pendingReleases.delete(lockPath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') pendingReleases.delete(lockPath)
+    else throw error
+  }
+}
+
 function processAlive(pid: number): boolean {
   try {
     process.kill(pid, 0)
@@ -25,6 +40,7 @@ async function recoverDeadLock(lockPath: string): Promise<void> {
 
 export async function acquireLinkLock(path: string, timeoutMs = 10_000): Promise<() => Promise<void>> {
   const lockPath = `${path}.lock`
+  await finishPendingRelease(lockPath)
   const token = `${process.pid}-${randomBytes(8).toString('hex')}`
   const candidate = `${lockPath}.${token}.candidate`
   await mkdir(dirname(path), { recursive: true })
@@ -34,7 +50,13 @@ export async function acquireLinkLock(path: string, timeoutMs = 10_000): Promise
     while (true) {
       try {
         await link(candidate, lockPath)
-        return () => unlink(lockPath).catch(() => undefined)
+        let released = false
+        return async () => {
+          if (released) return
+          released = true
+          pendingReleases.set(lockPath, token)
+          await finishPendingRelease(lockPath)
+        }
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
         await recoverDeadLock(lockPath)

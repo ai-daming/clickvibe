@@ -10,7 +10,7 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { appendLog } from '../src/infra/state.ts'
+import { appendDiagnosticLine } from '../src/infra/diagnostic-log-store.ts'
 import {
   assertActiveStateWriteAllowed,
   isV02GenerationViolation,
@@ -58,33 +58,42 @@ const workflow = { key: 'issue-dw8v', repoKey: 'o/r', url: 'https://github.com/o
 
 test('a verified journal with marker admits current-format runtime writers', async () => {
   await withRoots({ journal: { phase: 'verified' }, marker: true }, async (root) => {
-    await appendLog(workflow.key, 'dev', '[clickvibe] post-cutover action note')
+    await appendDiagnosticLine(root, workflow.key, '[clickvibe] post-cutover action note', 4096)
     assertActiveStateWriteAllowed(root)
   })
 })
 
 test('a partial or torn journal keeps every writer fail-closed', async () => {
   for (const phase of ['preparing', 'prepared', 'cutting-over', 'failed', 'unknown']) {
-    await withRoots({ journal: { phase }, marker: false }, async () => {
-      await assert.rejects(appendLog(workflow.key, 'dev', 'x'), (reason: unknown) => isV02GenerationViolation(reason))
+    await withRoots({ journal: { phase }, marker: false }, async (root) => {
+      await assert.rejects(
+        async () => appendDiagnosticLine(root, workflow.key, 'x', 4096),
+        (reason: unknown) => isV02GenerationViolation(reason),
+      )
     })
   }
 })
 
 test('drift between the journal and the marker stays fail-closed', async () => {
-  await withRoots({ journal: { phase: 'verified' }, marker: false }, async () => {
-    await assert.rejects(appendLog(workflow.key, 'dev', 'x'), (reason: unknown) => isV02GenerationViolation(reason))
+  await withRoots({ journal: { phase: 'verified' }, marker: false }, async (root) => {
+    await assert.rejects(
+      async () => appendDiagnosticLine(root, workflow.key, 'x', 4096),
+      (reason: unknown) => isV02GenerationViolation(reason),
+    )
   })
-  await withRoots({ journal: undefined, marker: true }, async () => {
-    await assert.rejects(appendLog(workflow.key, 'dev', 'x'), (reason: unknown) => isV02GenerationViolation(reason))
+  await withRoots({ journal: undefined, marker: true }, async (root) => {
+    await assert.rejects(
+      async () => appendDiagnosticLine(root, workflow.key, 'x', 4096),
+      (reason: unknown) => isV02GenerationViolation(reason),
+    )
   })
 })
 
 test('a rolled-back or clean root keeps the pre-upgrade write semantics', async () => {
-  await withRoots({ journal: { phase: 'rolled_back' }, marker: false }, async () => {
-    await appendLog(workflow.key, 'dev', '[clickvibe] rolled-back root stays writable')
+  await withRoots({ journal: { phase: 'rolled_back' }, marker: false }, async (root) => {
+    await appendDiagnosticLine(root, workflow.key, '[clickvibe] rolled-back root stays writable', 4096)
   })
-  await withRoots({ journal: undefined, marker: false }, async () => {
-    await appendLog(workflow.key, 'dev', '[clickvibe] clean root stays writable')
+  await withRoots({ journal: undefined, marker: false }, async (root) => {
+    await appendDiagnosticLine(root, workflow.key, '[clickvibe] clean root stays writable', 4096)
   })
 })

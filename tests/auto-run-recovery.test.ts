@@ -9,7 +9,7 @@ import { AUTO_RUN_WATCHDOG_NOTE } from '../src/workflow/auto-run-recovery-policy
 import {
   autoRunWakePending,
   clearAutoRunTimers,
-  handleAutoRunControllerFailure,
+  handleAutoRunControllerFailure as handleBoundControllerFailure,
   maintainPausedAutoRun,
   pauseAutoRun,
 } from '../src/workflow/auto-run-recovery.ts'
@@ -27,7 +27,7 @@ async function pollWorkflow(key: string, ready: (value: IssueWorkflow) => boolea
 }
 
 async function diagnosticRecords(tempHome: string, number: string): Promise<Record<string, unknown>[]> {
-  const path = join(tempHome, '.clickvibe', 'state', 'owner', 'repo', `issue-${number}`, 'diagnostics.jsonl')
+  const path = join(tempHome, '.clickvibe', 'state-recovery-1', 'owner', 'repo', `issue-${number}`, 'diagnostics.jsonl')
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const content = await readFile(path, 'utf8').catch(() => '')
     if (content.trim()) return content.trim().split('\n').map(JSON.parse)
@@ -303,3 +303,8 @@ test('rapid rate-limit reconciles during one circuit window defer only once', as
   assert.equal(defers.length, 1, `同一熔断窗口只应记录一次等待,实际 ${defers.length} 次`)
   assert.equal(observed?.autoRun?.status, 'running')
 })
+
+async function handleAutoRunControllerFailure(ctx, key, error, source, wake, runId?: string | null) {
+  const expected = runId === undefined ? ((await loadWorkflow(key))?.autoRun?.recoveryBudget?.runId ?? null) : runId
+  return handleBoundControllerFailure(ctx, key, error, source, wake, expected)
+}

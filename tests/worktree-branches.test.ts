@@ -1,9 +1,11 @@
+import { preparationShell } from './helpers/preparation-shell.ts'
 import assert from 'node:assert/strict'
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { activateV02Home, initFixtureRepository } from './helpers/v02-home.ts'
+import { initFixtureRepository } from './helpers/v02-home.ts'
+import { activateRecoveryHome as activateV02Home } from './helpers/recovery-home.ts'
 import { ensureWorktree } from '../src/agent/worktree.ts'
 import { issueKey, loadWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
 import { commitWorkflowFixture } from './workflow-fixture.ts'
@@ -27,7 +29,7 @@ interface Scenario {
 }
 
 async function runScenario(number: string, scenario: Scenario = {}) {
-  const root = await mkdtemp(join(tmpdir(), 'clickvibe-worktree-branches-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'clickvibe-worktree-branches-')))
   const home = join(root, 'home')
   const repo = join(root, 'repo')
   const worktreeRoot = join(root, 'worktrees')
@@ -37,7 +39,7 @@ async function runScenario(number: string, scenario: Scenario = {}) {
   await mkdir(join(home, '.clickvibe'), { recursive: true })
   await initFixtureRepository(repo)
   await activateV02Home(home, { 'o/r': repo }, { worktreeRoot: worktreeRoot })
-  if (scenario.persistFailure) await chmod(join(home, '.clickvibe', 'state'), 0o500)
+  if (scenario.persistFailure) await chmod(join(home, '.clickvibe', 'state-recovery-1'), 0o500)
   if (scenario.path === 'empty' || scenario.path === 'nonempty') await mkdir(target, { recursive: true })
   if (scenario.path === 'nonempty') await writeFile(join(target, 'owned.txt'), 'keep')
   if (scenario.frozenBase) {
@@ -67,7 +69,14 @@ async function runScenario(number: string, scenario: Scenario = {}) {
     await saveWorkflow(item)
   }
   const commands: string[] = []
+  let staleRemoved = false
   const ctx = {
+    jobs: {
+      list: () => [],
+      get: () => {
+        throw new Error('no task')
+      },
+    },
     shell: {
       resolve(spec: unknown) {
         return spec
@@ -103,20 +112,24 @@ async function runScenario(number: string, scenario: Scenario = {}) {
           }
         }
         if (spec.command === 'git worktree list --porcelain') {
-          const records =
-            typeof scenario.records === 'function'
+          const records = staleRemoved
+            ? ''
+            : typeof scenario.records === 'function'
               ? scenario.records(target, `repo-issue-${number}`)
               : (scenario.records ?? '')
           return { exitCode: 0, stdout: { text: records }, stderr: { text: '' } }
         }
         if (spec.command.includes('refs/heads/') && spec.command.endsWith('; echo $?'))
           return { exitCode: 0, stdout: { text: scenario.branchExists ? '0' : '1' }, stderr: { text: '' } }
-        if (scenario.failRemove && spec.command.startsWith('git worktree remove --force'))
+        if (scenario.failRemove && spec.command.startsWith('git worktree remove --force')) {
+          staleRemoved = true
           return { exitCode: 1, stdout: { text: '' }, stderr: { text: 'stale record already gone' } }
+        }
         return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
       },
     },
   }
+  ctx.shell.run = preparationShell(ctx.shell.run)
   try {
     const result = await ensureWorktree(
       ctx as never,
@@ -128,7 +141,7 @@ async function runScenario(number: string, scenario: Scenario = {}) {
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
-    await chmod(join(home, '.clickvibe', 'state'), 0o700).catch(() => undefined)
+    await chmod(join(home, '.clickvibe', 'state-recovery-1'), 0o700).catch(() => undefined)
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 }
@@ -199,10 +212,14 @@ test('first baseline selection rejects the current issue development branch', as
 test('new worktree creation is rooted at the sampled immutable baseline commit', async () => {
   const created = await runScenario('61', { symbolicRef: 'origin/release/2.0', baseHash: 'abc1234' })
   assert.equal(created.result.ok, true)
-  assert.ok(created.commands.includes("git worktree add -b 'repo-issue-61' '" + created.target + "' 'abc1234'"))
+  assert.ok(
+    created.commands.includes(
+      "git worktree add -b 'repo-issue-61' '" + created.target + "' '" + 'abc1234'.padEnd(40, '0') + "'",
+    ),
+  )
 })
 
-test('repair rollback deletes the branch it created when baseline persistence fails', async () => {
+test('unavailable persistence prevents repair before any Git mutation', async () => {
   const failed = await runScenario('15', {
     path: 'empty',
     branchExists: false,
@@ -210,8 +227,8 @@ test('repair rollback deletes the branch it created when baseline persistence fa
     records: (target, branch) => `worktree ${target}\nHEAD stale111\nbranch refs/heads/${branch}\n\n`,
   })
   assert.equal(failed.result.ok, false)
-  assert.ok(failed.commands.some((command) => command.startsWith('git worktree add -b')))
-  assert.ok(failed.commands.some((command) => command.startsWith('git branch -D')))
+  assert.ok(!failed.commands.some((command) => command.startsWith('git worktree add -b')))
+  assert.ok(!failed.commands.some((command) => command.startsWith('git branch -D')))
 })
 
 test('worktree preparation executes reuse, detached attach and existing-branch attach recoveries', async () => {

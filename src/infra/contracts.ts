@@ -1,3 +1,4 @@
+import { isRecoveryBudget, type RecoveryBudget } from './recovery-budget.ts'
 /** Plain-data contracts shared by adapters and upper-layer workflows. */
 export type AgentKind = 'codex' | 'claude'
 
@@ -64,6 +65,8 @@ export interface WorkItemContractSnapshot {
 
 /** The only Work Item contract authority carried by a privileged capability. */
 export interface ContractAuthorizationBinding {
+  /** Start permission is revoked when a stop advances this existing workflow generation. */
+  taskStateRevision?: number
   workItem: WorkItemIdentity
   fingerprint: WorkItemContractSnapshot['fingerprint']
 }
@@ -200,6 +203,7 @@ export interface AutoRunState {
   /** Contract authority for every later privileged stage in this run. */
   contract?: ContractAuthorizationBinding
   /** Durable scheduler checkpoint; git/GitHub facts remain the workflow truth. */
+  recoveryBudget?: RecoveryBudget
   controllerRecovery?: AutoRunControllerRecovery
 }
 
@@ -228,7 +232,9 @@ export function isAutoRunState(value: unknown): value is AutoRunState {
       recovery.consecutive > 0 &&
       typeof recovery.fingerprint === 'string' &&
       typeof recovery.retryAt === 'string' &&
-      typeof recovery.lastFailureAt === 'string')
+      Number.isFinite(Date.parse(recovery.retryAt)) &&
+      typeof recovery.lastFailureAt === 'string' &&
+      Number.isFinite(Date.parse(recovery.lastFailureAt)))
   return (
     (state.status === 'running' || state.status === 'paused' || state.status === 'completed') &&
     (state.devAgent === 'codex' || state.devAgent === 'claude') &&
@@ -238,9 +244,12 @@ export function isAutoRunState(value: unknown): value is AutoRunState {
     Number.isFinite(state.budgetHours) &&
     Number(state.budgetHours) > 0 &&
     typeof state.startedAt === 'string' &&
+    Number.isFinite(Date.parse(state.startedAt)) &&
     typeof state.deadline === 'string' &&
+    Number.isFinite(Date.parse(state.deadline)) &&
     Array.isArray(state.unresolved) &&
     validRecovery &&
+    (state.recoveryBudget === undefined || isRecoveryBudget(state.recoveryBudget)) &&
     validContract
   )
 }

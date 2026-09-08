@@ -3,7 +3,8 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { activateV02Home, initFixtureRepository } from './helpers/v02-home.ts'
+import { initFixtureRepository } from './helpers/v02-home.ts'
+import { activateRecoveryHome as activateV02Home } from './helpers/recovery-home.ts'
 import { mergingWorkflows } from '../src/infra/runtime.ts'
 import { issueKey, loadWorkflow, type IssueWorkflow } from '../src/infra/state.ts'
 import {
@@ -141,6 +142,8 @@ test('merge execution validates URL, exclusivity, workflow, config, worktree roo
     const repo = join(home, 'repo')
     const root = join(home, 'worktrees')
     await initFixtureRepository(repo)
+    // The next validation case has a different config generation; build a fresh paired fixture.
+    await rm(join(home, '.clickvibe'), { recursive: true, force: true })
     await activateV02Home(home, { 'o/r': repo }, { worktreeRoot: root })
     await saveWorkflow(workflow('2', { worktree: join(home, 'outside') }))
     assert.match(

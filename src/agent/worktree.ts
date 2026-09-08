@@ -1,195 +1,225 @@
-/**
- * clickvibe host half — routes:
- * - `/clickvibe/api/fetch`          — fetch GitHub issue/PR data via gh
- * - `/clickvibe/api/command`        — text-command entry (issue #13): conversation
- *                                      triggers reuse the same action handlers below
- * - `/clickvibe/api/state`          — restore panel context (all workflows)
- * - `/clickvibe/api/develop`        — start dev: worktree+branch+agent
- * - `/clickvibe/api/develop/poll`   — incremental dev log/status (JSON)
- * - `/clickvibe/api/history`        — complete disk-backed task history
- * - `/clickvibe/api/stream`         — SSE live status stream for a task
- * - `/clickvibe/api/review`         — review the dev branch with codex/claude
- * - `/clickvibe/api/resume`         — resume an interrupted dev session
- * - `/clickvibe/api/sync`           — sync the worktree with the remote base (issue #5)
- *
- * Workflow per issue (persisted under ~/.clickvibe/state/):
- *   developing → review-ready → reviewing → passed
- *                      ↑                  │
- *                      └── rework ────────┘
- */
-
+import { assertAutomaticRunAdmission } from '../infra/recovery-budget.ts'
+import { ShellCommandError } from '../infra/shell-failure.ts'
+import { workflowSeed } from '../infra/workflow-seed.ts'
+/** ADR-0016: worktree writes and their durable intent share one workflow command domain. */
+import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { basename, dirname, join, resolve } from 'node:path'
+import { access, constants, mkdir, readdir, realpath, rmdir } from 'node:fs/promises'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { remoteFetch } from '../infra/remote-git.ts'
 import { notifyLocalGitMutation } from '../infra/local-git-snapshot.ts'
 import { buildWorktreeAddCommand, decideWorktreeRecovery, shellQuote } from '../infra/develop-core.ts'
-import { expandHome, loadConfig, runCommand } from '../infra/runtime.ts'
-import {
-  appendLog,
-  commitWorkflowMetadata,
-  type IssueWorkflow,
-  issueKey,
-  loadWorkflow,
-  WorkflowConflictError,
-  workflowRevision,
-} from '../infra/state.ts'
+import { expandHome, loadConfig, runCommand, type ClickVibeConfig } from '../infra/runtime.ts'
+import { appendLog, type IssueWorkflow, issueKey, stateDir } from '../infra/state.ts'
+import { observeWorkflowTask, preparationBlockReason, type TaskOwnershipContext } from '../infra/task-ownership.ts'
+import { withWorkflowPreparationCommand } from '../infra/workflow-persistence.ts'
+import { validPreparation, type PreparationTransaction, type WorktreePreparation } from '../infra/preparation-record.ts'
+import { runtimeIdentity } from '../infra/task-diagnostics.ts'
 import { resolveSelectedRemoteBase } from './baseline.ts'
 
-/** Create (or reuse) the workflow record and the worktree+branch. */
+type ParsedIssue = { owner: string; repo: string; number: string }
+type PreparedResult =
+  | { ok: true; workflow: IssueWorkflow; worktree: string; branch: string }
+  | { ok: false; error: string }
+// A settled local command may be recovered after a disk error. A restarted process has no such proof.
+const endedCommands = new Map<string, true>()
+
 export async function ensureWorktree(
   ctx: Context,
-  parsed: { owner: string; repo: string; number: string },
+  parsed: ParsedIssue,
   requestedBaseline?: unknown,
-): Promise<{ ok: true; workflow: IssueWorkflow; worktree: string; branch: string } | { ok: false; error: string }> {
-  let config: Awaited<ReturnType<typeof loadConfig>>
+  authorizedTaskStateRevision?: number,
+  autoRunId?: string,
+): Promise<PreparedResult> {
+  let config: ClickVibeConfig
   try {
     config = await loadConfig()
-  } catch (reason) {
-    // Strict v0.2 pairing failures (e.g. a vanished clone) must surface as a
-    // readable refusal, not an unhandled crash (错误不埋葬).
-    return { ok: false, error: reason instanceof Error ? reason.message : String(reason) }
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) }
   }
   const repoKey = `${parsed.owner}/${parsed.repo}`
-  const repoPath = config.repos[repoKey]
-  if (!repoPath) {
-    return { ok: false, error: `本地未配置仓库 ${repoKey},请在 ~/.clickvibe/config.yaml 的 repos 中添加映射` }
-  }
-  const expandedRepo = expandHome(repoPath)
-  if (!existsSync(expandedRepo)) {
-    return { ok: false, error: `仓库路径不存在: ${expandedRepo}` }
-  }
-
-  const key = issueKey(repoKey, parsed.number)
-  let workflow = await loadWorkflow(key)
-  const project = basename(expandedRepo)
-  const branch = `${project}-issue-${parsed.number}`
-  const worktree = join(config.worktreeRoot, project, branch)
-
-  if (!workflow) {
-    workflow = {
-      key,
-      url: `https://github.com/${repoKey}/issues/${parsed.number}`,
-      repoKey,
-      worktree,
-      branch,
-      stage: 'idle',
-      devAgent: null,
-      devTaskId: null,
-      devSessionId: null,
-      devSessionAgent: null,
-      devInterrupted: false,
-      reviewAgent: null,
-      reviewTaskId: null,
-      reviewSessionId: null,
-      reviewSessionAgent: null,
-      reviewResult: null,
-      prNumber: null,
-      issueState: 'OPEN',
-      baseRef: null,
-      updatedAt: Date.now(),
-      events: [],
-    }
-  }
-  // 旧状态文件兜底:裸 session id 不猜 agent 归属,后续 resume 会按无效处理。
-  if (!Array.isArray(workflow.events)) workflow.events = []
-  if (workflow.reviewSessionId === undefined) workflow.reviewSessionId = null
-  if (workflow.devSessionAgent === undefined) workflow.devSessionAgent = null
-  if (workflow.reviewSessionAgent === undefined) workflow.reviewSessionAgent = null
-  if (workflow.prNumber === undefined) workflow.prNumber = null
-  if (workflow.issueState === undefined) workflow.issueState = 'OPEN'
-  if (workflow.baseRef === undefined) workflow.baseRef = null
-  // 校正路径字段(配置可能变化)
-  workflow.worktree = worktree
-  workflow.branch = branch
-
-  // 新分支只能从 fetch 后的远端默认分支创建,不能继承配置仓库碰巧停留的 HEAD。
-  const policy = { mode: 'danger-full-access' as const, workspaceRoot: expandedRepo }
+  const repo = config.repos[repoKey]
+  if (!repo) return { ok: false, error: `本地未配置仓库 ${repoKey}` }
+  const expandedRepo = expandHome(repo)
+  if (!existsSync(expandedRepo)) return { ok: false, error: `仓库路径不存在: ${expandedRepo}` }
   await remoteFetch(ctx, {
     repoKey,
     workdir: expandedRepo,
-    sandboxPolicy: policy,
+    sandboxPolicy: { mode: 'danger-full-access', workspaceRoot: expandedRepo },
     timeoutMs: 60_000,
   })
-  let defaultRemoteBase = await runCommand(ctx, 'git symbolic-ref --quiet --short refs/remotes/origin/HEAD', {
-    workdir: expandedRepo,
-    sandboxPolicy: policy,
-    timeoutMs: 10_000,
-  }).catch(() => '')
-  if (!defaultRemoteBase) {
-    const hasMain = await runCommand(
-      ctx,
-      `git show-ref --verify --quiet ${shellQuote('refs/remotes/origin/main')}; echo $?`,
-      { workdir: expandedRepo, sandboxPolicy: policy, timeoutMs: 10_000 },
+  const seed = workflowSeed(repoKey, parsed.number, expandedRepo, config.worktreeRoot)
+  try {
+    return await withWorkflowPreparationCommand(seed, (transaction) =>
+      prepare(
+        ctx,
+        parsed,
+        config,
+        expandedRepo,
+        seed,
+        transaction,
+        requestedBaseline,
+        authorizedTaskStateRevision,
+        autoRunId,
+      ),
     )
-    if (hasMain.trim() !== '0') return { ok: false, error: '无法确定 origin 默认分支,请设置 origin/HEAD' }
-    defaultRemoteBase = 'origin/main'
+  } catch (error) {
+    return {
+      ok: false,
+      error: `工作区准备或持久锁失败，现场已保留: ${error instanceof Error ? error.message : String(error)}`,
+    }
+  }
+}
+
+async function prepare(
+  ctx: Context,
+  parsed: ParsedIssue,
+  config: ClickVibeConfig,
+  repo: string,
+  seed: IssueWorkflow,
+  transaction: PreparationTransaction,
+  requestedBaseline: unknown,
+  authorizedTaskStateRevision?: number,
+  autoRunId?: string,
+): Promise<PreparedResult> {
+  let workflow = transaction.current() ?? seed
+  assertAutomaticRunAdmission(workflow, autoRunId, Date.now())
+  const revision = workflow.taskStateRevision ?? 0
+  if (
+    (authorizedTaskStateRevision !== undefined && authorizedTaskStateRevision !== revision) ||
+    (workflow.devInterrupted && authorizedTaskStateRevision === undefined)
+  )
+    return { ok: false, error: '启动授权对应的任务代次已变化或已停止，请重新授权' }
+  const blocked = preparationBlockReason(ctx as unknown as TaskOwnershipContext, workflow)
+  if (blocked) return { ok: false, error: blocked }
+  const ownership = observeWorkflowTask(ctx as unknown as TaskOwnershipContext, workflow)
+  if (ownership.state === 'running' || ownership.state === 'unknown')
+    return { ok: false, error: '工作区准备被当前任务占用或归属未知阻止' }
+  if (JSON.stringify(await loadConfig()) !== JSON.stringify(config))
+    return { ok: false, error: '仓库配置已变化，请重新授权' }
+  const { worktree, branch } = seed
+  const target = await canonicalWorktreePath(worktree)
+  const policy = { mode: 'danger-full-access' as const, workspaceRoot: repo }
+  const deadline = Date.now() + 120_000
+  const workItem = { provider: 'github', instance: 'github.com', container: seed.repoKey, id: parsed.number }
+  const command = async (text: string, workdir = repo, operation = 'worktree-observe') => {
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) throw new Error('worktree preparation deadline exceeded')
+    const controller = new AbortController()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        runCommand(ctx, text, {
+          workdir,
+          sandboxPolicy: policy,
+          timeoutMs: Math.min(60_000, remaining),
+          signal: controller.signal,
+          diagnostic: { operation, workItem, root: stateDir(), maxBytes: config.diagnosticsMaxBytes },
+        }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            controller.abort()
+            reject(new Error('worktree preparation deadline exceeded; command outcome unknown'))
+          }, remaining)
+        }),
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+  const common = await command('git rev-parse --git-common-dir', repo, 'worktree-common-dir')
+  const commonDir = await realpath(resolve(repo, common))
+  let prior = workflow.preparation
+  if (
+    prior &&
+    prior.taskStateRevision !== revision &&
+    authorizedTaskStateRevision === revision &&
+    ['prepared', 'settled', 'verified'].includes(prior.status)
+  )
+    prior = { ...prior, taskStateRevision: revision }
+  if (
+    prior &&
+    (!validPreparation(prior) ||
+      prior.status === 'blocked' ||
+      prior.taskStateRevision !== (workflow.taskStateRevision ?? 0) ||
+      prior.worktree !== target ||
+      prior.branch !== branch ||
+      prior.commonDir !== commonDir)
+  )
+    return { ok: false, error: 'worktree preparation 无法证明现场归属；保留并等待人工重新授权' }
+  if (
+    prior?.status === 'dispatched' &&
+    (prior.runtimeInstanceId !== runtimeIdentity.runtimeInstanceId || !endedCommands.has(prior.attemptId))
+  )
+    return { ok: false, error: 'worktree preparation 命令结束未知；保留现场，禁止重放' }
+  let defaultBase = await command(
+    'git symbolic-ref --quiet --short refs/remotes/origin/HEAD',
+    repo,
+    'worktree-default-base',
+  ).catch(() => '')
+  if (!defaultBase) {
+    if (
+      (
+        await command("git show-ref --verify --quiet 'refs/remotes/origin/main'; echo $?", repo, 'worktree-main-exists')
+      ).trim() !== '0'
+    )
+      return { ok: false, error: '无法确定 origin 默认分支,请设置 origin/HEAD' }
+    defaultBase = 'origin/main'
   }
   let remoteBase: string
   try {
     remoteBase = resolveSelectedRemoteBase({
       requested: requestedBaseline,
-      frozen: workflow.baseRef,
-      defaultRemoteBase,
+      frozen: workflow.baseRef ?? (prior ? `${prior.baseRef} @ ${prior.baseOid}` : null),
+      defaultRemoteBase: defaultBase,
     })
   } catch (error) {
     return { ok: false, error: String(error instanceof Error ? error.message : error) }
   }
-  const firstBaseSelection = !workflow.baseRef
-  const explicitCustomBase =
-    firstBaseSelection &&
-    requestedBaseline !== undefined &&
-    requestedBaseline !== null &&
-    remoteBase !== defaultRemoteBase
-  if (firstBaseSelection && remoteBase === `origin/${branch}`) {
+  const first = !workflow.baseRef
+  if (first && remoteBase === `origin/${branch}`)
     return { ok: false, error: `开发基线不能选择当前 Issue 开发分支 ${remoteBase}` }
-  }
-  const remoteBaseExists =
+  const baseExists =
     (
-      await runCommand(ctx, `git show-ref --verify --quiet ${shellQuote(`refs/remotes/${remoteBase}`)}; echo $?`, {
-        workdir: expandedRepo,
-        sandboxPolicy: policy,
-        timeoutMs: 10_000,
-      })
+      await command(
+        `git show-ref --verify --quiet ${shellQuote(`refs/remotes/${remoteBase}`)}; echo $?`,
+        repo,
+        'worktree-base-exists',
+      )
     ).trim() === '0'
-  if (firstBaseSelection && !remoteBaseExists) {
-    return { ok: false, error: `开发基线不存在或未 fetch: ${remoteBase}` }
-  }
-  const remoteBaseHash = firstBaseSelection
-    ? await runCommand(ctx, `git rev-parse --short ${shellQuote(remoteBase)}`, {
-        workdir: expandedRepo,
-        sandboxPolicy: policy,
-        timeoutMs: 10_000,
-      })
-    : null
-
-  if (firstBaseSelection) {
-    if (!remoteBaseHash) return { ok: false, error: `无法读取开发基线提交: ${remoteBase}` }
-  }
-
-  // 幂等建 worktree:用完整恢复决策(处理 reuse/attach/conflict/重建),
-  // 而不是简单判断目录是否存在。git 操作需要无沙箱(写主仓库 .git/refs)。
-  const listOut = await runCommand(ctx, 'git worktree list --porcelain', {
-    workdir: expandedRepo,
-    sandboxPolicy: policy,
-    timeoutMs: 15000,
-  })
-  const records = parseWorktreeList(listOut)
-  const normalizedTarget = resolve(worktree)
-  const atPath = records.find((r) => r.path === normalizedTarget)
+  if (first && !baseExists && !prior) return { ok: false, error: `开发基线不存在或未 fetch: ${remoteBase}` }
+  const baseOid =
+    prior?.baseOid ??
+    (first
+      ? await command(`git rev-parse ${shellQuote(remoteBase)}`, repo, 'worktree-base-oid')
+      : workflow.baseRef!.split(' @ ')[1])
+  // Old frozen baselines can contain short OIDs; expand through Git before persisting new authority.
+  const fullBase = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(baseOid ?? '')
+    ? baseOid!
+    : await command(`git rev-parse ${shellQuote(baseOid || remoteBase)}`, repo, 'worktree-base-oid')
+  if (!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(fullBase))
+    return { ok: false, error: `无法读取开发基线提交: ${remoteBase}` }
+  const observeRegistrations = async () =>
+    Promise.all(
+      parseWorktreeList(await command('git worktree list --porcelain', repo, 'worktree-list')).map(async (entry) => ({
+        ...entry,
+        path: await canonicalWorktreePath(entry.path),
+      })),
+    )
+  const records = await observeRegistrations()
+  const atPath = records.find((r) => r.path === target)
   const atBranch = records.find((r) => r.branch === branch)
-  const pathExists = existsSync(normalizedTarget)
-  let pathEmpty = false
-  if (pathExists) {
-    const { readdir } = await import('node:fs/promises')
-    pathEmpty = (await readdir(normalizedTarget)).length === 0
-  }
-  const branchOut = await runCommand(
-    ctx,
-    `git show-ref --verify --quiet ${shellQuote(`refs/heads/${branch}`)}; echo $?`,
-    { workdir: expandedRepo, sandboxPolicy: policy, timeoutMs: 15000 },
-  )
-  const branchExists = branchOut.trim() === '0'
+  const pathExists = existsSync(target)
+  const pathEmpty = pathExists && (await readdir(target)).length === 0
+  const branchExists =
+    (
+      await command(
+        `git show-ref --verify --quiet ${shellQuote(`refs/heads/${branch}`)}; echo $?`,
+        repo,
+        'worktree-branch-exists',
+      )
+    ).trim() === '0'
   const recovery = decideWorktreeRecovery({
     targetBranch: branch,
     pathExists,
@@ -198,163 +228,139 @@ export async function ensureWorktree(
     branchExists,
     branchWorktree: atBranch?.path ?? null,
   })
-  const detachedHead =
-    recovery.kind === 'attach-detached' || recovery.kind === 'attach-existing'
-      ? await runCommand(ctx, 'git rev-parse HEAD', {
-          workdir: normalizedTarget,
-          timeoutMs: 10_000,
-          sandboxPolicy: policy,
-        })
-      : null
-
   if (recovery.kind === 'conflict') {
     await appendLog(workflow.key, 'dev', `[clickvibe] worktree 冲突: ${recovery.reason}`)
     return { ok: false, error: `worktree 冲突: ${recovery.reason}` }
   }
-
-  if (firstBaseSelection && (branchExists || recovery.kind === 'attach-detached')) {
-    if (explicitCustomBase) {
+  const oldHead = branchExists
+    ? await command(`git rev-parse ${shellQuote(`refs/heads/${branch}`)}`, repo, 'worktree-branch-head')
+    : atPath?.branch === 'HEAD'
+      ? await command('git rev-parse HEAD', target, 'worktree-head')
+      : fullBase
+  if (first && (branchExists || recovery.kind === 'attach-detached') && !prior) {
+    if (requestedBaseline !== undefined && requestedBaseline !== null && remoteBase !== defaultBase)
       return {
         ok: false,
-        error: `既有开发分支 ${branch} 缺少冻结基线记录,无法证明从所选基线 ${remoteBase} 创建;拒绝定格或暗改 worktree`,
+        error: `既有开发分支 ${branch} 缺少冻结基线记录,无法证明从所选基线创建;拒绝定格或暗改 worktree`,
       }
-    }
-    const candidate = branchExists ? `refs/heads/${branch}` : 'HEAD'
-    const candidateWorkdir = branchExists ? expandedRepo : normalizedTarget
-    const compatible = await runCommand(
-      ctx,
-      `git merge-base --is-ancestor ${shellQuote(remoteBaseHash ?? remoteBase)} ${shellQuote(candidate)}`,
-      { workdir: candidateWorkdir, timeoutMs: 10_000, sandboxPolicy: policy },
+    const compatible = await command(
+      `git merge-base --is-ancestor ${shellQuote(fullBase)} ${shellQuote(oldHead)}`,
+    ).then(
+      () => true,
+      () => false,
     )
-      .then(() => true)
-      .catch(() => false)
-    if (!compatible) {
-      return { ok: false, error: `既有开发分支 ${branch} 不包含所选基线 ${remoteBase},拒绝定格或暗改 worktree` }
-    }
+    if (!compatible) return { ok: false, error: `既有开发分支 ${branch} 不包含所选基线 ${remoteBase}` }
   }
-
-  if (recovery.kind === 'reuse') {
-    await appendLog(workflow.key, 'dev', `[clickvibe] worktree 已存在,复用`)
-  } else if (recovery.kind === 'attach-detached') {
-    await runCommand(ctx, `git switch -c ${shellQuote(branch)}`, {
-      workdir: normalizedTarget,
-      timeoutMs: 60000,
-      sandboxPolicy: policy,
-    })
-    notifyLocalGitMutation({ repoKey, worktreePath: worktree }, 'worktree-mutation', 'ensureWorktree')
-    await appendLog(workflow.key, 'dev', `[clickvibe] 已为 detached worktree 创建目标分支`)
-  } else if (recovery.kind === 'attach-existing') {
-    await runCommand(ctx, `git switch ${shellQuote(branch)}`, {
-      workdir: normalizedTarget,
-      timeoutMs: 60000,
-      sandboxPolicy: policy,
-    })
-    notifyLocalGitMutation({ repoKey, worktreePath: worktree }, 'worktree-mutation', 'ensureWorktree')
-    await appendLog(workflow.key, 'dev', `[clickvibe] 已将 detached worktree 切换到现有目标分支`)
-  } else if (recovery.kind === 'repair') {
-    if (!remoteBaseExists && !branchExists) return { ok: false, error: `基线分支已不存在: ${remoteBase}` }
-    // stale 注册:先清理 git 注册记录(路径为空时可顺带删空目录),再重建
-    await appendLog(workflow.key, 'dev', `[clickvibe] 修复 stale 注册: ${recovery.reason}`)
-    if (pathExists && pathEmpty) {
-      const { rmdir } = await import('node:fs/promises')
-      await rmdir(normalizedTarget).catch(() => {
-        /* 非空时忽略,交给 git */
-      })
-    }
-    await runCommand(ctx, `git worktree remove --force ${shellQuote(normalizedTarget)}`, {
-      workdir: expandedRepo,
-      timeoutMs: 60000,
-      sandboxPolicy: policy,
-    }).catch(() => {
-      /* 记录已不在也忽略 */
-    })
-    const { mkdir } = await import('node:fs/promises')
-    await mkdir(dirname(normalizedTarget), { recursive: true })
-    const command = buildWorktreeAddCommand({
-      path: normalizedTarget,
-      branch,
-      branchExists,
-      remoteBase: remoteBaseHash ?? remoteBase,
-    })
-    await runCommand(ctx, command, { workdir: expandedRepo, timeoutMs: 60000, sandboxPolicy: policy })
-    notifyLocalGitMutation({ repoKey, worktreePath: worktree }, 'worktree-mutation', 'ensureWorktree')
-    await appendLog(workflow.key, 'dev', `[clickvibe] stale worktree 已重建`)
-  } else {
-    // add-new-branch / add-existing-branch:确保父目录存在后创建/复用
-    const { mkdir } = await import('node:fs/promises')
-    await mkdir(dirname(normalizedTarget), { recursive: true })
-    if (!remoteBaseExists && recovery.kind === 'add-new-branch') {
-      return { ok: false, error: `基线分支已不存在: ${remoteBase}` }
-    }
-    const command = buildWorktreeAddCommand({
-      path: normalizedTarget,
-      branch,
-      branchExists: recovery.kind !== 'add-new-branch',
-      remoteBase: remoteBaseHash ?? remoteBase,
-    })
-    await runCommand(ctx, command, { workdir: expandedRepo, timeoutMs: 60000, sandboxPolicy: policy })
-    notifyLocalGitMutation({ repoKey, worktreePath: worktree }, 'worktree-mutation', 'ensureWorktree')
-    await appendLog(
-      workflow.key,
-      'dev',
-      recovery.kind === 'add-new-branch'
-        ? `[clickvibe] worktree 与分支创建完成`
-        : `[clickvibe] 已从现有分支恢复 worktree`,
+  const expectedHead = prior && prior.status !== 'verified' ? prior.expectedHead : oldHead
+  let record: WorktreePreparation =
+    prior && prior.status !== 'verified'
+      ? prior
+      : {
+          schema: 1,
+          attemptId: randomUUID(),
+          runtimeInstanceId: runtimeIdentity.runtimeInstanceId,
+          taskStateRevision: workflow.taskStateRevision ?? 0,
+          commonDir,
+          worktree: target,
+          branch,
+          baseRef: remoteBase,
+          baseOid: fullBase,
+          expectedHead,
+          status: 'prepared',
+        }
+  const persist = async (status: WorktreePreparation['status'], baseRef?: string) => {
+    record = { ...record, status }
+    workflow = await transaction.commit({ preparation: record, worktree, branch, ...(baseRef ? { baseRef } : {}) })
+  }
+  const readback = async () => {
+    const registered = (await observeRegistrations()).find((r) => r.path === target)
+    if (
+      registered?.branch !== branch ||
+      (await command('git rev-parse HEAD', target, 'worktree-head')) !== expectedHead
     )
+      throw new Error('worktree preparation Git 回读不符；保留现场')
+    if (prior && prior.status !== 'verified' && (await command('git status --porcelain', target, 'worktree-status')))
+      throw new Error('worktree preparation 现场出现额外改动；保留现场')
   }
-
-  // startDevelop holds the workflow lock across worktree preparation and task
-  // reservation. Freeze the baseline only after preparation succeeds. The
-  // revision-bound metadata commit is the sole persistence point, so another
-  // controller cannot silently replace the selected base or lifecycle facts.
-  if (firstBaseSelection) workflow.baseRef = `${remoteBase} @ ${remoteBaseHash}`
+  const write = async (text: string, workdir: string, operation: string) => {
+    assertAutomaticRunAdmission(workflow, autoRunId, Date.now())
+    endedCommands.delete(record.attemptId)
+    await persist('dispatched')
+    await command(text, workdir, operation)
+    endedCommands.set(record.attemptId, true)
+    notifyLocalGitMutation({ repoKey: seed.repoKey, worktreePath: target }, 'worktree-mutation', 'ensureWorktree')
+    await persist('settled')
+  }
   try {
-    Object.assign(
-      workflow,
-      await commitWorkflowMetadata(workflow, workflowRevision(workflow), {
-        worktree: workflow.worktree,
-        branch: workflow.branch,
-        baseRef: workflow.baseRef,
-      }),
-    )
-  } catch (error) {
-    if (firstBaseSelection) {
-      const rollbackErrors: string[] = []
-      const rollback = async (command: string, workdir: string) => {
+    if (prior && prior.status !== 'prepared' && prior.status !== 'verified') {
+      await readback()
+    } else {
+      await persist('prepared')
+      if (recovery.kind !== 'reuse') {
+        const hookWorkdir = recovery.kind === 'attach-detached' || recovery.kind === 'attach-existing' ? target : repo
+        const hooks = await command('git rev-parse --git-path hooks', hookWorkdir, 'worktree-hooks')
+        if (!isAbsolute(hooks) && hooks !== '.git/hooks')
+          throw new Error('相对 Git hooks 路径无法证明新工作区没有后台写入；请人工确认')
+        if (!hooks) throw new Error('无法确认 Git hooks；保留现场')
+        const hook = join(isAbsolute(hooks) ? hooks : resolve(hookWorkdir, hooks), 'post-checkout')
+        let executable = false
         try {
-          await runCommand(ctx, command, { workdir, timeoutMs: 60_000, sandboxPolicy: policy })
-        } catch (rollbackError) {
-          rollbackErrors.push(String(rollbackError instanceof Error ? rollbackError.message : rollbackError))
+          await access(hook, constants.X_OK)
+          executable = true
+        } catch (error) {
+          if (!['ENOENT', 'EACCES', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error
+        }
+        if (executable) throw new Error('post-checkout hook 可能产生后台写入；需人工确认')
+        if (recovery.kind === 'attach-detached')
+          await write(`git switch -c ${shellQuote(branch)}`, target, 'worktree-attach')
+        else if (recovery.kind === 'attach-existing')
+          await write(`git switch ${shellQuote(branch)}`, target, 'worktree-attach')
+        else {
+          if (recovery.kind === 'repair') {
+            if (existsSync(target) && (await readdir(target)).length > 0)
+              throw new Error('stale worktree 已变为非空，拒绝删除')
+            if (pathExists && pathEmpty) await rmdir(target)
+            await write(`git worktree remove --force ${shellQuote(target)}`, repo, 'worktree-repair').catch(
+              async (error) => {
+                if (!(error instanceof ShellCommandError) || error.classification !== 'command-failure') throw error
+                if (
+                  (await observeRegistrations()).some((entry) => entry.path === target) ||
+                  (existsSync(target) && (await readdir(target)).length > 0)
+                )
+                  throw error
+                endedCommands.set(record.attemptId, true)
+                await persist('settled')
+              },
+            )
+          }
+          if (!baseExists && !branchExists) throw new Error(`基线分支已不存在: ${remoteBase}`)
+          await mkdir(dirname(target), { recursive: true })
+          await write(
+            buildWorktreeAddCommand({
+              path: target,
+              branch,
+              branchExists: recovery.kind === 'add-existing-branch' || (recovery.kind === 'repair' && branchExists),
+              remoteBase: fullBase,
+            }),
+            repo,
+            'worktree-add',
+          )
         }
       }
-      const createdBranch =
-        recovery.kind === 'add-new-branch' ||
-        recovery.kind === 'attach-detached' ||
-        (recovery.kind === 'repair' && !branchExists)
-      if (recovery.kind === 'add-new-branch') {
-        await rollback(`git worktree remove --force ${shellQuote(normalizedTarget)}`, expandedRepo)
-      } else if (recovery.kind === 'add-existing-branch' || recovery.kind === 'repair') {
-        await rollback(`git worktree remove --force ${shellQuote(normalizedTarget)}`, expandedRepo)
-      } else if (recovery.kind === 'attach-detached' || recovery.kind === 'attach-existing') {
-        if (detachedHead) await rollback(`git switch --detach ${shellQuote(detachedHead)}`, normalizedTarget)
-      }
-      if (createdBranch) await rollback(`git branch -D ${shellQuote(branch)}`, expandedRepo)
-      notifyLocalGitMutation({ repoKey, worktreePath: worktree }, 'worktree-rollback', 'ensureWorktree')
-      const detail = String(error instanceof Error ? error.message : error)
-      const rollbackDetail = rollbackErrors.length > 0 ? `; worktree 回滚失败: ${rollbackErrors.join('; ')}` : ''
-      return { ok: false, error: `无法定格开发基线: ${detail}${rollbackDetail}` }
+      await readback()
     }
+    await persist('verified', workflow.baseRef ?? `${remoteBase} @ ${fullBase}`)
+    endedCommands.delete(record.attemptId)
+    await appendLog(workflow.key, 'dev', '[clickvibe] worktree 已验证，现场保留')
+    return { ok: true, workflow, worktree, branch }
+  } catch (error) {
+    // Keep the durable last state and Git facts; never roll back a completed external write.
     return {
       ok: false,
-      error:
-        error instanceof WorkflowConflictError
-          ? 'Workflow 已由另一控制器推进,请刷新后重试'
-          : `Workflow 持久化失败:${String(error instanceof Error ? error.message : error)}`,
+      error: `无法定格开发基线或准备工作区，现场已保留: ${error instanceof Error ? error.message : String(error)}`,
     }
   }
-  return { ok: true, workflow, worktree, branch }
 }
-
 /** Parse `git worktree list --porcelain` output into { path, branch } records. */
 export function parseWorktreeList(output: string): { path: string; branch: string | null }[] {
   const records: { path: string; branch: string | null }[] = []
@@ -378,4 +384,15 @@ export function parseWorktreeList(output: string): { path: string; branch: strin
   }
   if (current) records.push(current)
   return records
+}
+
+async function canonicalWorktreePath(path: string): Promise<string> {
+  try {
+    return await realpath(path)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    const parent = dirname(path)
+    if (parent === path) throw error
+    return join(await canonicalWorktreePath(parent), basename(path))
+  }
 }

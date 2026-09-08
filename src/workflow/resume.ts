@@ -1,3 +1,4 @@
+import { automaticRunId } from '../infra/recovery-budget.ts'
 /**
  * clickvibe host half — routes:
  * - `/clickvibe/api/fetch`          — fetch GitHub issue/PR data via gh
@@ -54,7 +55,7 @@ export async function resumeDevelop(
   ctx: Context,
   payload: unknown,
 ): Promise<{ ok: true; taskId: string } | { ok: false; error: string; controllerError?: true }> {
-  const body = (payload ?? {}) as { url?: unknown; context?: unknown; freshSession?: unknown }
+  const body = (payload ?? {}) as { url?: unknown; autoRunId?: unknown; context?: unknown; freshSession?: unknown }
   const url = String(body.url ?? '').trim()
   const extraContext = typeof body.context === 'string' ? body.context.trim() : ''
   const freshSession = body.freshSession === true
@@ -161,6 +162,7 @@ export async function resumeDevelop(
       kind: 'dev',
       taskId: live.taskId,
       hostJobId: hostReservation.hostJobId,
+      autoRunId: automaticRunId(body),
       agent,
       resetSession,
     },

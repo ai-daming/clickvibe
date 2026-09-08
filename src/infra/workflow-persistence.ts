@@ -1,5 +1,9 @@
-import { randomBytes } from 'node:crypto'
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { recoveryStateRoot } from './recovery-layout.ts'
+import { assertPreparationSettled } from './preparation-record.ts'
+import { assertMetadataBudgetUnchanged, assertAutomaticRunAdmission } from './recovery-budget.ts'
+import { createWorkflowRecoveryCommands } from './workflow-recovery-commands.ts'
+import { mkdir, readFile } from 'node:fs/promises'
+import { durableWriteReplace, syncDirectory } from './v02-upgrade-durable.ts'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
@@ -20,6 +24,7 @@ export interface WorkflowTaskLease extends WorkflowTaskCredential {
   readonly [workflowTaskLeaseBrand]: true
 }
 export interface WorkflowTaskClaim extends WorkflowTaskCredential {
+  autoRunId?: string
   agent: 'codex' | 'claude'
   hostJobId: string
   resetSession?: boolean
@@ -100,7 +105,7 @@ export function workflowRevision(workflow: Pick<IssueWorkflow, 'revision'>): num
 }
 
 export function workflowStatePath(workflow: WorkflowStorageIdentity): string {
-  return workflowPath(join(homedir(), '.clickvibe', 'state'), workflow)
+  return workflowPath(recoveryStateRoot(), workflow)
 }
 
 const workflowCommandQueues = new Map<string, Promise<void>>()
@@ -112,12 +117,12 @@ const workflowCommandQueues = new Map<string, Promise<void>>()
  */
 function enqueueWorkflowCommand<T>(workflow: WorkflowStorageIdentity, execute: () => Promise<T>): Promise<T> {
   const key = workflowStatePath(workflow)
-  assertActiveStateWriteAllowed(join(homedir(), '.clickvibe', 'state'))
+  assertActiveStateWriteAllowed(recoveryStateRoot())
   const previous = workflowCommandQueues.get(key) ?? Promise.resolve()
   const operation = previous
     .catch(() => undefined)
     .then(async () => {
-      assertActiveStateWriteAllowed(join(homedir(), '.clickvibe', 'state'))
+      assertActiveStateWriteAllowed(recoveryStateRoot())
       return execute()
     })
   const tail = operation.then(
@@ -179,16 +184,15 @@ async function readCurrent(path: string): Promise<IssueWorkflow | null> {
 }
 
 async function atomicWrite(path: string, workflow: IssueWorkflow): Promise<void> {
-  assertActiveStateWriteAllowed(join(homedir(), '.clickvibe', 'state'))
+  const root = recoveryStateRoot()
+  assertActiveStateWriteAllowed(root)
   await mkdir(dirname(path), { recursive: true })
-  const temporary = `${path}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`
-  try {
-    assertActiveStateWriteAllowed(join(homedir(), '.clickvibe', 'state'))
-    await writeFile(temporary, JSON.stringify(workflow, null, 2), { encoding: 'utf8', mode: 0o600 })
-    assertActiveStateWriteAllowed(join(homedir(), '.clickvibe', 'state'))
-    await rename(temporary, path)
-  } finally {
-    await rm(temporary, { force: true }).catch(() => undefined)
+  await durableWriteReplace(path, JSON.stringify(workflow, null, 2), () => assertActiveStateWriteAllowed(root))
+  // The initial workflow may have created owner/repo/issue directories while acquiring its lock.
+  // Sync their entries as well before acknowledging an intent that permits an external write.
+  for (let directory = dirname(dirname(path)); directory.startsWith(root); directory = dirname(directory)) {
+    await syncDirectory(directory)
+    if (directory === root) break
   }
 }
 
@@ -231,6 +235,7 @@ async function conditionalCommit(
       if (currentTaskStateRevision === null) return { status: 'revision-conflict', currentRevision }
       return { status: 'revision-conflict', currentRevision, currentTaskStateRevision }
     }
+    assertMetadataBudgetUnchanged(current, { autoRun: workflow.autoRun })
     return await commit(path, current, workflow, currentRevision ?? 0, forceTaskStateAdvance)
   } finally {
     await release()
@@ -286,7 +291,10 @@ async function claimWorkflowTask(
       return { status: 'revision-conflict', currentRevision, currentTaskStateRevision }
     }
     if (!current) return { status: 'ownership-lost', currentRevision, currentTaskStateRevision, currentTask }
+    assertAutomaticRunAdmission(current, claim.autoRunId, Date.now())
+    assertPreparationSettled(current)
     const next: IssueWorkflow = { ...current }
+    delete next.preparation
     if (claim.kind === 'dev') {
       next.devAgent = claim.agent
       next.devTaskId = claim.taskId
@@ -390,7 +398,7 @@ export function commitWorkflowMetadataCommand(
   return enqueueWorkflowCommand(identity, () => commitWorkflowMetadata(identity, expectedRevision, patch))
 }
 
-type BaselineRestoreWorkflowTransaction = {
+export type BaselineRestoreWorkflowTransaction = {
   commitMetadata(identity: WorkflowStorageIdentity, patch: WorkflowMetadataPatch): Promise<IssueWorkflow>
 }
 /** Hold all related durable workflow locks through baseline validation and restoration. */
@@ -400,18 +408,28 @@ export function withBaselineRestoreWorkflowLocksCommand<T>(
 ): Promise<T> {
   const unique = new Map(identities.map((identity) => [workflowStatePath(identity), identity]))
   const ordered = [...unique.entries()].sort(([left], [right]) => left.localeCompare(right))
-  const acquire = (index: number): Promise<T> => {
+  const acquire = async (index: number): Promise<T> => {
     if (index >= ordered.length) {
       const lockedPaths = new Set(ordered.map(([path]) => path))
-      return operation({
-        commitMetadata: async (identity, patch) => {
-          const path = workflowStatePath(identity)
-          if (!lockedPaths.has(path)) throw new Error(`baseline restore transaction does not own ${path}`)
-          const current = await readCurrent(path)
-          const next = applyWorkflowMetadataPatch(identity, current, patch)
-          return (await commit(path, current, next, current ? storedRevision(current) : 0)).workflow
-        },
-      })
+      for (const path of lockedPaths) {
+        const current = await readCurrent(path)
+        if (current) assertPreparationSettled(current)
+      }
+      let active = true
+      try {
+        return await operation({
+          commitMetadata: async (identity, patch) => {
+            if (!active) throw new Error('workflow transaction expired')
+            const path = workflowStatePath(identity)
+            if (!lockedPaths.has(path)) throw new Error(`baseline restore transaction does not own ${path}`)
+            const current = await readCurrent(path)
+            const next = applyWorkflowMetadataPatch(identity, current, patch)
+            return (await commit(path, current, next, current ? storedRevision(current) : 0)).workflow
+          },
+        })
+      } finally {
+        active = false
+      }
     }
     const [path, identity] = ordered[index]
     return enqueueWorkflowCommand(identity, async () => {
@@ -452,3 +470,22 @@ export function stopWorkflowTaskCommand(
 ): Promise<WorkflowTaskStopResult> {
   return enqueueWorkflowCommand(identity, () => stopWorkflowTask(identity, task))
 }
+
+export const { commitRecoveryControlCommand, withWorkflowPreparationCommand, stopWorkflowPreparationCommand } =
+  createWorkflowRecoveryCommands(
+    (identity, operation) =>
+      enqueueWorkflowCommand(identity, async () => {
+        const path = workflowStatePath(identity),
+          release = await acquireLock(path)
+        try {
+          let current = await readCurrent(path)
+          return await operation(current, async (next, revoke = false) => {
+            current = (await commit(path, current, next, current ? storedRevision(current) : 0, revoke)).workflow
+            return current
+          })
+        } finally {
+          await release()
+        }
+      }),
+    (revision) => new WorkflowConflictError(revision),
+  )
