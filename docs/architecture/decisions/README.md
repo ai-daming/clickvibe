@@ -32,3 +32,4 @@ ADR 记录长期有效的架构取舍，不记录普通实现步骤。每个 ADR
 | [0013](0013-v02-exit-verification-single-writer-and-cutover-execution.md) | Accepted | v0.2 退出验收：状态类单一写入守卫、三平面终局汇总、provider-neutral 审计、资产处置与离线切换入口 |
 | [0016](0016-shell-worktree-recovery.md) | Accepted | Shell 原因诊断、工作区准备与认领互斥、持久恢复额度及离线格式升级（#170） |
 | [0017](0017-recovery-state-root-isolation.md) | Accepted | #170 新状态独立目录、历史引用迁移与旧默认写入隔离；替代 ADR-0016 §7 共用目录假设 |
+| [0018](0018-manual-worktree-preparation-resolution.md) | Accepted | #170 未决准备的离线人工结算、旧授权撤销与 blocked 生产规则；补充 ADR-0016 的人工恢复出口 |

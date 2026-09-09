@@ -78,6 +78,7 @@ v0.1 已验证部分事实推导、Agent 流程和持久化能力，但它没有
 - [可观测性与复盘](architecture/observability.md)：日志、事件、错误、证据与架构版本绑定。
 - [架构决策记录](architecture/decisions/README.md)：Accepted、Superseded 和 Draft 决策。
 - [Shell 与工作区恢复](architecture/decisions/0016-shell-worktree-recovery.md)：#170 的准备事务、未知结果不接管、一次冷却恢复额度和显式离线格式升级；实施前仍需核验，现场执行另行授权。
+- [未决准备的人工结算](architecture/decisions/0018-manual-worktree-preparation-resolution.md)：#170 维护窗口内的结束证据、精确状态转换、中断回读与新授权；实现和现场执行仍须分别通过门禁。
 - [恢复状态独立目录](architecture/decisions/0017-recovery-state-root-isolation.md)：修正 #170 的旧版隔离边界；新 active root、历史引用迁移及切换恢复优先按 ADR-0017 执行。
 - [三访问平面决策](architecture/decisions/0007-three-git-github-access-planes.md)：Local Git、Remote Git、GitHub REST 与 Agent 直接调用的治理边界。
 - [Remote Git Coordinator 单飞、串行化与写恢复](architecture/decisions/0011-remote-git-coordinator-admission-and-recovery.md)：#135 的 fetch 单飞与 scope FIFO、caller-owned push marker、锁内凭证校验、repo 级失效和 readback-only 恢复。
