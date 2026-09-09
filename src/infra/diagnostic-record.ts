@@ -6,6 +6,7 @@ import { basename, dirname, join } from 'node:path'
 import type { DiagnosticRecord, WorkItemIdentity } from './contracts.ts'
 import { appendDiagnosticLine } from './diagnostic-log-store.ts'
 import { diagnosticLogPath } from './state-layout.ts'
+import { safeShellOutput } from './shell-failure.ts'
 
 export function diagnosticCorrelationKey(record: Pick<DiagnosticRecord, 'source' | 'correlationId'>): string | null {
   return record.correlationId === null ? null : `${record.source}:${record.correlationId}`
@@ -129,7 +130,7 @@ export async function readDiagnosticDetails(root: string, record: DiagnosticReco
     let raw: Buffer
     try {
       const metadata = await file.stat()
-      if (!metadata.isFile() || metadata.nlink !== 1 || metadata.size > 8192) return '诊断附件类型或大小无效'
+      if (!metadata.isFile() || metadata.nlink !== 1 || metadata.size > 16384) return '诊断附件类型或大小无效'
       raw = await file.readFile()
     } finally {
       await file.close()
@@ -142,14 +143,18 @@ export async function readDiagnosticDetails(root: string, record: DiagnosticReco
     const time = (value: unknown) =>
       typeof value === 'string' && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : '未知'
     const signal = typeof d.signal === 'string' && /^SIG[A-Z0-9]{1,12}$/.test(d.signal) ? d.signal : '未知'
+    const output = (value: { text?: string; omitted?: boolean; truncated?: boolean } | undefined) => {
+      const safe = safeShellOutput(value, record.operation)
+      return `${safe.text || '无安全输出文本'}；省略: ${value?.omitted || safe.omitted ? '是' : '否'}；截断: ${safe.truncated ? '是' : '否'}`
+    }
     return [
       `终止信号: ${signal}`,
       `请求超时: ${ms(d.requestedTimeoutMs)}；实际超时: ${ms(d.effectiveTimeoutMs)}`,
       `开始: ${time(d.startedAt)}`,
       `结束: ${time(d.endedAt)}`,
       `耗时: ${ms(d.durationMs)}`,
-      `标准输出: ${d.stdout?.omitted ? '内容已安全省略' : '无内容'}；截断: ${d.stdout?.truncated === true ? '是' : '否'}`,
-      `标准错误: ${d.stderr?.omitted ? '内容已安全省略' : '无内容'}；截断: ${d.stderr?.truncated === true ? '是' : '否'}`,
+      `标准输出: ${output(d.stdout)}`,
+      `标准错误: ${output(d.stderr)}`,
     ].join('\n')
   } catch {
     return '诊断附件缺失或无法读取；原始错误摘要仍保留'

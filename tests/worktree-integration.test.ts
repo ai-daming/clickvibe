@@ -153,6 +153,25 @@ test('first development creates from a selected remote branch and freezes it', a
       stopped.taskStateRevision,
     )
     assert.equal(authorized.ok, true, JSON.stringify(authorized))
+    if (!authorized.ok) assert.fail('authorized worktree required')
+    const { withWorkflowPreparationCommand } = await import('../src/infra/workflow-persistence.ts')
+    await withWorkflowPreparationCommand(authorized.workflow, async (tx) => {
+      await tx.commit({ preparation: { ...authorized.workflow.preparation!, status: 'settled' } })
+    })
+    const dirtyPath = join(authorized.worktree, 'retained-dirty.txt')
+    await writeFile(dirtyPath, 'must survive')
+    const dirty = await ensureWorktree(
+      realShellCtx() as never,
+      { owner: 'o', repo: 'r', number: '60' },
+      undefined,
+      stopped.taskStateRevision,
+    )
+    assert.equal(dirty.ok, false)
+    const { loadWorkflow, issueKey } = await import('../src/infra/state.ts')
+    const dirtyState = await loadWorkflow(issueKey('o/r', '60'))
+    assert.equal(dirtyState?.preparation?.status, 'blocked')
+    assert.match(dirtyState?.events.at(-1)?.note ?? '', /dirty-worktree/)
+    assert.equal(await import('node:fs/promises').then(({ readFile }) => readFile(dirtyPath, 'utf8')), 'must survive')
     // A relative hook path may be absent on main but executable in the selected checkout.
     await git('switch', 'release/2.0')
     await mkdir(join(repo, '.hooks'), { recursive: true })
@@ -175,6 +194,10 @@ test('first development creates from a selected remote branch and freezes it', a
         'origin/release/2.0',
       )
       assert.equal(hooked.ok, false, 'relative hook location cannot prove preparation has no detached writer')
+      const { loadWorkflow, issueKey } = await import('../src/infra/state.ts')
+      const blocked = await loadWorkflow(issueKey('o/r', '64'))
+      assert.equal(blocked?.preparation?.status, 'blocked')
+      assert.match(blocked?.events.at(-1)?.note ?? '', /relative-hooks/)
       await assert.rejects(
         import('node:fs/promises').then(({ readFile }) => readFile(join(root, 'hook-marker'))),
         /ENOENT/,

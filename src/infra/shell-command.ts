@@ -48,8 +48,8 @@ async function recordFailure(
       startedAt: new Date(startedAt).toISOString(),
       endedAt: new Date(endedAt).toISOString(),
       durationMs: Math.max(0, endedAt - startedAt),
-      stdout: safeShellOutput(result?.stdout),
-      stderr: safeShellOutput(result?.stderr),
+      stdout: safeShellOutput(result?.stdout, operation),
+      stderr: safeShellOutput(result?.stderr, operation),
       hostErrorOmitted: result === null,
     })
     const record: DiagnosticRecord = {

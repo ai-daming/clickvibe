@@ -14,7 +14,12 @@ import { expandHome, loadConfig, runCommand, type ClickVibeConfig } from '../inf
 import { appendLog, type IssueWorkflow, issueKey, stateDir } from '../infra/state.ts'
 import { observeWorkflowTask, preparationBlockReason, type TaskOwnershipContext } from '../infra/task-ownership.ts'
 import { withWorkflowPreparationCommand } from '../infra/workflow-persistence.ts'
-import { validPreparation, type PreparationTransaction, type WorktreePreparation } from '../infra/preparation-record.ts'
+import {
+  PreparationConflict,
+  validPreparation,
+  type PreparationTransaction,
+  type WorktreePreparation,
+} from '../infra/preparation-record.ts'
 import { runtimeIdentity } from '../infra/task-diagnostics.ts'
 import { resolveSelectedRemoteBase } from './baseline.ts'
 
@@ -228,10 +233,8 @@ async function prepare(
     branchExists,
     branchWorktree: atBranch?.path ?? null,
   })
-  if (recovery.kind === 'conflict') {
+  if (recovery.kind === 'conflict')
     await appendLog(workflow.key, 'dev', `[clickvibe] worktree 冲突: ${recovery.reason}`)
-    return { ok: false, error: `worktree 冲突: ${recovery.reason}` }
-  }
   const oldHead = branchExists
     ? await command(`git rev-parse ${shellQuote(`refs/heads/${branch}`)}`, repo, 'worktree-branch-head')
     : atPath?.branch === 'HEAD'
@@ -278,9 +281,9 @@ async function prepare(
       registered?.branch !== branch ||
       (await command('git rev-parse HEAD', target, 'worktree-head')) !== expectedHead
     )
-      throw new Error('worktree preparation Git 回读不符；保留现场')
+      throw new PreparationConflict('git-mismatch')
     if (prior && prior.status !== 'verified' && (await command('git status --porcelain', target, 'worktree-status')))
-      throw new Error('worktree preparation 现场出现额外改动；保留现场')
+      throw new PreparationConflict('dirty-worktree')
   }
   const write = async (text: string, workdir: string, operation: string) => {
     assertAutomaticRunAdmission(workflow, autoRunId, Date.now())
@@ -292,6 +295,11 @@ async function prepare(
     await persist('settled')
   }
   try {
+    if (recovery.kind === 'conflict') {
+      const conflict = new PreparationConflict('worktree-conflict')
+      conflict.message += `: ${recovery.reason}`
+      throw conflict
+    }
     if (prior && prior.status !== 'prepared' && prior.status !== 'verified') {
       await readback()
     } else {
@@ -299,8 +307,7 @@ async function prepare(
       if (recovery.kind !== 'reuse') {
         const hookWorkdir = recovery.kind === 'attach-detached' || recovery.kind === 'attach-existing' ? target : repo
         const hooks = await command('git rev-parse --git-path hooks', hookWorkdir, 'worktree-hooks')
-        if (!isAbsolute(hooks) && hooks !== '.git/hooks')
-          throw new Error('相对 Git hooks 路径无法证明新工作区没有后台写入；请人工确认')
+        if (!isAbsolute(hooks) && hooks !== '.git/hooks') throw new PreparationConflict('relative-hooks')
         if (!hooks) throw new Error('无法确认 Git hooks；保留现场')
         const hook = join(isAbsolute(hooks) ? hooks : resolve(hookWorkdir, hooks), 'post-checkout')
         let executable = false
@@ -310,7 +317,7 @@ async function prepare(
         } catch (error) {
           if (!['ENOENT', 'EACCES', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error
         }
-        if (executable) throw new Error('post-checkout hook 可能产生后台写入；需人工确认')
+        if (executable) throw new PreparationConflict('active-hook')
         if (recovery.kind === 'attach-detached')
           await write(`git switch -c ${shellQuote(branch)}`, target, 'worktree-attach')
         else if (recovery.kind === 'attach-existing')
@@ -355,6 +362,13 @@ async function prepare(
     return { ok: true, workflow, worktree, branch }
   } catch (error) {
     // Keep the durable last state and Git facts; never roll back a completed external write.
+    if (
+      error instanceof PreparationConflict &&
+      (record.status !== 'dispatched' || endedCommands.has(record.attemptId))
+    ) {
+      await transaction.block(record, error.reason)
+      endedCommands.delete(record.attemptId)
+    }
     return {
       ok: false,
       error: `无法定格开发基线或准备工作区，现场已保留: ${error instanceof Error ? error.message : String(error)}`,
