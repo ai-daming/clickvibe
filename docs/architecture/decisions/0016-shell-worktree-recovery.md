@@ -8,6 +8,8 @@ Design acceptance: 维护者在本任务中对第二版设计及离线升级/降
 Accepted source SHA-256: `e3a87d411126f2aadc01074b27084569933540af68689452c7250adc04d8d552`。
 本 ADR 从 main 独立整理，不依赖尚未合入的 #169 / ADR-0014、0015。
 
+> 人工恢复补充：跨 runtime 的 dispatched 仍禁止自动接管；维护者离线人工结算及 blocked 生产规则见 [ADR-0018](0018-manual-worktree-preparation-resolution.md)。
+
 ## 1. 目标、权限与决定
 
 让命令失败能够解释；有效工作区不因控制器保存失败被删除；证据充分时恢复，持续失败有确定终点。
