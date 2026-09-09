@@ -1,3 +1,4 @@
+import { loadRecoveryConfig } from './recovery-config.ts'
 import { createHash, randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
@@ -49,7 +50,7 @@ import { ExclusiveTaskGate } from './task-gate.ts'
 const MAX_BODY_BYTES = 64 * 1024
 
 export interface ClickVibeConfig {
-  schemaVersion?: 1
+  schemaVersion?: 1 | 2
   repos: Record<string, string>
   worktreeRoot: string
   /** Remote-ref refresh interval for read paths. Clamped to 30-60 seconds. */
@@ -128,7 +129,7 @@ export function expandHome(path: string): string {
   return path
 }
 
-async function loadV02Config(home: string, raw: string, parsed: unknown): Promise<ClickVibeConfig> {
+export async function loadV02Config(home: string, raw: string, parsed: unknown): Promise<ClickVibeConfig> {
   const root = join(home, '.clickvibe')
   const config = parseClickVibeConfigV1(parsed)
   const [journalRaw, markerRaw] = await Promise.all([
@@ -201,7 +202,8 @@ export async function loadConfigFromHome(home: string): Promise<ClickVibeConfig>
   const parsed = parseYaml(raw) as (Partial<ClickVibeConfig> & { schemaVersion?: unknown }) | null
   // Only the config file's own ENOENT selects defaults. Any schema-1 pairing
   // error (missing journal/marker included) is an explicit fail-closed error.
-  if (parsed?.schemaVersion === 1) return await loadV02Config(home, raw, parsed)
+  if (parsed?.schemaVersion === 2) return loadRecoveryConfig(home)
+  if (parsed?.schemaVersion === 1) throw new Error('ClickVibe recovery 升级尚未完成，请先执行离线升级')
   if (parsed?.schemaVersion !== undefined)
     throw new Error(`unsupported ClickVibe config schemaVersion: ${parsed.schemaVersion}`)
   throw new Error(
@@ -296,43 +298,7 @@ export function githubAwareStatus(result: { ok: boolean; error?: string }, succe
   return result.error?.startsWith('GitHub 额度已用完,约 ') ? 429 : failure
 }
 
-/** Run one foreground command; returns trimmed stdout or throws on non-zero. */
-export async function runCommand(
-  ctx: Context,
-  command: string,
-  options: {
-    workdir?: string
-    stdin?: string
-    timeoutMs?: number
-    sandboxPolicy?: { mode: 'read-only' | 'workspace-write' | 'danger-full-access'; workspaceRoot: string }
-  } = {},
-): Promise<string> {
-  const spec = ctx.shell.resolve({
-    command,
-    workdir: options.workdir,
-    stdin: options.stdin,
-    timeoutMs: options.timeoutMs ?? 30000,
-    sandboxPolicy: options.sandboxPolicy,
-  })
-  const result = await ctx.shell.run(spec)
-  // stdout 超限时内存只保留尾部;有 spill 文件则读全文,否则明确报错而不是返回垃圾。
-  // 注:插件可见的 shell 类型只声明 {text},运行时才有 truncated/spillPath,做宽断言。
-  const out = result.stdout as { text: string; truncated?: boolean; spillPath?: string }
-  if (result.exitCode !== 0) {
-    // merge 等 Git 命令把 CONFLICT/文件提示打到 stdout,只拼 stderr 会丢冲突详情
-    const stderr = result.stderr?.text?.trim() ?? ''
-    const stdout = out.text.trim()
-    const detail = [stderr, stdout].filter(Boolean).join('\n')
-    throw new Error(`命令退出码 ${result.exitCode}${detail ? `: ${detail}` : ''}`)
-  }
-  if (out.truncated) {
-    if (out.spillPath) {
-      return (await readFile(out.spillPath, 'utf8')).trim()
-    }
-    throw new Error(`命令输出超过上限且无 spill 文件,无法获取完整输出`)
-  }
-  return out.text.trim()
-}
+export { runCommand } from './shell-command.ts'
 
 /** Read a host subprocess spill file: the byte-complete stream beyond the in-memory cap. */
 export async function readHostSpillFile(path: string): Promise<string> {

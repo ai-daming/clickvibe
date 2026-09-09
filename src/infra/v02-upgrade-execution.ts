@@ -23,7 +23,7 @@ import {
   type V02UpgradePreview,
 } from './v02-upgrade.ts'
 
-export type V02UpgradeOutcome = 'verified' | 'facts-changed' | 'failed' | 'rolled-back'
+export type V02UpgradeOutcome = 'verified' | 'facts-changed' | 'failed' | 'rolled-back' | 'released'
 
 export interface V02UpgradeGenerationFence {
   acquire(planFingerprint: string): Promise<{

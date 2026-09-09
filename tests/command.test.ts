@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { beforeEach } from 'node:test'
-import { activateV02Home, initFixtureRepository } from './helpers/v02-home.ts'
+import { initFixtureRepository } from './helpers/v02-home.ts'
+import { activateRecoveryHome as activateV02Home } from './helpers/recovery-home.ts'
 import { resetGithubGatewayOwnerForTests } from '../src/github/gateway-owner.ts'
 
 beforeEach(() => resetGithubGatewayOwnerForTests())

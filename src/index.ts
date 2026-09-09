@@ -44,10 +44,15 @@ declare module '@deepseek-ai/cordis' {
         timeoutMs?: number
         workdir?: string
         stdin?: string
+        signal?: AbortSignal
         sandboxPolicy?: { mode: 'read-only' | 'workspace-write' | 'danger-full-access'; workspaceRoot: string }
       }): unknown
       run(spec: unknown): Promise<{
         exitCode: number | null
+        signal?: string | null
+        timedOut?: boolean
+        aborted?: boolean
+        timeoutMs?: number
         stdout: { text: string }
         stderr?: { text?: string }
       }>

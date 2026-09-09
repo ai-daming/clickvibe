@@ -1,3 +1,4 @@
+import { isRecoveryBudget } from '../infra/recovery-budget.ts'
 import type { AutoRunState, WorkflowEvent } from '../infra/state.ts'
 
 export const AUTO_RUN_BASE_RETRY_MS = 5_000
@@ -12,6 +13,7 @@ export interface ControllerFailureEvidence {
   name: string
   message: string
   stack: string | null
+  failureKey?: string
 }
 
 export interface ControllerFailureAttempt extends ControllerFailureEvidence {
@@ -34,7 +36,12 @@ function stableFingerprint(value: string): string {
 
 export function controllerFailureEvidence(error: unknown): ControllerFailureEvidence {
   if (error instanceof Error) {
-    return { name: error.name, message: error.message, stack: error.stack ?? null }
+    return {
+      name: error.name,
+      message: error.message,
+      stack: error.stack ?? null,
+      ...('failureKey' in error && typeof error.failureKey === 'string' ? { failureKey: error.failureKey } : {}),
+    }
   }
   return { name: typeof error, message: String(error), stack: null }
 }
@@ -46,7 +53,7 @@ export function nextControllerFailure(
   now: number,
   random: number,
 ): ControllerFailureAttempt {
-  const identity = evidence.stack?.trim() || `${evidence.name}:${evidence.message}`
+  const identity = evidence.failureKey || evidence.stack?.trim() || `${evidence.name}:${evidence.message}`
   const fingerprint = stableFingerprint(identity)
   const attempt = (previous?.attempt ?? 0) + 1
   const consecutive = previous?.fingerprint === fingerprint ? previous.consecutive + 1 : 1
@@ -86,6 +93,7 @@ export function decideAutoRunWatchdog(
   ownership: 'none' | 'running' | 'unknown' | 'interrupted',
   now: number,
 ): AutoRunWatchdogDecision {
+  if (!isRecoveryBudget(autoRun.recoveryBudget) || autoRun.recoveryBudget.halted) return { kind: 'none' }
   if (autoRun.status !== 'paused' || autoRun.pausedReason !== 'controller-error') return { kind: 'none' }
   if (now >= Date.parse(autoRun.deadline)) return { kind: 'budget-exhausted' }
   if (ownership === 'interrupted') return { kind: 'session-interrupted' }

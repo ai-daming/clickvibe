@@ -1,3 +1,4 @@
+import { activateRecoveryHome } from './helpers/recovery-home.ts'
 /**
  * Gateway lifecycle stream (issue #131 slice A, c4; ADR-0010 §6/§10).
  *
@@ -351,6 +352,7 @@ test('r6/F3 regression: the evidence sink persists without flush() and publishes
   const previousHome = process.env.HOME
   const home = mkdtempSync(join(tmpdir(), 'clickvibe-gw-evidence-'))
   process.env.HOME = home
+  await activateRecoveryHome(home, {})
   try {
     const sink = createDiagnosticEvidenceSink()
     const requestId = 'gh-e2e'
@@ -374,6 +376,7 @@ test('r7/F3 regression: a request spanning flush windows is measured once with i
   const previousHome = process.env.HOME
   const home = mkdtempSync(join(tmpdir(), 'clickvibe-gw-evidence-r7-'))
   process.env.HOME = home
+  await activateRecoveryHome(home, {})
   try {
     const sink = createDiagnosticEvidenceSink()
     const requestId = 'gh-span'

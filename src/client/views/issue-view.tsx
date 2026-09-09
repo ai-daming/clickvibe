@@ -296,7 +296,15 @@ export function IssueView({
               <div className="cv-link-row" key={record.diagnosticId} title={record.correlationId ?? undefined}>
                 <span>{fmtDate(record.occurredAt)}</span>
                 <code className="cv-tl-hash">{record.operation}</code>
-                <span className="cv-dev-error">{record.message}</span>
+                <div className="cv-dev-error">
+                  {record.message}
+                  {record.details ? (
+                    <details>
+                      <summary>执行信息</summary>
+                      <pre>{record.details}</pre>
+                    </details>
+                  ) : null}
+                </div>
               </div>
             ))}
           </div>

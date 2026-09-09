@@ -81,6 +81,7 @@ export interface Workflow {
   observation?: { freshness: 'unknown'; error: string }
   diagnostics?: Array<{
     diagnosticId: string
+    details?: string
     operation: string
     classification: string
     message: string

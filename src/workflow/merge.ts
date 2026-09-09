@@ -1,3 +1,4 @@
+import { withWorkflowAction, actionPersistence, type WorkflowActionTransaction } from '../infra/workflow-action.ts'
 /** Privileged merge authorization, gates, cleanup and archival workflow. */
 
 import { existsSync } from 'node:fs'
@@ -81,14 +82,14 @@ export function replayMergeMetadata(disk: IssueWorkflow, memory: IssueWorkflow):
   disk.autoRun = memory.autoRun
 }
 
-async function persistMergeMetadata(workflow: IssueWorkflow): Promise<void> {
+async function persistMergeMetadata(workflow: IssueWorkflow, write: typeof commitWorkflowMetadata): Promise<void> {
   for (let attempt = 0; ; attempt += 1) {
     const current = (await loadWorkflow(workflow.key)) ?? workflow
     replayMergeMetadata(current, workflow)
     try {
       Object.assign(
         workflow,
-        await commitWorkflowMetadata(current, workflowRevision(current), {
+        await write(current, workflowRevision(current), {
           delivery: current.delivery,
           issueState: current.issueState,
           autoRun: current.autoRun,
@@ -185,7 +186,13 @@ export async function authorizeAgent(
       ) {
         return { ok: false, error: 'Issue 契约在预览后已变化,请刷新面板并重新确认' }
       }
-      contract = { workItem: current.snapshot.workItem, fingerprint: current.snapshot.fingerprint }
+      const target = parseUrl(input.url)!
+      const authorizedWorkflow = await loadWorkflow(issueKey(`${target.owner}/${target.repo}`, target.number))
+      contract = {
+        workItem: current.snapshot.workItem,
+        fingerprint: current.snapshot.fingerprint,
+        taskStateRevision: authorizedWorkflow?.taskStateRevision ?? 0,
+      }
       if (input.action === 'develop') baselinePreview = await developBaselinePreview(ctx, input.url, input.baseline)
     } else if (input.action === 'restore-base') {
       restorePreview = await baselineRestorePreview(ctx, input.url)
@@ -294,7 +301,12 @@ export async function mergeAndCleanup(ctx: Context, payload: unknown): Promise<M
   if (mergingWorkflows.has(key)) return { ok: false, error: '该 PR 正在合并或清理,请等待当前请求完成' }
   mergingWorkflows.add(key)
   try {
-    const result = await withWorkflowLock(key, async () => mergeAndCleanupUnlocked(ctx, payload))
+    if (!(await loadWorkflow(key))) return { ok: false, error: '未找到可合并的 workflow' }
+    const result = await withWorkflowAction(
+      key,
+      async (tx) => mergeAndCleanupUnlocked(ctx, payload, tx),
+      (payload as { autoRunId?: unknown })?.autoRunId,
+    )
     notifyLocalGitMutation({ repoKey }, 'merge', 'mergeAndCleanup')
     return result
   } catch (error) {
@@ -307,7 +319,13 @@ export async function mergeAndCleanup(ctx: Context, payload: unknown): Promise<M
   }
 }
 
-export async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): Promise<MergeResult> {
+export async function mergeAndCleanupUnlocked(
+  ctx: Context,
+  payload: unknown,
+  transaction?: WorkflowActionTransaction,
+): Promise<MergeResult> {
+  if (!transaction) return mergeAndCleanup(ctx, payload)
+  const { commitWorkflowMetadata, appendEvent } = actionPersistence(transaction)
   const url = String((payload as { url?: unknown } | undefined)?.url ?? '').trim()
   const parsed = parseUrl(url)
   if (!parsed || parsed.kind !== 'issue') return { ok: false, error: '合并目标必须是 GitHub Issue URL' }
@@ -426,7 +444,7 @@ export async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): P
       cleanup: { worktree: false, localBranch: false, remoteBranch: false, issue: false },
     }
     try {
-      await persistMergeMetadata(workflow)
+      await persistMergeMetadata(workflow, commitWorkflowMetadata)
     } catch (error) {
       return {
         ok: false,
@@ -445,14 +463,14 @@ export async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): P
   const persistStep = async (): Promise<void> => {
     delivery.status = 'cleanup-pending'
     delete delivery.lastError
-    await persistMergeMetadata(workflow)
+    await persistMergeMetadata(workflow, commitWorkflowMetadata)
   }
   const failCleanup = async (label: string, error: unknown): Promise<MergeResult> => {
     const detail = String(error instanceof Error ? error.message : error)
     delivery.status = 'cleanup-pending'
     delivery.lastError = `${label}: ${detail}`
     try {
-      await persistMergeMetadata(workflow)
+      await persistMergeMetadata(workflow, commitWorkflowMetadata)
     } catch (persistError) {
       return {
         ok: false,
@@ -585,7 +603,15 @@ export async function mergeAndCleanupUnlocked(ctx: Context, payload: unknown): P
   try {
     delivery.status = 'archived'
     delete delivery.lastError
-    await archiveWorkflow(workflow, workflowRevision(workflow) ?? 0)
+    Object.assign(
+      workflow,
+      await commitWorkflowMetadata(workflow, workflowRevision(workflow), {
+        delivery: workflow.delivery,
+        issueState: workflow.issueState,
+        autoRun: workflow.autoRun,
+        events: workflow.events,
+      }),
+    )
   } catch (error) {
     if (completingAutoRun && workflow.autoRun) {
       workflow.autoRun.status = 'running'

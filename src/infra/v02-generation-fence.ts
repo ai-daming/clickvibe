@@ -1,3 +1,5 @@
+import { recoveryStateRoot } from './recovery-layout.ts'
+import { assertRecoveryStateWriteAllowed } from './recovery-config.ts'
 /** Process-generation fence shared by legacy task starts and the v0.2 upgrader. */
 import { execFile } from 'node:child_process'
 import { existsSync, lstatSync, readFileSync } from 'node:fs'
@@ -88,6 +90,10 @@ function hasV02Marker(stateRoot: string): boolean {
 export function assertActiveStateWriteAllowed(stateRoot: string): void {
   if (fenceState.mode === 'upgrade-held')
     throw new V02GenerationViolationError('state write blocked: v0.2 upgrade holds the generation fence')
+  if (stateRoot === recoveryStateRoot(dirname(dirname(stateRoot)))) {
+    assertRecoveryStateWriteAllowed(stateRoot)
+    return
+  }
   if (fenceState.mode === 'v0.2-active') return
   const phase = journalPhase(clickvibeRootForState(stateRoot))
   const marker = hasV02Marker(stateRoot)
@@ -225,4 +231,11 @@ export function createOfflineV02GenerationFence(options: V02OfflineGenerationFen
 export function resetV02GenerationFenceForTest(): void {
   fenceState.mode = 'legacy-open'
   fenceState.token = null
+}
+
+/** Current task starts require the recovery generation, independently of the historical upgrader. */
+export function assertCurrentTaskStartAllowed(): void {
+  if (fenceState.mode === 'upgrade-held')
+    throw new V02GenerationViolationError('task start blocked by the upgrade fence')
+  assertActiveStateWriteAllowed(recoveryStateRoot())
 }

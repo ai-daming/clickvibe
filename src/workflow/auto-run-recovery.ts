@@ -1,3 +1,5 @@
+import { preparationBlockReason } from '../infra/task-ownership.ts'
+import { consumeRecoveryCooldown, haltRepeatedFailure } from '../infra/auto-run-recovery-control.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import { isGithubRateLimitError, recoveryLabel } from '../github/rest.ts'
 import type { AutoRunControllerRecovery } from '../infra/contracts.ts'
@@ -124,13 +126,20 @@ export async function pauseAutoRun(
   reason: AutoRunPausedReason,
   evidence?: PauseEvidence,
   ctx?: Context,
+  expectedRunId?: string,
 ): Promise<void> {
   const workflow = await loadWorkflow(key)
+  if (expectedRunId !== undefined && workflow?.autoRun?.recoveryBudget?.runId !== expectedRunId) return
   if (workflow) await pauseLoaded(workflow, reason, evidence, ctx)
 }
 
-export async function completeAutoRun(key: string, note = '自动跑到底已收敛,等待人工合并'): Promise<void> {
+export async function completeAutoRun(
+  key: string,
+  note = '自动跑到底已收敛,等待人工合并',
+  expectedRunId?: string,
+): Promise<void> {
   const workflow = await loadWorkflow(key)
+  if (expectedRunId !== undefined && workflow?.autoRun?.recoveryBudget?.runId !== expectedRunId) return
   if (!workflow?.autoRun || workflow.autoRun.status !== 'running') return
   workflow.autoRun.status = 'completed'
   workflow.autoRun.pausedReason = null
@@ -179,19 +188,21 @@ function recoveryState(
   }
 }
 
-async function persistRecovery(workflow: IssueWorkflow, recovery: AutoRunControllerRecovery): Promise<void> {
-  if (!workflow.autoRun) return
+async function persistRecovery(workflow: IssueWorkflow, recovery: AutoRunControllerRecovery): Promise<boolean> {
+  if (!workflow.autoRun) return false
   workflow.autoRun.controllerRecovery = recovery
   try {
     Object.assign(
       workflow,
       await commitWorkflowMetadata(workflow, workflowRevision(workflow), { autoRun: workflow.autoRun }),
     )
+    return true
   } catch (error) {
     logTaskDiagnostic('auto-run-recovery-persist-error', {
       workflowKey: workflow.key,
       error: error instanceof Error ? error.message : String(error),
     })
+    return false
   }
 }
 
@@ -269,6 +280,7 @@ export async function handleAutoRunControllerFailure(
   error: unknown,
   source: string,
   wake: AutoRunWake,
+  expectedRunId: string | null,
 ): Promise<void> {
   const workflow = await loadWorkflow(key)
   if (!workflow?.autoRun || workflow.autoRun.status !== 'running') {
@@ -280,6 +292,11 @@ export async function handleAutoRunControllerFailure(
       })
       scheduleAutoRunWakeAt(ctx, key, Date.now() + AUTO_RUN_BASE_RETRY_MS, wake)
     }
+    return
+  }
+  if (workflow.autoRun.recoveryBudget?.runId !== expectedRunId) return
+  if (workflow.autoRun.recoveryBudget?.halted) {
+    clearAutoRunSchedule(key)
     return
   }
   const now = Date.now()
@@ -372,6 +389,10 @@ export async function handleAutoRunControllerFailure(
   }
   if (attempt.fused && ownership.state === 'none') {
     workflow.autoRun.controllerRecovery = recoveryState(attempt, 'fused', retryAt, now)
+    if (await haltRepeatedFailure(workflow, attempt.message)) {
+      clearAutoRunSchedule(key)
+      return
+    }
     logTaskDiagnostic('auto-run-controller-fuse', {
       ...diagnostic,
       basis: `same-stack fingerprint ${attempt.fingerprint} consecutive ${attempt.consecutive} >= 3`,
@@ -386,14 +407,20 @@ export async function handleAutoRunControllerFailure(
   }
 
   logTaskDiagnostic('auto-run-controller-retry', diagnostic)
-  if (ownership.state === 'none')
-    await persistRecovery(workflow, recoveryState(attempt, 'transient', attempt.retryAt, now))
+  if (
+    ownership.state === 'none' &&
+    !(await persistRecovery(workflow, recoveryState(attempt, 'transient', attempt.retryAt, now)))
+  ) {
+    clearAutoRunSchedule(key)
+    return
+  }
   scheduleAutoRunWake(ctx, key, attempt.retryAt, workflow.autoRun.deadline, wake)
 }
 
-export async function clearAutoRunControllerFailure(key: string): Promise<void> {
-  failureAttempts.delete(key)
+export async function clearAutoRunControllerFailure(key: string, expectedRunId?: string): Promise<void> {
   const workflow = await loadWorkflow(key)
+  if (expectedRunId !== undefined && workflow?.autoRun?.recoveryBudget?.runId !== expectedRunId) return
+  failureAttempts.delete(key)
   if (!workflow?.autoRun?.controllerRecovery || workflow.autoRun.status !== 'running') return
   delete workflow.autoRun.controllerRecovery
   try {
@@ -410,8 +437,10 @@ export async function maintainPausedAutoRun(
   ctx: Context,
   key: string,
   wake: AutoRunWake,
+  expectedRunId?: string | null,
 ): Promise<'handled' | 'reattached'> {
   const workflow = await loadWorkflow(key)
+  if (expectedRunId !== undefined && workflow?.autoRun?.recoveryBudget?.runId !== expectedRunId) return 'handled'
   if (!workflow?.autoRun) return 'handled'
   const ownership = safeOwnership(ctx, workflow)
   const decision = decideAutoRunWatchdog(workflow.autoRun, workflow.events, ownership.state, Date.now())
@@ -435,23 +464,13 @@ export async function maintainPausedAutoRun(
     scheduleAutoRunWake(ctx, key, decision.retryAt, workflow.autoRun.deadline, wake)
     return 'handled'
   }
-  workflow.autoRun.status = 'running'
-  workflow.autoRun.pausedReason = null
-  workflow.autoRun.lastObservedAt = new Date().toISOString()
-  delete workflow.autoRun.controllerRecovery
-  failureAttempts.delete(key)
   try {
-    await appendEvent(
-      workflow,
-      {
-        kind: 'auto-run',
-        at: new Date().toISOString(),
-        round: workflow.autoRun.rounds,
-        step: workflow.autoRun.step,
-        note: AUTO_RUN_WATCHDOG_NOTE,
-      },
-      workflowRevision(workflow) ?? 0,
-    )
+    if (preparationBlockReason(ctx as unknown as TaskOwnershipContext, workflow)) {
+      scheduleAutoRunWakeAt(ctx, key, Date.now() + AUTO_RUN_BASE_RETRY_MS, wake)
+      return 'handled'
+    }
+    await consumeRecoveryCooldown(workflow, AUTO_RUN_WATCHDOG_NOTE)
+    failureAttempts.delete(key)
   } catch (error) {
     logTaskDiagnostic('auto-run-watchdog-persist-error', {
       workflowKey: key,
@@ -468,3 +487,5 @@ export async function maintainPausedAutoRun(
   armAutoRunDeadline(ctx, key, workflow.autoRun.deadline, wake)
   return 'reattached'
 }
+
+export const pendingControllerFailure = (key: string): ControllerFailureAttempt | undefined => failureAttempts.get(key)

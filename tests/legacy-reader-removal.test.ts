@@ -1,3 +1,4 @@
+import { activateRecoveryHome } from './helpers/recovery-home.ts'
 /**
  * Active legacy-reader removal tests (ADR-0013 §6, disposition table rows
  * A2/A3/B1–B4, issue #137 AC3). After the v0.2 clean break the runtime must
@@ -25,6 +26,7 @@ async function withTempHome(name, run) {
   const previous = process.env.HOME
   const home = await mkdtemp(join(tmpdir(), `clickvibe-legacy-removal-${name}-`))
   process.env.HOME = home
+  if (name === 'append-current-key') await activateRecoveryHome(home, {})
   try {
     await run(home)
   } finally {
@@ -53,7 +55,7 @@ test('v0.1 state layouts are observed as-is and never migrated', async () => {
 
 test('taskless action logs append only under the current workflow key, never a legacy alias', async () => {
   await withTempHome('append-current-key', async (home) => {
-    const state = join(home, '.clickvibe', 'state')
+    const state = join(home, '.clickvibe', 'state-recovery-1')
     const currentKey = 'issue-aXRzLW9yZ2FuaXphdGlvbi9yZXBv-9'
     const legacyAlias = 'its-organization-repo-9'
     await mkdir(join(state, legacyAlias), { recursive: true })

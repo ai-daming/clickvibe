@@ -1,6 +1,8 @@
 /** v0.2 DiagnosticRecord transport and active projection reader. */
-import { randomUUID } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
+import { lstat, open, readFile, realpath } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
 import type { DiagnosticRecord, WorkItemIdentity } from './contracts.ts'
 import { appendDiagnosticLine } from './diagnostic-log-store.ts'
 import { diagnosticLogPath } from './state-layout.ts'
@@ -109,4 +111,47 @@ export async function readDiagnosticRecords(root: string, workItem: WorkItemIden
     }
   }
   return records
+}
+
+/** Only read this producer's bounded, hash-verified artifact under its own Work Item directory. */
+export async function readDiagnosticDetails(root: string, record: DiagnosticRecord): Promise<string | undefined> {
+  const ref = record.rawArtifact
+  if (!ref || ref.kind !== 'diagnostic' || ref.redaction !== 'applied' || !basename(ref.path).startsWith('shell-'))
+    return undefined
+  const directory = dirname(diagnosticLogPath(root, record.workflow?.workItem))
+  const expected = join(directory, 'artifacts', `shell-${record.diagnosticId}.json`)
+  if (!/^[a-f0-9-]{36}$/.test(record.diagnosticId) || ref.path !== expected) return '诊断附件路径不匹配，已拒绝读取'
+  try {
+    if ((await realpath(dirname(expected))) !== join(await realpath(directory), 'artifacts'))
+      return '诊断附件目录不匹配'
+    if ((await lstat(expected)).isSymbolicLink()) return '诊断附件不可使用符号链接'
+    const file = await open(expected, constants.O_RDONLY | constants.O_NOFOLLOW)
+    let raw: Buffer
+    try {
+      const metadata = await file.stat()
+      if (!metadata.isFile() || metadata.nlink !== 1 || metadata.size > 8192) return '诊断附件类型或大小无效'
+      raw = await file.readFile()
+    } finally {
+      await file.close()
+    }
+    if (ref.contentHash !== `sha256-v1_${createHash('sha256').update(raw).digest('base64url')}`)
+      return '诊断附件哈希校验失败'
+    const d = JSON.parse(raw.toString('utf8'))
+    const ms = (value: unknown) =>
+      typeof value === 'number' && Number.isFinite(value) && value >= 0 ? `${value} ms` : '未知'
+    const time = (value: unknown) =>
+      typeof value === 'string' && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : '未知'
+    const signal = typeof d.signal === 'string' && /^SIG[A-Z0-9]{1,12}$/.test(d.signal) ? d.signal : '未知'
+    return [
+      `终止信号: ${signal}`,
+      `请求超时: ${ms(d.requestedTimeoutMs)}；实际超时: ${ms(d.effectiveTimeoutMs)}`,
+      `开始: ${time(d.startedAt)}`,
+      `结束: ${time(d.endedAt)}`,
+      `耗时: ${ms(d.durationMs)}`,
+      `标准输出: ${d.stdout?.omitted ? '内容已安全省略' : '无内容'}；截断: ${d.stdout?.truncated === true ? '是' : '否'}`,
+      `标准错误: ${d.stderr?.omitted ? '内容已安全省略' : '无内容'}；截断: ${d.stderr?.truncated === true ? '是' : '否'}`,
+    ].join('\n')
+  } catch {
+    return '诊断附件缺失或无法读取；原始错误摘要仍保留'
+  }
 }

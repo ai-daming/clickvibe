@@ -92,7 +92,10 @@ test('task generations append valid structured JSONL independently and aggregate
       exitCode: 0,
     })
 
-    const raw = await readFile(taskLogPath(join(tempHome, '.clickvibe', 'state'), workflow, 'dev', first), 'utf8')
+    const raw = await readFile(
+      taskLogPath(join(tempHome, '.clickvibe', 'state-recovery-1'), workflow, 'dev', first),
+      'utf8',
+    )
     const records = raw
       .trim()
       .split('\n')
@@ -101,7 +104,11 @@ test('task generations append valid structured JSONL independently and aggregate
     assert.equal(records[0].source, 'agent')
     assert.equal(records[1].source, 'clickvibe')
     assert.ok(records.every((record) => record.taskId === first && typeof record.line === 'string'))
-    await appendFile(taskLogPath(join(tempHome, '.clickvibe', 'state'), workflow, 'dev', first), '{"partial":', 'utf8')
+    await appendFile(
+      taskLogPath(join(tempHome, '.clickvibe', 'state-recovery-1'), workflow, 'dev', first),
+      '{"partial":',
+      'utf8',
+    )
     assert.deepEqual((await readTaskLog(workflow, 'dev', first)).lines, ['one', '[clickvibe] complete'])
   } finally {
     if (previousHome === undefined) delete process.env.HOME
@@ -115,7 +122,7 @@ test('legacy flat workflows are ignored as-is after the v0.2 clean break', async
   const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-legacy-flat-'))
   process.env.HOME = tempHome
   try {
-    const root = join(tempHome, '.clickvibe', 'state')
+    const root = join(tempHome, '.clickvibe', 'state-recovery-1')
     const workflow = fixture('a-b-c-7')
     await mkdir(join(root, workflow.key), { recursive: true })
     await writeFile(join(root, `${workflow.key}.json`), JSON.stringify(workflow), 'utf8')

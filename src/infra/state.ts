@@ -1,3 +1,5 @@
+import { recoveryStateRoot } from './recovery-layout.ts'
+import type { WorktreePreparation } from './preparation-record.ts'
 /** Project-scoped workflow state and task-log compatibility facade. */
 import { createHash } from 'node:crypto'
 import { appendFile, link, mkdir, readFile, readdir, rm } from 'node:fs/promises'
@@ -91,6 +93,7 @@ export interface IssueWorkflow {
   issueSnapshot?: PromptSnapshot
   /** Optional controller cache; missing or invalid state never blocks manual actions. */
   autoRun?: AutoRunState
+  preparation?: WorktreePreparation
   revision?: number
   taskStateRevision?: number
   updatedAt: number
@@ -201,7 +204,7 @@ export async function appendEvent(
 }
 
 export function stateDir(): string {
-  return join(homedir(), '.clickvibe', 'state')
+  return recoveryStateRoot()
 }
 
 export function statePath(workflow: WorkflowStorageIdentity): string {

@@ -58,11 +58,14 @@ const EXPECTED_STATE_EXPORTS = [
 const EXPECTED_PERSISTENCE_EXPORTS = [
   'WorkflowConflictError',
   'claimWorkflowTaskCommand',
+  'commitRecoveryControlCommand',
   'commitWorkflowMetadataCommand',
   'currentWorkflowTaskRef',
   'mutateWorkflowTaskCommand',
+  'stopWorkflowPreparationCommand',
   'stopWorkflowTaskCommand',
   'withBaselineRestoreWorkflowLocksCommand',
+  'withWorkflowPreparationCommand',
   'workflowRevision',
   'workflowStatePath',
 ]

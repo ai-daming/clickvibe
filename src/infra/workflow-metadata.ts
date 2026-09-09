@@ -1,3 +1,4 @@
+import { assertMetadataBudgetUnchanged } from './recovery-budget.ts'
 import type { IssueWorkflow } from './state.ts'
 import type { WorkflowStorageIdentity } from './state-layout.ts'
 
@@ -26,6 +27,7 @@ type ProtectedWorkflowField =
   | 'revision'
   | 'taskStateRevision'
   | 'updatedAt'
+  | 'preparation'
 type WorkflowMetadataField = Exclude<keyof IssueWorkflow, ProtectedWorkflowField>
 
 /** Metadata patch incapable of carrying lifecycle state, even via a typed workflow variable. */
@@ -56,6 +58,7 @@ export function applyWorkflowMetadataPatch(
       throw new Error(`workflow metadata patch cannot write ${field}`)
     }
   }
+  assertMetadataBudgetUnchanged(current, patch)
   if (current) return { ...current, ...patch }
   if (typeof patch.worktree !== 'string' || typeof patch.branch !== 'string') {
     throw new Error('new workflow metadata requires worktree and branch')

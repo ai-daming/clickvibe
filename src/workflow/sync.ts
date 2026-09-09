@@ -1,3 +1,4 @@
+import { withWorkflowAction, actionPersistence, type WorkflowActionTransaction } from '../infra/workflow-action.ts'
 /**
  * clickvibe host half — routes:
  * - `/clickvibe/api/fetch`          — fetch GitHub issue/PR data via gh
@@ -55,10 +56,16 @@ export async function syncWorktree(ctx: Context, payload: unknown): Promise<Sync
     return { ok: false, error: '请输入形如 https://github.com/owner/repo/issues/123 的链接' }
   }
   const key = issueKey(`${parsed.owner}/${parsed.repo}`, parsed.number)
-  return await withWorkflowLock(key, async () => syncWorktreeLocked(ctx, key))
+  if (!(await loadWorkflow(key))) return { ok: false, error: '该 issue 尚无 worktree,无法同步' }
+  return await withWorkflowAction(
+    key,
+    async (tx) => syncWorktreeLocked(ctx, key, tx),
+    (payload as { autoRunId?: unknown })?.autoRunId,
+  )
 }
 
-async function syncWorktreeLocked(ctx: Context, key: string): Promise<SyncResult> {
+async function syncWorktreeLocked(ctx: Context, key: string, tx: WorkflowActionTransaction): Promise<SyncResult> {
+  const { commitWorkflowMetadata, appendEvent, persistRemoteGitAttempt } = actionPersistence(tx)
   const workflow = await loadWorkflow(key)
   if (!workflow || !existsSync(workflow.worktree)) {
     return { ok: false, error: '该 issue 尚无 worktree,无法同步' }
@@ -70,7 +77,14 @@ async function syncWorktreeLocked(ctx: Context, key: string): Promise<SyncResult
   const policy = { mode: 'danger-full-access' as const, workspaceRoot: workflow.worktree }
   const remoteBase = `origin/${workflowBaseBranch(workflow.baseRef)}`
   try {
-    const recovered = await recoverWorkflowRemotePush(ctx, workflow, 'sync', workflow.worktree, policy)
+    const recovered = await recoverWorkflowRemotePush(
+      ctx,
+      workflow,
+      'sync',
+      workflow.worktree,
+      policy,
+      persistRemoteGitAttempt,
+    )
     if (recovered?.status === 'confirmed') {
       const recoveredHead = await readWorktreeHead(ctx, workflow.worktree)
       await appendLog(workflow.key, 'dev', `[clickvibe] 已回读确认上次同步 push，HEAD ${recoveredHead ?? '未知'}`)

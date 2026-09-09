@@ -1,3 +1,4 @@
+import { activateRecoveryHome } from './helpers/recovery-home.ts'
 import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -66,6 +67,7 @@ test('real host registry retains ownership across plugin fiber reload and cancel
   const tempHome = await mkdtemp(join(tmpdir(), 'clickvibe-owner-'))
   const previousHome = process.env.HOME
   process.env.HOME = tempHome
+  await activateRecoveryHome(tempHome, {})
   const host = new Context()
   const persistedTasks: LiveTask[] = []
   try {

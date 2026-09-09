@@ -19,12 +19,19 @@ export function logTaskDiagnostic(event: string, fields: Record<string, unknown>
     ...runtimeIdentity,
     ...fields,
   }
+  const root = stateDir()
   const line = JSON.stringify(record)
   console.warn(line)
   const maxBytes = loadConfig()
     .then((config) => config.diagnosticsMaxBytes ?? DEFAULT_DIAGNOSTIC_MAX_BYTES)
     .catch(() => DEFAULT_DIAGNOSTIC_MAX_BYTES)
-  void appendDiagnosticLine(stateDir(), fields.workflowKey, line, maxBytes).catch(() => undefined)
+  void Promise.resolve()
+    .then(() => appendDiagnosticLine(root, fields.workflowKey, line, maxBytes))
+    .catch((error) => {
+      console.error(
+        `[clickvibe] diagnostic persistence failed: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    })
 }
 
 /** Await best-effort writes before a task releases or deletes its persistence directory. */

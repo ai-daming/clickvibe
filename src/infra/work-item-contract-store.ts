@@ -1,3 +1,6 @@
+import { dirname } from 'node:path'
+import { recoveryStateRoot } from './recovery-layout.ts'
+import { assertRecoveryStateWriteAllowed } from './recovery-config.ts'
 /** ADR-0012 immutable capture bundle and atomic current-pointer persistence. */
 import { createHash, randomBytes } from 'node:crypto'
 import { mkdir, open, readFile, rename, rm } from 'node:fs/promises'
@@ -25,6 +28,7 @@ export type WorkItemContractPublication =
   | { state: 'unknown'; reason: string }
 
 interface ReaderOptions {
+  artifactRoot?: string
   root: string
   workItem: WorkItemIdentity
   fingerprintOf: (snapshot: WorkItemContractSnapshot) => `wic1_${string}`
@@ -100,6 +104,7 @@ async function readCapture(
   captureId: string,
   fingerprint: string,
   fingerprintOf: ReaderOptions['fingerprintOf'],
+  artifactDirectory?: string,
 ): Promise<WorkItemContractRead> {
   if (!/^capture1_[A-Za-z0-9_-]{43}$/.test(captureId)) return { state: 'unknown', reason: 'invalid-capture-id' }
   const directory = join(paths.captures, captureId)
@@ -128,7 +133,7 @@ async function readCapture(
     if (snapshot.rawArtifact.contentHash !== `sha256-v1_${rawDigest(raw)}`) {
       return { state: 'unknown', reason: 'raw-content-hash-mismatch' }
     }
-    if (snapshot.rawArtifact.path !== join(directory, 'raw.json'))
+    if (snapshot.rawArtifact.path !== join(artifactDirectory ?? directory, 'raw.json'))
       return { state: 'unknown', reason: 'raw-artifact-path-mismatch' }
     if (snapshot.fingerprint !== fingerprint || fingerprintOf(snapshot) !== fingerprint) {
       return { state: 'unknown', reason: 'contract-fingerprint-mismatch' }
@@ -157,7 +162,16 @@ export async function readCurrentWorkItemContract(options: ReaderOptions): Promi
     return { state: 'unknown', reason: 'unknown-current-version' }
   }
   if (typeof current.captureId !== 'string') return { state: 'unknown', reason: 'invalid-current-contract' }
-  return readCapture(paths, options.workItem, current.captureId, current.fingerprint, options.fingerprintOf)
+  return readCapture(
+    paths,
+    options.workItem,
+    current.captureId,
+    current.fingerprint,
+    options.fingerprintOf,
+    options.artifactRoot
+      ? join(workItemContractPaths(options.artifactRoot, options.workItem).captures, current.captureId)
+      : undefined,
+  )
 }
 
 async function publishCaptureFiles(
@@ -200,6 +214,7 @@ async function publishCaptureFiles(
 }
 
 export async function publishWorkItemContractCapture(options: PublisherOptions): Promise<WorkItemContractPublication> {
+  if (options.root === recoveryStateRoot(dirname(dirname(options.root)))) assertRecoveryStateWriteAllowed(options.root)
   const paths = workItemContractPaths(options.root, options.workItem)
   await mkdir(paths.captures, { recursive: true, mode: 0o700 })
   const release = await acquireLinkLock(paths.current)
@@ -231,6 +246,8 @@ export async function publishWorkItemContractCapture(options: PublisherOptions):
     } else if (current.reason !== 'missing-current-contract') {
       return current
     }
+    if (options.root === recoveryStateRoot(dirname(dirname(options.root))))
+      assertRecoveryStateWriteAllowed(options.root)
     await publishCaptureFiles(paths, options.snapshot, options.raw, options.fingerprintOf, options.checkpoint)
     const verified = await readCapture(
       paths,
@@ -250,6 +267,8 @@ export async function publishWorkItemContractCapture(options: PublisherOptions):
       await writeSynced(temporary, pointer)
       await options.checkpoint?.('after-pointer-temp-write')
       await options.checkpoint?.('before-pointer-rename')
+      if (options.root === recoveryStateRoot(dirname(dirname(options.root))))
+        assertRecoveryStateWriteAllowed(options.root)
       await rename(temporary, paths.current)
       await options.checkpoint?.('after-pointer-rename')
       await syncDirectory(paths.contract)

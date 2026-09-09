@@ -1,3 +1,4 @@
+import { withWorkflowAction, actionPersistence, type WorkflowActionTransaction } from '../infra/workflow-action.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import { ensurePullRequest } from '../github/pr.ts'
 import { githubWriteOutcomeError, githubWriteRecoverOperation } from '../github/writes.ts'
@@ -20,14 +21,21 @@ export async function createPullRequest(
   const parsed = parseUrl(url)
   if (!parsed || parsed.kind !== 'issue') return { ok: false, error: '创建 PR 的目标必须是 GitHub Issue URL' }
   const key = issueKey(`${parsed.owner}/${parsed.repo}`, parsed.number)
-  return withWorkflowLock(key, () => createPullRequestLocked(ctx, key, parsed.number))
+  if (!(await loadWorkflow(key))) return { ok: false, error: '未找到该 issue 的 workflow' }
+  return withWorkflowAction(
+    key,
+    (tx) => createPullRequestLocked(ctx, key, parsed.number, tx),
+    (payload as { autoRunId?: unknown })?.autoRunId,
+  )
 }
 
 async function createPullRequestLocked(
   ctx: Context,
   key: string,
   issueNumber: string,
+  tx: WorkflowActionTransaction,
 ): Promise<{ ok: true; prNumber: string; created: boolean } | { ok: false; error: string }> {
+  const { commitWorkflowMetadata, persistRemoteGitAttempt } = actionPersistence(tx)
   const workflow = await loadWorkflow(key)
   if (!workflow) return { ok: false, error: '未找到该 issue 的 workflow' }
   const currentContract = await observeCurrentIssueContract(ctx, workflow.url, { force: true })
@@ -70,7 +78,14 @@ async function createPullRequestLocked(
     const result = await ensurePullRequest(ctx, createInput, {
       beforeCreate: async () => {
         const policy = { mode: 'danger-full-access' as const, workspaceRoot: workflow.worktree }
-        const recovered = await recoverWorkflowRemotePush(ctx, workflow, 'pr-push', workflow.worktree, policy)
+        const recovered = await recoverWorkflowRemotePush(
+          ctx,
+          workflow,
+          'pr-push',
+          workflow.worktree,
+          policy,
+          persistRemoteGitAttempt,
+        )
         const branch = await runCommand(ctx, 'git branch --show-current', {
           workdir: workflow.worktree,
           timeoutMs: 10_000,

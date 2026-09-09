@@ -12,6 +12,7 @@ import {
 function autoRun(overrides: Partial<AutoRunState> = {}): AutoRunState {
   return {
     status: 'paused',
+    recoveryBudget: { schema: 1, runId: 'fixture-run', cooldownUsed: false, halted: false },
     autoMerge: false,
     devAgent: 'codex',
     reviewAgent: 'codex',

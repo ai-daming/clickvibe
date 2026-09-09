@@ -17,6 +17,7 @@ import ts from 'typescript'
 
 const CONTRACT_STORE_FILE = /work-item-contract-store\.ts$/
 const CONTRACT_STORE_IMPORTS = new Map([
+  ['src/infra/recovery-upgrade.ts', new Set(['readCurrentWorkItemContract'])],
   [
     'src/workflow/work-item-contract-repository.ts',
     new Set([
@@ -34,6 +35,7 @@ const CONTRACT_PATH_LITERALS = ["'current.json'", '"current.json"']
 
 const DIAGNOSTICS_FILE = /diagnostic-log-store\.ts$/
 const DIAGNOSTICS_IMPORTS = new Map([
+  ['src/infra/shell-command.ts', new Set(['appendDiagnosticLine', 'DEFAULT_DIAGNOSTIC_MAX_BYTES'])],
   ['src/infra/diagnostic-record.ts', new Set(['appendDiagnosticLine'])],
   [
     'src/infra/remote-git-evidence.ts',
@@ -50,17 +52,25 @@ const DIAGNOSTICS_IMPORTS = new Map([
   ['src/workflow/work-item-contract-repository.ts', new Set(['DEFAULT_DIAGNOSTIC_MAX_BYTES'])],
 ])
 const DIAGNOSTICS_PATH_ALLOWED = new Set([
+  'src/infra/shell-command.ts',
   'src/infra/state-layout.ts',
   'src/infra/diagnostic-log-store.ts',
   'src/infra/diagnostic-record.ts',
 ])
 const DIAGNOSTICS_PATH_NAMES = new Set(['diagnosticLogPath'])
 
+const RECOVERY_UPGRADE_OWNERS = new Set([
+  'src/infra/recovery-upgrade.ts',
+  'src/infra/recovery-upgrade-plan.ts',
+  'src/infra/recovery-upgrade-files.ts',
+])
 const CONFIG_PATH_LITERAL = /['"](?:config\.yaml|\.clickvibe-state\.json)['"]/
 const WRITE_PRIMITIVE = /\b(?:writeFile|appendFile|rename|rm|unlink|link|symlink|cp|mkdir|truncate)\s*\(/
 /** May reference the quoted config/marker literals at all. */
 const CONFIG_LITERAL_ALLOWED = (relative) =>
   /v02-upgrade[^/]*\.ts$/.test(relative) ||
+  inAllowed(relative, RECOVERY_UPGRADE_OWNERS) ||
+  relative === 'src/infra/recovery-config.ts' ||
   ['src/infra/runtime.ts', 'src/infra/project-config.ts', 'src/infra/v02-generation-fence.ts'].some(
     (item) => relative === item || relative.endsWith(`/${item}`),
   )
@@ -81,6 +91,13 @@ const PERSISTENCE_FILE = /workflow-persistence\.ts$/
 const PATH_NAMES = new Set(['workflowPath', 'workflowStatePath'])
 const PATH_ALLOWED = new Set(['src/infra/workflow-persistence.ts', 'src/infra/state-layout.ts', 'src/infra/state.ts'])
 const PERSISTENCE_IMPORTS = new Map([
+  ['src/agent/worktree.ts', new Set(['withWorkflowPreparationCommand'])],
+  ['src/infra/auto-run-recovery-control.ts', new Set(['commitRecoveryControlCommand', 'workflowRevision'])],
+  [
+    'src/infra/workflow-action.ts',
+    new Set(['withBaselineRestoreWorkflowLocksCommand', 'BaselineRestoreWorkflowTransaction']),
+  ],
+  ['src/workflow/auto-run.ts', new Set(['commitRecoveryControlCommand'])],
   [
     'src/infra/state.ts',
     new Set([
@@ -97,7 +114,7 @@ const PERSISTENCE_IMPORTS = new Map([
   ],
   ['src/workflow/task-claim.ts', new Set(['claimWorkflowTaskCommand'])],
   ['src/workflow/task-lease.ts', new Set(['mutateWorkflowTaskCommand', 'WorkflowTaskCommitResult'])],
-  ['src/workflow/task-api.ts', new Set(['stopWorkflowTaskCommand'])],
+  ['src/workflow/task-api.ts', new Set(['stopWorkflowTaskCommand', 'stopWorkflowPreparationCommand'])],
   ['src/infra/baseline-restore-git.ts', new Set(['withBaselineRestoreWorkflowLocksCommand'])],
 ])
 
@@ -226,7 +243,7 @@ for (const file of files) {
         `${relative}: quoted config/state-marker literals belong to the upgrade machine or admitted readers`,
       )
     }
-    const isUpgradeModule = /(^|\/)v02-upgrade[^/]*\.ts$/.test(relative)
+    const isUpgradeModule = /(^|\/)v02-upgrade[^/]*\.ts$/.test(relative) || inAllowed(relative, RECOVERY_UPGRADE_OWNERS)
     if (!isUpgradeModule && !allowedEntry(relative, CONFIG_WRITE_ALLOWLIST) && WRITE_PRIMITIVE.test(source.text)) {
       failures.push(`${relative}: active config/state-marker writes belong to the v0.2 upgrade machine`)
     }
