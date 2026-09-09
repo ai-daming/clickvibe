@@ -89,7 +89,13 @@ function inAllowed(relative, set) {
 }
 const PERSISTENCE_FILE = /workflow-persistence\.ts$/
 const PATH_NAMES = new Set(['workflowPath', 'workflowStatePath'])
-const PATH_ALLOWED = new Set(['src/infra/workflow-persistence.ts', 'src/infra/state-layout.ts', 'src/infra/state.ts'])
+// ADR-0018 offline single-operator settlement owns its exact workflow path; never host-mounted.
+const PATH_ALLOWED = new Set([
+  'src/infra/manual-preparation.ts',
+  'src/infra/workflow-persistence.ts',
+  'src/infra/state-layout.ts',
+  'src/infra/state.ts',
+])
 const PERSISTENCE_IMPORTS = new Map([
   ['src/agent/worktree.ts', new Set(['withWorkflowPreparationCommand'])],
   ['src/infra/auto-run-recovery-control.ts', new Set(['commitRecoveryControlCommand', 'workflowRevision'])],

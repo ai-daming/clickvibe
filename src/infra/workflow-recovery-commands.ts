@@ -55,6 +55,31 @@ export function createWorkflowRecoveryCommands(within: Within, conflict: (revisi
         try {
           return await run({
             current: () => (current ? structuredClone(current) : null),
+            block: async (record, reason) => {
+              if (!active || writing) throw new Error('preparation transaction expired or busy')
+              if (
+                !['git-mismatch', 'dirty-worktree', 'relative-hooks', 'active-hook', 'worktree-conflict'].includes(
+                  reason,
+                )
+              )
+                throw new Error('invalid preparation block reason')
+              writing = true
+              try {
+                const next = applyPreparationPatch(current, initial, { preparation: { ...record, status: 'blocked' } })
+                next.events = [
+                  ...next.events,
+                  {
+                    kind: 'note',
+                    at: new Date().toISOString(),
+                    note: `worktree preparation ${record.attemptId} blocked: ${reason}; 保留现场，需人工结算`,
+                  },
+                ]
+                current = await commit(next)
+                return structuredClone(current)
+              } finally {
+                writing = false
+              }
+            },
             commit: async (patch) => {
               if (!active || writing) throw new Error('preparation transaction expired or busy')
               writing = true

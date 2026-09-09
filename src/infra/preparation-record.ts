@@ -22,6 +22,22 @@ export type PreparationPatch = Partial<Pick<IssueWorkflow, 'worktree' | 'branch'
 export interface PreparationTransaction {
   current(): IssueWorkflow | null
   commit(patch: PreparationPatch): Promise<IssueWorkflow>
+  block(record: WorktreePreparation, reason: PreparationBlockReason): Promise<IssueWorkflow>
+}
+export type PreparationBlockReason =
+  | 'git-mismatch'
+  | 'dirty-worktree'
+  | 'relative-hooks'
+  | 'active-hook'
+  | 'worktree-conflict'
+export class PreparationConflict extends Error {
+  readonly reason: PreparationBlockReason
+  constructor(reason: PreparationBlockReason) {
+    super(
+      `${reason === 'worktree-conflict' ? 'worktree 冲突' : 'worktree preparation blocked'}: ${reason}; 保留现场，需人工结算`,
+    )
+    this.reason = reason
+  }
 }
 export function validPreparation(value: unknown): value is WorktreePreparation {
   if (!value || typeof value !== 'object') return false

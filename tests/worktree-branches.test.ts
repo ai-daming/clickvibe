@@ -262,7 +262,12 @@ test('worktree preparation executes reuse, detached attach and existing-branch a
   const conflict = await runScenario('13', { path: 'nonempty', branchExists: true })
   assert.equal(conflict.result.ok, false)
   if (!conflict.result.ok) assert.match(conflict.result.error, /未注册的非空目录/)
-  assert.equal(conflict.stored, null)
+  assert.equal(conflict.stored?.preparation?.status, 'blocked')
+  assert.match(conflict.stored?.events.at(-1)?.note ?? '', /worktree-conflict/)
+  assert.equal(
+    conflict.commands.some((command) => command.startsWith('git worktree add')),
+    false,
+  )
 })
 
 test('stale registrations repair safely and deleted frozen bases cannot recreate a missing branch', async () => {

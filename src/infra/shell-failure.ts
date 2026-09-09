@@ -30,13 +30,67 @@ export function classifyShellFailure(result: ShellOutcome): ShellFailureKind {
   return result.exitCode === null ? 'unknown' : 'command-failure'
 }
 
-/** Unknown command output may contain arbitrary secrets; retain availability/size, not guessed-safe text. */
-export function safeShellOutput(output: { text?: string; truncated?: boolean } | undefined) {
+// Only fixed Git/system phrases can leave this function. Never copy a captured path, argument or prefix.
+const gitOutputOperations = new Set([
+  'worktree-add',
+  'worktree-attach',
+  'worktree-repair',
+  'worktree-common-dir',
+  'worktree-default-base',
+  'worktree-main-exists',
+  'worktree-base-exists',
+  'worktree-base-oid',
+  'worktree-branch-exists',
+  'worktree-branch-head',
+  'worktree-head',
+  'worktree-hooks',
+  'worktree-list',
+  'worktree-status',
+])
+const gitOutputLines = new Set([
+  'fatal: not a git repository (or any of the parent directories): .git',
+  'fatal: this operation must be run in a work tree',
+  'fatal: not a valid object name: HEAD',
+])
+const systemReasons = [
+  'No space left on device',
+  'Permission denied',
+  'Read-only file system',
+  'No such file or directory',
+  'Too many open files',
+  'Input/output error',
+]
+
+/** Allowlist fragments from the last 4 KiB; all other output (including localized errors) is omitted. */
+export function safeShellOutput(output: { text?: string; truncated?: boolean } | undefined, operation = '') {
+  const original = typeof output?.text === 'string' ? output.text : ''
+  const bytes = new TextEncoder().encode(original)
+  const clipped = bytes.length > 4096
+  let tail = new TextDecoder().decode(bytes.subarray(Math.max(0, bytes.length - 4096)))
+  // A clipped first line is never a complete diagnostic statement, even if its suffix looks safe.
+  if (clipped) tail = tail.includes('\n') ? tail.slice(tail.indexOf('\n') + 1) : ''
+  const retained: string[] = []
+  if (gitOutputOperations.has(operation)) {
+    for (const line of tail.split(/\r?\n/)) {
+      if (gitOutputLines.has(line)) retained.push(line)
+      else if (
+        /^(fatal|error): /.test(line) &&
+        ![...line].some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127)
+      ) {
+        const reason = systemReasons.find((reason) => line.endsWith(`: ${reason}`))
+        if (reason) retained.push(`${line.startsWith('fatal:') ? 'fatal' : 'error'}: [details omitted]: ${reason}`)
+      }
+    }
+  }
+  // Generated phrases are ASCII; cap again because replacing a short prefix can expand a line.
+  let text = retained.join('\n')
+  const expanded = text.length > 4096
+  while (text.length > 4096) text = text.slice(text.indexOf('\n') + 1)
   return {
-    text: '',
-    omitted: Boolean(output?.text),
+    text,
+    omitted: Boolean(original && (clipped || text !== original.replace(/\r\n/g, '\n').trimEnd())),
     available: output !== undefined,
-    truncated: output?.truncated ?? false,
+    truncated: output?.truncated === true || clipped || expanded,
   }
 }
 
