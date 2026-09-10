@@ -472,11 +472,7 @@ export function PanelContent() {
                                 title={shownAction.hint}
                                 onClick={() => rowAction(issue)}
                               >
-                                {shownAction.kind === 'none'
-                                  ? status === 'passed'
-                                    ? '已交付'
-                                    : shownAction.label
-                                  : shownAction.label}
+                                {shownAction.label}
                               </button>
                             </div>
                           </div>

@@ -1,12 +1,8 @@
 /**
- * Pure workflow-snapshot merge for the project panel.
- *
- * Archived workflows vanish from the server state response (loadAllWorkflows
- * excludes archived). A merge that only updates incoming entries freezes the
- * last cached state forever — including a clickable "重试清理" captured during
- * the merge→cleanup window (#89, 2026-08-25: merged 16:06:43, cleaned
- * 16:06:58, panel kept the zombie button). Vanished + prune → terminal
- * display, never a zombie action.
+ * A state poll contains persisted workflows, whereas repo/issues also derives
+ * observations for never-started issues. Absence is not archival evidence.
+ * Keep list observations; disable vanished cleanup actions so issue #89's
+ * stale retry button cannot survive, without inventing a terminal state.
  */
 
 export interface SnapshotWorkflowLike {
@@ -21,11 +17,11 @@ export interface SnapshotIssueLike<TWorkflow> {
   workflow?: TWorkflow | null
 }
 
-/** Apply fresh workflow states; vanished workflows are archived → terminal display. */
+/** Merge present observations; missing cleanup waits for authoritative refresh. */
 export function applyWorkflowSnapshot<TIssue extends SnapshotIssueLike<unknown>>(
   previous: TIssue[],
   incoming: SnapshotWorkflowLike[],
-  pruneMissing: boolean,
+  pruneMissing = false,
 ): TIssue[] {
   const byUrl = new Map(incoming.map((item) => [item.url, item]))
   return previous.map((item) => {
@@ -33,13 +29,18 @@ export function applyWorkflowSnapshot<TIssue extends SnapshotIssueLike<unknown>>
     if (current) return { ...item, workflow: current } as TIssue
     if (!pruneMissing || !item.workflow) return item
     const workflow = item.workflow as SnapshotWorkflowLike & Record<string, unknown>
+    if (workflow.derived?.nextAction?.kind !== 'cleanup') return item
     return {
       ...item,
       workflow: {
         ...workflow,
         derived: {
           ...workflow.derived,
-          nextAction: { kind: 'none', label: '已交付', hint: 'PR 已合并,清理完成,已归档' },
+          nextAction: {
+            kind: 'none',
+            label: '状态待刷新',
+            hint: '本轮未返回该工作流，无法确认清理结果；请刷新项目列表',
+          },
         },
       },
     } as TIssue

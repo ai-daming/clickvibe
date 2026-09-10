@@ -87,7 +87,7 @@ export function useProjectPanel() {
       const response = await apiCall<WorkflowStateResponse>('state', { repoKey }, 8_000)
       if (response.ok) {
         setStateRefreshError(null)
-        // prune=true:本轮成功响应中消失的 workflow 已归档,终结显示而非冻结僵尸动作
+        // 缺失不代表归档；仅禁用缺失 workflow 的旧清理动作，保留列表中的事实推导。
         mergeWorkflowStates(response.workflows, true)
         setFreshness(response.freshness)
         setRepoAdvance(response.repoAdvance)
