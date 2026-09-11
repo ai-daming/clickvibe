@@ -1,6 +1,6 @@
 # ClickVibe 当前有效架构
 
-> Status: Accepted | Owner: ClickVibe maintainers | Last updated: 2026-09-09 | Scope: target architecture; implementation order is governed by [roadmap](roadmap.md)
+> Status: Accepted | Owner: ClickVibe maintainers | Last updated: 2026-09-11 | Scope: target architecture; implementation order is governed by [roadmap](roadmap.md)
 
 本文是 ClickVibe 架构的唯一入口。它回答“当前系统由什么组成、事实由谁拥有、变化如何进入系统”。详细设计放在 `docs/architecture/`，重要取舍放在 `docs/architecture/decisions/`；带日期的 `docs/plans/` 只记录一次实施过程，不自动成为当前架构。
 
@@ -112,6 +112,6 @@ v0.1 已验证部分事实推导、Agent 流程和持久化能力，但它没有
 
 架构版本不另造编号：**提交 SHA 就是精确版本**。任务和 Review 应记录其使用的 baseline SHA 与相关 ADR，避免 Agent 按过期架构施工。
 
-## 待审设计
+## Issue 开发准备评估
 
-[#177 的评估与讨论回写设计](architecture/decisions/0019-issue-implementation-gate-assessment.md)目前为 Draft。它包含对 ADR-0012 的限定准入补充候选，未接受和合入前不得替代现有授权规则。
+[#177 的评估与讨论回写设计](architecture/decisions/0019-issue-implementation-gate-assessment.md)定义单项/批量 impl-gate、可选自动触发、报告持久化和 Harness 讨论回写。其 §9 限定补充 ADR-0012：只有非目标/约束缺失且可信的当前 READY 引用明确 Accepted 设计时，免于重复补正文；其余契约、授权与执行保护保留。设计接受不表示功能已经实现。
