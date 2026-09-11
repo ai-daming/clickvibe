@@ -111,3 +111,7 @@ v0.1 已验证部分事实推导、Agent 流程和持久化能力，但它没有
 6. 每次架构替代必须新增 ADR，并更新本文或对应架构视图；不得只修改历史 plan。
 
 架构版本不另造编号：**提交 SHA 就是精确版本**。任务和 Review 应记录其使用的 baseline SHA 与相关 ADR，避免 Agent 按过期架构施工。
+
+## 待审设计
+
+[#177 的评估与讨论回写设计](architecture/decisions/0019-issue-implementation-gate-assessment.md)目前为 Draft。它包含对 ADR-0012 的限定准入补充候选，未接受和合入前不得替代现有授权规则。
