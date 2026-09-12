@@ -33,4 +33,5 @@ ADR 记录长期有效的架构取舍，不记录普通实现步骤。每个 ADR
 | [0016](0016-shell-worktree-recovery.md) | Accepted | Shell 原因诊断、工作区准备与认领互斥、持久恢复额度及离线格式升级（#170） |
 | [0017](0017-recovery-state-root-isolation.md) | Accepted | #170 新状态独立目录、历史引用迁移与旧默认写入隔离；替代 ADR-0016 §7 共用目录假设 |
 | [0018](0018-manual-worktree-preparation-resolution.md) | Accepted | #170 未决准备的离线人工结算、旧授权撤销与 blocked 生产规则；补充 ADR-0016 的人工恢复出口 |
-| [0019](0019-issue-implementation-gate-assessment.md) | Accepted | #177：单项/批量 impl-gate、持久评估评论、Harness 讨论回写及限定 READY 准入 |
+| [0019](0019-issue-implementation-gate-assessment.md) | Superseded | #177 原评估与限定 READY 准入方案，由 ADR-0020 简化替代 |
+| [0020](0020-advisory-issue-assessment.md) | Accepted | #177：评估展示现状、不作为开发前置；取消预算和批次订阅，保留结果保存与讨论回写 |

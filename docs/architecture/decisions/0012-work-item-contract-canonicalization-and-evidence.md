@@ -73,11 +73,11 @@ interface WorkItemContractSnapshot {
 
 因此“snapshot 保存 title/body/state”解释为 snapshot 通过 ArtifactRef 保存并可回读完整原始观察，不解释为领域快照再复制一套 Provider 字段。该映射是 AC1 的验收口径；本 ADR 合入 `main` 前仍不能作为 Coding baseline。
 
-### 2.1 ADR-0019 的限定补充（#177）
+### 2.1 ADR-0020 的执行边界修订（#177）
 
-[ADR-0019 §9](0019-issue-implementation-gate-assessment.md#9-ready-与授权d4-已确认)在其生效后，限定补充本 ADR §2、§5、§8 的 unknown 准入规则：仅 nonGoals/constraints 为 unknown/missing，且当前可信 READY 与 VerifiedDesignReceipt 明确绑定适用 Accepted 设计中的对应依据时，可进入既有授权流程。开发和 review 必须接收同一份核验报告及设计依据；每个关键入口仍重新核对当前身份、契约、基线与证据有效性。
+[ADR-0020](0020-advisory-issue-assessment.md)生效后替代原 ADR-0019 的 READY 特殊放行方案：成功读取的 Issue 中字段缺失、冲突或不符合正文解析格式，作为问题展示和 Agent 输入，不再阻止用户明确选择开发、自动运行、创建 PR 或启动 review。字段 unknown 和 canonical 指纹原样保留；不强制取得评估或 READY。
 
-该补充不把 missing 写成 known，不改变 snapshot 或 wic1 指纹，不豁免目标/AC/依赖 unknown、conflicting/unparseable、未知版本或损坏证据；不取消动作授权、任务所有权、Git 或合并保护。完整条件以 ADR-0019 §9 为唯一来源，其他分支维持本 ADR 原规则。
+本 ADR §2、§5、§8 对上述执行入口的字段完整性限制按 ADR-0020 §7 修订。未知数据版本、损坏证据、读取失败、动作授权、任务所有权与指纹时效保护不变。共享契约读取不再以字段不完整抛错；合并调用侧保留既有完整性与其他 merge 策略，包括原有人工 override。允许尝试开发不等于验收通过或自动允许合并。
 
 ### 3. canonicalization v1
 
