@@ -1,6 +1,6 @@
 # ADR-0019：Issue impl-gate 评估与讨论回写
 
-Status: Accepted（本次状态同步合入 main 后生效）。Acceptance: 维护者确认 D1–D4 并请求编码，合并设计 PR #178（`15ee503e4846aa901e26e7d9539b831deed6c5e4`），随后确认补齐接受状态并继续。设计接受不等于 impl-gate READY、实现完成或现场验收。
+Status: Superseded by [ADR-0020](0020-advisory-issue-assessment.md)（随替代设计合入 main 生效）。以下保留历史，预算、批次订阅、READY 放行及发布绑定不再作为实施要求。
 Work: ai-daming/clickvibe#177（updatedAt 2026-09-10T17:49:22Z）
 Design investigation baseline: 82cf1bcc8a88b13c7c304eb62d44fd004ed70aea
 Merged design: #178 at 15ee503e4846aa901e26e7d9539b831deed6c5e4；实施核验须另记当时的 exact main SHA。
