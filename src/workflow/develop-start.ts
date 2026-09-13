@@ -49,11 +49,7 @@ import {
   type TaskOwnershipContext,
   workflowTaskExpectation,
 } from '../infra/task-ownership.ts'
-import {
-  contractHasKnownCanonicalFields,
-  dependencyStatesFromContract,
-  observeCurrentIssueContract,
-} from './work-item-contract-repository.ts'
+import { dependencyStatesFromContract, observeCurrentIssueContract } from './work-item-contract-repository.ts'
 import { withWorkflowLock } from '../infra/workflow-lock.ts'
 import { deriveAutoDevelopment } from './auto-development.ts'
 import { type AutoRunFailureClassification, classifiedAutoRunFailure } from './auto-run-policy.ts'
@@ -160,9 +156,6 @@ export async function startDevelop(
   const currentContract = await observeCurrentIssueContract(ctx, url, { force: true })
   if (currentContract.state !== 'known') {
     return classifiedAutoRunFailure(`执行前无法确认当前契约: ${currentContract.reason}`, 'authorization-denied')
-  }
-  if (!contractHasKnownCanonicalFields(currentContract.snapshot)) {
-    return classifiedAutoRunFailure('当前契约含 unknown 字段,禁止启动 Coding', 'authorization-denied')
   }
   if (currentContract.prompt.state !== 'OPEN') {
     return { ok: false, error: agent === 'dryrun' ? '只有 OPEN Issue 可以执行 dryrun' : '只有 OPEN Issue 可以启动开发' }

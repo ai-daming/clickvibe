@@ -75,7 +75,7 @@ test('one provider observation materializes the prompt and canonical snapshot fr
   if (metadataOnly.state === 'known') assert.equal(metadataOnly.snapshot.fingerprint, result.snapshot.fingerprint)
 })
 
-test('missing canonical sections remain explicit unknown and cannot authorize', async (t) => {
+test('missing canonical sections remain explicit unknown for completeness consumers', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'clickvibe-contract-unknown-'))
   t.after(() => rm(root, { recursive: true, force: true }))
   const result = await materializeGithubWorkItemContract({

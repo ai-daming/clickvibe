@@ -48,7 +48,7 @@ import { enrichWorkflowStates } from './repository-state.ts'
 import { resumeDevelop } from './resume.ts'
 import { startReview } from './review-flow.ts'
 import { syncWorktree } from './sync.ts'
-import { contractHasKnownCanonicalFields, observeCurrentIssueContract } from './work-item-contract-repository.ts'
+import { observeCurrentIssueContract } from './work-item-contract-repository.ts'
 
 interface AutoRunCommandState {
   running: Set<string>
@@ -326,9 +326,6 @@ export async function startAutoRun(
   }
   const current = await observeCurrentIssueContract(ctx, url, { force: true })
   if (current.state !== 'known') return { ok: false, error: `执行前无法确认当前契约: ${current.reason}` }
-  if (!contractHasKnownCanonicalFields(current.snapshot)) {
-    return { ok: false, error: '当前契约含 unknown 字段,拒绝启动自动跑到底' }
-  }
   if (current.prompt.state !== 'OPEN') return { ok: false, error: '只有 OPEN Issue 可以启动自动跑到底' }
   if (
     JSON.stringify(current.snapshot.workItem) !== JSON.stringify(authorizedContract.workItem) ||

@@ -42,11 +42,7 @@ import { baselineRestorePreview } from './baseline-restore.ts'
 import { type DevelopBaselinePreview, developBaselinePreview } from './develop-baseline-preview.ts'
 import { cleanupRemoteBranch } from './merge-remote-cleanup.ts'
 import { withWorkflowLock } from '../infra/workflow-lock.ts'
-import {
-  contractHasKnownCanonicalFields,
-  fingerprintGithubIssueContract,
-  observeCurrentIssueContract,
-} from './work-item-contract-repository.ts'
+import { fingerprintGithubIssueContract, observeCurrentIssueContract } from './work-item-contract-repository.ts'
 
 export type MergeAuthorizationPreview =
   | {
@@ -172,9 +168,6 @@ export async function authorizeAgent(
     if (input.action === 'develop' || input.action === 'auto') {
       const current = await observeCurrentIssueContract(ctx, input.url, { force: true })
       if (current.state !== 'known') return { ok: false, error: `当前契约不可用: ${current.reason}` }
-      if (!contractHasKnownCanonicalFields(current.snapshot)) {
-        return { ok: false, error: '当前契约含 unknown 字段,禁止签发开发授权' }
-      }
       snapshot = current.prompt
       if (snapshot.state !== 'OPEN') return { ok: false, error: '只有 OPEN Issue 可以启动开发' }
       if (!body.expectedSnapshot || typeof body.expectedSnapshot !== 'object' || Array.isArray(body.expectedSnapshot)) {
