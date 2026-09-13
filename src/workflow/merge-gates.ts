@@ -34,12 +34,15 @@ export interface ReviewIssueContract {
 }
 
 /** Read the exact Issue contract that one review run evaluates. */
-export async function fetchIssueContract(ctx: Context, url: string, force = false): Promise<ReviewIssueContract> {
+export async function fetchIssueContract(
+  ctx: Context,
+  url: string,
+  force = false,
+): Promise<ReviewIssueContract & { canonicalFieldsKnown: boolean }> {
   const current = await observeCurrentIssueContract(ctx, url, { force })
   if (current.state !== 'known') throw new Error(current.reason)
-  if (!contractHasKnownCanonicalFields(current.snapshot))
-    throw new Error('current Work Item contract contains unknown fields')
   return {
+    canonicalFieldsKnown: contractHasKnownCanonicalFields(current.snapshot),
     title: current.prompt.title,
     body: current.prompt.body,
     state: current.prompt.state,
@@ -209,13 +212,20 @@ export async function collectMergeGateFailures(
   if (!reviewedContract) {
     failures.push({ key: 'review-contract-missing', message: '最近通过的 review 缺少验收契约快照,需重新 Review' })
   } else {
-    let current: ReviewIssueContract
+    let current: Awaited<ReturnType<typeof fetchIssueContract>>
     try {
       current = await fetchIssueContract(ctx, workflow.url, true)
     } catch (error) {
       failures.push({
         key: 'contract-unreadable',
         message: `无法读取当前验收契约: ${String(error instanceof Error ? error.message : error)}`,
+      })
+      return failures
+    }
+    if (!current.canonicalFieldsKnown) {
+      failures.push({
+        key: 'contract-unreadable',
+        message: '当前验收契约字段不完整，开发和 Review 可继续，但不满足自动合并条件',
       })
       return failures
     }

@@ -11,7 +11,7 @@ import { observeWorkflowTask, type TaskOwnershipContext } from '../infra/task-ow
 import { withWorkflowLock } from '../infra/workflow-lock.ts'
 import { persistRemoteGitAttempt, recoverWorkflowRemotePush } from './remote-git-attempt.ts'
 import { workflowBaseBranch } from './state-view.ts'
-import { contractHasKnownCanonicalFields, observeCurrentIssueContract } from './work-item-contract-repository.ts'
+import { observeCurrentIssueContract } from './work-item-contract-repository.ts'
 
 export async function createPullRequest(
   ctx: Context,
@@ -41,9 +41,6 @@ async function createPullRequestLocked(
   const currentContract = await observeCurrentIssueContract(ctx, workflow.url, { force: true })
   if (currentContract.state !== 'known')
     return { ok: false, error: `无法确认当前契约,拒绝创建 PR: ${currentContract.reason}` }
-  if (!contractHasKnownCanonicalFields(currentContract.snapshot)) {
-    return { ok: false, error: '当前契约含 unknown 字段,拒绝创建 PR' }
-  }
   if (currentContract.prompt.state !== 'OPEN') return { ok: false, error: 'Issue 已关闭,拒绝创建 PR' }
   const createInput = {
     repoKey: workflow.repoKey,

@@ -3496,7 +3496,7 @@ test('/develop automatic mode fails closed before worktree creation for invalid 
     automatic: true,
   })
   assert.equal(invalidResult.status, 400)
-  assert.match(invalidResult.body.error ?? '', /unknown 字段/)
+  assert.match(invalidResult.body.error ?? '', /契约缺失.*验收标准/)
 
   // The two phases simulate DIFFERENT GitHub states in one process; the
   // process-level Gateway owner would otherwise serve phase 1's aggregate.

@@ -5,7 +5,7 @@ import { githubRead } from '../github/operations.ts'
 import type { GithubCommentRest } from '../github/reads.ts'
 import { isGithubRateLimitError } from '../github/rest.ts'
 import { commitWorkflowMetadata, type IssueWorkflow, WorkflowConflictError, workflowRevision } from '../infra/state.ts'
-import { contractHasKnownCanonicalFields, observeCurrentIssueContract } from './work-item-contract-repository.ts'
+import { observeCurrentIssueContract } from './work-item-contract-repository.ts'
 
 async function fetchPrPromptComments(
   ctx: Context,
@@ -52,8 +52,6 @@ export async function resolvePromptSnapshot(
 ): Promise<ResolvedPromptSnapshot | { error: string }> {
   const current = await observeCurrentIssueContract(ctx, workflow.url, { force: true })
   if (current.state !== 'known') return { error: `无法确认当前 Work Item 契约: ${current.reason}` }
-  if (!contractHasKnownCanonicalFields(current.snapshot))
-    return { error: '当前 Work Item 契约含 unknown 字段,禁止启动阶段' }
   const snapshot = structuredClone(current.prompt)
   const prComments = await fetchPrPromptComments(ctx, workflow)
   if (prComments) snapshot.comments.push(...prComments)
