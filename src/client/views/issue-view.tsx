@@ -5,6 +5,7 @@ import { type ProjectOption, type Workflow } from '../domain.ts'
 import { fmtDate, renderMarkdown } from '../format.tsx'
 import { getClientContext } from '../panel-state.ts'
 import { CollapsibleSection, sectionStorageKey } from './collapsible-section.ts'
+import { AssessmentSection } from './assessment-section.tsx'
 import { DevSection } from './dev-section.tsx'
 
 export interface GhComment {
@@ -418,6 +419,7 @@ export function IssueView({
           </div>
         </CollapsibleSection>
       ) : null}
+      {kind === 'issue' && issue.url ? <AssessmentSection url={issue.url} /> : null}
       <div className="cv-issue-body">
         <div className="cv-md">{renderMarkdown(issue.body ?? '')}</div>
       </div>

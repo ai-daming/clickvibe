@@ -223,6 +223,12 @@ export async function handleCommand(
   payload: unknown,
 ): Promise<{ status: number; body: unknown }> {
   const text = String((payload as { command?: unknown } | undefined)?.command ?? '')
+  if (text.trim().startsWith('assess '))
+    return handleApiPost(ctx, req, 'assessment', {
+      action: 'evaluate',
+      urls: text.trim().slice(7).split(/\s+/),
+      model: (payload as { model?: unknown }).model,
+    })
   const parsed = parseCommand(text)
   if (!parsed.ok) return { status: 400, body: { ok: false, error: parsed.error } }
   const command = parsed.command

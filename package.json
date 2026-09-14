@@ -49,19 +49,20 @@
     "react-dom": "^18.2.0"
   },
   "dependencies": {
+    "@deepseek-ai/dsh-llm": "0.1.5-rc.2",
     "marked": "^18.0.10",
     "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.10",
     "@deepseek-ai/cordis": "^4.0.0-rc.8",
-    "@deepseek-ai/dsh-jobs": "0.1.0-rc.8",
-    "@deepseek-ai/dsh-jobs-local": "0.1.0-rc.8",
     "@deepseek-ai/dsh-client-runtime": "0.1.0-rc.8",
     "@deepseek-ai/dsh-client-ui-conversation": "0.1.0-rc.8",
     "@deepseek-ai/dsh-client-ui-layout": "0.1.0-rc.8",
     "@deepseek-ai/dsh-client-ui-sidebar": "0.1.0-rc.8",
     "@deepseek-ai/dsh-client-ui-slots": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-jobs": "0.1.0-rc.8",
+    "@deepseek-ai/dsh-jobs-local": "0.1.0-rc.8",
     "@types/node": "^24.0.0",
     "@types/react": "~18.3.1",
     "@types/react-dom": "~18.3.1",
@@ -90,6 +91,7 @@
     "check": "pnpm run typecheck && pnpm run lint && pnpm run format:check && pnpm run check:size && pnpm run check:layers && pnpm run check:style-tokens && pnpm run check:state-writes && pnpm run check:local-git-writes && pnpm run check:github-access && pnpm run check:provider-neutral",
     "check:local-git-writes": "node scripts/check-local-git-writes.mjs",
     "check:github-access": "node scripts/check-github-access.mjs",
-    "check:provider-neutral": "node scripts/check-provider-neutral.mjs"
+    "check:provider-neutral": "node scripts/check-provider-neutral.mjs",
+    "test:assessment-harness": "node scenarios/assessment-harness.mjs"
   }
 }

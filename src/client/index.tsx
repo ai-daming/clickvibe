@@ -8,7 +8,8 @@ import type { LayoutController } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { SidebarFooterActionOwnerProps } from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-import { submitIssueOrganization, type IssueOrganizerInputActions } from './issue-organizer.ts'
+import { submitBoundIssueOrganization } from './issue-organizer-runtime.ts'
+import type { IssueOrganizerInputActions } from './issue-organizer.ts'
 import { PANEL_ID, panelState, setClientContext, setPanelOpen, usePanelOpen } from './panel-state.ts'
 import { installStyles } from './styles.ts'
 import { OccupiedPanel } from './views/occupied-panel.tsx'
@@ -32,7 +33,13 @@ export function apply(ctx: ClientContext): void {
         slots.register(
           { name: 'conversation.input.left', id: 'clickvibe-issue-organizer', order: 20 },
           ({ inputActions }: { inputActions: IssueOrganizerInputActions }) => (
-            <button type="button" className="cv-issue-organizer" onClick={() => submitIssueOrganization(inputActions)}>
+            <button
+              type="button"
+              className="cv-issue-organizer"
+              onClick={() =>
+                void submitBoundIssueOrganization(inputActions).catch((error) => window.alert(String(error)))
+              }
+            >
               整理 Issue
             </button>
           ),

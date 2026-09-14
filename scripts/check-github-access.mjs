@@ -34,6 +34,11 @@ const ALLOWLIST = new Map(
       symbols: ['request@1'],
       reason: 'the Gateway HTTP executor method — the only place a Controller gh command is assembled',
     },
+    'src/client/assessment-prompts.ts': {
+      boundary: 'prompt-text',
+      symbols: [],
+      reason: 'Bound discussion prompt only; this module must remain execution-free',
+    },
     'src/agent/prompts.ts': {
       boundary: 'prompt-text',
       symbols: [],

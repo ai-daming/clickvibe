@@ -72,6 +72,7 @@ export async function openDshConversationDraft(
   deps: DshConversationDeps,
   path: string,
   draftText: string,
+  bindSession?: (sessionId: string) => Promise<void>,
 ): Promise<DshOpenResult> {
   let workspaceId: string
   try {
@@ -86,6 +87,12 @@ export async function openDshConversationDraft(
     sessionId = await deps.workspaces.connectWorkspace(workspaceId)
   } catch (reason) {
     return { ok: false, error: `DSH 空白会话创建失败: ${errorMessage(reason)}` }
+  }
+
+  try {
+    await bindSession?.(sessionId)
+  } catch (reason) {
+    return { ok: false, error: `讨论关联失败: ${errorMessage(reason)}` }
   }
 
   // 先写草稿再导航(connectWorkspace 契约保证会话已可寻址)。
