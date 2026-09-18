@@ -5,6 +5,7 @@ import { localGitSnapshots } from '../infra/local-git-snapshot.ts'
 import { fetchIssue } from '../github/issue.ts'
 import { type AgentAuthorization, isLoopbackAddress, parseAgent } from '../infra/develop-core.ts'
 import { consumeAuthorization, githubAwareStatus, privilegedRequestError } from '../infra/runtime.ts'
+import { assessments } from './assessment.ts'
 import { startDevelop } from './develop-start.ts'
 import { createPullRequest } from './create-pr.ts'
 import { startAutoRun } from './auto-run.ts'
@@ -27,6 +28,15 @@ export async function handleApiPost(
   method: string | undefined,
   payload: unknown,
 ): Promise<{ status: number; body: unknown }> {
+  if (method === 'assessment') {
+    const error = privilegedRequestError(req)
+    if (error) return { status: 403, body: { ok: false, error } }
+    try {
+      return { status: 200, body: await assessments(ctx).handle(payload) }
+    } catch (reason) {
+      return { status: 400, body: { ok: false, error: reason instanceof Error ? reason.message : String(reason) } }
+    }
+  }
   if (method === 'command') return await handleCommand(ctx, req, payload)
   if (method === 'fetch') {
     const result = await fetchIssue(ctx, payload)

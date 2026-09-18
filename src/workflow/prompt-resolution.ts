@@ -1,3 +1,4 @@
+import { withAssessmentPrompt } from './assessment-context.ts'
 /** Stage-start resolution of the repository-owned current contract and prompt evidence. */
 import type { Context } from '@deepseek-ai/cordis'
 import type { ResolvedPromptSnapshot } from '../agent/prompts.ts'
@@ -52,7 +53,7 @@ export async function resolvePromptSnapshot(
 ): Promise<ResolvedPromptSnapshot | { error: string }> {
   const current = await observeCurrentIssueContract(ctx, workflow.url, { force: true })
   if (current.state !== 'known') return { error: `无法确认当前 Work Item 契约: ${current.reason}` }
-  const snapshot = structuredClone(current.prompt)
+  const snapshot = await withAssessmentPrompt(current.prompt)
   const prComments = await fetchPrPromptComments(ctx, workflow)
   if (prComments) snapshot.comments.push(...prComments)
   if (snapshot.state === 'OPEN' || snapshot.state === 'CLOSED') workflow.issueState = snapshot.state

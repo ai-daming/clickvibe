@@ -1,4 +1,3 @@
-/** Project issue-list presentation and navigation. */
 import React from 'react'
 import { useProjectPanel } from '../project-state.ts'
 import { RunningDuration } from '../duration.ts'
@@ -9,6 +8,8 @@ import { type Dependencies, type GhIssue, IssueView, type TimelineEvent, repoOf 
 import { ProjectSelector } from './project-selector.tsx'
 import { RepositoryAdvanceBanner } from './repository-advance-banner.tsx'
 import { AutoRunForm } from './auto-run-form.tsx'
+import { useProjectAssessments } from '../assessment.ts'
+import { AssessmentBatch, AssessmentControls, AssessmentMilestone } from './assessment-section.tsx'
 import { IssueRowMeta } from './issue-row-meta.ts'
 
 export function PanelContent() {
@@ -55,6 +56,8 @@ export function PanelContent() {
     updateWorkflow,
     workflow,
   } = useProjectPanel()
+  const assessmentUrls = issues.map((issue) => String(issue.url ?? '')).filter(Boolean)
+  const assessmentState = useProjectAssessments(assessmentUrls, repoKey, setError)
   const selectedProject = projects.find((project) => project.repoKey === repoKey) ?? null
   const projectConfigured = selectedProject?.configured !== false
 
@@ -102,7 +105,6 @@ export function PanelContent() {
       }> = []
       for (const issue of chosen) {
         const url = String(issue.url ?? '')
-        // The first item refreshes the shared repository dependency snapshot; later items reuse it.
         const fetched = await fetchIssue(url, 20_000, prepared.length === 0)
         if (!fetched.ok) throw new Error(`#${issue.number} 刷新失败: ${fetched.error}`)
         const snapshot = fetched.data.item as GhIssue
@@ -214,6 +216,7 @@ export function PanelContent() {
             : '⚠ 状态可能过期 · 远端同步失败，当前使用本地 refs'}
         </div>
       ) : null}
+      {assessmentState.error ? <div className="cv-error">{assessmentState.error}</div> : null}
       {stateRefreshError ? (
         <div className="cv-stale" title={stateRefreshError}>
           {stateRefreshError.startsWith('GitHub 额度已用完,约 ')
@@ -311,6 +314,12 @@ export function PanelContent() {
               </button>
             </div>
             <div className="cv-batch-bar">
+              <AssessmentBatch
+                repoKey={repoKey}
+                urls={issues
+                  .filter((issue) => selectedIssues.has(Number(issue.number)))
+                  .map((issue) => String(issue.url))}
+              />
               <button
                 className="cv-batch-btn cv-batch-secondary"
                 onClick={toggleReadySelection}
@@ -368,10 +377,10 @@ export function PanelContent() {
                   <React.Fragment key={group}>
                     <div className="cv-group-title">
                       {group} · {rows.length}
+                      {groupBy === 'milestone' ? <AssessmentMilestone repoKey={repoKey} title={group} /> : null}
                     </div>
                     {[...rows]
                       .sort((a, b) => {
-                        // 就绪优先:就绪(未开发+依赖OK) → 开发中 → 阻塞 → 已交付;同档按编号。
                         const levelOf = (issue: RepositoryIssue): number => {
                           if (issue.blockedBy.some((dependency) => dependency.state.toUpperCase() === 'OPEN')) return 2
                           const status = issue.workflow.derived?.status ?? issue.workflow.stage
@@ -389,8 +398,6 @@ export function PanelContent() {
                           label: '开始开发',
                           hint: '',
                         }
-                        // blockedBy 门槛:有 OPEN 依赖时,阻止"开始/恢复开发"(未开发先等依赖完成);
-                        // review/返工/合并等已开发流程不受影响(不能因依赖未完成卡死已做的工作)。
                         const blockedByOpen = issue.blockedBy.filter(
                           (dependency) => dependency.state.toUpperCase() === 'OPEN',
                         )
@@ -402,8 +409,6 @@ export function PanelContent() {
                                 hint: '依赖未完成,先完成被阻塞的依赖',
                               }
                             : baseAction
-                        // 契约门槛:缺 目标/验收标准/依赖 的 issue 标记『不满足契约』并提示补齐,
-                        // 不硬选(不拦人工开发,按钮保留、hint 提示补全);自动选取(#9)按 contract.ok 排除。
                         const contract = issue.contract
                         const shownAction =
                           contract && !contract.ok && (action.kind === 'develop' || action.kind === 'resume')
@@ -419,7 +424,7 @@ export function PanelContent() {
                               type="checkbox"
                               aria-label={`选择 issue #${issue.number}`}
                               checked={selectedIssues.has(Number(issue.number))}
-                              disabled={!batchCandidates.includes(issue) || batchBusy}
+                              disabled={batchBusy}
                               title={
                                 issue.autoDevelopment?.ready && !batchCandidates.includes(issue)
                                   ? `每批最多 ${MAX_BATCH_ISSUES} 个，请先启动当前批次`
@@ -458,6 +463,10 @@ export function PanelContent() {
                                 dependencyLedger={issue.dependencyLedger}
                               />
                             </div>
+                            <AssessmentControls
+                              url={String(issue.url)}
+                              item={assessmentState.items.find((item) => item.url === issue.url)}
+                            />
                             <div className="cv-row-actions">
                               <AutoRunForm
                                 compact

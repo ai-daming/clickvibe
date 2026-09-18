@@ -283,6 +283,11 @@ body[data-cv-panel-dragging] #root.cv-panel-host-open, body[data-cv-panel-draggi
 .cv-auth-note { color: var(--dsw-alias-state-business-primary); }
 .cv-auth-warning { color: var(--dsw-alias-state-warn-label); }
 .cv-auth-actions { display: flex; justify-content: flex-end; align-items: center; gap: 10px; margin-top: 14px; }
+
+.cv-assessment { min-width:0; grid-column:1 / -1; grid-row:2; padding:6px 0; font-size:12px; }
+.cv-issue-row > .cv-row-actions { grid-column:4; grid-row:1; }
+.cv-assessment-action { background: transparent; color: var(--dsw-alias-state-business-primary); border: 1px solid var(--dsw-alias-border-l2); }
+.cv-assessment-actions { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
 `
 
 /** Inject the plugin stylesheet once; returns the disposer. */

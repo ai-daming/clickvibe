@@ -1,3 +1,4 @@
+import { withAssessmentPrompt } from './assessment-context.ts'
 import { automaticRunId } from '../infra/recovery-budget.ts'
 /**
  * clickvibe host half — routes:
@@ -171,7 +172,11 @@ export async function startDevelop(
       'authorization-denied',
     )
   }
-  launchSnapshot = { snapshot: currentContract.prompt, contract: currentContract.snapshot, freshness: 'current' }
+  launchSnapshot = {
+    snapshot: await withAssessmentPrompt(currentContract.prompt),
+    contract: currentContract.snapshot,
+    freshness: 'current',
+  }
 
   if (automatic) {
     const current = currentContract.prompt

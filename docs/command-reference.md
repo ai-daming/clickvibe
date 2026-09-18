@@ -54,3 +54,17 @@ curl -s http://127.0.0.1:3080/clickvibe/api/command \
 ## 与 UI 的关系(设计约束 1)
 
 `/command` 不重新实现任何动作:它把解析出的命令转发到与 UI 按钮相同的 `handleApiPost` 分发(`src/index.ts`),因此授权协议、任务门禁、状态推导、评论发布全部共享。新增操作时:在 `WRITE_METHOD`/读命令分支注册映射,并更新本文件与 `src/command.ts` 的 `COMMAND_HELP_TEXT`。
+
+## 开发准备评估（#177）
+
+Issue 列表与详情页的“评估”使用 Harness 当前会话已选模型执行只读 impl-gate。结果在评估区域展示；“开始开发”不依赖评估状态。模型选择不存在时，在 Harness 原有模型选择器中选择即可，不设置 token 或时间额度。
+
+- 勾选 Issue 后“批量评估”不受开发 ready 筛选限制；里程碑“全部评估”显示完整数量，包含 CLOSED Issue，不包含 PR。
+- 自动默认关闭，按项目开启，仅在使用该项目列表期间发现缺失或过期结果时入队。重复刷新复用既有结果；失败或取消后由用户点击评估重试。
+- “继续讨论”打开目标仓库对话并预填上下文，保留原有发送步骤。“整理 Issue”在该对话内绑定原目标；返回面板或窗口重新获得焦点时，核对正文变化并重新评估。
+- 报告先保存在本机，再保存为 GitHub 评论。评论失败不影响阅读和开发；“核对保存”恢复发布状态，未知结果只回读，不重复发布。
+- 关闭或重启不会删除已保存报告。未完成会话若无法确认完整结果，会显示中断，可重试。
+
+HTTP 动作统一进入 `/clickvibe/api/assessment`，沿用本机同源与 `x-clickvibe-request` 检查。文本命令 `assess <issue-url> [issue-url ...]` 通过 `/clickvibe/api/command` 进入相同后端；请求同时携带 Harness 已选的 `model: { provider, model, reasoningEffort? }`。这不是开发授权。
+
+开发者可在不启动 Web 服务、不访问真实模型的情况下验证真实 Harness 接入：在 ClickVibe 根目录运行 `CLICKVIBE_HARNESS_CHECKOUT=/path/to/built/deepseek-harness pnpm run test:assessment-harness`。该场景使用临时会话存储和本地脚本化 provider，验证真实 Agent 创建、只读限制及持久报告读取；不替代用户实际模型和 GitHub 端到端验收。

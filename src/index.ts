@@ -26,6 +26,7 @@ import { closeRemoteGitCoordinator } from './infra/remote-git.ts'
 import { loadEmbeddedGhIssueSkill } from './infra/embedded-skill.ts'
 import { ROUTE } from './infra/http-contract.ts'
 import { readJsonBody, writeJson } from './infra/runtime.ts'
+import { assessments } from './workflow/assessment.ts'
 import { handleApiPost } from './workflow/dispatch.ts'
 import { getTaskHistory, handleStream } from './workflow/task-api.ts'
 
@@ -92,6 +93,8 @@ export const inject = ['webServer', 'shell', 'skills', 'jobs']
 export function apply(ctx: Context): void {
   ctx.jobs?.attachController('clickvibe')
   ctx.skills.register(loadEmbeddedGhIssueSkill())
+  if (typeof ctx.inject === 'function')
+    ctx.inject(['agents', 'sessionPersistence', 'llm'], () => assessments(ctx).wake())
   ctx.webServer.register({
     kind: 'prefix',
     path: ROUTE,
@@ -104,6 +107,7 @@ export function apply(ctx: Context): void {
       const method = pathname.startsWith(`${ROUTE}/`) ? pathname.slice(`${ROUTE}/`.length) : undefined
       const knownMethods = new Set([
         'fetch',
+        'assessment',
         'projects',
         'repo/issues',
         'state',
