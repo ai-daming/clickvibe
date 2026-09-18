@@ -70,6 +70,7 @@ export async function executeAssessment(
   signal: AbortSignal,
 ) {
   signal.throwIfAborted()
+  if (!/^[a-f0-9]{40}$/.test(run.input.baseOid)) throw new Error('只允许读取评估提交中的仓库文件')
   await host.llm.resolveCallConfig(run.input.model)
   let handle: AgentHandle | undefined
   const cancel = () => handle?.agent.cancel('ClickVibe assessment cancelled')

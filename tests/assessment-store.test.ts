@@ -35,7 +35,7 @@ test('assessment admission deduplicates and persists results independently of co
     assert.deepEqual(await restored.report(runs[0]), report)
     assert.equal((await restored.submit([input]))[0].id, run.id)
     assert.equal(assessmentView(runs[0], input.basis).discussion, true)
-    assert.equal(assessmentView(runs[0], 'new-basis').discussion, false)
+    assert.equal(assessmentView(runs[0], 'new-basis').discussion, true)
   } finally {
     await rm(home, { recursive: true, force: true })
   }

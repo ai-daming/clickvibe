@@ -62,6 +62,27 @@ for (const immediateReadback of [false, true])
       assert.equal(posts, 1)
       assert.equal(comments[0].body.includes(home), false)
       readbackAvailable = true
+      if (!immediateReadback) {
+        const delayed = comments.splice(0)
+        for (let attempt = 0; attempt < 2; attempt++) {
+          await publishAssessment(ctx as never, store, (await store.list())[0], report)
+          const unresolved = (await store.list())[0]
+          assert.equal(unresolved.publication.status, 'unknown')
+          assert.match(unresolved.publication.error!, /未找到匹配评论不代表发布失败/)
+          assert.ok(unresolved.publication.error!.includes(unknown.publication.error!))
+          assert.equal(posts, 1)
+          assert.equal((await store.report(unresolved))?.text, report.text)
+        }
+        const diagnostic = (await store.list())[0].publication.error
+        await publishAssessment(ctx as never, store, (await store.list())[0], report)
+        assert.equal((await store.list())[0].publication.error, diagnostic)
+        comments.push(delayed[0], { ...delayed[0], id: 43 })
+        await publishAssessment(ctx as never, store, (await store.list())[0], report)
+        assert.equal((await store.list())[0].publication.status, 'unknown')
+        assert.match((await store.list())[0].publication.error!, /多条匹配评论/)
+        assert.equal(posts, 1)
+        comments.splice(0, comments.length, ...delayed)
+      }
       await publishAssessment(ctx as never, new AssessmentStore(`${home}/.clickvibe/state-recovery-1`), unknown, report)
       assert.equal((await store.list())[0].publication.status, 'published')
       assert.equal((await store.list())[0].publication.commentId, 42)

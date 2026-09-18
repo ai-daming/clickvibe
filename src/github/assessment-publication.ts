@@ -28,6 +28,17 @@ export async function publishAssessment(
         body: run.publication.body,
         commentId: matches[0].id,
       })
+    else {
+      const detail =
+        matches.length === 0
+          ? '未找到匹配评论不代表发布失败；保持待核实，不会重复发布。可稍后再次核对，本地报告仍可使用。'
+          : '找到多条匹配评论，无法确认唯一发布结果；请核查 GitHub 评论，不会重复发布。'
+      const original = run.publication.error
+      await store.publication(run.id, 'unknown', {
+        ...run.publication,
+        error: original?.includes(detail) ? original : [original, detail].filter(Boolean).join('\n'),
+      })
+    }
     return
   }
   const outcome = await githubWrite<{ repoKey: string; number: number; body: string }, { id: number }>(ctx, {

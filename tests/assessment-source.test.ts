@@ -3,6 +3,7 @@ import { writeFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import test from 'node:test'
 import { assessmentBasis, assessmentGit, assessmentSkill, readAssessmentFile } from '../src/infra/assessment-source.ts'
+import { executeAssessment } from '../src/infra/assessment-harness.ts'
 import { recoveryHome } from './helpers/recovery-home.ts'
 import { assessmentReport, assessmentView } from '../src/workflow/assessment-policy.ts'
 
@@ -56,9 +57,19 @@ test('every original gate verdict has advisory presentation without changing dev
     const run = { phase: 'completed', input: { basis: 'b' }, verdict: report.verdict }
     const view = assessmentView(run as never, 'b')
     assert.equal(view.discussion, !['READY', 'NEEDS_EVIDENCE'].includes(verdict))
-    assert.equal(assessmentView(run as never, 'changed').discussion, false)
+    assert.equal(assessmentView(run as never, 'changed').discussion, view.discussion)
+    assert.equal(assessmentView(run as never, 'changed').label, '评估依据已变化')
   }
   for (const phase of ['queued', 'running', 'failed', 'interrupted', 'cancelled'])
     assert.equal(assessmentView({ phase, input: { basis: 'b' } } as never, 'b').discussion, false)
   assert.throws(() => assessmentReport('Implementation Gate: UNKNOWN\nWork: x\nexplain'), /结论/)
+})
+
+test('invalid frozen commit is rejected before calling the assessment host', async () => {
+  for (const baseOid of ['HEAD', '--all', '', 'a'.repeat(39)]) {
+    await assert.rejects(
+      executeAssessment({} as never, { input: { baseOid } } as never, '', new AbortController().signal),
+      /只允许读取评估提交/,
+    )
+  }
 })
