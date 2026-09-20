@@ -15,7 +15,11 @@ interface ToolScope {
       name: string
       description: string
       parameters: object
-      output: { schema: object; render(value: unknown): { type: 'text'; text: string }[] }
+      /** Host contract: a successful body value is projected as `render(callArguments, value)`. */
+      output: {
+        schema: object
+        render(args: unknown, value: unknown): { type: 'text'; text: string }[]
+      }
       execute(args: unknown, execution: { signal: AbortSignal }): Promise<unknown>
     }): void
   }
@@ -92,7 +96,7 @@ export async function executeAssessment(
         )
         const output = {
           schema: { type: 'string' },
-          render: (value: unknown) => [{ type: 'text' as const, text: String(value) }],
+          render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: String(value) }],
         }
         scope.tools.register({
           name: 'assessment_list_files',

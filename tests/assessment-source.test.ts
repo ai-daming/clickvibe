@@ -37,6 +37,73 @@ test('assessment reads frozen Git objects instead of subsequently edited files',
   }
 })
 
+test('assessment read tools project the real content the model receives', async () => {
+  const { home, repositories } = await recoveryHome(['o/r'])
+  const path = repositories['o/r']
+  try {
+    await writeFile(join(path, 'README.md'), 'accepted design')
+    await assessmentGit(path, ['add', 'README.md'])
+    await assessmentGit(path, [
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.test',
+      'commit',
+      '-m',
+      'test source',
+    ])
+    const baseOid = (await assessmentGit(path, ['rev-parse', 'HEAD'])).trim()
+    const registered = new Map<
+      string,
+      {
+        output: { render(args: unknown, value: unknown): { type: string; text: string }[] }
+        execute(args: unknown, context: { signal: AbortSignal }): Promise<unknown>
+      }
+    >()
+    const host = {
+      llm: { resolveCallConfig: async () => undefined },
+      agents: {
+        async create(options: { sessionId: string; setup(scope: unknown): void }) {
+          options.setup({
+            tools: {
+              presentAs: () => undefined,
+              restrict: () => undefined,
+              guard: () => undefined,
+              register: (tool: { name: string }) => registered.set(tool.name, tool as never),
+            },
+          })
+          return {
+            agent: {
+              id: options.sessionId,
+              followup: () => undefined,
+              async whenIdle() {
+                // The host projects a successful body value as render(callArguments, value).
+                const args = { path: 'README.md' }
+                const read = registered.get('assessment_read_file')!
+                const content = await read.execute(args, { signal: new AbortController().signal })
+                assert.equal(content, 'accepted design')
+                assert.deepEqual(read.output.render(args, content), [{ type: 'text', text: 'accepted design' }])
+                const list = registered.get('assessment_list_files')!
+                const listing = await list.execute({}, { signal: new AbortController().signal })
+                assert.deepEqual(list.output.render({}, listing), [{ type: 'text', text: listing }])
+              },
+              cancel: () => undefined,
+            },
+            dispose: async () => undefined,
+          }
+        },
+      },
+      sessionPersistence: {
+        open: async () => ({ read: async () => ({ events: [] }), close: async () => undefined }),
+      },
+    }
+    const run = { id: 'run', sessionId: 'session', messageId: 'message', input: { repoPath: path, baseOid } }
+    await executeAssessment(host as never, run as never, 'Use impl-gate.', new AbortController().signal)
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
 test('checkbox changes preserve assessment basis while requirements and code invalidate it', () => {
   const basis = (body: string, oid = 'a') => assessmentBasis(body, 'canonical', oid, 'skill')
   assert.equal(basis('## 验收标准\r\n- [ ] 完成  \r\n'), basis('## 验收标准\n- [x] 完成'))
