@@ -30,6 +30,21 @@ class Adapter extends LlmAdapter {
       yield { type: 'finish', reason: { kind: 'tool-calls' } }
       return
     }
+    if (calls === 2) {
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+      yield {
+        type: 'block-end',
+        index: 0,
+        block: {
+          type: 'tool-call',
+          id: 'read-test',
+          name: 'assessment_read_file',
+          arguments: JSON.stringify({ path: 'AGENTS.md' }),
+        },
+      }
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }
+      return
+    }
     const text = 'Implementation Gate: NEEDS_EVIDENCE\nWork: o/r#177\n需要取得现场事实。'
     yield { type: 'block-start', index: 0, blockType: 'text' }
     yield { type: 'text-delta', index: 0, text }
@@ -44,11 +59,20 @@ try {
   await ctx.plugin((await load('session/session-persistence-jsonl')).default, { root, compression: 'none' })
   await ctx.plugin((await load('core/agent-loop')).default, { agents: [] })
   ctx.llm.registerAdapter(['assessment-test'], new Adapter())
-  ctx.on('agent/created', ({agent}) => { agent.ctx.tools.register({name:'late_write', description:'Forbidden late tool', parameters:{type:'object',properties:{}}, output:{schema:{type:'string'},render:value=>[{type:'text',text:value}]}, execute: async () => { forbiddenWrites++; return 'WRITTEN' }}) })
+  ctx.on('agent/created', ({agent}) => { agent.ctx.tools.register({name:'late_write', description:'Forbidden late tool', parameters:{type:'object',properties:{}}, output:{schema:{type:'string'},render:(_args,value)=>[{type:'text',text:String(value)}]}, execute: async () => { forbiddenWrites++; return 'WRITTEN' }}) })
   const run = { id: randomUUID(), sessionId: randomUUID(), messageId: randomUUID(), input: { repoPath: work, repoKey: 'o/r', url: 'https://github.com/o/r/issues/177', body: '## 目标\n验证', title: 'Smoke', baseOid: '7aca625f44b9858ebee2e97c7b65f155e4a2d358', model: { provider: 'assessment-test', model: 'test' } } }
   const events = await executeAssessment(ctx, run, 'Use impl-gate.', new AbortController().signal)
   assert.match(readAssessmentOutput(events, run.messageId), /NEEDS_EVIDENCE/)
-  assert.equal(calls, 2)
+  assert.equal(calls, 3)
   assert.equal(forbiddenWrites, 0)
-  console.log(JSON.stringify({ success: true, realAgentFactory: true, realPersistence: true, readOnlyToolSurface: true, lateScopedWriteBlocked: forbiddenWrites === 0, networkModelCalls: 0, events: events.length }))
+  const read = events
+    .filter(event => event.type === 'tool/result')
+    .flatMap(event => event.data.message.content)
+    .filter(block => block.type === 'tool-result' && block.toolCallId === 'read-test')
+    .flatMap(block => block.content)
+    .map(block => block.text)
+    .join('')
+  assert.match(read, /ClickVibe 代码治理/)
+  assert.doesNotMatch(read, /\[object Object\]/)
+  console.log(JSON.stringify({ success: true, realAgentFactory: true, realPersistence: true, readOnlyToolSurface: true, lateScopedWriteBlocked: forbiddenWrites === 0, readContentProjected: true, networkModelCalls: 0, events: events.length }))
 } finally { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) }
