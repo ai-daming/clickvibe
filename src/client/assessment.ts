@@ -1,5 +1,6 @@
 /** Browser assessment client; independent of development buttons and state. */
 import React from 'react'
+export { currentAssessmentSession, currentAssessmentModel } from './assessment-model.ts'
 import { apiCall } from './domain.ts'
 import { getClientContext, setPanelOpen } from './panel-state.ts'
 import { openDshConversationDraft, resolveDshConversationDeps } from './dsh-conversation.ts'
@@ -18,29 +19,6 @@ export async function assessmentCall<T = { ok: boolean; error?: string }>(body: 
   const result = await apiCall<T & { ok: boolean; error?: string }>('assessment', body)
   if (!result.ok) throw new Error(result.error ?? '评估请求失败')
   return result
-}
-export function currentAssessmentSession() {
-  const ctx = getClientContext()
-  const sessions = ctx?.get('sessions') as { list?: { getSnapshot(): { current?: string } } } | undefined
-  return sessions?.list?.getSnapshot().current
-}
-export async function currentAssessmentModel() {
-  const ctx = getClientContext()
-  const sessionId = currentAssessmentSession()
-  const directories = ctx?.get('modelDirectories') as
-    | {
-        directoryFor(id: string): {
-          load(): Promise<{
-            current: { provider: string; model: string; reasoningEffort?: string } | null
-            routable: boolean | null
-          }>
-        }
-      }
-    | undefined
-  if (!sessionId || !directories) throw new Error('请先在 Harness 打开对话并选择模型，开发入口仍可使用')
-  const result = await directories.directoryFor(sessionId).load()
-  if (!result.current || result.routable === false) throw new Error('请在 Harness 选择可用模型')
-  return result.current
 }
 export function useAssessments(urls: string[]) {
   const [items, setItems] = React.useState<AssessmentItem[]>([])
