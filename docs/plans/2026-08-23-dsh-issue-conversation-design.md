@@ -30,6 +30,21 @@
 - `tests/dsh-conversation.test.ts`(新)—— 注册幂等、草稿先于导航、
   不发送、三类失败的可读错误、服务缺失命名。
 
+## 后续订正(2026-09-20,DSH 0.1.6)
+
+DSH 把客户端导航面从 `workspaces`/`sessions` 收窄到 `uiWorkspace`
+(deepseek-harness `0efc7f045e` "carve outward interfaces"):
+
+- `workspaces.connectWorkspace` → `uiWorkspace.connectWorkspace`
+- `sessions.open(sessionId)` → `uiWorkspace.openSession(sessionId)`
+- `workspaces` 只剩注册/改名/删除,`sessions` 只剩 `retain`/`scope`/`list`
+
+因此第 2、4 步失效(现宿主上必然抛 `is not a function`)。同时草稿顺序
+被宿主语义反转:`sessions.scope(id)` 只在会话被 retain 后存在,而 retain
+发生在导航内部,故 `connectWorkspace` → 绑定讨论 → `openSession` →
+`setDraft`。实现见 `src/client/dsh-conversation.ts`,回归测试见
+`tests/dsh-conversation.test.ts`。
+
 ## 边界
 
 - 远程配置(无本机路径):按钮禁用,title 说明原因。
